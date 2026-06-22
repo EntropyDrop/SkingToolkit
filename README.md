@@ -25,6 +25,11 @@
 ```bash
 SkingToolkit/
 ├── README.md              # Technical documentation & guide
+├── flux2_src/             # Localized custom Flux2/Klein model package
+│   ├── __init__.py
+│   ├── model.py
+│   ├── autoencoder.py
+│   └── sampling.py
 ├── renderer.py            # Differentiable Renderer using PyTorch grid mapping
 ├── loss.py                # Multi-view MSE & LPIPS foreground-weighted losses
 ├── dataset.py             # MinecraftSkinDataset, Alex-Steve, & Voxel resolver
