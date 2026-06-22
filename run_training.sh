@@ -7,6 +7,8 @@ DATA_DIR="../SkingDataset/skins"
 PHOTOS_DIR="../SkingDataset/control_imgs"
 MAPPINGS_DIR="../github/differentiable_minecraft_renderer/mappings"
 OUTPUT_DIR="output/flux_skin_lora"
+VALIDATION_PHOTOS_DIR=""            # Folder containing validation/test conditioning images (e.g. ../Sking/validation_imgs, leave empty to disable)
+VALIDATION_STEPS=500                # Run validation sampling every N steps
 
 # Hyperparameters
 LR=1e-4
@@ -63,5 +65,7 @@ accelerate launch train.py \
     --use_lora True \
     --lora_rank 16 \
     --lora_alpha 16 \
-    --lora_target_modules "qkv,linear1,linear2,proj"
+    --lora_target_modules "qkv,linear1,linear2,proj" \
+    --validation_photos_dir "$VALIDATION_PHOTOS_DIR" \
+    --validation_steps "$VALIDATION_STEPS"
 

@@ -1,11 +1,13 @@
 import os
 import argparse
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from accelerate import Accelerator
 from tqdm.auto import tqdm
+from PIL import Image
 
 # Import local modules
 from dataset import MinecraftSkinDataset
@@ -55,6 +57,10 @@ def parse_args():
     parser.add_argument("--lora_rank", type=int, default=16, help="LoRA rank parameter.")
     parser.add_argument("--lora_alpha", type=int, default=16, help="LoRA alpha parameter.")
     parser.add_argument("--lora_target_modules", type=str, default=None, help="Comma-separated LoRA target module names (if None, targets suitable defaults based on model type).")
+    
+    # Validation / Sampling parameters
+    parser.add_argument("--validation_photos_dir", type=str, default=None, help="Folder containing validation/test conditioning images.")
+    parser.add_argument("--validation_steps", type=int, default=500, help="Run validation sampling once every N update steps.")
     
     return parser.parse_args()
 
@@ -134,6 +140,210 @@ def encode_prompt_qwen(tokenizer, text_encoder, prompt, device, max_sequence_len
     
     return prompt_embeds, None
 
+def run_validation(args, transformer, vae, tokenizer1, tokenizer2, text_encoder1, text_encoder2, device, weight_dtype, global_step, accelerator):
+    if not args.validation_photos_dir or not os.path.exists(args.validation_photos_dir):
+        return
+        
+    print(f"\n[*] Running validation sampling at step {global_step}...")
+    
+    # 1. Scan validation directory for images
+    # Supports separate front/back subfolders or single images
+    front_dir = os.path.join(args.validation_photos_dir, "front")
+    back_dir = os.path.join(args.validation_photos_dir, "back")
+    
+    val_pairs = []
+    image_extensions = (".png", ".jpg", ".jpeg", ".webp")
+    
+    if os.path.exists(front_dir) and os.path.exists(back_dir):
+        # Scan front directory
+        for f in sorted(os.listdir(front_dir)):
+            if f.lower().endswith(image_extensions):
+                stem, ext = os.path.splitext(f)
+                # Find matching back view image
+                for b_ext in image_extensions:
+                    b_path = os.path.join(back_dir, stem + b_ext)
+                    if os.path.exists(b_path):
+                        val_pairs.append({
+                            "type": "split",
+                            "stem": stem,
+                            "front": os.path.join(front_dir, f),
+                            "back": b_path
+                        })
+                        break
+    else:
+        # Scan root folder for single images
+        for f in sorted(os.listdir(args.validation_photos_dir)):
+            if os.path.isfile(os.path.join(args.validation_photos_dir, f)) and f.lower().endswith(image_extensions):
+                stem, _ = os.path.splitext(f)
+                val_pairs.append({
+                    "type": "single",
+                    "stem": stem,
+                    "path": os.path.join(args.validation_photos_dir, f)
+                })
+                
+    if not val_pairs:
+        print("[!] No validation images found in validation_photos_dir.")
+        return
+        
+    # Unstage/unwrap PEFT model for inference mode
+    unwrapped_transformer = accelerator.unwrap_model(transformer)
+    unwrapped_transformer.eval()
+    
+    # Define validation output directory
+    val_output_dir = os.path.join(args.output_dir, "validation_samples")
+    os.makedirs(val_output_dir, exist_ok=True)
+    
+    bg_color = (128, 128, 128) # solid gray
+    
+    # 2. Loop over validation pairs
+    for item in val_pairs:
+        stem = item["stem"]
+        try:
+            # Load images
+            if item["type"] == "split":
+                front_img = Image.open(item["front"]).convert("RGB")
+                back_img = Image.open(item["back"]).convert("RGB")
+                
+                # Resize both to 256x512
+                front_img = front_img.resize((256, 512), resample=Image.Resampling.LANCZOS)
+                back_img = back_img.resize((256, 512), resample=Image.Resampling.LANCZOS)
+            else:
+                combined_img = Image.open(item["path"]).convert("RGB")
+                w, h = combined_img.size
+                front_img = combined_img.crop((0, 0, w // 2, h)).resize((256, 512), resample=Image.Resampling.LANCZOS)
+                back_img = combined_img.crop((w // 2, 0, w, h)).resize((256, 512), resample=Image.Resampling.LANCZOS)
+                
+            # Load prompt txt if it exists
+            caption_path = os.path.join(args.validation_photos_dir, stem + ".txt")
+            if os.path.exists(caption_path):
+                with open(caption_path, "r", encoding="utf-8") as f:
+                    prompt = f.read().strip()
+            else:
+                prompt = "minecraft skin character"
+                
+            print(f"  - Sampling: {stem} | Prompt: '{prompt}'")
+            
+            # Prepare conditioning tensors (2, 3, 512, 256), scaled to [-1, 1] range for VAE
+            from torchvision.transforms.functional import to_tensor
+            front_tensor = (to_tensor(front_img) * 2.0 - 1.0).to(device, dtype=weight_dtype)
+            back_tensor = (to_tensor(back_img) * 2.0 - 1.0).to(device, dtype=weight_dtype)
+            controls_item = [front_tensor, back_tensor]
+            
+            # 3. Encode prompt
+            with torch.no_grad():
+                if args.text_encoder_type == "qwen":
+                    prompt_embeds, pooled_prompt_embeds = encode_prompt_qwen(
+                        tokenizer1, text_encoder1, [prompt], device
+                    )
+                else:
+                    prompt_embeds, pooled_prompt_embeds = encode_prompt(
+                        tokenizer1, tokenizer2, text_encoder1, text_encoder2, [prompt], device
+                    )
+                prompt_embeds = prompt_embeds.to(dtype=weight_dtype)
+                if pooled_prompt_embeds is not None:
+                    pooled_prompt_embeds = pooled_prompt_embeds.to(dtype=weight_dtype)
+                    
+            # 4. Generate random initial noise latents (1, 16, 64, 32)
+            # Since VAE target canvas is 256x512, downsampling by 8 gives H_latent=64, W_latent=32.
+            # Channels is 16 for Flux.
+            # We must run generation in a torch.no_grad() block
+            with torch.no_grad():
+                # Encode conditioning images to sequence tokens for custom Flux2 model
+                if args.model_type == "flux2klein":
+                    from extensions_built_in.diffusion_models.flux2.src.sampling import encode_image_refs
+                    img_cond_seq, img_cond_seq_ids = encode_image_refs(vae, controls_item)
+                    img_cond_seq = img_cond_seq.to(device, dtype=weight_dtype)
+                    img_cond_seq_ids = img_cond_seq_ids.to(device)
+                    
+                latents = torch.randn((1, 16, 64, 32), device=device, dtype=weight_dtype)
+                
+                # Euler ODE integration steps
+                num_inference_steps = 28
+                dt = 1.0 / num_inference_steps
+                t = 1.0
+                
+                for step_idx in range(num_inference_steps):
+                    t_tensor = torch.full((1,), t, device=device, dtype=weight_dtype)
+                    
+                    if args.model_type == "flux2klein":
+                        from extensions_built_in.diffusion_models.flux2.src.sampling import batched_prc_img, batched_prc_txt, scatter_ids
+                        packed_latents, img_ids = batched_prc_img(latents)
+                        packed_txt, txt_ids = batched_prc_txt(prompt_embeds)
+                        guidance_vec = torch.full((1,), 4.0, device=device, dtype=weight_dtype)
+                        
+                        img_input = torch.cat((packed_latents, img_cond_seq), dim=1)
+                        img_input_ids = torch.cat((img_ids, img_cond_seq_ids), dim=1)
+                        
+                        model_pred_packed = unwrapped_transformer(
+                            x=img_input,
+                            x_ids=img_input_ids,
+                            timesteps=t_tensor,
+                            ctx=packed_txt,
+                            ctx_ids=txt_ids.to(device),
+                            guidance=guidance_vec
+                        )
+                        
+                        # Slice output back to original sequence length (excluding cond tokens)
+                        model_pred_packed = model_pred_packed[:, :packed_latents.shape[1]]
+                        
+                        unpacked_list = scatter_ids(model_pred_packed, img_ids)
+                        model_pred = torch.cat(unpacked_list, dim=0).squeeze(2)
+                    else:
+                        txt_ids = torch.zeros(1, 512, 3, device=device, dtype=weight_dtype)
+                        img_ids = torch.zeros(1, 64 * 32, 3, device=device, dtype=weight_dtype)
+                        
+                        model_pred = unwrapped_transformer(
+                            hidden_states=latents,
+                            timestep=t_tensor * 1000.0,
+                            encoder_hidden_states=prompt_embeds,
+                            pooled_projections=pooled_prompt_embeds,
+                            txt_ids=txt_ids,
+                            img_ids=img_ids,
+                            return_dict=False
+                        )[0]
+                        
+                    # Euler integration step
+                    latents = latents - dt * model_pred
+                    t -= dt
+                    
+                # Decode predicted latent x_0 using VAE
+                if args.model_type == "flux2klein":
+                    pred_decoded = vae.decode(latents)
+                else:
+                    latents_scaled = latents / vae.config.scaling_factor
+                    pred_decoded = vae.decode(latents_scaled).sample
+                    
+                pred_decoded = (pred_decoded + 1.0) / 2.0
+                pred_decoded = pred_decoded.clamp(0.0, 1.0)
+                
+                # Extract 64x64 RGBA Skin
+                pred_rgb = pred_decoded[:, :, :256, :]
+                pred_alpha = pred_decoded[:, :, 256:, :].mean(dim=1, keepdim=True)
+                
+                pred_rgb_64 = F.interpolate(pred_rgb, size=(64, 64), mode='bilinear', align_corners=True)
+                pred_alpha_64 = F.interpolate(pred_alpha, size=(64, 64), mode='bilinear', align_corners=True)
+                pred_skin = torch.cat([pred_rgb_64, pred_alpha_64], dim=1) # (1, 4, 64, 64)
+                
+                # Save generated images
+                # 64x64 RGBA skin
+                skin_tensor = pred_skin[0].cpu().float()
+                skin_np = (skin_tensor.permute(1, 2, 0).numpy() * 255.0).clip(0, 255).astype(np.uint8)
+                skin_img = Image.fromarray(skin_np, "RGBA")
+                skin_img.save(os.path.join(val_output_dir, f"step_{global_step}_{stem}_skin.png"))
+                
+                # 256x512 VAE canvas
+                decoded_tensor = pred_decoded[0].cpu().float()
+                decoded_np = (decoded_tensor.permute(1, 2, 0).numpy() * 255.0).clip(0, 255).astype(np.uint8)
+                decoded_img = Image.fromarray(decoded_np, "RGB")
+                decoded_img.save(os.path.join(val_output_dir, f"step_{global_step}_{stem}_canvas.png"))
+                
+        except Exception as e:
+            print(f"[!] Error sampling validation image '{stem}': {e}")
+            
+    # Set model back to train mode
+    transformer.train()
+    print("[*] Validation sampling complete. Resuming training.")
+
 def main():
     args = parse_args()
     
@@ -192,7 +402,7 @@ def main():
         
         from extensions_built_in.diffusion_models.flux2.src.model import Flux2, Klein4BParams, Klein9BParams
         from extensions_built_in.diffusion_models.flux2.src.autoencoder import AutoEncoder, AutoEncoderParams, AutoEncoderSmallDecoderParams
-        from extensions_built_in.diffusion_models.flux2.src.sampling import batched_prc_img, batched_prc_txt, scatter_ids
+        from extensions_built_in.diffusion_models.flux2.src.sampling import batched_prc_img, batched_prc_txt, scatter_ids, encode_image_refs
         from safetensors.torch import load_file
         
         # Load VAE from custom safetensors file
@@ -323,6 +533,7 @@ def main():
     
     # Main training loop
     print("[*] Starting training loop...")
+    global_step = 0
     for epoch in range(args.epochs):
         transformer.train()
         epoch_loss = 0.0
@@ -378,17 +589,37 @@ def main():
                     packed_latents, img_ids = batched_prc_img(x_t)
                     packed_txt, txt_ids = batched_prc_txt(prompt_embeds)
                     
+                    # Encode conditioning images (front & back separate views, both 256x512)
+                    # cond_image has shape (B, 2, 3, 512, 256) in range [0, 1]. Scale to [-1, 1] for VAE.
+                    cond_image_scaled = cond_image * 2.0 - 1.0
+                    img_cond_seq_list = []
+                    img_cond_seq_ids_list = []
+                    for i in range(B):
+                        controls_item = [cond_image_scaled[i, 0], cond_image_scaled[i, 1]]
+                        seq_item, ids_item = encode_image_refs(vae, controls_item)
+                        img_cond_seq_list.append(seq_item)
+                        img_cond_seq_ids_list.append(ids_item)
+                    img_cond_seq = torch.cat(img_cond_seq_list, dim=0).to(device, dtype=weight_dtype)
+                    img_cond_seq_ids = torch.cat(img_cond_seq_ids_list, dim=0).to(device)
+                    
+                    # Concatenate reference/control tokens to image sequence
+                    img_input = torch.cat((packed_latents, img_cond_seq), dim=1)
+                    img_input_ids = torch.cat((img_ids, img_cond_seq_ids), dim=1)
+                    
                     # Prepare guidance vec
                     guidance_vec = torch.full((B,), 4.0, device=device, dtype=weight_dtype) # default guidance 4.0
                     
                     packed_noise_pred = transformer(
-                        x=packed_latents,
-                        x_ids=img_ids.to(device),
+                        x=img_input,
+                        x_ids=img_input_ids,
                         timesteps=t, # Already normalized to [0, 1]
                         ctx=packed_txt,
                         ctx_ids=txt_ids.to(device),
                         guidance=guidance_vec
                     )
+                    
+                    # Slice prediction output back to match original latents sequence length (excluding cond tokens)
+                    packed_noise_pred = packed_noise_pred[:, :packed_latents.shape[1]]
                     
                     # Scatter/unpack tokens back to spatial coordinates
                     unpacked_list = scatter_ids(packed_noise_pred, img_ids)
@@ -458,6 +689,24 @@ def main():
                     
                 optimizer.step()
                 optimizer.zero_grad()
+                
+                if accelerator.sync_gradients:
+                    global_step += 1
+                    if args.validation_photos_dir and global_step % args.validation_steps == 0:
+                        if accelerator.is_main_process:
+                            run_validation(
+                                args,
+                                transformer,
+                                vae,
+                                tokenizer1,
+                                tokenizer2,
+                                text_encoder1,
+                                text_encoder2,
+                                device,
+                                weight_dtype,
+                                global_step,
+                                accelerator
+                            )
                 
             # Log metrics
             epoch_loss += loss.item()
