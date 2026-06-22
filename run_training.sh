@@ -9,7 +9,6 @@ MAPPINGS_DIR="../differentiable_minecraft_renderer/mappings"
 OUTPUT_DIR="output/flux_skin_lora"
 VALIDATION_PHOTOS_DIR=""            # Folder containing validation/test conditioning images (e.g. ../Sking/validation_imgs, leave empty to disable)
 VALIDATION_STEPS=500                # Run validation sampling every N steps
-AI_TOOLKIT_PATH="../ai-toolkit"     # Path to custom ai-toolkit directory
 
 # Hyperparameters
 LR=1e-4
@@ -68,6 +67,5 @@ accelerate launch train.py \
     --lora_alpha 16 \
     --lora_target_modules "qkv,linear1,linear2,proj" \
     --validation_photos_dir "$VALIDATION_PHOTOS_DIR" \
-    --validation_steps "$VALIDATION_STEPS" \
-    --ai_toolkit_path "$AI_TOOLKIT_PATH"
+    --validation_steps "$VALIDATION_STEPS"
 

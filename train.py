@@ -12,6 +12,9 @@ from PIL import Image
 # Import local modules
 from dataset import MinecraftSkinDataset
 from loss import MinecraftLoss
+from flux2_src.model import Flux2, Klein4BParams, Klein9BParams
+from flux2_src.autoencoder import AutoEncoder, AutoEncoderParams, AutoEncoderSmallDecoderParams
+from flux2_src.sampling import batched_prc_img, batched_prc_txt, scatter_ids, encode_image_refs
 
 # Import diffusers and transformers
 from diffusers import (
@@ -33,7 +36,6 @@ def parse_args():
     parser.add_argument("--photos_dir", type=str, default=None, help="Path to conditioning photos folder.")
     parser.add_argument("--output_dir", type=str, default="output", help="Path to save checkpoints.")
     parser.add_argument("--mappings_dir", type=str, default=None, help="Path to differentiable renderer mappings folder.")
-    parser.add_argument("--ai_toolkit_path", type=str, default=None, help="Path to the local 'ai-toolkit' repository directory.")
     
     # Training hyperparameters
     parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate.")
@@ -251,7 +253,6 @@ def run_validation(args, transformer, vae, tokenizer1, tokenizer2, text_encoder1
             with torch.no_grad():
                 # Encode conditioning images to sequence tokens for custom Flux2 model
                 if args.model_type == "flux2klein":
-                    from extensions_built_in.diffusion_models.flux2.src.sampling import encode_image_refs
                     img_cond_seq, img_cond_seq_ids = encode_image_refs(vae, controls_item)
                     img_cond_seq = img_cond_seq.to(device, dtype=weight_dtype)
                     img_cond_seq_ids = img_cond_seq_ids.to(device)
@@ -267,7 +268,6 @@ def run_validation(args, transformer, vae, tokenizer1, tokenizer2, text_encoder1
                     t_tensor = torch.full((1,), t, device=device, dtype=weight_dtype)
                     
                     if args.model_type == "flux2klein":
-                        from extensions_built_in.diffusion_models.flux2.src.sampling import batched_prc_img, batched_prc_txt, scatter_ids
                         packed_latents, img_ids = batched_prc_img(latents)
                         packed_txt, txt_ids = batched_prc_txt(prompt_embeds)
                         guidance_vec = torch.full((1,), 4.0, device=device, dtype=weight_dtype)
@@ -394,32 +394,6 @@ def main():
         
     # VAE and Denoising Transformer Loading
     if args.model_type == "flux2klein":
-        # Load custom local model structures from ai-toolkit
-        import sys
-        
-        # Resolve ai-toolkit path dynamically with multiple fallbacks
-        ai_toolkit_path = args.ai_toolkit_path
-        if ai_toolkit_path is None:
-            current_dir = os.path.dirname(os.path.abspath(__file__))
-            workspace_dir = os.path.abspath(os.path.join(current_dir, ".."))
-            ai_toolkit_path = os.path.join(workspace_dir, "ai-toolkit")
-            
-        ai_toolkit_path = os.path.abspath(ai_toolkit_path)
-        if not os.path.exists(ai_toolkit_path):
-            print(f"WARNING: ai-toolkit path '{ai_toolkit_path}' does not exist.")
-            # Search in sibling github directory fallback
-            parent_dir = os.path.dirname(ai_toolkit_path)
-            github_ai_toolkit = os.path.join(parent_dir, "github", "ai-toolkit")
-            if os.path.exists(github_ai_toolkit):
-                ai_toolkit_path = github_ai_toolkit
-                print(f"[*] Found ai-toolkit at sibling fallback path: '{ai_toolkit_path}'")
-                
-        sys.path.insert(0, ai_toolkit_path)
-        sys.path.insert(0, os.path.join(ai_toolkit_path, "extensions_built_in", "diffusion_models"))
-        
-        from extensions_built_in.diffusion_models.flux2.src.model import Flux2, Klein4BParams, Klein9BParams
-        from extensions_built_in.diffusion_models.flux2.src.autoencoder import AutoEncoder, AutoEncoderParams, AutoEncoderSmallDecoderParams
-        from extensions_built_in.diffusion_models.flux2.src.sampling import batched_prc_img, batched_prc_txt, scatter_ids, encode_image_refs
         from safetensors.torch import load_file
         
         # Load VAE from custom safetensors file
