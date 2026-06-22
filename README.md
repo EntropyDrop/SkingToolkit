@@ -11,6 +11,7 @@
   - **Top half (`256x256`)**: Skin UV RGB upscaled via Box filtering.
   - **Bottom half (`256x256`)**: Skin UV Alpha upscaled via Box filtering and represented as grayscale.
   - Gradients flow back smoothly through both active regions during training with no empty padding.
+* **🖼️ Multi-View Control Image Loader**: Supports loading conditioning input as separate front and back views (each $256 \times 512$, e.g., from `front/` and `back/` directories). It automatically resizes and concatenates them side-by-side to construct a standard $512 \times 512$ conditioning input, with fallback to pre-combined files.
 * **🎮 Voxel Texture Edge Consistency Resolver**: Reconstructs a temporary 3D voxel color grid during loading to resolve missing/transparent pixel conflicts at adjacent edges.
 * **🔄 Slim-to-Standard Arm Expansion (Alex-to-Steve)**: Dynamically checks and converts Alex skins (3px arm width) into Steve skins (4px arm width) before training.
 * **🤖 Dual Architecture Compatibility**:
@@ -70,7 +71,7 @@ bash SkingToolkit/run_training.sh
 | `--text_encoder_type` | string | `t5_clip` | Text encoder structure. Choices: `t5_clip`, `qwen`. |
 | `--text_encoder_path` | string | `None` | Path to the Qwen model if `qwen` type is selected (defaults to `Qwen/Qwen3-4B`). |
 | `--data_dir` | string | *Required* | Folder containing target flat `64x64` skin PNGs. |
-| `--photos_dir` | string | `None` | Folder containing conditioning control photos. |
+| `--photos_dir` | string | `None` | Folder containing conditioning control photos. Looks for separate `front/{id}.png` and `back/{id}.png` (each 256x512) to combine side-by-side, otherwise falls back to `{id}.png` (512x512). |
 | `--mappings_dir` | string | `None` | Folder containing the `.pt` view mapping coordinates. |
 | `--output_dir` | string | `output` | Folder to save fine-tuned LoRA weights. |
 | `--use_lora` | bool | `True` | Wrap transformer with PEFT LoRA fine-tuning. |

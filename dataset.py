@@ -260,19 +260,46 @@ class MinecraftSkinDataset(Dataset):
         target_tensor = (transforms.ToTensor()(target_img) * 2.0) - 1.0
         
         # 4. Load conditioning photo
-        photo_path = None
-        for ext in [".png", ".jpg", ".jpeg"]:
-            temp_path = os.path.join(self.photos_dir, stem + ext)
-            if os.path.exists(temp_path):
-                photo_path = temp_path
+        # Look for front and back images first (each expected to be 256x512, which we resize to cond_size//2 x cond_size)
+        front_path = None
+        back_path = None
+        for ext in [".png", ".jpg", ".jpeg", ".webp"]:
+            f_path = os.path.join(self.photos_dir, "front", stem + ext)
+            b_path = os.path.join(self.photos_dir, "back", stem + ext)
+            if os.path.exists(f_path) and os.path.exists(b_path):
+                front_path = f_path
+                back_path = b_path
                 break
-                
-        if photo_path is not None:
-            cond_img = Image.open(photo_path).convert("RGB")
-        else:
-            # Fallback to gray placeholder
-            cond_img = Image.new("RGB", (self.cond_size, self.cond_size), self.bg_color)
+        
+        if front_path is not None and back_path is not None:
+            front_img = Image.open(front_path).convert("RGB")
+            back_img = Image.open(back_path).convert("RGB")
             
+            # Resize both to half width (cond_size // 2, cond_size)
+            half_w = self.cond_size // 2
+            h = self.cond_size
+            front_resized = front_img.resize((half_w, h), resample=Image.Resampling.LANCZOS)
+            back_resized = back_img.resize((half_w, h), resample=Image.Resampling.LANCZOS)
+            
+            # Concatenate side-by-side into a single cond_size x cond_size image (e.g. 512x512)
+            cond_img = Image.new("RGB", (self.cond_size, self.cond_size), self.bg_color)
+            cond_img.paste(front_resized, (0, 0))
+            cond_img.paste(back_resized, (half_w, 0))
+        else:
+            # Fallback to single combined conditioning image
+            photo_path = None
+            for ext in [".png", ".jpg", ".jpeg", ".webp"]:
+                temp_path = os.path.join(self.photos_dir, stem + ext)
+                if os.path.exists(temp_path):
+                    photo_path = temp_path
+                    break
+            
+            if photo_path is not None:
+                cond_img = Image.open(photo_path).convert("RGB")
+            else:
+                # Fallback to gray placeholder
+                cond_img = Image.new("RGB", (self.cond_size, self.cond_size), self.bg_color)
+                
         cond_tensor = self.transform_cond(cond_img)
         
         # 5. Load prompt description
