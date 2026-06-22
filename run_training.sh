@@ -1,11 +1,11 @@
 #!/bin/bash
 
 # Configuration paths (Defaulting to folders in the current workspace)
-MODEL_PATH="models/flux2klein4b"  # Path containing Flux2Klein weights (e.g. flux-2-klein-base-4b.safetensors and VAE)
-TEXT_ENCODER_PATH="Qwen/Qwen3-4B" # Path to Qwen text encoder model
-DATA_DIR="../Sking/skins"
-PHOTOS_DIR="../Sking/control_imgs"
-MAPPINGS_DIR="../differentiable_minecraft_renderer/mappings"
+MODEL_PATH="../flux2klein4b"  # Path containing Flux2Klein weights (e.g. flux-2-klein-base-4b.safetensors and VAE)
+TEXT_ENCODER_PATH="../Qwen/Qwen3-4B" # Path to Qwen text encoder model
+DATA_DIR="../SkingDataset/skins"
+PHOTOS_DIR="../SkingDataset/control_imgs"
+MAPPINGS_DIR="../github/differentiable_minecraft_renderer/mappings"
 OUTPUT_DIR="output/flux_skin_lora"
 
 # Hyperparameters

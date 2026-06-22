@@ -18,7 +18,7 @@ def run_verification():
     current_dir = os.path.dirname(os.path.abspath(__file__))
     workspace_dir = os.path.abspath(os.path.join(current_dir, ".."))
     
-    data_dir = os.path.join(workspace_dir, "Sking", "skins")
+    data_dir = os.path.join(workspace_dir, "SkingDataset", "skins")
     mappings_dir = os.path.join(workspace_dir, "differentiable_minecraft_renderer", "mappings")
     
     print(f"[*] Dataset skins path: {data_dir}")
