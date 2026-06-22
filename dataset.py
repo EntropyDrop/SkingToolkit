@@ -239,7 +239,7 @@ class MinecraftSkinDataset(Dataset):
         gt_skin_np = np.array(skin, dtype=np.float32) / 255.0
         gt_skin_tensor = torch.tensor(gt_skin_np).permute(2, 0, 1) # (4, 64, 64)
         
-        # 3. Build [RGB | Alpha] side-by-side composite VAE target (512x512)
+        # 3. Build [RGB | Alpha] top-to-bottom composite VAE target (256x512)
         # RGB Part: Paste skin over opaque gray background
         rgb_part = Image.new("RGB", (64, 64), self.bg_color)
         rgb_part.paste(skin, (0, 0), skin)
@@ -251,10 +251,10 @@ class MinecraftSkinDataset(Dataset):
         rgb_part_upscaled = rgb_part.resize((256, 256), resample=Image.Resampling.BOX)
         alpha_part_upscaled = alpha_part.resize((256, 256), resample=Image.Resampling.BOX)
         
-        # Place side-by-side into a 512x512 image
-        target_img = Image.new("RGB", (512, 512), self.bg_color)
-        target_img.paste(rgb_part_upscaled, (0, 0))
-        target_img.paste(alpha_part_upscaled, (256, 0))
+        # Place top-to-bottom into a 256x512 image (no blank padding)
+        target_img = Image.new("RGB", (256, 512), self.bg_color)
+        target_img.paste(rgb_part_upscaled, (0, 0))       # Top half
+        target_img.paste(alpha_part_upscaled, (0, 256))   # Bottom half
         
         # Convert VAE target to tensor and normalize to [-1, 1] (standard for VAE latents encoding)
         target_tensor = (transforms.ToTensor()(target_img) * 2.0) - 1.0

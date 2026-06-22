@@ -49,7 +49,7 @@ def run_verification():
         # Load first item
         item = dataset[0]
         print("[✓] Successfully loaded dataset item!")
-        print(f"    - Target latent image tensor shape: {item['target_latent_image'].shape} (expected 3 x 512 x 512)")
+        print(f"    - Target latent image tensor shape: {item['target_latent_image'].shape} (expected 3 x 512 x 256)")
         print(f"    - Conditioning photo tensor shape:  {item['cond_image'].shape} (expected 3 x 256 x 256)")
         print(f"    - Prompt text:                     '{item['prompt']}'")
         print(f"    - Ground Truth skin tensor shape:   {item['gt_skin'].shape} (expected 4 x 64 x 64)")

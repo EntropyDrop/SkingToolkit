@@ -7,10 +7,10 @@
 ## 🚀 Key Features
 
 * **🎨 Differentiable Rendering Backpropagation**: Uses PyTorch `F.grid_sample` to warp the flat predicted `64x64` skin texture maps into multi-view 2D renders (such as `static_front` and `static_back`). The entire rendering operation is mathematically differentiable, enabling rendering losses to guide the texture generation.
-* **📐 Side-by-Side Target VAE Layout `[RGB | Alpha]`**: Resolves the VAE's native 3-channel (RGB) limitation by packing the target `64x64` RGBA skin into a `512x512` RGB canvas:
-  - **Left half (`512x256`)**: Skin UV RGB upscaled via Box filtering.
-  - **Right half (`512x256`)**: Skin UV Alpha upscaled via Box filtering and represented as grayscale.
-  - Gradients flow back smoothly through both regions during training.
+* **📐 Top-to-Bottom Target VAE Layout `[RGB | Alpha]`**: Resolves the VAE's native 3-channel (RGB) limitation by packing the target `64x64` RGBA skin into a `256x512` RGB canvas:
+  - **Top half (`256x256`)**: Skin UV RGB upscaled via Box filtering.
+  - **Bottom half (`256x256`)**: Skin UV Alpha upscaled via Box filtering and represented as grayscale.
+  - Gradients flow back smoothly through both active regions during training with no empty padding.
 * **🎮 Voxel Texture Edge Consistency Resolver**: Reconstructs a temporary 3D voxel color grid during loading to resolve missing/transparent pixel conflicts at adjacent edges.
 * **🔄 Slim-to-Standard Arm Expansion (Alex-to-Steve)**: Dynamically checks and converts Alex skins (3px arm width) into Steve skins (4px arm width) before training.
 * **🤖 Dual Architecture Compatibility**:
@@ -94,7 +94,7 @@ graph TD
         Photo[Conditioning Photo]
         Prompt[Text Prompt]
         GTSkin[Ground Truth 64x64 RGBA Skin]
-        Composite[Target 512x512 RGB+Alpha Image]
+        Composite[Target 256x512 RGB+Alpha Image]
     end
 
     subgraph Differentiable Forward Pass
@@ -104,7 +104,7 @@ graph TD
         Photo & Prompt & LatentXT -->|Flux Transformer| VPred[Predicted Velocity Vector]
         
         VPred & LatentXT -->|Flow Math| PredX0[Predicted x_0 Latent]
-        PredX0 -->|VAE Decoder| Decoded[512x512 Decoded RGB+Alpha]
+        PredX0 -->|VAE Decoder| Decoded[256x512 Decoded RGB+Alpha]
         
         Decoded -->|Slice & Interpolate| PredSkin[Predicted 64x64 RGBA Skin]
         

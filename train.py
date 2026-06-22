@@ -332,7 +332,7 @@ def main():
         for step, batch in enumerate(progress_bar):
             with accelerator.accumulate(transformer):
                 # Retrieve batch data
-                target_latent_image = batch["target_latent_image"].to(device, dtype=weight_dtype) # (B, 3, 512, 512)
+                target_latent_image = batch["target_latent_image"].to(device, dtype=weight_dtype) # (B, 3, 512, 256)
                 cond_image = batch["cond_image"].to(device, dtype=weight_dtype)                 # (B, 3, 512, 512)
                 prompts = batch["prompt"]                                                       # List of strings
                 gt_skin = batch["gt_skin"].to(device, dtype=weight_dtype)                       # (B, 4, 64, 64)
@@ -392,7 +392,7 @@ def main():
                     
                     # Scatter/unpack tokens back to spatial coordinates
                     unpacked_list = scatter_ids(packed_noise_pred, img_ids)
-                    model_pred = torch.cat(unpacked_list, dim=0).squeeze(2) # Shape: (B, 16, 64, 64)
+                    model_pred = torch.cat(unpacked_list, dim=0).squeeze(2) # Shape: (B, 16, H_latent, W_latent)
                 else:
                     # Standard Flux coordinates grids
                     H_latent, W_latent = latents_gt.shape[2], latents_gt.shape[3]
@@ -419,7 +419,7 @@ def main():
                 # Reconstruct clean latent estimation from the predicted velocity:
                 pred_x0 = x_t - t_expanded * model_pred
                 
-                # Decode predicted latent x_0 to 512x512 RGB space using VAE
+                # Decode predicted latent x_0 to 256x512 RGB space using VAE
                 if args.model_type == "flux2klein":
                     pred_decoded = vae.decode(pred_x0)
                 else:
@@ -430,11 +430,11 @@ def main():
                 pred_decoded = (pred_decoded + 1.0) / 2.0
                 pred_decoded = pred_decoded.clamp(0.0, 1.0)
                 
-                # 13. Extract the 64x64 RGBA Skin UV from the side-by-side composite
-                # Left half is RGB: [0:256, 0:256]
-                pred_rgb = pred_decoded[:, :, :256, :256]
-                # Right half is Alpha (grayscale representation): [0:256, 256:512]
-                pred_alpha = pred_decoded[:, :, :256, 256:512].mean(dim=1, keepdim=True)
+                # 13. Extract the 64x64 RGBA Skin UV from the top-to-bottom composite
+                # Top half is RGB: [0:256, :]
+                pred_rgb = pred_decoded[:, :, :256, :]
+                # Bottom half is Alpha (grayscale representation): [256:512, :]
+                pred_alpha = pred_decoded[:, :, 256:, :].mean(dim=1, keepdim=True)
                 
                 # Resize from 256x256 to 64x64 using bilinear interpolation
                 pred_rgb_64 = F.interpolate(pred_rgb, size=(64, 64), mode='bilinear', align_corners=True)

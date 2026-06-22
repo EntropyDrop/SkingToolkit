@@ -2,7 +2,10 @@ import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from .renderer import DifferentiableRenderer
+try:
+    from renderer import DifferentiableRenderer
+except ImportError:
+    from .renderer import DifferentiableRenderer
 
 class MinecraftLoss(nn.Module):
     def __init__(
