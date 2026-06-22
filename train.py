@@ -204,16 +204,14 @@ def run_validation(args, transformer, vae, tokenizer1, tokenizer2, text_encoder1
                 front_img = Image.open(item["front"]).convert("RGB")
                 back_img = Image.open(item["back"]).convert("RGB")
                 
-                # Resize both to half-width and full-height of 512x512 canvas
-                front_resized = front_img.resize((256, 512), resample=Image.Resampling.LANCZOS)
-                back_resized = back_img.resize((256, 512), resample=Image.Resampling.LANCZOS)
-                
-                cond_img = Image.new("RGB", (512, 512), bg_color)
-                cond_img.paste(front_resized, (0, 0))
-                cond_img.paste(back_resized, (256, 0))
+                # Resize both to 256x512
+                front_img = front_img.resize((256, 512), resample=Image.Resampling.LANCZOS)
+                back_img = back_img.resize((256, 512), resample=Image.Resampling.LANCZOS)
             else:
-                cond_img = Image.open(item["path"]).convert("RGB")
-                cond_img = cond_img.resize((512, 512), resample=Image.Resampling.LANCZOS)
+                combined_img = Image.open(item["path"]).convert("RGB")
+                w, h = combined_img.size
+                front_img = combined_img.crop((0, 0, w // 2, h)).resize((256, 512), resample=Image.Resampling.LANCZOS)
+                back_img = combined_img.crop((w // 2, 0, w, h)).resize((256, 512), resample=Image.Resampling.LANCZOS)
                 
             # Load prompt txt if it exists
             caption_path = os.path.join(args.validation_photos_dir, stem + ".txt")
@@ -225,9 +223,11 @@ def run_validation(args, transformer, vae, tokenizer1, tokenizer2, text_encoder1
                 
             print(f"  - Sampling: {stem} | Prompt: '{prompt}'")
             
-            # Prepare conditioning tensor (1 x 3 x 512 x 512), normalized to [0, 1]
+            # Prepare conditioning tensors (2, 3, 512, 256), scaled to [-1, 1] range for VAE
             from torchvision.transforms.functional import to_tensor
-            cond_tensor = to_tensor(cond_img).unsqueeze(0).to(device, dtype=weight_dtype)
+            front_tensor = (to_tensor(front_img) * 2.0 - 1.0).to(device, dtype=weight_dtype)
+            back_tensor = (to_tensor(back_img) * 2.0 - 1.0).to(device, dtype=weight_dtype)
+            controls_item = [front_tensor, back_tensor]
             
             # 3. Encode prompt
             with torch.no_grad():
@@ -248,6 +248,13 @@ def run_validation(args, transformer, vae, tokenizer1, tokenizer2, text_encoder1
             # Channels is 16 for Flux.
             # We must run generation in a torch.no_grad() block
             with torch.no_grad():
+                # Encode conditioning images to sequence tokens for custom Flux2 model
+                if args.model_type == "flux2klein":
+                    from extensions_built_in.diffusion_models.flux2.src.sampling import encode_image_refs
+                    img_cond_seq, img_cond_seq_ids = encode_image_refs(vae, controls_item)
+                    img_cond_seq = img_cond_seq.to(device, dtype=weight_dtype)
+                    img_cond_seq_ids = img_cond_seq_ids.to(device)
+                    
                 latents = torch.randn((1, 16, 64, 32), device=device, dtype=weight_dtype)
                 
                 # Euler ODE integration steps
@@ -264,14 +271,20 @@ def run_validation(args, transformer, vae, tokenizer1, tokenizer2, text_encoder1
                         packed_txt, txt_ids = batched_prc_txt(prompt_embeds)
                         guidance_vec = torch.full((1,), 4.0, device=device, dtype=weight_dtype)
                         
+                        img_input = torch.cat((packed_latents, img_cond_seq), dim=1)
+                        img_input_ids = torch.cat((img_ids, img_cond_seq_ids), dim=1)
+                        
                         model_pred_packed = unwrapped_transformer(
-                            x=packed_latents,
-                            x_ids=img_ids.to(device),
+                            x=img_input,
+                            x_ids=img_input_ids,
                             timesteps=t_tensor,
                             ctx=packed_txt,
                             ctx_ids=txt_ids.to(device),
                             guidance=guidance_vec
                         )
+                        
+                        # Slice output back to original sequence length (excluding cond tokens)
+                        model_pred_packed = model_pred_packed[:, :packed_latents.shape[1]]
                         
                         unpacked_list = scatter_ids(model_pred_packed, img_ids)
                         model_pred = torch.cat(unpacked_list, dim=0).squeeze(2)
@@ -389,7 +402,7 @@ def main():
         
         from extensions_built_in.diffusion_models.flux2.src.model import Flux2, Klein4BParams, Klein9BParams
         from extensions_built_in.diffusion_models.flux2.src.autoencoder import AutoEncoder, AutoEncoderParams, AutoEncoderSmallDecoderParams
-        from extensions_built_in.diffusion_models.flux2.src.sampling import batched_prc_img, batched_prc_txt, scatter_ids
+        from extensions_built_in.diffusion_models.flux2.src.sampling import batched_prc_img, batched_prc_txt, scatter_ids, encode_image_refs
         from safetensors.torch import load_file
         
         # Load VAE from custom safetensors file
@@ -576,17 +589,37 @@ def main():
                     packed_latents, img_ids = batched_prc_img(x_t)
                     packed_txt, txt_ids = batched_prc_txt(prompt_embeds)
                     
+                    # Encode conditioning images (front & back separate views, both 256x512)
+                    # cond_image has shape (B, 2, 3, 512, 256) in range [0, 1]. Scale to [-1, 1] for VAE.
+                    cond_image_scaled = cond_image * 2.0 - 1.0
+                    img_cond_seq_list = []
+                    img_cond_seq_ids_list = []
+                    for i in range(B):
+                        controls_item = [cond_image_scaled[i, 0], cond_image_scaled[i, 1]]
+                        seq_item, ids_item = encode_image_refs(vae, controls_item)
+                        img_cond_seq_list.append(seq_item)
+                        img_cond_seq_ids_list.append(ids_item)
+                    img_cond_seq = torch.cat(img_cond_seq_list, dim=0).to(device, dtype=weight_dtype)
+                    img_cond_seq_ids = torch.cat(img_cond_seq_ids_list, dim=0).to(device)
+                    
+                    # Concatenate reference/control tokens to image sequence
+                    img_input = torch.cat((packed_latents, img_cond_seq), dim=1)
+                    img_input_ids = torch.cat((img_ids, img_cond_seq_ids), dim=1)
+                    
                     # Prepare guidance vec
                     guidance_vec = torch.full((B,), 4.0, device=device, dtype=weight_dtype) # default guidance 4.0
                     
                     packed_noise_pred = transformer(
-                        x=packed_latents,
-                        x_ids=img_ids.to(device),
+                        x=img_input,
+                        x_ids=img_input_ids,
                         timesteps=t, # Already normalized to [0, 1]
                         ctx=packed_txt,
                         ctx_ids=txt_ids.to(device),
                         guidance=guidance_vec
                     )
+                    
+                    # Slice prediction output back to match original latents sequence length (excluding cond tokens)
+                    packed_noise_pred = packed_noise_pred[:, :packed_latents.shape[1]]
                     
                     # Scatter/unpack tokens back to spatial coordinates
                     unpacked_list = scatter_ids(packed_noise_pred, img_ids)

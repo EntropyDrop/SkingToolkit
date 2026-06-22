@@ -204,7 +204,7 @@ class MinecraftSkinDataset(Dataset):
             print(f"WARNING: No skin PNG files found in data_dir: {self.data_dir}")
             
         self.transform_cond = transforms.Compose([
-            transforms.Resize((self.cond_size, self.cond_size), interpolation=transforms.InterpolationMode.LANCZOS),
+            transforms.Resize((self.cond_size, self.cond_size // 2), interpolation=transforms.InterpolationMode.LANCZOS),
             transforms.ToTensor(),
             # Normalize conditioning images to [0, 1] or [-1, 1]. We output [0, 1] here
         ])
@@ -260,7 +260,7 @@ class MinecraftSkinDataset(Dataset):
         target_tensor = (transforms.ToTensor()(target_img) * 2.0) - 1.0
         
         # 4. Load conditioning photo
-        # Look for front and back images first (each expected to be 256x512, which we resize to cond_size//2 x cond_size)
+        # Look for front and back images first (each expected to be 256x512)
         front_path = None
         back_path = None
         for ext in [".png", ".jpg", ".jpeg", ".webp"]:
@@ -275,16 +275,9 @@ class MinecraftSkinDataset(Dataset):
             front_img = Image.open(front_path).convert("RGB")
             back_img = Image.open(back_path).convert("RGB")
             
-            # Resize both to half width (cond_size // 2, cond_size)
-            half_w = self.cond_size // 2
-            h = self.cond_size
-            front_resized = front_img.resize((half_w, h), resample=Image.Resampling.LANCZOS)
-            back_resized = back_img.resize((half_w, h), resample=Image.Resampling.LANCZOS)
-            
-            # Concatenate side-by-side into a single cond_size x cond_size image (e.g. 512x512)
-            cond_img = Image.new("RGB", (self.cond_size, self.cond_size), self.bg_color)
-            cond_img.paste(front_resized, (0, 0))
-            cond_img.paste(back_resized, (half_w, 0))
+            front_tensor = self.transform_cond(front_img)
+            back_tensor = self.transform_cond(back_img)
+            cond_tensor = torch.stack([front_tensor, back_tensor], dim=0) # (2, 3, cond_size, cond_size // 2)
         else:
             # Fallback to single combined conditioning image
             photo_path = None
@@ -295,12 +288,18 @@ class MinecraftSkinDataset(Dataset):
                     break
             
             if photo_path is not None:
-                cond_img = Image.open(photo_path).convert("RGB")
+                combined_img = Image.open(photo_path).convert("RGB")
             else:
-                # Fallback to gray placeholder
-                cond_img = Image.new("RGB", (self.cond_size, self.cond_size), self.bg_color)
+                combined_img = Image.new("RGB", (self.cond_size, self.cond_size), self.bg_color)
                 
-        cond_tensor = self.transform_cond(cond_img)
+            # Split the combined image into left half (front) and right half (back)
+            w, h = combined_img.size
+            front_img = combined_img.crop((0, 0, w // 2, h))
+            back_img = combined_img.crop((w // 2, 0, w, h))
+            
+            front_tensor = self.transform_cond(front_img)
+            back_tensor = self.transform_cond(back_img)
+            cond_tensor = torch.stack([front_tensor, back_tensor], dim=0) # (2, 3, cond_size, cond_size // 2)
         
         # 5. Load prompt description
         caption_path = os.path.join(self.captions_dir, stem + ".txt")
