@@ -33,6 +33,7 @@ def parse_args():
     parser.add_argument("--photos_dir", type=str, default=None, help="Path to conditioning photos folder.")
     parser.add_argument("--output_dir", type=str, default="output", help="Path to save checkpoints.")
     parser.add_argument("--mappings_dir", type=str, default=None, help="Path to differentiable renderer mappings folder.")
+    parser.add_argument("--ai_toolkit_path", type=str, default=None, help="Path to the local 'ai-toolkit' repository directory.")
     
     # Training hyperparameters
     parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate.")
@@ -395,10 +396,26 @@ def main():
     if args.model_type == "flux2klein":
         # Load custom local model structures from ai-toolkit
         import sys
-        current_dir = os.path.dirname(os.path.abspath(__file__))
-        workspace_dir = os.path.abspath(os.path.join(current_dir, ".."))
-        sys.path.insert(0, os.path.join(workspace_dir, "ai-toolkit"))
-        sys.path.insert(0, os.path.join(workspace_dir, "ai-toolkit", "extensions_built_in", "diffusion_models"))
+        
+        # Resolve ai-toolkit path dynamically with multiple fallbacks
+        ai_toolkit_path = args.ai_toolkit_path
+        if ai_toolkit_path is None:
+            current_dir = os.path.dirname(os.path.abspath(__file__))
+            workspace_dir = os.path.abspath(os.path.join(current_dir, ".."))
+            ai_toolkit_path = os.path.join(workspace_dir, "ai-toolkit")
+            
+        ai_toolkit_path = os.path.abspath(ai_toolkit_path)
+        if not os.path.exists(ai_toolkit_path):
+            print(f"WARNING: ai-toolkit path '{ai_toolkit_path}' does not exist.")
+            # Search in sibling github directory fallback
+            parent_dir = os.path.dirname(ai_toolkit_path)
+            github_ai_toolkit = os.path.join(parent_dir, "github", "ai-toolkit")
+            if os.path.exists(github_ai_toolkit):
+                ai_toolkit_path = github_ai_toolkit
+                print(f"[*] Found ai-toolkit at sibling fallback path: '{ai_toolkit_path}'")
+                
+        sys.path.insert(0, ai_toolkit_path)
+        sys.path.insert(0, os.path.join(ai_toolkit_path, "extensions_built_in", "diffusion_models"))
         
         from extensions_built_in.diffusion_models.flux2.src.model import Flux2, Klein4BParams, Klein9BParams
         from extensions_built_in.diffusion_models.flux2.src.autoencoder import AutoEncoder, AutoEncoderParams, AutoEncoderSmallDecoderParams
