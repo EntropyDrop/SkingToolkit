@@ -403,7 +403,8 @@ def run_validation(args, transformer, vae, tokenizer1, tokenizer2, text_encoder1
                     img_cond_seq = img_cond_seq.to(device, dtype=weight_dtype)
                     img_cond_seq_ids = img_cond_seq_ids.to(device)
                     
-                latents = torch.randn((1, 16, 64, 32), device=device, dtype=weight_dtype)
+                latent_channels = 128 if args.model_type == "flux2klein" else 16
+                latents = torch.randn((1, latent_channels, 64, 32), device=device, dtype=weight_dtype)
                 
                 # Euler ODE integration steps
                 num_inference_steps = 28
