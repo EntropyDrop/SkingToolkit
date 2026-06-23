@@ -8,7 +8,29 @@ MODEL_PATH="../black-forest-labs/FLUX.2-klein-base-4B"  # Path containing Flux2K
 TEXT_ENCODER_PATH="../Qwen/Qwen3-4B" # Path to Qwen text encoder model
 DATA_DIR="../SkingDataset/skins"
 PHOTOS_DIR="../SkingDataset/control_imgs"
-MAPPINGS_DIR="../differentiable_minecraft_renderer/mappings"
+MAPPINGS_DIR="${MAPPINGS_DIR:-}"
+if [ -z "$MAPPINGS_DIR" ]; then
+    for candidate in \
+        "../differentiable_minecraft_renderer/mappings" \
+        "./mappings" \
+        "../github/differentiable_minecraft_renderer/mappings" \
+        "$HOME/llms/differentiable_minecraft_renderer/mappings" \
+        "$HOME/Documents/entropydrop_website/differentiable_minecraft_renderer/mappings"
+    do
+        if [ -d "$candidate" ]; then
+            MAPPINGS_DIR="$candidate"
+            break
+        fi
+    done
+fi
+
+if [ -z "$MAPPINGS_DIR" ] || [ ! -d "$MAPPINGS_DIR" ]; then
+    echo "[X] Could not find differentiable renderer mappings."
+    echo "    Expected files like static_front_mapping.pt and static_back_mapping.pt."
+    echo "    Set MAPPINGS_DIR explicitly, for example:"
+    echo "    MAPPINGS_DIR=/path/to/differentiable_minecraft_renderer/mappings ./run_training.sh"
+    exit 1
+fi
 OUTPUT_DIR="output/flux_skin_lora"
 VALIDATION_PHOTOS_DIR="../SkingValidation" # 测试验证图根目录（包含 front/ 和 back/）
 VALIDATION_STEPS=100
