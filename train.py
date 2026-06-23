@@ -730,7 +730,7 @@ def main():
             with open(caption_path, "r", encoding="utf-8") as f:
                 all_prompts.add(f.read().strip())
         else:
-            all_prompts.add("minecraft skin character")
+            all_prompts.add(dataloader.dataset.default_caption)
             
     # Collect all validation prompts
     if args.validation_photos_dir and os.path.exists(args.validation_photos_dir):
@@ -743,7 +743,7 @@ def main():
                         with open(caption_path, "r", encoding="utf-8") as f:
                             all_prompts.add(f.read().strip())
                     else:
-                        all_prompts.add("minecraft skin character")
+                        all_prompts.add("")
                         
     # Encode them
     from tqdm import tqdm
