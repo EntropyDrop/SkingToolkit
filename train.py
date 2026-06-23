@@ -729,105 +729,106 @@ def main():
                 noise = torch.randn_like(latents_gt)
                 
                 # Compute noisy latent at t: x_t = (1 - t) * x_0 + t * noise
-                t_expanded = t.view(-1, 1, 1, 1)
-                x_t = (1.0 - t_expanded) * latents_gt + t_expanded * noise
-                
-                # 11. Run Transformer Forward pass
-                if args.model_type == "flux2klein":
-                    # Pack sequence coordinates for the custom local Flux2 model
-                    packed_latents, img_ids = batched_prc_img(x_t)
-                    packed_txt, txt_ids = batched_prc_txt(prompt_embeds)
+                with accelerator.autocast():
+                    t_expanded = t.view(-1, 1, 1, 1)
+                    x_t = (1.0 - t_expanded) * latents_gt + t_expanded * noise
                     
-                    # Encode conditioning images (front & back separate views, both 256x512)
-                    # cond_image has shape (B, 2, 3, 512, 256) in range [0, 1]. Scale to [-1, 1] for VAE.
-                    cond_image_scaled = cond_image * 2.0 - 1.0
-                    img_cond_seq_list = []
-                    img_cond_seq_ids_list = []
-                    for i in range(B):
-                        controls_item = [cond_image_scaled[i, 0], cond_image_scaled[i, 1]]
-                        seq_item, ids_item = encode_image_refs(vae, controls_item)
-                        img_cond_seq_list.append(seq_item)
-                        img_cond_seq_ids_list.append(ids_item)
-                    img_cond_seq = torch.cat(img_cond_seq_list, dim=0).to(device, dtype=weight_dtype)
-                    img_cond_seq_ids = torch.cat(img_cond_seq_ids_list, dim=0).to(device)
+                    # 11. Run Transformer Forward pass
+                    if args.model_type == "flux2klein":
+                        # Pack sequence coordinates for the custom local Flux2 model
+                        packed_latents, img_ids = batched_prc_img(x_t)
+                        packed_txt, txt_ids = batched_prc_txt(prompt_embeds)
+                        
+                        # Encode conditioning images (front & back separate views, both 256x512)
+                        # cond_image has shape (B, 2, 3, 512, 256) in range [0, 1]. Scale to [-1, 1] for VAE.
+                        cond_image_scaled = cond_image * 2.0 - 1.0
+                        img_cond_seq_list = []
+                        img_cond_seq_ids_list = []
+                        for i in range(B):
+                            controls_item = [cond_image_scaled[i, 0], cond_image_scaled[i, 1]]
+                            seq_item, ids_item = encode_image_refs(vae, controls_item)
+                            img_cond_seq_list.append(seq_item)
+                            img_cond_seq_ids_list.append(ids_item)
+                        img_cond_seq = torch.cat(img_cond_seq_list, dim=0).to(device, dtype=weight_dtype)
+                        img_cond_seq_ids = torch.cat(img_cond_seq_ids_list, dim=0).to(device)
+                        
+                        # Concatenate reference/control tokens to image sequence
+                        img_input = torch.cat((packed_latents, img_cond_seq), dim=1)
+                        img_input_ids = torch.cat((img_ids, img_cond_seq_ids), dim=1)
+                        
+                        # Prepare guidance vec
+                        guidance_vec = torch.full((B,), 4.0, device=device, dtype=weight_dtype) # default guidance 4.0
+                        
+                        packed_noise_pred = transformer(
+                            x=img_input,
+                            x_ids=img_input_ids,
+                            timesteps=t, # Already normalized to [0, 1]
+                            ctx=packed_txt,
+                            ctx_ids=txt_ids.to(device),
+                            guidance=guidance_vec
+                        )
+                        
+                        # Slice prediction output back to match original latents sequence length (excluding cond tokens)
+                        packed_noise_pred = packed_noise_pred[:, :packed_latents.shape[1]]
+                        
+                        # Scatter/unpack tokens back to spatial coordinates
+                        unpacked_list = scatter_ids(packed_noise_pred, img_ids)
+                        model_pred = torch.cat(unpacked_list, dim=0).squeeze(2) # Shape: (B, 16, H_latent, W_latent)
+                    else:
+                        # Standard Flux coordinates grids
+                        H_latent, W_latent = latents_gt.shape[2], latents_gt.shape[3]
+                        txt_ids = torch.zeros(B, 512, 3, device=device, dtype=weight_dtype)
+                        img_ids = torch.zeros(B, H_latent * W_latent, 3, device=device, dtype=weight_dtype)
+                        
+                        model_pred = transformer(
+                            hidden_states=x_t,
+                            timestep=t * 1000.0, # Range [0, 1000]
+                            encoder_hidden_states=prompt_embeds,
+                            pooled_projections=pooled_prompt_embeds,
+                            txt_ids=txt_ids,
+                            img_ids=img_ids,
+                            return_dict=False
+                        )[0]
                     
-                    # Concatenate reference/control tokens to image sequence
-                    img_input = torch.cat((packed_latents, img_cond_seq), dim=1)
-                    img_input_ids = torch.cat((img_ids, img_cond_seq_ids), dim=1)
+                    # Flow matching target velocity: (noise - latents_gt)
+                    target_velocity = noise - latents_gt
                     
-                    # Prepare guidance vec
-                    guidance_vec = torch.full((B,), 4.0, device=device, dtype=weight_dtype) # default guidance 4.0
+                    # Flow Matching Latent Loss (standard MSE)
+                    loss_latent = F.mse_loss(model_pred, target_velocity)
                     
-                    packed_noise_pred = transformer(
-                        x=img_input,
-                        x_ids=img_input_ids,
-                        timesteps=t, # Already normalized to [0, 1]
-                        ctx=packed_txt,
-                        ctx_ids=txt_ids.to(device),
-                        guidance=guidance_vec
-                    )
+                    # 12. Differentiable VAE Decode to reconstruct Predicted Skin UV
+                    # Reconstruct clean latent estimation from the predicted velocity:
+                    pred_x0 = x_t - t_expanded * model_pred
                     
-                    # Slice prediction output back to match original latents sequence length (excluding cond tokens)
-                    packed_noise_pred = packed_noise_pred[:, :packed_latents.shape[1]]
+                    # Decode predicted latent x_0 to 256x512 RGB space using VAE
+                    if args.model_type == "flux2klein":
+                        pred_decoded = vae.decode(pred_x0.to(dtype=vae.dtype))
+                    else:
+                        pred_x0_scaled = pred_x0 / vae.config.scaling_factor
+                        pred_decoded = vae.decode(pred_x0_scaled).sample
                     
-                    # Scatter/unpack tokens back to spatial coordinates
-                    unpacked_list = scatter_ids(packed_noise_pred, img_ids)
-                    model_pred = torch.cat(unpacked_list, dim=0).squeeze(2) # Shape: (B, 16, H_latent, W_latent)
-                else:
-                    # Standard Flux coordinates grids
-                    H_latent, W_latent = latents_gt.shape[2], latents_gt.shape[3]
-                    txt_ids = torch.zeros(B, 512, 3, device=device, dtype=weight_dtype)
-                    img_ids = torch.zeros(B, H_latent * W_latent, 3, device=device, dtype=weight_dtype)
+                    # Normalize decoded outputs from [-1, 1] range to [0, 1] range
+                    pred_decoded = (pred_decoded + 1.0) / 2.0
+                    pred_decoded = pred_decoded.clamp(0.0, 1.0)
                     
-                    model_pred = transformer(
-                        hidden_states=x_t,
-                        timestep=t * 1000.0, # Range [0, 1000]
-                        encoder_hidden_states=prompt_embeds,
-                        pooled_projections=pooled_prompt_embeds,
-                        txt_ids=txt_ids,
-                        img_ids=img_ids,
-                        return_dict=False
-                    )[0]
-                
-                # Flow matching target velocity: (noise - latents_gt)
-                target_velocity = noise - latents_gt
-                
-                # Flow Matching Latent Loss (standard MSE)
-                loss_latent = F.mse_loss(model_pred, target_velocity)
-                
-                # 12. Differentiable VAE Decode to reconstruct Predicted Skin UV
-                # Reconstruct clean latent estimation from the predicted velocity:
-                pred_x0 = x_t - t_expanded * model_pred
-                
-                # Decode predicted latent x_0 to 256x512 RGB space using VAE
-                if args.model_type == "flux2klein":
-                    pred_decoded = vae.decode(pred_x0.to(dtype=vae.dtype))
-                else:
-                    pred_x0_scaled = pred_x0 / vae.config.scaling_factor
-                    pred_decoded = vae.decode(pred_x0_scaled).sample
-                
-                # Normalize decoded outputs from [-1, 1] range to [0, 1] range
-                pred_decoded = (pred_decoded + 1.0) / 2.0
-                pred_decoded = pred_decoded.clamp(0.0, 1.0)
-                
-                # 13. Extract the 64x64 RGBA Skin UV from the top-to-bottom composite
-                # Top half is RGB: [0:256, :]
-                pred_rgb = pred_decoded[:, :, :256, :]
-                # Bottom half is Alpha (grayscale representation): [256:512, :]
-                pred_alpha = pred_decoded[:, :, 256:, :].mean(dim=1, keepdim=True)
-                
-                # Resize from 256x256 to 64x64 using bilinear interpolation
-                pred_rgb_64 = F.interpolate(pred_rgb, size=(64, 64), mode='bilinear', align_corners=True)
-                pred_alpha_64 = F.interpolate(pred_alpha, size=(64, 64), mode='bilinear', align_corners=True)
-                
-                # Combine to form the predicted 64x64 RGBA skin texture
-                pred_skin = torch.cat([pred_rgb_64, pred_alpha_64], dim=1) # (B, 4, 64, 64)
-                
-                # 14. Compute Combined Loss
-                loss_criterion_dict = criterion(pred_skin, gt_skin)
-                loss_render_total = loss_criterion_dict["loss_total"]
-                
-                loss = args.lambda_latent * loss_latent + loss_render_total
+                    # 13. Extract the 64x64 RGBA Skin UV from the top-to-bottom composite
+                    # Top half is RGB: [0:256, :]
+                    pred_rgb = pred_decoded[:, :, :256, :]
+                    # Bottom half is Alpha (grayscale representation): [256:512, :]
+                    pred_alpha = pred_decoded[:, :, 256:, :].mean(dim=1, keepdim=True)
+                    
+                    # Resize from 256x256 to 64x64 using bilinear interpolation
+                    pred_rgb_64 = F.interpolate(pred_rgb, size=(64, 64), mode='bilinear', align_corners=True)
+                    pred_alpha_64 = F.interpolate(pred_alpha, size=(64, 64), mode='bilinear', align_corners=True)
+                    
+                    # Combine to form the predicted 64x64 RGBA skin texture
+                    pred_skin = torch.cat([pred_rgb_64, pred_alpha_64], dim=1) # (B, 4, 64, 64)
+                    
+                    # 14. Compute Combined Loss
+                    loss_criterion_dict = criterion(pred_skin, gt_skin)
+                    loss_render_total = loss_criterion_dict["loss_total"]
+                    
+                    loss = args.lambda_latent * loss_latent + loss_render_total
                 
                 # 15. Backpropagate Loss
                 accelerator.backward(loss)
