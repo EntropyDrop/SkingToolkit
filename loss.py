@@ -100,7 +100,7 @@ class MinecraftLoss(nn.Module):
                     # LPIPS expects inputs in [-1, 1] range
                     pred_rgb = pred_view[:, :3] * 2.0 - 1.0
                     gt_rgb = gt_view[:, :3] * 2.0 - 1.0
-                    loss_lpips_render += self.lpips_loss_fn(pred_rgb, gt_rgb).mean()
+                    loss_lpips_render += self.lpips_loss_fn(pred_rgb, gt_rgb).mean().to(dtype=skins_pred.dtype)
             
             # Average rendering losses over all views
             loss_mse_render = loss_mse_render / self.view_count

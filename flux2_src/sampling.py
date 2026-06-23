@@ -86,7 +86,7 @@ def encode_image_refs(
     ref_tokens = ref_tokens.unsqueeze(0)  # (1, total_ref_tokens, C)
     ref_ids = ref_ids.unsqueeze(0)  # (1, total_ref_tokens, 4)
 
-    return ref_tokens.to(torch.bfloat16), ref_ids
+    return ref_tokens.to(ae.dtype), ref_ids
 
 
 def prc_txt(
