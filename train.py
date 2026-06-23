@@ -634,6 +634,9 @@ def main():
         print("[*] Training FULL model (All transformer parameters will be updated)")
         transformer.requires_grad_(True)
         
+    # Ensure all parameters including newly initialized LoRA weights are in the target dtype
+    transformer.to(dtype=weight_dtype)
+        
     # 4. Setup Dataset & Dataloader
     dataset = MinecraftSkinDataset(
         data_dir=args.data_dir,
@@ -675,7 +678,7 @@ def main():
     else:
         text_encoder1.to(device)
         text_encoder2.to(device)
-    criterion.to(device)
+    criterion.to(device, dtype=weight_dtype)
     
     # Main training loop
     print("[*] Starting training loop...")
