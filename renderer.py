@@ -82,12 +82,13 @@ class DifferentiableRenderer(nn.Module):
         assert C == 4, "Skins must have 4 channels (RGBA)"
         assert H_in == 64 and W_in == 64, "Skins must be 64x64"
         
-        # Retrieve buffers
-        inner_grid = getattr(self, f"{view_name}_inner_grid").unsqueeze(0).expand(B, -1, -1, -1)
-        inner_mask = getattr(self, f"{view_name}_inner_mask").unsqueeze(0).unsqueeze(1).expand(B, -1, -1, -1) # (B, 1, H, W)
+        # Retrieve buffers and cast to match the input dtype (e.g. bfloat16 or float32)
+        dtype = skins.dtype
+        inner_grid = getattr(self, f"{view_name}_inner_grid").unsqueeze(0).expand(B, -1, -1, -1).to(dtype=dtype)
+        inner_mask = getattr(self, f"{view_name}_inner_mask").unsqueeze(0).unsqueeze(1).expand(B, -1, -1, -1).to(dtype=dtype) # (B, 1, H, W)
         
-        outer_grid = getattr(self, f"{view_name}_outer_grid").unsqueeze(0).expand(B, -1, -1, -1)
-        outer_mask = getattr(self, f"{view_name}_outer_mask").unsqueeze(0).unsqueeze(1).expand(B, -1, -1, -1) # (B, 1, H, W)
+        outer_grid = getattr(self, f"{view_name}_outer_grid").unsqueeze(0).expand(B, -1, -1, -1).to(dtype=dtype)
+        outer_mask = getattr(self, f"{view_name}_outer_mask").unsqueeze(0).unsqueeze(1).expand(B, -1, -1, -1).to(dtype=dtype) # (B, 1, H, W)
         
         # 1. Sample inner layer using bilinear interpolation
         inner_sampled = F.grid_sample(skins, inner_grid, mode='bilinear', padding_mode='zeros', align_corners=True)
@@ -105,7 +106,7 @@ class DifferentiableRenderer(nn.Module):
         outer_alpha = outer_sampled[:, 3:4, :, :]
         
         # Prepare background color broadcasted to match dimensions
-        bg = self.bg_color.view(1, 3, 1, 1).expand(B, -1, inner_rgb.shape[2], inner_rgb.shape[3])
+        bg = self.bg_color.view(1, 3, 1, 1).expand(B, -1, inner_rgb.shape[2], inner_rgb.shape[3]).to(dtype=dtype)
         
         # Composite inner layer over background
         inner_composite = inner_alpha * inner_rgb + (1.0 - inner_alpha) * bg
