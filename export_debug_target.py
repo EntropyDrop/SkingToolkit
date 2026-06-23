@@ -24,7 +24,11 @@ def main():
     print(f"Exporting the first {num_exports} samples...")
     
     for i in range(num_exports):
-        target_latent_image, cond_image, gt_skin_tensor, prompt = dataset[i]
+        batch = dataset[i]
+        target_latent_image = batch["target_latent_image"]
+        cond_image = batch["cond_image"]
+        gt_skin_tensor = batch["gt_skin"]
+        prompt = batch["prompt"]
         
         # target_latent_image shape: (3, 512, 256) in [-1, 1]
         # Denormalize from [-1, 1] back to [0, 1]
