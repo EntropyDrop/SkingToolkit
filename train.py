@@ -455,7 +455,7 @@ def run_validation(args, transformer, vae, tokenizer1, tokenizer2, text_encoder1
                     
                 # Decode predicted latent x_0 using VAE
                 if args.model_type == "flux2klein":
-                    pred_decoded = vae.decode(latents)
+                    pred_decoded = vae.decode(latents.to(dtype=vae.dtype))
                 else:
                     latents_scaled = latents / vae.config.scaling_factor
                     pred_decoded = vae.decode(latents_scaled).sample
@@ -714,7 +714,7 @@ def main():
                 with torch.no_grad():
                     # VAE target_latent_image is normalized in [-1, 1]
                     if args.model_type == "flux2klein":
-                        latents_gt = vae.encode(target_latent_image)
+                        latents_gt = vae.encode(target_latent_image.to(dtype=vae.dtype))
                     else:
                         latents_gt = vae.encode(target_latent_image).latent_dist.sample()
                         latents_gt = latents_gt * vae.config.scaling_factor
@@ -798,7 +798,7 @@ def main():
                 
                 # Decode predicted latent x_0 to 256x512 RGB space using VAE
                 if args.model_type == "flux2klein":
-                    pred_decoded = vae.decode(pred_x0)
+                    pred_decoded = vae.decode(pred_x0.to(dtype=vae.dtype))
                 else:
                     pred_x0_scaled = pred_x0 / vae.config.scaling_factor
                     pred_decoded = vae.decode(pred_x0_scaled).sample
