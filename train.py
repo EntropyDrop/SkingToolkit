@@ -24,6 +24,152 @@ from diffusers import (
 )
 from transformers import CLIPTextModel, CLIPTokenizer, T5EncoderModel, T5TokenizerFast
 
+def convert_diffusers_vae_to_custom(state_dict):
+    # If the state dict is already in custom format, return as is
+    if "encoder.quant_conv.weight" in state_dict:
+        return state_dict
+
+    # Check if this is indeed a diffusers format VAE
+    is_diffusers = any(k.startswith("encoder.down_blocks") for k in state_dict.keys())
+    if not is_diffusers:
+        return state_dict
+
+    custom_state_dict = {}
+
+    # 1. Direct key mappings
+    direct_mappings = {
+        "quant_conv.weight": "encoder.quant_conv.weight",
+        "quant_conv.bias": "encoder.quant_conv.bias",
+        "post_quant_conv.weight": "decoder.post_quant_conv.weight",
+        "post_quant_conv.bias": "decoder.post_quant_conv.bias",
+        
+        "encoder.conv_in.weight": "encoder.conv_in.weight",
+        "encoder.conv_in.bias": "encoder.conv_in.bias",
+        "encoder.conv_out.weight": "encoder.conv_out.weight",
+        "encoder.conv_out.bias": "encoder.conv_out.bias",
+        "encoder.conv_norm_out.weight": "encoder.norm_out.weight",
+        "encoder.conv_norm_out.bias": "encoder.norm_out.bias",
+        
+        "decoder.conv_in.weight": "decoder.conv_in.weight",
+        "decoder.conv_in.bias": "decoder.conv_in.bias",
+        "decoder.conv_out.weight": "decoder.conv_out.weight",
+        "decoder.conv_out.bias": "decoder.conv_out.bias",
+        "decoder.conv_norm_out.weight": "decoder.norm_out.weight",
+        "decoder.conv_norm_out.bias": "decoder.norm_out.bias",
+    }
+    
+    for k, v in direct_mappings.items():
+        if k in state_dict:
+            custom_state_dict[v] = state_dict[k]
+
+    # 2. Encoder down blocks
+    for i in range(4): # 4 down blocks
+        # Downsamplers
+        old_ds_w = f"encoder.down_blocks.{i}.downsamplers.0.conv.weight"
+        old_ds_b = f"encoder.down_blocks.{i}.downsamplers.0.conv.bias"
+        if old_ds_w in state_dict:
+            custom_state_dict[f"encoder.down.{i}.downsample.conv.weight"] = state_dict[old_ds_w]
+        if old_ds_b in state_dict:
+            custom_state_dict[f"encoder.down.{i}.downsample.conv.bias"] = state_dict[old_ds_b]
+
+        # Resnets (2 resnets per down block)
+        for j in range(2):
+            for layer in ["norm1", "norm2", "conv1", "conv2", "conv_shortcut"]:
+                custom_layer = "nin_shortcut" if layer == "conv_shortcut" else layer
+                old_key = f"encoder.down_blocks.{i}.resnets.{j}.{layer}.weight"
+                new_key = f"encoder.down.{i}.block.{j}.{custom_layer}.weight"
+                if old_key in state_dict:
+                    custom_state_dict[new_key] = state_dict[old_key]
+                
+                old_bias = f"encoder.down_blocks.{i}.resnets.{j}.{layer}.bias"
+                new_bias = f"encoder.down.{i}.block.{j}.{custom_layer}.bias"
+                if old_bias in state_dict:
+                    custom_state_dict[new_bias] = state_dict[old_bias]
+
+    # 3. Encoder mid block
+    for j in range(2): # 2 resnets in mid_block
+        for layer in ["norm1", "norm2", "conv1", "conv2", "conv_shortcut"]:
+            custom_layer = "nin_shortcut" if layer == "conv_shortcut" else layer
+            old_key = f"encoder.mid_block.resnets.{j}.{layer}.weight"
+            new_key = f"encoder.mid.block_{j+1}.{custom_layer}.weight"
+            if old_key in state_dict:
+                custom_state_dict[new_key] = state_dict[old_key]
+            old_bias = f"encoder.mid_block.resnets.{j}.{layer}.bias"
+            new_bias = f"encoder.mid.block_{j+1}.{custom_layer}.bias"
+            if old_bias in state_dict:
+                custom_state_dict[new_bias] = state_dict[old_bias]
+
+    # Encoder mid block Attention
+    attn_mappings = {
+        "group_norm": "norm",
+        "to_q": "q",
+        "to_k": "k",
+        "to_v": "v",
+        "to_out.0": "proj_out"
+    }
+    for old_name, new_name in attn_mappings.items():
+        for suffix in ["weight", "bias"]:
+            old_key = f"encoder.mid_block.attentions.0.{old_name}.{suffix}"
+            new_key = f"encoder.mid.attn_1.{new_name}.{suffix}"
+            if old_key in state_dict:
+                val = state_dict[old_key]
+                if suffix == "weight" and old_name in ["to_q", "to_k", "to_v", "to_out.0"]:
+                    if val.ndim == 2:
+                        val = val.unsqueeze(-1).unsqueeze(-1)
+                custom_state_dict[new_key] = val
+
+    # 4. Decoder up blocks
+    for i in range(4): # 4 up blocks in diffusers (0 to 3)
+        custom_i = 3 - i
+        # Upsamplers (exist in up_blocks 0, 1, 2 for diffusers)
+        old_us_w = f"decoder.up_blocks.{i}.upsamplers.0.conv.weight"
+        old_us_b = f"decoder.up_blocks.{i}.upsamplers.0.conv.bias"
+        if old_us_w in state_dict:
+            custom_state_dict[f"decoder.up.{custom_i}.upsample.conv.weight"] = state_dict[old_us_w]
+        if old_us_b in state_dict:
+            custom_state_dict[f"decoder.up.{custom_i}.upsample.conv.bias"] = state_dict[old_us_b]
+
+        # Resnets (3 resnets per up block)
+        for j in range(3):
+            for layer in ["norm1", "norm2", "conv1", "conv2", "conv_shortcut"]:
+                custom_layer = "nin_shortcut" if layer == "conv_shortcut" else layer
+                old_key = f"decoder.up_blocks.{i}.resnets.{j}.{layer}.weight"
+                new_key = f"decoder.up.{custom_i}.block.{j}.{custom_layer}.weight"
+                if old_key in state_dict:
+                    custom_state_dict[new_key] = state_dict[old_key]
+                
+                old_bias = f"decoder.up_blocks.{i}.resnets.{j}.{layer}.bias"
+                new_bias = f"decoder.up.{custom_i}.block.{j}.{custom_layer}.bias"
+                if old_bias in state_dict:
+                    custom_state_dict[new_bias] = state_dict[old_bias]
+
+    # 5. Decoder mid block
+    for j in range(2): # 2 resnets in mid_block
+        for layer in ["norm1", "norm2", "conv1", "conv2", "conv_shortcut"]:
+            custom_layer = "nin_shortcut" if layer == "conv_shortcut" else layer
+            old_key = f"decoder.mid_block.resnets.{j}.{layer}.weight"
+            new_key = f"decoder.mid.block_{j+1}.{custom_layer}.weight"
+            if old_key in state_dict:
+                custom_state_dict[new_key] = state_dict[old_key]
+            old_bias = f"decoder.mid_block.resnets.{j}.{layer}.bias"
+            new_bias = f"decoder.mid.block_{j+1}.{custom_layer}.bias"
+            if old_bias in state_dict:
+                custom_state_dict[new_bias] = state_dict[old_bias]
+
+    # Decoder mid block Attention
+    for old_name, new_name in attn_mappings.items():
+        for suffix in ["weight", "bias"]:
+            old_key = f"decoder.mid_block.attentions.0.{old_name}.{suffix}"
+            new_key = f"decoder.mid.attn_1.{new_name}.{suffix}"
+            if old_key in state_dict:
+                val = state_dict[old_key]
+                if suffix == "weight" and old_name in ["to_q", "to_k", "to_v", "to_out.0"]:
+                    if val.ndim == 2:
+                        val = val.unsqueeze(-1).unsqueeze(-1)
+                custom_state_dict[new_key] = val
+
+    return custom_state_dict
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Flux2Klein Differentiable Minecraft Skin Trainer")
     
@@ -405,6 +551,7 @@ def main():
             
         print(f"[*] Loading custom VAE from: {vae_path}")
         vae_state_dict = load_file(vae_path, device="cpu")
+        vae_state_dict = convert_diffusers_vae_to_custom(vae_state_dict)
         autoencoder_params = AutoEncoderParams()
         # Check if small VAE decoder layout is used (e.g. channels count)
         if vae_state_dict.get('decoder.up.0.block.0.conv1.bias', None) is not None:
