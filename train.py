@@ -306,7 +306,7 @@ def straight_through_clamp(x, min_value=0.0, max_value=1.0):
     clamped = x.clamp(min_value, max_value)
     return x + (clamped - x).detach()
 
-def run_validation(args, transformer, vae, tokenizer1, tokenizer2, text_encoder1, text_encoder2, device, weight_dtype, global_step, accelerator):
+def run_validation(args, transformer, vae, prompt_cache, device, weight_dtype, global_step, accelerator):
     if not args.validation_photos_dir or not os.path.exists(args.validation_photos_dir):
         return
         
@@ -396,19 +396,17 @@ def run_validation(args, transformer, vae, tokenizer1, tokenizer2, text_encoder1
             back_tensor = (to_tensor(back_img) * 2.0 - 1.0).to(device, dtype=weight_dtype)
             controls_item = [front_tensor, back_tensor]
             
-            # 3. Encode prompt
-            with torch.no_grad():
-                if args.text_encoder_type == "qwen":
-                    prompt_embeds, pooled_prompt_embeds = encode_prompt_qwen(
-                        tokenizer1, text_encoder1, [prompt], device
-                    )
-                else:
-                    prompt_embeds, pooled_prompt_embeds = encode_prompt(
-                        tokenizer1, tokenizer2, text_encoder1, text_encoder2, [prompt], device
-                    )
-                prompt_embeds = prompt_embeds.to(dtype=weight_dtype)
-                if pooled_prompt_embeds is not None:
-                    pooled_prompt_embeds = pooled_prompt_embeds.to(dtype=weight_dtype)
+            # 3. Fetch prompt from cache
+            pe, ppe = prompt_cache.get(prompt, (None, None))
+            if pe is None:
+                print(f"[!] Warning: Prompt '{prompt}' not found in cache. Skipping validation.")
+                continue
+                
+            prompt_embeds = pe.to(device, dtype=weight_dtype)
+            if ppe is not None:
+                pooled_prompt_embeds = ppe.to(device, dtype=weight_dtype)
+            else:
+                pooled_prompt_embeds = None
                     
             # 4. Generate random initial noise latents for the target VAE canvas.
             # Flux2Klein uses a 16x spatial VAE scale (8x encoder + 2x pixel shuffle).
@@ -719,10 +717,55 @@ def main():
     if criterion is not None:
         criterion.to(device, dtype=weight_dtype)
     
+    # 8. Pre-encode all prompts and unload Text Encoder to save VRAM
+    print("[*] Pre-encoding all training and validation prompts...")
+    prompt_cache = {}
+    all_prompts = set()
+    
+    # Collect all training prompts
+    for filename in dataloader.dataset.skin_filenames:
+        stem, _ = os.path.splitext(filename)
+        caption_path = os.path.join(dataloader.dataset.captions_dir, stem + ".txt")
+        if os.path.exists(caption_path):
+            with open(caption_path, "r", encoding="utf-8") as f:
+                all_prompts.add(f.read().strip())
+        else:
+            all_prompts.add("minecraft skin character")
+            
+    # Collect all validation prompts
+    if args.validation_photos_dir and os.path.exists(args.validation_photos_dir):
+        for root, dirs, files in os.walk(args.validation_photos_dir):
+            for filename in files:
+                if filename.endswith(".png") or filename.endswith(".jpg") or filename.endswith(".webp"):
+                    stem, _ = os.path.splitext(filename)
+                    caption_path = os.path.join(args.validation_photos_dir, stem + ".txt")
+                    if os.path.exists(caption_path):
+                        with open(caption_path, "r", encoding="utf-8") as f:
+                            all_prompts.add(f.read().strip())
+                    else:
+                        all_prompts.add("minecraft skin character")
+                        
+    # Encode them
+    from tqdm import tqdm
+    for p in tqdm(all_prompts, desc="Encoding Prompts", disable=not accelerator.is_local_main_process):
+        with torch.no_grad():
+            if args.text_encoder_type == "qwen":
+                pe, ppe = encode_prompt_qwen(tokenizer1, text_encoder1, [p], device)
+            else:
+                pe, ppe = encode_prompt(tokenizer1, tokenizer2, text_encoder1, text_encoder2, [p], device)
+            prompt_cache[p] = (pe.cpu(), ppe.cpu() if ppe is not None else None)
+            
+    print("[*] Unloading Text Encoder to free VRAM...")
+    del text_encoder1
+    if args.text_encoder_type != "qwen":
+        del text_encoder2
+    import gc
+    gc.collect()
+    torch.cuda.empty_cache()
+    
     # Main training loop
     print("[*] Starting training loop...")
     global_step = 0
-    prompt_cache = {}
     
     for epoch in range(args.epochs):
         transformer.train()
@@ -740,28 +783,18 @@ def main():
                 
                 B = target_latent_image.shape[0]
                 
-                # 8. Encode prompts on the fly with in-memory caching
+                # 9. Fetch cached prompts
                 prompt_embeds_list = []
                 pooled_embeds_list = []
                 for p in prompts:
-                    if p not in prompt_cache:
-                        with torch.no_grad():
-                            if args.text_encoder_type == "qwen":
-                                pe, ppe = encode_prompt_qwen(tokenizer1, text_encoder1, [p], device)
-                            else:
-                                pe, ppe = encode_prompt(tokenizer1, tokenizer2, text_encoder1, text_encoder2, [p], device)
-                            # Move to CPU to save GPU RAM if the cache gets very large, but for 
-                            # a small number of prompts keeping them on device is faster.
-                            prompt_cache[p] = (pe, ppe)
-                    
                     pe, ppe = prompt_cache[p]
-                    prompt_embeds_list.append(pe)
+                    prompt_embeds_list.append(pe.to(device, dtype=weight_dtype))
                     if ppe is not None:
-                        pooled_embeds_list.append(ppe)
+                        pooled_embeds_list.append(ppe.to(device, dtype=weight_dtype))
                         
-                prompt_embeds = torch.cat(prompt_embeds_list, dim=0).to(dtype=weight_dtype)
+                prompt_embeds = torch.cat(prompt_embeds_list, dim=0)
                 if len(pooled_embeds_list) > 0:
-                    pooled_prompt_embeds = torch.cat(pooled_embeds_list, dim=0).to(dtype=weight_dtype)
+                    pooled_prompt_embeds = torch.cat(pooled_embeds_list, dim=0)
                 else:
                     pooled_prompt_embeds = None
                 
@@ -900,10 +933,7 @@ def main():
                                 args,
                                 transformer,
                                 vae,
-                                tokenizer1,
-                                tokenizer2,
-                                text_encoder1,
-                                text_encoder2,
+                                prompt_cache,
                                 device,
                                 weight_dtype,
                                 global_step,
