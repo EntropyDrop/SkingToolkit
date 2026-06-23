@@ -558,10 +558,18 @@ def main():
             if vae_state_dict['decoder.up.0.block.0.conv1.bias'].shape[0] == 96:
                 autoencoder_params = AutoEncoderSmallDecoderParams()
                 
+        # Populate BN default statistics if missing (e.g. when loading standard diffusers VAE)
+        if "bn.running_mean" not in vae_state_dict:
+            vae_state_dict["bn.running_mean"] = torch.zeros(128)
+        if "bn.running_var" not in vae_state_dict:
+            vae_state_dict["bn.running_var"] = torch.ones(128)
+        if "bn.num_batches_tracked" not in vae_state_dict:
+            vae_state_dict["bn.num_batches_tracked"] = torch.tensor(0, dtype=torch.long)
+
         vae = AutoEncoder(autoencoder_params)
         for k in vae_state_dict:
             vae_state_dict[k] = vae_state_dict[k].to(dtype=weight_dtype)
-        vae.load_state_dict(vae_state_dict, assign=True)
+        vae.load_state_dict(vae_state_dict, strict=False, assign=True)
         vae.requires_grad_(False)
         vae.eval()
         
