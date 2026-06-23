@@ -73,8 +73,8 @@ class MinecraftLoss(nn.Module):
         loss_uv = F.mse_loss(skins_pred, skins_gt)
         
         # 2. Rendering Loss across selected views
-        loss_mse_render = torch.tensor(0.0, device=skins_pred.device)
-        loss_lpips_render = torch.tensor(0.0, device=skins_pred.device)
+        loss_mse_render = torch.tensor(0.0, device=skins_pred.device, dtype=skins_pred.dtype)
+        loss_lpips_render = torch.tensor(0.0, device=skins_pred.device, dtype=skins_pred.dtype)
         
         if self.lambda_render > 0 and self.view_count > 0:
             for view in self.views:
