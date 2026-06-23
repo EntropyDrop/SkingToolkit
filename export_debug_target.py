@@ -9,7 +9,7 @@ def main():
     dataset = MinecraftSkinDataset(
         data_dir="../SkingDataset/skins",
         photos_dir="../SkingDataset/control_imgs",
-        cond_size=512
+        cond_size=1024
     )
     
     if len(dataset) == 0:
@@ -30,7 +30,7 @@ def main():
         gt_skin_tensor = batch["gt_skin"]
         prompt = batch["prompt"]
         
-        # target_latent_image shape: (3, 512, 256) in [-1, 1]
+        # target_latent_image shape: (3, 1024, 512) in [-1, 1]
         # Denormalize from [-1, 1] back to [0, 1]
         target_tensor_norm = (target_latent_image + 1.0) / 2.0
         

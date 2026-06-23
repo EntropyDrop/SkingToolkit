@@ -173,8 +173,9 @@ class MinecraftSkinDataset(Dataset):
         data_dir,
         photos_dir=None,
         captions_dir=None,
-        cond_size=512,
-        bg_color=(128, 128, 128)
+        cond_size=1024,
+        bg_color=(128, 128, 128),
+        default_caption=""
     ):
         """
         PyTorch Dataset for Differentiable Minecraft Skin Fine-tuning.
@@ -182,8 +183,9 @@ class MinecraftSkinDataset(Dataset):
             data_dir: Path to skins folder containing target 64x64 skin PNGs.
             photos_dir: Path to conditioning photos folder. If None, falls back to data_dir/../control_imgs or data_dir.
             captions_dir: Path to captions folder. If None, falls back to data_dir.
-            cond_size: Image size for the conditioning photo.
+            cond_size: Target/control image height. Width is cond_size // 2, matching ai-toolkit 512x1024 training.
             bg_color: Solid gray color (128,128,128) to paste RGB skin over.
+            default_caption: Caption used when no .txt caption exists.
         """
         self.data_dir = data_dir
         self.photos_dir = photos_dir or os.path.abspath(os.path.join(data_dir, "..", "control_imgs"))
@@ -192,7 +194,10 @@ class MinecraftSkinDataset(Dataset):
             
         self.captions_dir = captions_dir or data_dir
         self.cond_size = cond_size
+        self.target_height = cond_size
+        self.target_width = cond_size // 2
         self.bg_color = bg_color
+        self.default_caption = default_caption
         
         # Scan skin PNGs
         self.skin_filenames = sorted([
@@ -204,7 +209,7 @@ class MinecraftSkinDataset(Dataset):
             print(f"WARNING: No skin PNG files found in data_dir: {self.data_dir}")
             
         self.transform_cond = transforms.Compose([
-            transforms.Resize((self.cond_size, self.cond_size // 2), interpolation=transforms.InterpolationMode.LANCZOS),
+            transforms.Resize((self.target_height, self.target_width), interpolation=transforms.InterpolationMode.LANCZOS),
             transforms.ToTensor(),
             # Normalize conditioning images to [0, 1] or [-1, 1]. We output [0, 1] here
         ])
@@ -248,25 +253,25 @@ class MinecraftSkinDataset(Dataset):
         gt_rgba_np[transparent, :3] = rgb_np[transparent]
         gt_skin_tensor = torch.tensor(gt_rgba_np.astype(np.float32) / 255.0).permute(2, 0, 1) # (4, 64, 64)
         
-        # 4. Build [RGB | Alpha] top-to-bottom composite VAE target (256x512)
+        # 4. Build [RGB | Alpha] top-to-bottom composite VAE target (512x1024 by default).
         
         # Alpha Part: Extract alpha channel as RGB grayscale
         alpha_part = skin.split()[3].convert("RGB")
         
-        # Resize parts to 256x256 using Nearest Neighbor (BOX filter) to preserve voxel details
-        rgb_part_upscaled = rgb_part.resize((256, 256), resample=Image.Resampling.BOX)
-        alpha_part_upscaled = alpha_part.resize((256, 256), resample=Image.Resampling.BOX)
+        part_size = self.target_width
+        rgb_part_upscaled = rgb_part.resize((part_size, part_size), resample=Image.Resampling.BOX)
+        alpha_part_upscaled = alpha_part.resize((part_size, part_size), resample=Image.Resampling.BOX)
         
-        # Place top-to-bottom into a 256x512 image (no blank padding)
-        target_img = Image.new("RGB", (256, 512), self.bg_color)
+        # Place top-to-bottom into a 512x1024 image by default (no blank padding).
+        target_img = Image.new("RGB", (self.target_width, self.target_height), self.bg_color)
         target_img.paste(rgb_part_upscaled, (0, 0))       # Top half
-        target_img.paste(alpha_part_upscaled, (0, 256))   # Bottom half
+        target_img.paste(alpha_part_upscaled, (0, part_size))   # Bottom half
         
         # Convert VAE target to tensor and normalize to [-1, 1] (standard for VAE latents encoding)
         target_tensor = (transforms.ToTensor()(target_img) * 2.0) - 1.0
         
         # 4. Load conditioning photo
-        # Look for front and back images first (each expected to be 256x512)
+        # Look for front and back images first (each resized to target_width x target_height)
         front_path = None
         back_path = None
         for ext in [".png", ".jpg", ".jpeg", ".webp"]:
@@ -283,7 +288,7 @@ class MinecraftSkinDataset(Dataset):
             
             front_tensor = self.transform_cond(front_img)
             back_tensor = self.transform_cond(back_img)
-            cond_tensor = torch.stack([front_tensor, back_tensor], dim=0) # (2, 3, cond_size, cond_size // 2)
+            cond_tensor = torch.stack([front_tensor, back_tensor], dim=0) # (2, 3, target_height, target_width)
         else:
             # Fallback to single combined conditioning image
             photo_path = None
@@ -296,7 +301,7 @@ class MinecraftSkinDataset(Dataset):
             if photo_path is not None:
                 combined_img = Image.open(photo_path).convert("RGB")
             else:
-                combined_img = Image.new("RGB", (self.cond_size, self.cond_size), self.bg_color)
+                combined_img = Image.new("RGB", (self.target_width * 2, self.target_height), self.bg_color)
                 
             # Split the combined image into left half (front) and right half (back)
             w, h = combined_img.size
@@ -305,7 +310,7 @@ class MinecraftSkinDataset(Dataset):
             
             front_tensor = self.transform_cond(front_img)
             back_tensor = self.transform_cond(back_img)
-            cond_tensor = torch.stack([front_tensor, back_tensor], dim=0) # (2, 3, cond_size, cond_size // 2)
+            cond_tensor = torch.stack([front_tensor, back_tensor], dim=0) # (2, 3, target_height, target_width)
         
         # 5. Load prompt description
         caption_path = os.path.join(self.captions_dir, stem + ".txt")
@@ -313,7 +318,7 @@ class MinecraftSkinDataset(Dataset):
             with open(caption_path, "r", encoding="utf-8") as f:
                 prompt = f.read().strip()
         else:
-            prompt = "minecraft skin character"
+            prompt = self.default_caption
             
         return {
             "target_latent_image": target_tensor,  # VAE target, normalized to [-1, 1]

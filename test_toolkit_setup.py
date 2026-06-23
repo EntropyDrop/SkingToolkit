@@ -42,15 +42,15 @@ def run_verification():
         dataset = MinecraftSkinDataset(
             data_dir=data_dir,
             photos_dir=None, # fallback
-            cond_size=256
+            cond_size=1024
         )
         print(f"[*] Found {len(dataset)} items in skins dataset.")
         
         # Load first item
         item = dataset[0]
         print("[✓] Successfully loaded dataset item!")
-        print(f"    - Target latent image tensor shape: {item['target_latent_image'].shape} (expected 3 x 512 x 256)")
-        print(f"    - Conditioning photo tensor shape:  {item['cond_image'].shape} (expected 3 x 256 x 256)")
+        print(f"    - Target latent image tensor shape: {item['target_latent_image'].shape} (expected 3 x 1024 x 512)")
+        print(f"    - Conditioning photo tensor shape:  {item['cond_image'].shape} (expected 2 x 3 x 1024 x 512)")
         print(f"    - Prompt text:                     '{item['prompt']}'")
         print(f"    - Ground Truth skin tensor shape:   {item['gt_skin'].shape} (expected 4 x 64 x 64)")
     except Exception as e:

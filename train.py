@@ -191,12 +191,13 @@ def parse_args():
     parser.add_argument("--mixed_precision", type=str, default="bf16", choices=["no", "fp16", "bf16"], help="Mixed precision mode.")
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1, help="Gradient accumulation steps.")
     parser.add_argument("--max_grad_norm", type=float, default=1.0, help="Max gradient norm clipping.")
+    parser.add_argument("--resolution", type=int, default=1024, help="Target/control image height. Width is resolution // 2 for 512x1024 ai-toolkit parity.")
     
     # Differentiable Render Loss coefficients
     parser.add_argument("--lambda_latent", type=float, default=1.0, help="Flow matching latent loss coefficient.")
-    parser.add_argument("--lambda_uv", type=float, default=1.0, help="Flat skin UV reconstruction loss coefficient.")
-    parser.add_argument("--lambda_render", type=float, default=1.0, help="Rendered view reconstruction loss coefficient.")
-    parser.add_argument("--lambda_lpips", type=float, default=0.1, help="Perceptual LPIPS render loss coefficient.")
+    parser.add_argument("--lambda_uv", type=float, default=0.0, help="Flat skin UV reconstruction loss coefficient.")
+    parser.add_argument("--lambda_render", type=float, default=0.0, help="Rendered view reconstruction loss coefficient.")
+    parser.add_argument("--lambda_lpips", type=float, default=0.0, help="Perceptual LPIPS render loss coefficient.")
     parser.add_argument("--use_lpips", action="store_true", help="Enable LPIPS perceptual loss on renders.")
     parser.add_argument("--foreground_weight", type=float, default=1.0, help="Foreground pixel weight multiplier.")
     parser.add_argument("--views", type=str, default="static_front,static_back", help="Comma-separated render views to use for training loss.")
@@ -213,8 +214,10 @@ def parse_args():
         raise argparse.ArgumentTypeError("Expected a boolean value.")
 
     parser.add_argument("--use_lora", type=str2bool, nargs="?", const=True, default=True, help="Enable PEFT LoRA fine-tuning instead of full parameter training.")
-    parser.add_argument("--lora_rank", type=int, default=16, help="LoRA rank parameter.")
-    parser.add_argument("--lora_alpha", type=int, default=16, help="LoRA alpha parameter.")
+    parser.add_argument("--lora_rank", type=int, default=32, help="LoRA rank parameter for linear layers.")
+    parser.add_argument("--lora_alpha", type=int, default=32, help="LoRA alpha parameter for linear layers.")
+    parser.add_argument("--lora_conv_rank", type=int, default=16, help="ai-toolkit compatibility knob; Flux2 transformer has no Conv2d layers to wrap by default.")
+    parser.add_argument("--lora_conv_alpha", type=int, default=16, help="ai-toolkit compatibility knob; Flux2 transformer has no Conv2d layers to wrap by default.")
     parser.add_argument("--lora_target_modules", type=str, default=None, help="Comma-separated LoRA target module names (if None, targets suitable defaults based on model type).")
     
     # Validation / Sampling parameters
@@ -308,6 +311,8 @@ def run_validation(args, transformer, vae, tokenizer1, tokenizer2, text_encoder1
         return
         
     print(f"\n[*] Running validation sampling at step {global_step}...")
+    target_height = args.resolution
+    target_width = args.resolution // 2
     
     # 1. Scan validation directory for images
     # Supports separate front/back subfolders or single images
@@ -367,14 +372,13 @@ def run_validation(args, transformer, vae, tokenizer1, tokenizer2, text_encoder1
                 front_img = Image.open(item["front"]).convert("RGB")
                 back_img = Image.open(item["back"]).convert("RGB")
                 
-                # Resize both to 256x512
-                front_img = front_img.resize((256, 512), resample=Image.Resampling.LANCZOS)
-                back_img = back_img.resize((256, 512), resample=Image.Resampling.LANCZOS)
+                front_img = front_img.resize((target_width, target_height), resample=Image.Resampling.LANCZOS)
+                back_img = back_img.resize((target_width, target_height), resample=Image.Resampling.LANCZOS)
             else:
                 combined_img = Image.open(item["path"]).convert("RGB")
                 w, h = combined_img.size
-                front_img = combined_img.crop((0, 0, w // 2, h)).resize((256, 512), resample=Image.Resampling.LANCZOS)
-                back_img = combined_img.crop((w // 2, 0, w, h)).resize((256, 512), resample=Image.Resampling.LANCZOS)
+                front_img = combined_img.crop((0, 0, w // 2, h)).resize((target_width, target_height), resample=Image.Resampling.LANCZOS)
+                back_img = combined_img.crop((w // 2, 0, w, h)).resize((target_width, target_height), resample=Image.Resampling.LANCZOS)
                 
             # Load prompt txt if it exists
             caption_path = os.path.join(args.validation_photos_dir, stem + ".txt")
@@ -382,11 +386,11 @@ def run_validation(args, transformer, vae, tokenizer1, tokenizer2, text_encoder1
                 with open(caption_path, "r", encoding="utf-8") as f:
                     prompt = f.read().strip()
             else:
-                prompt = "minecraft skin character"
+                prompt = ""
                 
             print(f"  - Sampling: {stem} | Prompt: '{prompt}'")
             
-            # Prepare conditioning tensors (2, 3, 512, 256), scaled to [-1, 1] range for VAE
+            # Prepare conditioning tensors (2, 3, target_height, target_width), scaled to [-1, 1] range for VAE
             from torchvision.transforms.functional import to_tensor
             front_tensor = (to_tensor(front_img) * 2.0 - 1.0).to(device, dtype=weight_dtype)
             back_tensor = (to_tensor(back_img) * 2.0 - 1.0).to(device, dtype=weight_dtype)
@@ -406,7 +410,7 @@ def run_validation(args, transformer, vae, tokenizer1, tokenizer2, text_encoder1
                 if pooled_prompt_embeds is not None:
                     pooled_prompt_embeds = pooled_prompt_embeds.to(dtype=weight_dtype)
                     
-            # 4. Generate random initial noise latents for the 512x256 VAE canvas.
+            # 4. Generate random initial noise latents for the target VAE canvas.
             # Flux2Klein uses a 16x spatial VAE scale (8x encoder + 2x pixel shuffle).
             with torch.no_grad():
                 # Encode conditioning images to sequence tokens for custom Flux2 model
@@ -421,8 +425,8 @@ def run_validation(args, transformer, vae, tokenizer1, tokenizer2, text_encoder1
                 else:
                     latent_channels = vae.config.latent_channels
                     vae_scale_factor = 2 ** (len(vae.config.block_out_channels) - 1)
-                latent_h = 512 // vae_scale_factor
-                latent_w = 256 // vae_scale_factor
+                latent_h = target_height // vae_scale_factor
+                latent_w = target_width // vae_scale_factor
                 latents = torch.randn((1, latent_channels, latent_h, latent_w), device=device, dtype=weight_dtype)
                 
                 # Euler ODE integration steps
@@ -482,9 +486,10 @@ def run_validation(args, transformer, vae, tokenizer1, tokenizer2, text_encoder1
                     
                 pred_decoded = ((pred_decoded + 1.0) / 2.0).clamp(0.0, 1.0)
                 
-                # Extract 64x64 RGBA Skin
-                pred_rgb = pred_decoded[:, :, :256, :]
-                pred_alpha = pred_decoded[:, :, 256:, :].mean(dim=1, keepdim=True)
+                # Extract 64x64 RGBA Skin from the [RGB; Alpha] canvas.
+                half_height = pred_decoded.shape[-2] // 2
+                pred_rgb = pred_decoded[:, :, :half_height, :]
+                pred_alpha = pred_decoded[:, :, half_height:, :].mean(dim=1, keepdim=True)
                 
                 pred_rgb_64 = F.interpolate(pred_rgb, size=(64, 64), mode='bilinear', align_corners=True)
                 pred_alpha_64 = F.interpolate(pred_alpha, size=(64, 64), mode='bilinear', align_corners=True)
@@ -637,6 +642,15 @@ def main():
     if args.use_lora:
         target_modules = args.lora_target_modules.split(",") if args.lora_target_modules else default_lora_targets
         print(f"[*] Wrapping Transformer with LoRA (Rank={args.lora_rank}, Alpha={args.lora_alpha}, Targets={target_modules})")
+        conv_modules = [name for name, module in transformer.named_modules() if isinstance(module, nn.Conv2d)]
+        if args.lora_conv_rank > 0:
+            if conv_modules:
+                print(
+                    "[!] --lora_conv_rank/--lora_conv_alpha are accepted for ai-toolkit config parity, "
+                    "but this PEFT path uses the linear LoRA rank for configured targets."
+                )
+            else:
+                print("[*] Conv LoRA requested for ai-toolkit parity, but Flux2 transformer has no Conv2d modules to wrap.")
         from peft import LoraConfig, get_peft_model
         lora_config = LoraConfig(
             r=args.lora_rank,
@@ -658,7 +672,8 @@ def main():
     dataset = MinecraftSkinDataset(
         data_dir=args.data_dir,
         photos_dir=args.photos_dir,
-        cond_size=512
+        cond_size=args.resolution,
+        default_caption=""
     )
     dataloader = DataLoader(
         dataset,
@@ -672,16 +687,22 @@ def main():
     optimizer_class = torch.optim.AdamW
     optimizer = optimizer_class(transformer.parameters(), lr=args.lr)
     
-    # 6. Setup Loss criterion (Differentiable Renderer + UV Loss + LPIPS)
-    criterion = MinecraftLoss(
-        mappings_dir=args.mappings_dir,
-        lambda_uv=args.lambda_uv,
-        lambda_render=args.lambda_render,
-        lambda_lpips=args.lambda_lpips,
-        use_lpips=args.use_lpips,
-        views=args.views,
-        foreground_weight=args.foreground_weight
-    )
+    # 6. Setup optional auxiliary loss. For ai-toolkit parity, keep this disabled
+    # so the objective is exactly MSE(model_pred, noise - latents_gt).
+    use_aux_loss = args.lambda_uv > 0 or args.lambda_render > 0
+    criterion = None
+    if use_aux_loss:
+        criterion = MinecraftLoss(
+            mappings_dir=args.mappings_dir,
+            lambda_uv=args.lambda_uv,
+            lambda_render=args.lambda_render,
+            lambda_lpips=args.lambda_lpips,
+            use_lpips=args.use_lpips,
+            views=args.views,
+            foreground_weight=args.foreground_weight
+        )
+    else:
+        print("[*] UV/render auxiliary losses disabled; training latent flow matching MSE only.")
     
     # 7. Accelerate wrap
     transformer, optimizer, dataloader = accelerator.prepare(
@@ -695,7 +716,8 @@ def main():
     else:
         text_encoder1.to(device)
         text_encoder2.to(device)
-    criterion.to(device, dtype=weight_dtype)
+    if criterion is not None:
+        criterion.to(device, dtype=weight_dtype)
     
     # Main training loop
     print("[*] Starting training loop...")
@@ -709,8 +731,8 @@ def main():
         for step, batch in enumerate(progress_bar):
             with accelerator.accumulate(transformer):
                 # Retrieve batch data
-                target_latent_image = batch["target_latent_image"].to(device, dtype=weight_dtype) # (B, 3, 512, 256)
-                cond_image = batch["cond_image"].to(device, dtype=weight_dtype)                 # (B, 3, 512, 512)
+                target_latent_image = batch["target_latent_image"].to(device, dtype=weight_dtype) # (B, 3, H, W)
+                cond_image = batch["cond_image"].to(device, dtype=weight_dtype)                   # (B, 2, 3, H, W)
                 prompts = batch["prompt"]                                                       # List of strings
                 gt_skin = batch["gt_skin"].to(device, dtype=weight_dtype)                       # (B, 4, 64, 64)
                 
@@ -741,8 +763,7 @@ def main():
                     latents_gt = latents_gt.to(dtype=weight_dtype)
                 
                 # 10. Sample timesteps and add noise (Flow Matching formulation)
-                # Sample random t in a safe range [0.0, 0.90] to avoid division-by-zero instabilities
-                t = torch.rand((B,), device=device, dtype=weight_dtype) * 0.90
+                t = torch.rand((B,), device=device, dtype=weight_dtype)
                 noise = torch.randn_like(latents_gt)
                 
                 # Compute noisy latent at t: x_t = (1 - t) * x_0 + t * noise
@@ -756,8 +777,7 @@ def main():
                         packed_latents, img_ids = batched_prc_img(x_t)
                         packed_txt, txt_ids = batched_prc_txt(prompt_embeds)
                         
-                        # Encode conditioning images (front & back separate views, both 256x512)
-                        # cond_image has shape (B, 2, 3, 512, 256) in range [0, 1]. Scale to [-1, 1] for VAE.
+                        # Encode conditioning images (front & back separate views). cond_image is in [0, 1].
                         cond_image_scaled = cond_image * 2.0 - 1.0
                         img_cond_seq_list = []
                         img_cond_seq_ids_list = []
@@ -812,42 +832,43 @@ def main():
                     
                     # Flow Matching Latent Loss (standard MSE)
                     loss_latent = F.mse_loss(model_pred, target_velocity)
-                    
-                    # 12. Differentiable VAE Decode to reconstruct Predicted Skin UV
-                    # Reconstruct clean latent estimation from the predicted velocity:
-                    pred_x0 = x_t - t_expanded * model_pred
-                    
-                    # Decode predicted latent x_0 to 256x512 RGB space using VAE
-                    if args.model_type == "flux2klein":
-                        pred_decoded = vae.decode(pred_x0.to(dtype=vae.dtype))
-                    else:
-                        pred_x0_scaled = pred_x0 / vae.config.scaling_factor
-                        pred_decoded = vae.decode(pred_x0_scaled).sample
-                    
-                    # Normalize decoded outputs from [-1, 1] range to [0, 1] range.
-                    # Do not clamp before loss: saturated pixels still need gradients.
-                    pred_decoded = (pred_decoded + 1.0) / 2.0
-                    
-                    # 13. Extract the 64x64 RGBA Skin UV from the top-to-bottom composite
-                    # Top half is RGB: [0:256, :]
-                    pred_rgb = pred_decoded[:, :, :256, :]
-                    # Bottom half is Alpha (grayscale representation): [256:512, :]
-                    pred_alpha = pred_decoded[:, :, 256:, :].mean(dim=1, keepdim=True)
-                    
-                    # Resize from 256x256 to 64x64 using bilinear interpolation
-                    pred_rgb_64 = F.interpolate(pred_rgb, size=(64, 64), mode='bilinear', align_corners=True)
-                    pred_alpha_64 = F.interpolate(pred_alpha, size=(64, 64), mode='bilinear', align_corners=True)
-                    
-                    # Combine to form the predicted 64x64 RGBA skin texture
-                    pred_skin = torch.cat([pred_rgb_64, pred_alpha_64], dim=1) # (B, 4, 64, 64)
-                    pred_skin_for_loss = straight_through_clamp(pred_skin, 0.0, 1.0)
-                    
-                    # 14. Compute Combined Loss
-                    loss_criterion_dict = criterion(pred_skin_for_loss, gt_skin)
-                    loss_render_total = loss_criterion_dict["loss_total"]
-                    
-                    loss = args.lambda_latent * loss_latent + loss_render_total
-                
+
+                    zero_metric = loss_latent.detach().new_zeros(())
+                    loss_criterion_dict = {
+                        "loss_total": zero_metric,
+                        "loss_uv": zero_metric,
+                        "loss_render_mse": zero_metric,
+                        "loss_render_lpips": zero_metric,
+                        "loss_render_total": zero_metric,
+                    }
+
+                    if criterion is not None:
+                        # Reconstruct clean latent estimation from the predicted velocity.
+                        pred_x0 = x_t - t_expanded * model_pred
+
+                        if args.model_type == "flux2klein":
+                            pred_decoded = vae.decode(pred_x0.to(dtype=vae.dtype))
+                        else:
+                            pred_x0_scaled = pred_x0 / vae.config.scaling_factor
+                            pred_decoded = vae.decode(pred_x0_scaled).sample
+
+                        pred_decoded = (pred_decoded + 1.0) / 2.0
+
+                        # Extract the 64x64 RGBA skin UV from the [RGB; Alpha] composite.
+                        half_height = pred_decoded.shape[-2] // 2
+                        pred_rgb = pred_decoded[:, :, :half_height, :]
+                        pred_alpha = pred_decoded[:, :, half_height:, :].mean(dim=1, keepdim=True)
+
+                        pred_rgb_64 = F.interpolate(pred_rgb, size=(64, 64), mode='bilinear', align_corners=True)
+                        pred_alpha_64 = F.interpolate(pred_alpha, size=(64, 64), mode='bilinear', align_corners=True)
+
+                        pred_skin = torch.cat([pred_rgb_64, pred_alpha_64], dim=1) # (B, 4, 64, 64)
+                        pred_skin_for_loss = straight_through_clamp(pred_skin, 0.0, 1.0)
+
+                        loss_criterion_dict = criterion(pred_skin_for_loss, gt_skin)
+
+                    loss = args.lambda_latent * loss_latent + loss_criterion_dict["loss_total"]
+
                 # 15. Backpropagate Loss
                 accelerator.backward(loss)
                 
