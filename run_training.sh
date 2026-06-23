@@ -1,11 +1,14 @@
 #!/bin/bash
 
-# Configuration paths (Defaulting to folders in the current workspace)
+# Configuration paths (Defaulting to folders relative to this script)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+
 MODEL_PATH="../black-forest-labs/FLUX.2-klein-base-4B"  # Path containing Flux2Klein weights (e.g. flux-2-klein-base-4b.safetensors and VAE)
 TEXT_ENCODER_PATH="../Qwen/Qwen3-4B" # Path to Qwen text encoder model
 DATA_DIR="../SkingDataset/skins"
 PHOTOS_DIR="../SkingDataset/control_imgs"
-MAPPINGS_DIR="../github/differentiable_minecraft_renderer/mappings"
+MAPPINGS_DIR="../differentiable_minecraft_renderer/mappings"
 OUTPUT_DIR="output/flux_skin_lora"
 VALIDATION_PHOTOS_DIR="../SkingValidation" # 测试验证图根目录（包含 front/ 和 back/）
 VALIDATION_STEPS=100
@@ -68,4 +71,3 @@ accelerate launch train.py \
     --lora_target_modules "qkv,linear1,linear2,proj" \
     --validation_photos_dir "$VALIDATION_PHOTOS_DIR" \
     --validation_steps "$VALIDATION_STEPS"
-

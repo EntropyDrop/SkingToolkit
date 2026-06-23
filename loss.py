@@ -40,7 +40,12 @@ class MinecraftLoss(nn.Module):
         else:
             self.views = self.renderer.views
             
-        self.view_count = max(1, len(self.views))
+        if self.lambda_render > 0 and len(self.views) == 0:
+            raise ValueError(
+                "Rendering loss is enabled but no valid renderer views were loaded. "
+                "Check --mappings_dir and --views, or set --lambda_render 0."
+            )
+        self.view_count = len(self.views)
         
         # Optionally load LPIPS model
         self.lpips_loss_fn = None
@@ -69,8 +74,13 @@ class MinecraftLoss(nn.Module):
         assert skins_pred.shape == skins_gt.shape, f"Shape mismatch: {skins_pred.shape} vs {skins_gt.shape}"
         
         # 1. Flat UV Loss (Reconstruction)
-        # We calculate MSE for RGB and Alpha channel of the flat 64x64 skin
-        loss_uv = F.mse_loss(skins_pred, skins_gt)
+        # RGB under fully transparent pixels is not visible in Minecraft. Use the
+        # target alpha as an RGB visibility mask and supervise alpha everywhere.
+        alpha_gt = skins_gt[:, 3:4].detach()
+        rgb_denom = (alpha_gt.sum(dim=(1, 2, 3)) * 3.0).clamp_min(1.0)
+        loss_rgb = (((skins_pred[:, :3] - skins_gt[:, :3]) ** 2) * alpha_gt).sum(dim=(1, 2, 3)) / rgb_denom
+        loss_alpha = F.mse_loss(skins_pred[:, 3:4], skins_gt[:, 3:4])
+        loss_uv = loss_rgb.mean() + loss_alpha
         
         # 2. Rendering Loss across selected views
         loss_mse_render = torch.tensor(0.0, device=skins_pred.device, dtype=skins_pred.dtype)

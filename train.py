@@ -202,7 +202,17 @@ def parse_args():
     parser.add_argument("--views", type=str, default="static_front,static_back", help="Comma-separated render views to use for training loss.")
     
     # LoRA fine-tuning parameters
-    parser.add_argument("--use_lora", type=bool, default=True, help="Enable PEFT LoRA fine-tuning instead of full parameter training.")
+    def str2bool(value):
+        if isinstance(value, bool):
+            return value
+        value = value.lower()
+        if value in ("yes", "true", "t", "1", "y"):
+            return True
+        if value in ("no", "false", "f", "0", "n"):
+            return False
+        raise argparse.ArgumentTypeError("Expected a boolean value.")
+
+    parser.add_argument("--use_lora", type=str2bool, nargs="?", const=True, default=True, help="Enable PEFT LoRA fine-tuning instead of full parameter training.")
     parser.add_argument("--lora_rank", type=int, default=16, help="LoRA rank parameter.")
     parser.add_argument("--lora_alpha", type=int, default=16, help="LoRA alpha parameter.")
     parser.add_argument("--lora_target_modules", type=str, default=None, help="Comma-separated LoRA target module names (if None, targets suitable defaults based on model type).")
@@ -288,6 +298,10 @@ def encode_prompt_qwen(tokenizer, text_encoder, prompt, device, max_sequence_len
     prompt_embeds = rearrange(out, "b c l d -> b l (c d)")
     
     return prompt_embeds, None
+
+def straight_through_clamp(x, min_value=0.0, max_value=1.0):
+    clamped = x.clamp(min_value, max_value)
+    return x + (clamped - x).detach()
 
 def run_validation(args, transformer, vae, tokenizer1, tokenizer2, text_encoder1, text_encoder2, device, weight_dtype, global_step, accelerator):
     if not args.validation_photos_dir or not os.path.exists(args.validation_photos_dir):
@@ -392,10 +406,8 @@ def run_validation(args, transformer, vae, tokenizer1, tokenizer2, text_encoder1
                 if pooled_prompt_embeds is not None:
                     pooled_prompt_embeds = pooled_prompt_embeds.to(dtype=weight_dtype)
                     
-            # 4. Generate random initial noise latents (1, 16, 64, 32)
-            # Since VAE target canvas is 256x512, downsampling by 8 gives H_latent=64, W_latent=32.
-            # Channels is 16 for Flux.
-            # We must run generation in a torch.no_grad() block
+            # 4. Generate random initial noise latents for the 512x256 VAE canvas.
+            # Flux2Klein uses a 16x spatial VAE scale (8x encoder + 2x pixel shuffle).
             with torch.no_grad():
                 # Encode conditioning images to sequence tokens for custom Flux2 model
                 if args.model_type == "flux2klein":
@@ -403,8 +415,15 @@ def run_validation(args, transformer, vae, tokenizer1, tokenizer2, text_encoder1
                     img_cond_seq = img_cond_seq.to(device, dtype=weight_dtype)
                     img_cond_seq_ids = img_cond_seq_ids.to(device)
                     
-                latent_channels = 128 if args.model_type == "flux2klein" else 16
-                latents = torch.randn((1, latent_channels, 64, 32), device=device, dtype=weight_dtype)
+                if args.model_type == "flux2klein":
+                    latent_channels = vae.params.z_channels * int(np.prod(vae.ps))
+                    vae_scale_factor = (2 ** (len(vae.params.ch_mult) - 1)) * vae.ps[0]
+                else:
+                    latent_channels = vae.config.latent_channels
+                    vae_scale_factor = 2 ** (len(vae.config.block_out_channels) - 1)
+                latent_h = 512 // vae_scale_factor
+                latent_w = 256 // vae_scale_factor
+                latents = torch.randn((1, latent_channels, latent_h, latent_w), device=device, dtype=weight_dtype)
                 
                 # Euler ODE integration steps
                 num_inference_steps = 28
@@ -438,7 +457,7 @@ def run_validation(args, transformer, vae, tokenizer1, tokenizer2, text_encoder1
                         model_pred = torch.cat(unpacked_list, dim=0).squeeze(2)
                     else:
                         txt_ids = torch.zeros(1, 512, 3, device=device, dtype=weight_dtype)
-                        img_ids = torch.zeros(1, 64 * 32, 3, device=device, dtype=weight_dtype)
+                        img_ids = torch.zeros(1, latent_h * latent_w, 3, device=device, dtype=weight_dtype)
                         
                         model_pred = unwrapped_transformer(
                             hidden_states=latents,
@@ -461,8 +480,7 @@ def run_validation(args, transformer, vae, tokenizer1, tokenizer2, text_encoder1
                     latents_scaled = latents / vae.config.scaling_factor
                     pred_decoded = vae.decode(latents_scaled).sample
                     
-                pred_decoded = (pred_decoded + 1.0) / 2.0
-                pred_decoded = pred_decoded.clamp(0.0, 1.0)
+                pred_decoded = ((pred_decoded + 1.0) / 2.0).clamp(0.0, 1.0)
                 
                 # Extract 64x64 RGBA Skin
                 pred_rgb = pred_decoded[:, :, :256, :]
@@ -473,13 +491,11 @@ def run_validation(args, transformer, vae, tokenizer1, tokenizer2, text_encoder1
                 pred_skin = torch.cat([pred_rgb_64, pred_alpha_64], dim=1) # (1, 4, 64, 64)
                 
                 # Save generated images
-                # 64x64 RGBA skin
                 skin_tensor = pred_skin[0].cpu().float()
                 skin_np = (skin_tensor.permute(1, 2, 0).numpy() * 255.0).clip(0, 255).astype(np.uint8)
                 skin_img = Image.fromarray(skin_np, "RGBA")
                 skin_img.save(os.path.join(val_output_dir, f"step_{global_step}_{stem}_skin.png"))
                 
-                # 256x512 VAE canvas
                 decoded_tensor = pred_decoded[0].cpu().float()
                 decoded_np = (decoded_tensor.permute(1, 2, 0).numpy() * 255.0).clip(0, 255).astype(np.uint8)
                 decoded_img = Image.fromarray(decoded_np, "RGB")
@@ -808,9 +824,9 @@ def main():
                         pred_x0_scaled = pred_x0 / vae.config.scaling_factor
                         pred_decoded = vae.decode(pred_x0_scaled).sample
                     
-                    # Normalize decoded outputs from [-1, 1] range to [0, 1] range
+                    # Normalize decoded outputs from [-1, 1] range to [0, 1] range.
+                    # Do not clamp before loss: saturated pixels still need gradients.
                     pred_decoded = (pred_decoded + 1.0) / 2.0
-                    pred_decoded = pred_decoded.clamp(0.0, 1.0)
                     
                     # 13. Extract the 64x64 RGBA Skin UV from the top-to-bottom composite
                     # Top half is RGB: [0:256, :]
@@ -824,9 +840,10 @@ def main():
                     
                     # Combine to form the predicted 64x64 RGBA skin texture
                     pred_skin = torch.cat([pred_rgb_64, pred_alpha_64], dim=1) # (B, 4, 64, 64)
+                    pred_skin_for_loss = straight_through_clamp(pred_skin, 0.0, 1.0)
                     
                     # 14. Compute Combined Loss
-                    loss_criterion_dict = criterion(pred_skin, gt_skin)
+                    loss_criterion_dict = criterion(pred_skin_for_loss, gt_skin)
                     loss_render_total = loss_criterion_dict["loss_total"]
                     
                     loss = args.lambda_latent * loss_latent + loss_render_total
@@ -881,4 +898,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

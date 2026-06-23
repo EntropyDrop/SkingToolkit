@@ -235,14 +235,20 @@ class MinecraftSkinDataset(Dataset):
         skin_np[semi_transparent, 3] = 255
         skin = Image.fromarray(skin_np)
         
-        # 2. Extract ground truth skin tensor (B x 4 x 64 x 64, normalized to [0, 1])
-        gt_skin_np = np.array(skin, dtype=np.float32) / 255.0
-        gt_skin_tensor = torch.tensor(gt_skin_np).permute(2, 0, 1) # (4, 64, 64)
-        
-        # 3. Build [RGB | Alpha] top-to-bottom composite VAE target (256x512)
-        # RGB Part: Paste skin over opaque gray background
+        # 2. Build the RGB target on the same gray matte used by the VAE canvas.
         rgb_part = Image.new("RGB", (64, 64), self.bg_color)
         rgb_part.paste(skin, (0, 0), skin)
+
+        # 3. Extract ground truth skin tensor (B x 4 x 64 x 64, normalized to [0, 1]).
+        # Minecraft ignores RGB where alpha is 0, so store those pixels on the
+        # same gray matte as the VAE target instead of supervising arbitrary PNG RGB.
+        gt_rgba_np = np.array(skin, dtype=np.uint8)
+        rgb_np = np.array(rgb_part, dtype=np.uint8)
+        transparent = gt_rgba_np[..., 3] == 0
+        gt_rgba_np[transparent, :3] = rgb_np[transparent]
+        gt_skin_tensor = torch.tensor(gt_rgba_np.astype(np.float32) / 255.0).permute(2, 0, 1) # (4, 64, 64)
+        
+        # 4. Build [RGB | Alpha] top-to-bottom composite VAE target (256x512)
         
         # Alpha Part: Extract alpha channel as RGB grayscale
         alpha_part = skin.split()[3].convert("RGB")
