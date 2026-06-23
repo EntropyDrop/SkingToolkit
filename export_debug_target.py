@@ -1,0 +1,41 @@
+import torch
+import numpy as np
+from PIL import Image
+import os
+from dataset import MinecraftSkinDataset
+
+def main():
+    print("Initializing dataset...")
+    dataset = MinecraftSkinDataset(
+        data_dir="../SkingDataset/skins",
+        photos_dir="../SkingDataset/control_imgs",
+        cond_size=512
+    )
+    
+    if len(dataset) == 0:
+        print("Error: Dataset is empty.")
+        return
+
+    # Get the first item
+    print("Loading first sample...")
+    target_latent_image, cond_image, gt_skin_tensor, prompt = dataset[0]
+    
+    # target_latent_image shape: (3, 512, 256) in [-1, 1]
+    # Denormalize from [-1, 1] back to [0, 1]
+    target_tensor_norm = (target_latent_image + 1.0) / 2.0
+    
+    # Convert back to numpy array (H, W, C) in [0, 255]
+    img_np = (target_tensor_norm.permute(1, 2, 0).numpy() * 255.0).clip(0, 255).astype(np.uint8)
+    
+    # Convert to PIL Image
+    img_pil = Image.fromarray(img_np, mode="RGB")
+    
+    # Save the debug image
+    output_path = "debug_target_composite.png"
+    img_pil.save(output_path)
+    
+    print(f"Successfully saved debug image to {os.path.abspath(output_path)}")
+    print(f"Sample Prompt: {prompt}")
+
+if __name__ == "__main__":
+    main()
