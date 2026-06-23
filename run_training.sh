@@ -1,20 +1,20 @@
 #!/bin/bash
 
 # Configuration paths (Defaulting to folders in the current workspace)
-MODEL_PATH="../flux2klein4b"  # Path containing Flux2Klein weights (e.g. flux-2-klein-base-4b.safetensors and VAE)
+MODEL_PATH="../black-forest-labs/FLUX.2-klein-base-4B"  # Path containing Flux2Klein weights (e.g. flux-2-klein-base-4b.safetensors and VAE)
 TEXT_ENCODER_PATH="../Qwen/Qwen3-4B" # Path to Qwen text encoder model
 DATA_DIR="../SkingDataset/skins"
 PHOTOS_DIR="../SkingDataset/control_imgs"
 MAPPINGS_DIR="../github/differentiable_minecraft_renderer/mappings"
 OUTPUT_DIR="output/flux_skin_lora"
-VALIDATION_PHOTOS_DIR=""            # Folder containing validation/test conditioning images (e.g. ../Sking/validation_imgs, leave empty to disable)
-VALIDATION_STEPS=500                # Run validation sampling every N steps
+VALIDATION_PHOTOS_DIR="../SkingValidation" # 测试验证图根目录（包含 front/ 和 back/）
+VALIDATION_STEPS=100
 
 # Hyperparameters
 LR=1e-4
 BATCH_SIZE=2
-EPOCHS=100
-SAVE_EVERY_EPOCHS=5
+EPOCHS=1000
+SAVE_EVERY_EPOCHS=500
 PRECISION="bf16"
 
 # Loss weighting coefficients
