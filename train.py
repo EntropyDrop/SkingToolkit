@@ -722,6 +722,8 @@ def main():
     # Main training loop
     print("[*] Starting training loop...")
     global_step = 0
+    prompt_cache = {}
+    
     for epoch in range(args.epochs):
         transformer.train()
         epoch_loss = 0.0
@@ -738,19 +740,30 @@ def main():
                 
                 B = target_latent_image.shape[0]
                 
-                # 8. Encode prompts on the fly
-                with torch.no_grad():
-                    if args.text_encoder_type == "qwen":
-                        prompt_embeds, pooled_prompt_embeds = encode_prompt_qwen(
-                            tokenizer, text_encoder, prompts, device
-                        )
-                    else:
-                        prompt_embeds, pooled_prompt_embeds = encode_prompt(
-                            tokenizer1, tokenizer2, text_encoder1, text_encoder2, prompts, device
-                        )
-                    prompt_embeds = prompt_embeds.to(dtype=weight_dtype)
-                    if pooled_prompt_embeds is not None:
-                        pooled_prompt_embeds = pooled_prompt_embeds.to(dtype=weight_dtype)
+                # 8. Encode prompts on the fly with in-memory caching
+                prompt_embeds_list = []
+                pooled_embeds_list = []
+                for p in prompts:
+                    if p not in prompt_cache:
+                        with torch.no_grad():
+                            if args.text_encoder_type == "qwen":
+                                pe, ppe = encode_prompt_qwen(tokenizer1, text_encoder1, [p], device)
+                            else:
+                                pe, ppe = encode_prompt(tokenizer1, tokenizer2, text_encoder1, text_encoder2, [p], device)
+                            # Move to CPU to save GPU RAM if the cache gets very large, but for 
+                            # a small number of prompts keeping them on device is faster.
+                            prompt_cache[p] = (pe, ppe)
+                    
+                    pe, ppe = prompt_cache[p]
+                    prompt_embeds_list.append(pe)
+                    if ppe is not None:
+                        pooled_embeds_list.append(ppe)
+                        
+                prompt_embeds = torch.cat(prompt_embeds_list, dim=0).to(dtype=weight_dtype)
+                if len(pooled_embeds_list) > 0:
+                    pooled_prompt_embeds = torch.cat(pooled_embeds_list, dim=0).to(dtype=weight_dtype)
+                else:
+                    pooled_prompt_embeds = None
                 
                 # 9. Encode Target Images into Latent space (x0)
                 with torch.no_grad():
