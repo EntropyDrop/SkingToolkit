@@ -79,7 +79,6 @@ bash SkingToolkit/run_training.sh
 | `--photos_dir` | string | `None` | Folder containing conditioning control photos. Looks for separate `front/{id}.png` and `back/{id}.png` (each 256x512) to combine side-by-side, otherwise falls back to `{id}.png` (512x512). |
 | `--mappings_dir` | string | `None` | Folder containing the `.pt` view mapping coordinates. |
 | `--output_dir` | string | `output` | Folder to save fine-tuned LoRA weights. |
-| `--use_lora` | bool | `True` | Wrap transformer with PEFT LoRA fine-tuning. |
 | `--lora_target_modules` | string | `None` | Comma-separated target modules (e.g. `qkv,linear1,linear2,proj` for custom models). |
 | `--lr` | float | `1e-4` | Learning rate. |
 | `--batch_size` | int | `1` | Training batch size. |

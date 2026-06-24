@@ -77,7 +77,6 @@ accelerate launch train.py \
     --views "$VIEWS" \
     --foreground_weight "$FOREGROUND_WEIGHT" \
     --render_warmup_epochs "$RENDER_WARMUP_EPOCHS" \
-    --use_lora True \
     --lora_rank "$LORA_LINEAR_RANK" \
     --lora_alpha "$LORA_LINEAR_ALPHA" \
     --lora_conv_rank "$LORA_CONV_RANK" \

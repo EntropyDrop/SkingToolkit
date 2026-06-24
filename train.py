@@ -202,17 +202,6 @@ def parse_args():
     parser.add_argument("--render_warmup_epochs", type=int, default=200, help="Number of initial epochs to train using ONLY latent loss before enabling UV/Render losses.")
     
     # LoRA fine-tuning parameters
-    def str2bool(value):
-        if isinstance(value, bool):
-            return value
-        value = value.lower()
-        if value in ("yes", "true", "t", "1", "y"):
-            return True
-        if value in ("no", "false", "f", "0", "n"):
-            return False
-        raise argparse.ArgumentTypeError("Expected a boolean value.")
-
-    parser.add_argument("--use_lora", type=str2bool, nargs="?", const=True, default=True, help="Enable PEFT LoRA fine-tuning instead of full parameter training.")
     parser.add_argument("--lora_rank", type=int, default=32, help="LoRA rank parameter for linear layers.")
     parser.add_argument("--lora_alpha", type=int, default=32, help="LoRA alpha parameter for linear layers.")
     parser.add_argument("--lora_conv_rank", type=int, default=16, help="ai-toolkit compatibility knob; Flux2 transformer has no Conv2d layers to wrap by default.")
@@ -583,32 +572,28 @@ def main():
     # Define LoRA targets for custom Flux2 model
     default_lora_targets = ["qkv", "linear1", "linear2", "proj"]
         
-    # 3. Setup LoRA if requested
-    if args.use_lora:
-        target_modules = args.lora_target_modules.split(",") if args.lora_target_modules else default_lora_targets
-        print(f"[*] Wrapping Transformer with LoRA (Rank={args.lora_rank}, Alpha={args.lora_alpha}, Targets={target_modules})")
-        conv_modules = [name for name, module in transformer.named_modules() if isinstance(module, nn.Conv2d)]
-        if args.lora_conv_rank > 0:
-            if conv_modules:
-                print(
-                    "[!] --lora_conv_rank/--lora_conv_alpha are accepted for ai-toolkit config parity, "
-                    "but this PEFT path uses the linear LoRA rank for configured targets."
-                )
-            else:
-                print("[*] Conv LoRA requested for ai-toolkit parity, but Flux2 transformer has no Conv2d modules to wrap.")
-        from peft import LoraConfig, get_peft_model
-        lora_config = LoraConfig(
-            r=args.lora_rank,
-            lora_alpha=args.lora_alpha,
-            target_modules=target_modules,
-            lora_dropout=0.0,
-            bias="none"
-        )
-        transformer = get_peft_model(transformer, lora_config)
-        transformer.print_trainable_parameters()
-    else:
-        print("[*] Training FULL model (All transformer parameters will be updated)")
-        transformer.requires_grad_(True)
+    # 3. Setup LoRA
+    target_modules = args.lora_target_modules.split(",") if args.lora_target_modules else default_lora_targets
+    print(f"[*] Wrapping Transformer with LoRA (Rank={args.lora_rank}, Alpha={args.lora_alpha}, Targets={target_modules})")
+    conv_modules = [name for name, module in transformer.named_modules() if isinstance(module, nn.Conv2d)]
+    if args.lora_conv_rank > 0:
+        if conv_modules:
+            print(
+                "[!] --lora_conv_rank/--lora_conv_alpha are accepted for ai-toolkit config parity, "
+                "but this PEFT path uses the linear LoRA rank for configured targets."
+            )
+        else:
+            print("[*] Conv LoRA requested for ai-toolkit parity, but Flux2 transformer has no Conv2d modules to wrap.")
+    from peft import LoraConfig, get_peft_model
+    lora_config = LoraConfig(
+        r=args.lora_rank,
+        lora_alpha=args.lora_alpha,
+        target_modules=target_modules,
+        lora_dropout=0.0,
+        bias="none"
+    )
+    transformer = get_peft_model(transformer, lora_config)
+    transformer.print_trainable_parameters()
         
     # Ensure all parameters including newly initialized LoRA weights are in the target dtype
     transformer.to(dtype=weight_dtype)
