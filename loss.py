@@ -92,17 +92,16 @@ class MinecraftLoss(nn.Module):
                 pred_view = self.renderer.forward_view(skins_pred, view) # (B, 4, H, W)
                 gt_view = self.renderer.forward_view(skins_gt, view)     # (B, 4, H, W)
                 
-                # Full frame MSE (on RGB channels)
-                full_mse = F.mse_loss(pred_view[:, :3], gt_view[:, :3])
-                
                 # Foreground-focused MSE (places higher weights on the character, ignoring empty background)
                 if self.foreground_weight > 0:
                     # Construct mask of the union of foreground pixels (where either predicted or GT is non-transparent)
                     fg_mask = torch.maximum(pred_view[:, 3:4], gt_view[:, 3:4]).detach()
                     fg_denom = fg_mask.sum(dim=(1, 2, 3)).clamp_min(1.0)
                     fg_mse = (((pred_view[:, :3] - gt_view[:, :3]) ** 2) * fg_mask).sum(dim=(1, 2, 3)) / (fg_denom * 3.0)
-                    loss_mse_render += full_mse + self.foreground_weight * fg_mse.mean()
+                    loss_mse_render += self.foreground_weight * fg_mse.mean()
                 else:
+                    # Fallback to full frame MSE if foreground weighting is disabled
+                    full_mse = F.mse_loss(pred_view[:, :3], gt_view[:, :3])
                     loss_mse_render += full_mse
                     
                 # Optional LPIPS perceptual loss on rendered view
