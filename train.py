@@ -695,7 +695,7 @@ def main():
             lambda_uv=args.lambda_uv,
             lambda_render=args.lambda_render,
             lambda_lpips=args.lambda_lpips,
-            use_lpips=args.use_lpips,
+            use_lpips=(args.lambda_lpips > 0),
             views=args.views,
             foreground_weight=args.foreground_weight
         )
@@ -946,7 +946,8 @@ def main():
                 "Total Loss": f"{loss.item():.4f}",
                 "Latent MSE": f"{loss_latent.item():.4f}",
                 "UV MSE": f"{loss_criterion_dict['loss_uv'].item():.4f}",
-                "Render MSE": f"{loss_criterion_dict['loss_render_mse'].item():.4f}"
+                "Render MSE": f"{loss_criterion_dict['loss_render_mse'].item():.4f}",
+                "LPIPS": f"{loss_criterion_dict['loss_render_lpips'].item():.4f}"
             })
             
         epoch_loss = epoch_loss / len(dataloader)
