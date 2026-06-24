@@ -105,6 +105,32 @@ Because **Latent MSE** is calculated on flow-matching noise velocities (which ha
 
 ---
 
+## 🛤️ The Full Training Workflow Explained
+
+Understanding the lifecycle of a training run helps in debugging and parameter tuning. Here is exactly what happens when you execute `run_training.sh`:
+
+### 1. Initialization & VRAM Purge
+The dataset script initializes by scanning your `skins` folder. If it detects any 3-pixel arm (Alex) skins, it dynamically converts them to standard 4-pixel arm (Steve) format to ensure geometric consistency. 
+Before the training loop even begins, the script pushes all unique text prompts through the massive Qwen Text Encoder. The resulting embeddings are cached in system RAM, and the Text Encoder is **permanently deleted from VRAM** (`del text_encoder`, `empty_cache()`), freeing up ~8GB of memory for the heavy rendering tasks ahead.
+
+### 2. Phase 1: Latent Warmup (Speed & Structure)
+For the first 200 epochs (configured via `RENDER_WARMUP_EPOCHS`), the training skips all pixel-space decoding and 3D rendering. It strictly optimizes the **Latent Flow Matching MSE** (predicting the velocity vector towards the noise-free latent). This allows the Flux LoRA to rapidly learn the basic spatial layout and structure of a Minecraft skin at extremely high speed.
+
+### 3. Phase 2: Differentiable Rendering & Texture Tuning
+Once the warmup epochs pass, the pipeline activates the auxiliary rendering losses. The process becomes highly complex:
+1. The predicted latent velocity is used to estimate the clean latent $x_0$.
+2. The $x_0$ latent is passed through the VAE Decoder to produce a $1024 \times 512$ RGB+Alpha canvas.
+3. The top (RGB) and bottom (Alpha) halves are sliced, downsampled to $64 \times 64$, and concatenated into a standard RGBA Minecraft texture.
+4. PyTorch's `F.grid_sample` warps this $64 \times 64$ texture onto a 3D character layout from multiple camera views (`static_front`, `static_back`).
+
+### 4. Foreground-Focused Pixel & Perceptual Loss
+The generated multi-view renders are compared against ground truth renders. To prevent the empty gray background from diluting the loss, the script computes a foreground mask and calculates **MSE strictly on the character's pixels**. Additionally, the **LPIPS perceptual loss** evaluates the sharpness and high-frequency details (like pixel art grain and fabric folds), sending powerful gradients all the way back through the renderer and VAE into the Flux LoRA weights.
+
+### 5. Validation & Checkpointing
+Every `VALIDATION_STEPS`, the model pauses training to sample images from pure noise using the Euler ODE solver (default 28 inference steps). It saves the visual samples and the updated LoRA safetensors to your `output_dir`.
+
+---
+
 ## 🧬 Differentiable rendering workflow
 
 ```mermaid
