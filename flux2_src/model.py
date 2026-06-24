@@ -48,10 +48,13 @@ class Klein4BParams:
     use_guidance_embed: bool = False
 
 
-class FakeConfig:
+class FakeConfig(dict):
     # for diffusers compatability
     def __init__(self):
+        super().__init__()
         self.patch_size = 1
+        self["patch_size"] = 1
+        self["model_type"] = "custom"
 
 
 class Flux2(nn.Module):
