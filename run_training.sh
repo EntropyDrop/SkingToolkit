@@ -27,6 +27,7 @@ LAMBDA_RENDER=1.0
 LAMBDA_LPIPS=0.0
 VIEWS="static_front,static_back"
 FOREGROUND_WEIGHT=1.0
+RENDER_WARMUP_EPOCHS=200
 
 # LoRA config aligned with ai-toolkit linear=32/linear_alpha=32. Conv knobs are
 # passed through for parity, but this Flux2 transformer has no Conv2d modules.
@@ -99,6 +100,7 @@ accelerate launch train.py \
     --lambda_lpips "$LAMBDA_LPIPS" \
     --views "$VIEWS" \
     --foreground_weight "$FOREGROUND_WEIGHT" \
+    --render_warmup_epochs "$RENDER_WARMUP_EPOCHS" \
     --use_lora True \
     --lora_rank "$LORA_LINEAR_RANK" \
     --lora_alpha "$LORA_LINEAR_ALPHA" \

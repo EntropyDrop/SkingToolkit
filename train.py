@@ -201,6 +201,7 @@ def parse_args():
     parser.add_argument("--use_lpips", action="store_true", help="Enable LPIPS perceptual loss on renders.")
     parser.add_argument("--foreground_weight", type=float, default=1.0, help="Foreground pixel weight multiplier.")
     parser.add_argument("--views", type=str, default="static_front,static_back", help="Comma-separated render views to use for training loss.")
+    parser.add_argument("--render_warmup_epochs", type=int, default=200, help="Number of initial epochs to train using ONLY latent loss before enabling UV/Render losses.")
     
     # LoRA fine-tuning parameters
     def str2bool(value):
@@ -888,7 +889,7 @@ def main():
                         "loss_render_total": zero_metric,
                     }
 
-                    if criterion is not None:
+                    if criterion is not None and epoch >= args.render_warmup_epochs:
                         # Reconstruct clean latent estimation from the predicted velocity.
                         pred_x0 = x_t - t_expanded * model_pred
 
