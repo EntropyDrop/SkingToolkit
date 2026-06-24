@@ -36,29 +36,7 @@ LORA_LINEAR_ALPHA=32
 LORA_CONV_RANK=16
 LORA_CONV_ALPHA=16
 
-MAPPINGS_DIR="${MAPPINGS_DIR:-}"
-if [ -z "$MAPPINGS_DIR" ]; then
-    for candidate in \
-        "../differentiable_minecraft_renderer/mappings" \
-        "./mappings" \
-        "../github/differentiable_minecraft_renderer/mappings" \
-        "$HOME/llms/differentiable_minecraft_renderer/mappings" \
-        "$HOME/Documents/entropydrop_website/differentiable_minecraft_renderer/mappings"
-    do
-        if [ -d "$candidate" ]; then
-            MAPPINGS_DIR="$candidate"
-            break
-        fi
-    done
-fi
-
-if [[ "$LAMBDA_RENDER" != "0" && "$LAMBDA_RENDER" != "0.0" && ( -z "$MAPPINGS_DIR" || ! -d "$MAPPINGS_DIR" ) ]]; then
-    echo "[X] Could not find differentiable renderer mappings."
-    echo "    Expected files like static_front_mapping.pt and static_back_mapping.pt."
-    echo "    Set MAPPINGS_DIR explicitly, for example:"
-    echo "    MAPPINGS_DIR=/path/to/differentiable_minecraft_renderer/mappings ./run_training.sh"
-    exit 1
-fi
+MAPPINGS_DIR="../github/differentiable_minecraft_renderer/mappings"
 
 # Print info
 echo "=========================================================="
@@ -82,7 +60,6 @@ echo "=========================================================="
 accelerate launch train.py \
     --model_path "$MODEL_PATH" \
     --model_type "flux2klein" \
-    --text_encoder_type "qwen" \
     --text_encoder_path "$TEXT_ENCODER_PATH" \
     --data_dir "$DATA_DIR" \
     --photos_dir "$PHOTOS_DIR" \

@@ -176,8 +176,7 @@ def parse_args():
     # Model and paths
     parser.add_argument("--model_path", type=str, required=True, help="Base Flux model path on Hugging Face or local path.")
     parser.add_argument("--model_type", type=str, default="standard", choices=["standard", "flux2klein"], help="Model structure type ('standard' for diffusers, 'flux2klein' for custom Qwen-based Flux2 model).")
-    parser.add_argument("--text_encoder_type", type=str, default="t5_clip", choices=["t5_clip", "qwen"], help="Text encoder type ('t5_clip' for CLIP+T5, 'qwen' for Qwen3).")
-    parser.add_argument("--text_encoder_path", type=str, default=None, help="Path to the Qwen text encoder (defaults to Qwen/Qwen3-4B if text_encoder_type is qwen).")
+    parser.add_argument("--text_encoder_path", type=str, default=None, help="Path to the Qwen text encoder (defaults to Qwen/Qwen3-4B).")
     parser.add_argument("--data_dir", type=str, required=True, help="Path to skins folder containing target 64x64 skin PNGs.")
     parser.add_argument("--photos_dir", type=str, default=None, help="Path to conditioning photos folder.")
     parser.add_argument("--output_dir", type=str, default="output", help="Path to save checkpoints.")
@@ -532,32 +531,20 @@ def main():
     elif accelerator.mixed_precision == "bf16":
         weight_dtype = torch.bfloat16
         
-    # 2. Load Models based on model_type & text_encoder_type
-    print(f"[*] Model type: {args.model_type} | Text Encoder type: {args.text_encoder_type}")
+    # 2. Load Models
+    print(f"[*] Model type: {args.model_type}")
     
-    # Tokenizers and Text Encoders Loading
-    if args.text_encoder_type == "qwen":
-        from transformers import Qwen2Tokenizer, AutoModelForCausalLM
-        te_path = args.text_encoder_path or "Qwen/Qwen3-4B"
-        print(f"[*] Loading Qwen text encoder from: {te_path}")
-        tokenizer = Qwen2Tokenizer.from_pretrained(te_path)
-        text_encoder = AutoModelForCausalLM.from_pretrained(te_path, torch_dtype=weight_dtype)
-        text_encoder.requires_grad_(False)
-        text_encoder.eval()
-        
-        tokenizer1, tokenizer2 = tokenizer, None
-        text_encoder1, text_encoder2 = text_encoder, None
-    else:
-        # Standard CLIP + T5 Text Encoders
-        print(f"[*] Loading standard CLIP + T5 text encoders from: {args.model_path}")
-        tokenizer1 = CLIPTokenizer.from_pretrained(args.model_path, subfolder="tokenizer")
-        tokenizer2 = T5TokenizerFast.from_pretrained(args.model_path, subfolder="tokenizer_2")
-        text_encoder1 = CLIPTextModel.from_pretrained(args.model_path, subfolder="text_encoder")
-        text_encoder2 = T5EncoderModel.from_pretrained(args.model_path, subfolder="text_encoder_2")
-        text_encoder1.requires_grad_(False)
-        text_encoder2.requires_grad_(False)
-        text_encoder1.eval()
-        text_encoder2.eval()
+    # Tokenizers and Text Encoders Loading (Only Qwen3 supported)
+    from transformers import Qwen2Tokenizer, AutoModelForCausalLM
+    te_path = args.text_encoder_path or "Qwen/Qwen3-4B"
+    print(f"[*] Loading Qwen text encoder from: {te_path}")
+    tokenizer = Qwen2Tokenizer.from_pretrained(te_path)
+    text_encoder = AutoModelForCausalLM.from_pretrained(te_path, torch_dtype=weight_dtype)
+    text_encoder.requires_grad_(False)
+    text_encoder.eval()
+    
+    tokenizer1, tokenizer2 = tokenizer, None
+    text_encoder1, text_encoder2 = text_encoder, None
         
     # VAE and Denoising Transformer Loading
     if args.model_type == "flux2klein":
@@ -710,11 +697,7 @@ def main():
     
     # Move VAE, encoders, and loss module to GPU device
     vae.to(device)
-    if args.text_encoder_type == "qwen":
-        text_encoder.to(device)
-    else:
-        text_encoder1.to(device)
-        text_encoder2.to(device)
+    text_encoder.to(device)
     if criterion is not None:
         criterion.to(device, dtype=weight_dtype)
     
@@ -750,16 +733,11 @@ def main():
     from tqdm import tqdm
     for p in tqdm(all_prompts, desc="Encoding Prompts", disable=not accelerator.is_local_main_process):
         with torch.no_grad():
-            if args.text_encoder_type == "qwen":
-                pe, ppe = encode_prompt_qwen(tokenizer1, text_encoder1, [p], device)
-            else:
-                pe, ppe = encode_prompt(tokenizer1, tokenizer2, text_encoder1, text_encoder2, [p], device)
+            pe, ppe = encode_prompt_qwen(tokenizer1, text_encoder1, [p], device)
             prompt_cache[p] = (pe.cpu(), ppe.cpu() if ppe is not None else None)
             
     print("[*] Unloading Text Encoder to free VRAM...")
     del text_encoder1
-    if args.text_encoder_type != "qwen":
-        del text_encoder2
     import gc
     gc.collect()
     torch.cuda.empty_cache()
