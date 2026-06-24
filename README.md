@@ -74,7 +74,6 @@ bash SkingToolkit/run_training.sh
 | Parameter | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
 | `--model_path` | string | *Required* | Path containing model weights/safetensors folder. |
-| `--model_type` | string | `standard` | Set to `flux2klein` for custom Qwen-based models, otherwise `standard`. |
 | `--text_encoder_path` | string | `None` | Path to the Qwen model (defaults to `Qwen/Qwen3-4B`). |
 | `--data_dir` | string | *Required* | Folder containing target flat `64x64` skin PNGs. |
 | `--photos_dir` | string | `None` | Folder containing conditioning control photos. Looks for separate `front/{id}.png` and `back/{id}.png` (each 256x512) to combine side-by-side, otherwise falls back to `{id}.png` (512x512). |

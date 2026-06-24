@@ -59,7 +59,6 @@ echo "=========================================================="
 # Run the training script via Hugging Face Accelerate or Python directly
 accelerate launch train.py \
     --model_path "$MODEL_PATH" \
-    --model_type "flux2klein" \
     --text_encoder_path "$TEXT_ENCODER_PATH" \
     --data_dir "$DATA_DIR" \
     --photos_dir "$PHOTOS_DIR" \

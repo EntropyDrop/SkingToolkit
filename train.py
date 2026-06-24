@@ -175,7 +175,6 @@ def parse_args():
     
     # Model and paths
     parser.add_argument("--model_path", type=str, required=True, help="Base Flux model path on Hugging Face or local path.")
-    parser.add_argument("--model_type", type=str, default="standard", choices=["standard", "flux2klein"], help="Model structure type ('standard' for diffusers, 'flux2klein' for custom Qwen-based Flux2 model).")
     parser.add_argument("--text_encoder_path", type=str, default=None, help="Path to the Qwen text encoder (defaults to Qwen/Qwen3-4B).")
     parser.add_argument("--data_dir", type=str, required=True, help="Path to skins folder containing target 64x64 skin PNGs.")
     parser.add_argument("--photos_dir", type=str, default=None, help="Path to conditioning photos folder.")
@@ -412,17 +411,12 @@ def run_validation(args, transformer, vae, prompt_cache, device, weight_dtype, g
             # Flux2Klein uses a 16x spatial VAE scale (8x encoder + 2x pixel shuffle).
             with torch.no_grad():
                 # Encode conditioning images to sequence tokens for custom Flux2 model
-                if args.model_type == "flux2klein":
-                    img_cond_seq, img_cond_seq_ids = encode_image_refs(vae, controls_item)
-                    img_cond_seq = img_cond_seq.to(device, dtype=weight_dtype)
-                    img_cond_seq_ids = img_cond_seq_ids.to(device)
-                    
-                if args.model_type == "flux2klein":
-                    latent_channels = vae.params.z_channels * int(np.prod(vae.ps))
-                    vae_scale_factor = (2 ** (len(vae.params.ch_mult) - 1)) * vae.ps[0]
-                else:
-                    latent_channels = vae.config.latent_channels
-                    vae_scale_factor = 2 ** (len(vae.config.block_out_channels) - 1)
+                img_cond_seq, img_cond_seq_ids = encode_image_refs(vae, controls_item)
+                img_cond_seq = img_cond_seq.to(device, dtype=weight_dtype)
+                img_cond_seq_ids = img_cond_seq_ids.to(device)
+                
+                latent_channels = vae.params.z_channels * int(np.prod(vae.ps))
+                vae_scale_factor = (2 ** (len(vae.params.ch_mult) - 1)) * vae.ps[0]
                 latent_h = target_height // vae_scale_factor
                 latent_w = target_width // vae_scale_factor
                 latents = torch.randn((1, latent_channels, latent_h, latent_w), device=device, dtype=weight_dtype)
@@ -435,52 +429,34 @@ def run_validation(args, transformer, vae, prompt_cache, device, weight_dtype, g
                 for step_idx in range(num_inference_steps):
                     t_tensor = torch.full((1,), t, device=device, dtype=weight_dtype)
                     
-                    if args.model_type == "flux2klein":
-                        packed_latents, img_ids = batched_prc_img(latents)
-                        packed_txt, txt_ids = batched_prc_txt(prompt_embeds)
-                        guidance_vec = torch.full((1,), 4.0, device=device, dtype=weight_dtype)
-                        
-                        img_input = torch.cat((packed_latents, img_cond_seq), dim=1)
-                        img_input_ids = torch.cat((img_ids, img_cond_seq_ids), dim=1)
-                        
-                        model_pred_packed = unwrapped_transformer(
-                            x=img_input,
-                            x_ids=img_input_ids,
-                            timesteps=t_tensor,
-                            ctx=packed_txt,
-                            ctx_ids=txt_ids.to(device),
-                            guidance=guidance_vec
-                        )
-                        
-                        # Slice output back to original sequence length (excluding cond tokens)
-                        model_pred_packed = model_pred_packed[:, :packed_latents.shape[1]]
-                        
-                        unpacked_list = scatter_ids(model_pred_packed, img_ids)
-                        model_pred = torch.cat(unpacked_list, dim=0).squeeze(2)
-                    else:
-                        txt_ids = torch.zeros(1, 512, 3, device=device, dtype=weight_dtype)
-                        img_ids = torch.zeros(1, latent_h * latent_w, 3, device=device, dtype=weight_dtype)
-                        
-                        model_pred = unwrapped_transformer(
-                            hidden_states=latents,
-                            timestep=t_tensor * 1000.0,
-                            encoder_hidden_states=prompt_embeds,
-                            pooled_projections=pooled_prompt_embeds,
-                            txt_ids=txt_ids,
-                            img_ids=img_ids,
-                            return_dict=False
-                        )[0]
+                    packed_latents, img_ids = batched_prc_img(latents)
+                    packed_txt, txt_ids = batched_prc_txt(prompt_embeds)
+                    guidance_vec = torch.full((1,), 4.0, device=device, dtype=weight_dtype)
+                    
+                    img_input = torch.cat((packed_latents, img_cond_seq), dim=1)
+                    img_input_ids = torch.cat((img_ids, img_cond_seq_ids), dim=1)
+                    
+                    model_pred_packed = unwrapped_transformer(
+                        x=img_input,
+                        x_ids=img_input_ids,
+                        timesteps=t_tensor,
+                        ctx=packed_txt,
+                        ctx_ids=txt_ids.to(device),
+                        guidance=guidance_vec
+                    )
+                    
+                    # Slice output back to original sequence length (excluding cond tokens)
+                    model_pred_packed = model_pred_packed[:, :packed_latents.shape[1]]
+                    
+                    unpacked_list = scatter_ids(model_pred_packed, img_ids)
+                    model_pred = torch.cat(unpacked_list, dim=0).squeeze(2)
                         
                     # Euler integration step
                     latents = latents - dt * model_pred
                     t -= dt
                     
                 # Decode predicted latent x_0 using VAE
-                if args.model_type == "flux2klein":
-                    pred_decoded = vae.decode(latents.to(dtype=vae.dtype))
-                else:
-                    latents_scaled = latents / vae.config.scaling_factor
-                    pred_decoded = vae.decode(latents_scaled).sample
+                pred_decoded = vae.decode(latents.to(dtype=vae.dtype))
                     
                 pred_decoded = ((pred_decoded + 1.0) / 2.0).clamp(0.0, 1.0)
                 
@@ -532,7 +508,6 @@ def main():
         weight_dtype = torch.bfloat16
         
     # 2. Load Models
-    print(f"[*] Model type: {args.model_type}")
     
     # Tokenizers and Text Encoders Loading (Only Qwen3 supported)
     from transformers import Qwen2Tokenizer, AutoModelForCausalLM
@@ -547,82 +522,69 @@ def main():
     text_encoder1, text_encoder2 = text_encoder, None
         
     # VAE and Denoising Transformer Loading
-    if args.model_type == "flux2klein":
-        from safetensors.torch import load_file
+    from safetensors.torch import load_file
+    
+    # Load VAE from custom safetensors file
+    vae_path = os.path.join(args.model_path, "ae.safetensors")
+    if not os.path.exists(vae_path):
+        vae_path = os.path.join(args.model_path, "vae", "ae.safetensors")
+    if not os.path.exists(vae_path):
+        vae_path = os.path.join(args.model_path, "vae", "diffusion_pytorch_model.safetensors")
         
-        # Load VAE from custom safetensors file
-        vae_path = os.path.join(args.model_path, "ae.safetensors")
-        if not os.path.exists(vae_path):
-            vae_path = os.path.join(args.model_path, "vae", "ae.safetensors")
-        if not os.path.exists(vae_path):
-            vae_path = os.path.join(args.model_path, "vae", "diffusion_pytorch_model.safetensors")
+    print(f"[*] Loading custom VAE from: {vae_path}")
+    vae_state_dict = load_file(vae_path, device="cpu")
+    vae_state_dict = convert_diffusers_vae_to_custom(vae_state_dict)
+    autoencoder_params = AutoEncoderParams()
+    # Check if small VAE decoder layout is used (e.g. channels count)
+    if vae_state_dict.get('decoder.up.0.block.0.conv1.bias', None) is not None:
+        if vae_state_dict['decoder.up.0.block.0.conv1.bias'].shape[0] == 96:
+            autoencoder_params = AutoEncoderSmallDecoderParams()
             
-        print(f"[*] Loading custom VAE from: {vae_path}")
-        vae_state_dict = load_file(vae_path, device="cpu")
-        vae_state_dict = convert_diffusers_vae_to_custom(vae_state_dict)
-        autoencoder_params = AutoEncoderParams()
-        # Check if small VAE decoder layout is used (e.g. channels count)
-        if vae_state_dict.get('decoder.up.0.block.0.conv1.bias', None) is not None:
-            if vae_state_dict['decoder.up.0.block.0.conv1.bias'].shape[0] == 96:
-                autoencoder_params = AutoEncoderSmallDecoderParams()
-                
-        # Populate BN default statistics if missing (e.g. when loading standard diffusers VAE)
-        if "bn.running_mean" not in vae_state_dict:
-            vae_state_dict["bn.running_mean"] = torch.zeros(128)
-        if "bn.running_var" not in vae_state_dict:
-            vae_state_dict["bn.running_var"] = torch.ones(128)
-        if "bn.num_batches_tracked" not in vae_state_dict:
-            vae_state_dict["bn.num_batches_tracked"] = torch.tensor(0, dtype=torch.long)
+    # Populate BN default statistics if missing (e.g. when loading standard diffusers VAE)
+    if "bn.running_mean" not in vae_state_dict:
+        vae_state_dict["bn.running_mean"] = torch.zeros(128)
+    if "bn.running_var" not in vae_state_dict:
+        vae_state_dict["bn.running_var"] = torch.ones(128)
+    if "bn.num_batches_tracked" not in vae_state_dict:
+        vae_state_dict["bn.num_batches_tracked"] = torch.tensor(0, dtype=torch.long)
 
-        vae = AutoEncoder(autoencoder_params)
-        for k in vae_state_dict:
-            vae_state_dict[k] = vae_state_dict[k].to(dtype=weight_dtype)
-        vae.load_state_dict(vae_state_dict, strict=False, assign=True)
-        vae.requires_grad_(False)
-        vae.eval()
-        
-        # Load Scheduler
-        noise_scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(args.model_path, subfolder="scheduler")
-        
-        # Setup Transformer parameters
-        if "4b" in args.model_path.lower():
-            params = Klein4BParams()
-        else:
-            params = Klein9BParams()
-        transformer = Flux2(params)
-        
-        # Locate safetensors weight file
-        sf_file = None
-        if os.path.isdir(args.model_path):
-            for f in os.listdir(args.model_path):
-                if f.endswith(".safetensors") and f != "ae.safetensors":
-                    sf_file = os.path.join(args.model_path, f)
-                    break
-            if sf_file is None:
-                raise FileNotFoundError(f"No safetensors model weights found in: {args.model_path}")
-        else:
-            sf_file = args.model_path
-            
-        print(f"[*] Loading custom transformer weights from: {sf_file}")
-        transformer_state_dict = load_file(sf_file, device="cpu")
-        for k in transformer_state_dict:
-            transformer_state_dict[k] = transformer_state_dict[k].to(dtype=weight_dtype)
-        transformer.load_state_dict(transformer_state_dict, assign=True)
-        
-        # Define LoRA targets for custom Flux2 model
-        default_lora_targets = ["qkv", "linear1", "linear2", "proj"]
+    vae = AutoEncoder(autoencoder_params)
+    for k in vae_state_dict:
+        vae_state_dict[k] = vae_state_dict[k].to(dtype=weight_dtype)
+    vae.load_state_dict(vae_state_dict, strict=False, assign=True)
+    vae.requires_grad_(False)
+    vae.eval()
+    
+    # Load Scheduler
+    noise_scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(args.model_path, subfolder="scheduler")
+    
+    # Setup Transformer parameters
+    if "4b" in args.model_path.lower():
+        params = Klein4BParams()
     else:
-        # Standard diffusers model structures
-        print(f"[*] Loading standard VAE and Transformer from: {args.model_path}")
-        vae = AutoencoderKL.from_pretrained(args.model_path, subfolder="vae")
-        vae.requires_grad_(False)
-        vae.eval()
+        params = Klein9BParams()
+    transformer = Flux2(params)
+    
+    # Locate safetensors weight file
+    sf_file = None
+    if os.path.isdir(args.model_path):
+        for f in os.listdir(args.model_path):
+            if f.endswith(".safetensors") and f != "ae.safetensors":
+                sf_file = os.path.join(args.model_path, f)
+                break
+        if sf_file is None:
+            raise FileNotFoundError(f"No safetensors model weights found in: {args.model_path}")
+    else:
+        sf_file = args.model_path
         
-        noise_scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(args.model_path, subfolder="scheduler")
-        transformer = FluxTransformer2DModel.from_pretrained(args.model_path, subfolder="transformer")
-        
-        # Standard attention targets
-        default_lora_targets = ["to_q", "to_k", "to_v", "to_out.0"]
+    print(f"[*] Loading custom transformer weights from: {sf_file}")
+    transformer_state_dict = load_file(sf_file, device="cpu")
+    for k in transformer_state_dict:
+        transformer_state_dict[k] = transformer_state_dict[k].to(dtype=weight_dtype)
+    transformer.load_state_dict(transformer_state_dict, assign=True)
+    
+    # Define LoRA targets for custom Flux2 model
+    default_lora_targets = ["qkv", "linear1", "linear2", "proj"]
         
     # 3. Setup LoRA if requested
     if args.use_lora:
@@ -780,11 +742,7 @@ def main():
                 # 9. Encode Target Images into Latent space (x0)
                 with torch.no_grad():
                     # VAE target_latent_image is normalized in [-1, 1]
-                    if args.model_type == "flux2klein":
-                        latents_gt = vae.encode(target_latent_image.to(dtype=vae.dtype))
-                    else:
-                        latents_gt = vae.encode(target_latent_image).latent_dist.sample()
-                        latents_gt = latents_gt * vae.config.scaling_factor
+                    latents_gt = vae.encode(target_latent_image.to(dtype=vae.dtype))
                     latents_gt = latents_gt.to(dtype=weight_dtype)
                 
                 # 10. Sample timesteps and add noise (Flow Matching formulation)
@@ -797,60 +755,44 @@ def main():
                     x_t = (1.0 - t_expanded) * latents_gt + t_expanded * noise
                     
                     # 11. Run Transformer Forward pass
-                    if args.model_type == "flux2klein":
-                        # Pack sequence coordinates for the custom local Flux2 model
-                        packed_latents, img_ids = batched_prc_img(x_t)
-                        packed_txt, txt_ids = batched_prc_txt(prompt_embeds)
-                        
-                        # Encode conditioning images (front & back separate views). cond_image is in [0, 1].
-                        cond_image_scaled = cond_image * 2.0 - 1.0
-                        img_cond_seq_list = []
-                        img_cond_seq_ids_list = []
-                        for i in range(B):
-                            controls_item = [cond_image_scaled[i, 0], cond_image_scaled[i, 1]]
-                            seq_item, ids_item = encode_image_refs(vae, controls_item)
-                            img_cond_seq_list.append(seq_item)
-                            img_cond_seq_ids_list.append(ids_item)
-                        img_cond_seq = torch.cat(img_cond_seq_list, dim=0).to(device, dtype=weight_dtype)
-                        img_cond_seq_ids = torch.cat(img_cond_seq_ids_list, dim=0).to(device)
-                        
-                        # Concatenate reference/control tokens to image sequence
-                        img_input = torch.cat((packed_latents, img_cond_seq), dim=1)
-                        img_input_ids = torch.cat((img_ids, img_cond_seq_ids), dim=1)
-                        
-                        # Prepare guidance vec
-                        guidance_vec = torch.full((B,), 4.0, device=device, dtype=weight_dtype) # default guidance 4.0
-                        
-                        packed_noise_pred = transformer(
-                            x=img_input,
-                            x_ids=img_input_ids,
-                            timesteps=t, # Already normalized to [0, 1]
-                            ctx=packed_txt,
-                            ctx_ids=txt_ids.to(device),
-                            guidance=guidance_vec
-                        )
-                        
-                        # Slice prediction output back to match original latents sequence length (excluding cond tokens)
-                        packed_noise_pred = packed_noise_pred[:, :packed_latents.shape[1]]
-                        
-                        # Scatter/unpack tokens back to spatial coordinates
-                        unpacked_list = scatter_ids(packed_noise_pred, img_ids)
-                        model_pred = torch.cat(unpacked_list, dim=0).squeeze(2) # Shape: (B, 16, H_latent, W_latent)
-                    else:
-                        # Standard Flux coordinates grids
-                        H_latent, W_latent = latents_gt.shape[2], latents_gt.shape[3]
-                        txt_ids = torch.zeros(B, 512, 3, device=device, dtype=weight_dtype)
-                        img_ids = torch.zeros(B, H_latent * W_latent, 3, device=device, dtype=weight_dtype)
-                        
-                        model_pred = transformer(
-                            hidden_states=x_t,
-                            timestep=t * 1000.0, # Range [0, 1000]
-                            encoder_hidden_states=prompt_embeds,
-                            pooled_projections=pooled_prompt_embeds,
-                            txt_ids=txt_ids,
-                            img_ids=img_ids,
-                            return_dict=False
-                        )[0]
+                    # Pack sequence coordinates for the custom local Flux2 model
+                    packed_latents, img_ids = batched_prc_img(x_t)
+                    packed_txt, txt_ids = batched_prc_txt(prompt_embeds)
+                    
+                    # Encode conditioning images (front & back separate views). cond_image is in [0, 1].
+                    cond_image_scaled = cond_image * 2.0 - 1.0
+                    img_cond_seq_list = []
+                    img_cond_seq_ids_list = []
+                    for i in range(B):
+                        controls_item = [cond_image_scaled[i, 0], cond_image_scaled[i, 1]]
+                        seq_item, ids_item = encode_image_refs(vae, controls_item)
+                        img_cond_seq_list.append(seq_item)
+                        img_cond_seq_ids_list.append(ids_item)
+                    img_cond_seq = torch.cat(img_cond_seq_list, dim=0).to(device, dtype=weight_dtype)
+                    img_cond_seq_ids = torch.cat(img_cond_seq_ids_list, dim=0).to(device)
+                    
+                    # Concatenate reference/control tokens to image sequence
+                    img_input = torch.cat((packed_latents, img_cond_seq), dim=1)
+                    img_input_ids = torch.cat((img_ids, img_cond_seq_ids), dim=1)
+                    
+                    # Prepare guidance vec
+                    guidance_vec = torch.full((B,), 4.0, device=device, dtype=weight_dtype) # default guidance 4.0
+                    
+                    packed_noise_pred = transformer(
+                        x=img_input,
+                        x_ids=img_input_ids,
+                        timesteps=t, # Already normalized to [0, 1]
+                        ctx=packed_txt,
+                        ctx_ids=txt_ids.to(device),
+                        guidance=guidance_vec
+                    )
+                    
+                    # Slice prediction output back to match original latents sequence length (excluding cond tokens)
+                    packed_noise_pred = packed_noise_pred[:, :packed_latents.shape[1]]
+                    
+                    # Scatter/unpack tokens back to spatial coordinates
+                    unpacked_list = scatter_ids(packed_noise_pred, img_ids)
+                    model_pred = torch.cat(unpacked_list, dim=0).squeeze(2) # Shape: (B, 16, H_latent, W_latent)
                     
                     # Flow matching target velocity: (noise - latents_gt)
                     target_velocity = noise - latents_gt
@@ -871,11 +813,7 @@ def main():
                         # Reconstruct clean latent estimation from the predicted velocity.
                         pred_x0 = x_t - t_expanded * model_pred
 
-                        if args.model_type == "flux2klein":
-                            pred_decoded = vae.decode(pred_x0.to(dtype=vae.dtype))
-                        else:
-                            pred_x0_scaled = pred_x0 / vae.config.scaling_factor
-                            pred_decoded = vae.decode(pred_x0_scaled).sample
+                        pred_decoded = vae.decode(pred_x0.to(dtype=vae.dtype))
 
                         pred_decoded = (pred_decoded + 1.0) / 2.0
 
