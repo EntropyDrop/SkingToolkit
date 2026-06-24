@@ -558,11 +558,8 @@ def main():
     # Load Scheduler
     noise_scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(args.model_path, subfolder="scheduler")
     
-    # Setup Transformer parameters
-    if "4b" in args.model_path.lower():
-        params = Klein4BParams()
-    else:
-        params = Klein9BParams()
+    # Setup Transformer parameters (Only 4B supported)
+    params = Klein4BParams()
     transformer = Flux2(params)
     
     # Locate safetensors weight file
