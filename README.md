@@ -36,9 +36,14 @@ SkingToolkit/
 ├── loss.py                # Multi-view MSE & LPIPS foreground-weighted losses
 ├── dataset.py             # MinecraftSkinDataset, Alex-Steve, & Voxel resolver
 ├── train.py               # Core training execution loop & backprop pipeline
+├── inverse_uv/            # Supervised fixed-view render -> 64x64 UV training
 ├── test_toolkit_setup.py  # Local self-contained math/setup verification script
 └── run_training.sh        # Shell launcher configured for Flux2Klein4B
 ```
+
+`inverse_uv/` is a separate supervised inverse-mapping pipeline. It reuses the
+same renderer and GT skin normalization utilities, but keeps its dataset/model
+losses/train script isolated from the Flux/LoRA training path.
 
 ---
 
