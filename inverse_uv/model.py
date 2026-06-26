@@ -41,9 +41,13 @@ class UpBlock(nn.Module):
         super().__init__()
         self.block = ConvBlock(in_channels + skip_channels, out_channels)
 
-    def forward(self, x, skip):
-        x = F.interpolate(x, size=skip.shape[-2:], mode="bilinear", align_corners=False)
-        return self.block(torch.cat([x, skip], dim=1))
+    def forward(self, x, skip=None):
+        if skip is not None:
+            x = F.interpolate(x, size=skip.shape[-2:], mode="bilinear", align_corners=False)
+            x = torch.cat([x, skip], dim=1)
+        else:
+            x = F.interpolate(x, scale_factor=2.0, mode="bilinear", align_corners=False)
+        return self.block(x)
 
 
 class InverseUVNet(nn.Module):
@@ -56,28 +60,30 @@ class InverseUVNet(nn.Module):
         self.down3 = DownBlock(c * 4, c * 8)
         self.down4 = DownBlock(c * 8, c * 8)
         self.mid = ConvBlock(c * 8, c * 8)
-        self.up3 = UpBlock(c * 8, c * 8, c * 4)
-        self.up2 = UpBlock(c * 4, c * 4, c * 2)
-        self.up1 = UpBlock(c * 2, c * 2, c)
-        self.up0 = UpBlock(c, c, c)
+        
+        # Native 64x64 Decoder (no skip connections due to unaligned domains)
+        self.up_dec2 = UpBlock(c * 8, 0, c * 4) # 16x16 -> 32x32
+        self.up_dec1 = UpBlock(c * 4, 0, c * 2) # 32x32 -> 64x64
         self.head = nn.Sequential(
-            nn.Conv2d(c, c, kernel_size=3, padding=1),
+            nn.Conv2d(c * 2, c, kernel_size=3, padding=1),
             nn.SiLU(inplace=True),
             nn.Conv2d(c, output_channels, kernel_size=1),
         )
 
     def forward(self, x):
-        s0 = self.stem(x)
-        s1 = self.down1(s0)
-        s2 = self.down2(s1)
-        s3 = self.down3(s2)
-        x = self.down4(s3)
+        x = self.stem(x)
+        x = self.down1(x)
+        x = self.down2(x)
+        x = self.down3(x)
+        x = self.down4(x)
         x = self.mid(x)
-        x = self.up3(x, s3)
-        x = self.up2(x, s2)
-        x = self.up1(x, s1)
-        x = self.up0(x, s0)
-        x = F.interpolate(x, size=(64, 64), mode="bilinear", align_corners=False)
+        
+        # Force bottleneck to 16x16 (decouples render_size from 64x64 output)
+        x = F.adaptive_avg_pool2d(x, (16, 16))
+        
+        x = self.up_dec2(x) # -> 32x32
+        x = self.up_dec1(x) # -> 64x64
+        
         return torch.sigmoid(self.head(x))
 
 
