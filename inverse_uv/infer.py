@@ -37,13 +37,11 @@ def load_conditioning(args, checkpoint_args, input_channels):
     images = []
     if args.combined:
         combined = Image.open(args.combined)
-        if len(views) != 2:
-            raise ValueError("--combined only supports checkpoints trained with exactly two views.")
         width, height = combined.size
-        images = [
-            combined.crop((0, 0, width // 2, height)),
-            combined.crop((width // 2, 0, width, height)),
-        ]
+        if width % len(views) != 0:
+            raise ValueError(f"Combined image width {width} is not divisible by {len(views)} views.")
+        view_width = width // len(views)
+        images = [combined.crop((i * view_width, 0, (i + 1) * view_width, height)) for i in range(len(views))]
     elif args.view_images:
         if len(args.view_images) != len(views):
             raise ValueError(f"Expected {len(views)} --view_images, got {len(args.view_images)}.")
