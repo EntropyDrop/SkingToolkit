@@ -47,34 +47,35 @@ class UpBlock(nn.Module):
 
 
 class InverseUVNet(nn.Module):
-    def __init__(self, input_channels=6, base_channels=64, output_channels=4):
+    def __init__(self, input_channels=10, base_channels=64, output_channels=4):
         super().__init__()
         c = base_channels
         self.stem = ConvBlock(input_channels, c)
         self.down1 = DownBlock(c, c * 2)
         self.down2 = DownBlock(c * 2, c * 4)
         self.down3 = DownBlock(c * 4, c * 8)
-        self.down4 = DownBlock(c * 8, c * 8)
         self.mid = ConvBlock(c * 8, c * 8)
-        self.up3 = UpBlock(c * 8, c * 8, c * 4)
+        self.up2 = UpBlock(c * 8, c * 4, c * 4)
+        self.up1 = UpBlock(c * 4, c * 2, c * 2)
+        self.up0 = UpBlock(c * 2, c, c)
         self.head = nn.Sequential(
-            nn.Conv2d(c * 4, c, kernel_size=3, padding=1),
+            nn.Conv2d(c, c, kernel_size=3, padding=1),
             nn.SiLU(inplace=True),
             nn.Conv2d(c, output_channels, kernel_size=1),
         )
 
     def forward(self, x):
-        # Force input to 512x512 so that s3 is guaranteed to be 64x64
-        if x.shape[-1] != 512 or x.shape[-2] != 512:
-            x = F.interpolate(x, size=(512, 512), mode="bilinear", align_corners=False)
-            
+        if x.shape[-1] != 64 or x.shape[-2] != 64:
+            x = F.interpolate(x, size=(64, 64), mode="bilinear", align_corners=False)
+
         s0 = self.stem(x)
         s1 = self.down1(s0)
         s2 = self.down2(s1)
         s3 = self.down3(s2)
-        x = self.down4(s3)
-        x = self.mid(x)
-        x = self.up3(x, s3)
+        x = self.mid(s3)
+        x = self.up2(x, s2)
+        x = self.up1(x, s1)
+        x = self.up0(x, s0)
         return torch.sigmoid(self.head(x))
 
 

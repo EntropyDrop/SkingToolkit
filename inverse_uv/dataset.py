@@ -4,7 +4,6 @@ from pathlib import Path
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 from PIL import Image
 from torch.utils.data import Dataset
 import torchvision.transforms.functional as TF
@@ -19,6 +18,9 @@ from SkingToolkit.renderer import DifferentiableRenderer  # noqa: E402
 
 
 IMAGE_EXTENSIONS = (".png", ".webp", ".jpg", ".jpeg")
+UV_SIZE = 64
+CONDITIONING_LAYERS = ("inner", "outer")
+CONDITIONING_CHANNELS = len(CONDITIONING_LAYERS) * 5
 
 
 def parse_views(views):
@@ -46,6 +48,68 @@ def load_skin(path, bg_color=(128, 128, 128), normalize_model=True):
     return rgba.clamp(0.0, 1.0)
 
 
+def view_native_size(renderer, view):
+    mask = getattr(renderer, f"{view}_inner_mask")
+    return tuple(mask.shape)
+
+
+def _uv_indices_from_grid(grid, mask):
+    coords = ((grid[mask] + 1.0) * 0.5 * (UV_SIZE - 1)).round().long()
+    coords[:, 0].clamp_(0, UV_SIZE - 1)
+    coords[:, 1].clamp_(0, UV_SIZE - 1)
+    return coords[:, 1] * UV_SIZE + coords[:, 0]
+
+
+def _ensure_rgba(rendered, geometry_mask=None):
+    if rendered.shape[0] == 4:
+        return rendered
+    if rendered.shape[0] != 3:
+        raise ValueError(f"Expected RGB or RGBA render tensor, got {rendered.shape[0]} channels.")
+    if geometry_mask is None:
+        alpha = torch.ones_like(rendered[:1])
+    else:
+        alpha = geometry_mask.to(dtype=rendered.dtype, device=rendered.device).unsqueeze(0)
+    return torch.cat([rendered, alpha], dim=0)
+
+
+def unproject_renders_to_uv(rendered_views, renderer, views, bg_color=(128, 128, 128)):
+    views = parse_views(views)
+    if len(rendered_views) != len(views):
+        raise ValueError(f"Expected {len(views)} rendered views, got {len(rendered_views)}.")
+
+    sample = rendered_views[0]
+    device = sample.device
+    dtype = sample.dtype
+    accum = sample.new_zeros(len(CONDITIONING_LAYERS), 4, UV_SIZE, UV_SIZE)
+    counts = sample.new_zeros(len(CONDITIONING_LAYERS), 1, UV_SIZE, UV_SIZE)
+
+    for view, rendered in zip(views, rendered_views):
+        inner_mask = getattr(renderer, f"{view}_inner_mask").to(device=device).bool()
+        outer_mask = getattr(renderer, f"{view}_outer_mask").to(device=device).bool()
+        geometry_mask = inner_mask | outer_mask
+        rendered = _ensure_rgba(rendered.to(device=device, dtype=dtype), geometry_mask=geometry_mask)
+
+        for layer_index, layer in enumerate(CONDITIONING_LAYERS):
+            mask = getattr(renderer, f"{view}_{layer}_mask").to(device=device).bool()
+            if not bool(mask.any()):
+                continue
+            grid = getattr(renderer, f"{view}_{layer}_grid").to(device=device, dtype=dtype)
+            flat_uv = _uv_indices_from_grid(grid, mask)
+            values = rendered[:, mask]
+
+            accum[layer_index].reshape(4, -1).index_add_(1, flat_uv, values)
+            ones = torch.ones((1, values.shape[1]), dtype=dtype, device=device)
+            counts[layer_index].reshape(1, -1).index_add_(1, flat_uv, ones)
+
+    known = (counts > 0).to(dtype=dtype)
+    averaged = accum / counts.clamp_min(1.0)
+    bg = sample.new_tensor(bg_color, dtype=dtype).view(1, 3, 1, 1) / 255.0
+    rgb = torch.where(known.expand(-1, 3, -1, -1) > 0, averaged[:, :3], bg.expand_as(averaged[:, :3]))
+    alpha = torch.where(known > 0, averaged[:, 3:4], torch.zeros_like(averaged[:, 3:4]))
+    layers = torch.cat([rgb, alpha, known], dim=1)
+    return layers.reshape(-1, UV_SIZE, UV_SIZE).clamp(0.0, 1.0)
+
+
 def build_conditioning(
     skin,
     renderer,
@@ -53,20 +117,14 @@ def build_conditioning(
     image_size=256,
     include_alpha=False,
 ):
-    render_channels = []
+    _ = image_size, include_alpha
+    rendered_views = []
     with torch.no_grad():
         skin_batch = skin.unsqueeze(0)
         for view in views:
             rendered = renderer.forward_view(skin_batch, view).squeeze(0)
-            rendered = rendered[:4 if include_alpha else 3]
-            rendered = F.interpolate(
-                rendered.unsqueeze(0),
-                size=(image_size, image_size),
-                mode="bilinear",
-                align_corners=False,
-            ).squeeze(0)
-            render_channels.append(rendered)
-    return torch.cat(render_channels, dim=0).clamp(0.0, 1.0)
+            rendered_views.append(rendered)
+    return unproject_renders_to_uv(rendered_views, renderer, views)
 
 
 class InverseUVDataset(Dataset):
@@ -109,7 +167,7 @@ class InverseUVDataset(Dataset):
         if not self.skin_paths:
             raise ValueError(f"No skin images found in {data_dir}")
 
-        self.input_channels = len(self.views) * (4 if self.include_alpha else 3)
+        self.input_channels = CONDITIONING_CHANNELS
 
     def __len__(self):
         return len(self.skin_paths)

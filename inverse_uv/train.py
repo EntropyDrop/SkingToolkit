@@ -122,8 +122,17 @@ def build_arg_parser():
     parser.add_argument("--output_dir", default="inverse_uv_runs/default", help="Checkpoint/output folder.")
     parser.add_argument("--mappings_dir", default=None, help="Renderer mappings directory.")
     parser.add_argument("--views", default="static_front,static_back", help="Comma-separated render views.")
-    parser.add_argument("--render_size", type=int, default=256, help="Square input size per render view.")
-    parser.add_argument("--include_alpha", action="store_true", help="Use render alpha channels as conditioning too.")
+    parser.add_argument(
+        "--render_size",
+        type=int,
+        default=256,
+        help="Deprecated compatibility option; UV unprojection uses each view's native mapping size.",
+    )
+    parser.add_argument(
+        "--include_alpha",
+        action="store_true",
+        help="Deprecated compatibility option; UV unprojection always builds RGBA plus mask conditioning.",
+    )
     parser.add_argument("--base_channels", type=int, default=64, help="Base channel width for InverseUVNet.")
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--epochs", type=int, default=20)
@@ -138,6 +147,7 @@ def build_arg_parser():
     parser.add_argument("--lambda_rgb", type=float, default=1.0)
     parser.add_argument("--lambda_alpha", type=float, default=0.5)
     parser.add_argument("--lambda_render", type=float, default=0.1)
+    parser.add_argument("--lambda_edge", type=float, default=0.25)
     parser.add_argument("--render_foreground_weight", type=float, default=1.0)
     parser.add_argument("--save_every", type=int, default=1)
     parser.add_argument("--preview_every", type=int, default=1)
@@ -147,6 +157,7 @@ def build_arg_parser():
 
 def main():
     args = build_arg_parser().parse_args()
+    args.conditioning_mode = "uv_unproject_inpaint"
     torch.manual_seed(args.seed)
 
     output_dir = Path(args.output_dir)
@@ -198,6 +209,7 @@ def main():
         lambda_rgb=args.lambda_rgb,
         lambda_alpha=args.lambda_alpha,
         lambda_render=args.lambda_render,
+        lambda_edge=args.lambda_edge,
         render_foreground_weight=args.render_foreground_weight,
     ).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
@@ -215,6 +227,7 @@ def main():
         "train_samples": len(train_dataset),
         "val_samples": len(val_dataset) if val_dataset is not None else 0,
         "input_channels": input_channels,
+        "conditioning_mode": "uv_unproject_inpaint",
         "parameters": count_parameters(model),
         "views": dataset.views,
         "device": str(device),

@@ -1,14 +1,16 @@
 # Inverse UV Training
 
-This module trains a supervised model for:
+This module trains a supervised inpainting model for:
 
 ```text
-fixed-view render images -> original 64x64 RGBA Minecraft skin UV
+fixed-view render images -> unprojected UV conditioning -> original 64x64 RGBA Minecraft skin UV
 ```
 
 It is intentionally separate from the existing Flux/LoRA training path. The main
-supervision is GT UV reconstruction; differentiable render consistency is an
-auxiliary loss.
+supervision is GT UV reconstruction; differentiable render consistency and a
+light edge loss are auxiliary terms. Renderer mappings are used to unproject
+each view into aligned UV space before the U-Net sees the sample, so the model
+learns UV-space inpainting instead of long-distance render-to-UV pixel moves.
 
 ## Train
 
@@ -26,7 +28,9 @@ Useful knobs:
 - `--lambda_rgb`: visible-RGB UV reconstruction weight.
 - `--lambda_alpha`: alpha reconstruction weight.
 - `--lambda_render`: differentiable render consistency weight.
-- `--include_alpha`: also feed render alpha channels to the model.
+- `--lambda_edge`: UV-space edge reconstruction weight for sharper pixel boundaries.
+- `--render_size`: deprecated compatibility option; UV unprojection uses native mapping sizes.
+- `--include_alpha`: deprecated compatibility option; conditioning always uses RGBA plus masks.
 
 ## Infer
 

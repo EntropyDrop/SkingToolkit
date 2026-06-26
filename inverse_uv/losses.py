@@ -42,6 +42,24 @@ def alpha_bce(pred_uv, gt_uv, uv_mask=None):
     return loss.mean()
 
 
+def edge_l1(pred_uv, gt_uv, uv_mask=None):
+    alpha_gt = gt_uv[:, 3:4].detach()
+    if uv_mask is not None:
+        alpha_gt = alpha_gt * uv_mask
+
+    pred_rgb = pred_uv[:, :3]
+    gt_rgb = gt_uv[:, :3]
+    dx_mask = alpha_gt[:, :, :, 1:] * alpha_gt[:, :, :, :-1]
+    dy_mask = alpha_gt[:, :, 1:, :] * alpha_gt[:, :, :-1, :]
+
+    dx = (pred_rgb[:, :, :, 1:] - pred_rgb[:, :, :, :-1]) - (gt_rgb[:, :, :, 1:] - gt_rgb[:, :, :, :-1])
+    dy = (pred_rgb[:, :, 1:, :] - pred_rgb[:, :, :-1, :]) - (gt_rgb[:, :, 1:, :] - gt_rgb[:, :, :-1, :])
+    dx_loss = dx.abs() * dx_mask
+    dy_loss = dy.abs() * dy_mask
+    denom = ((dx_mask.sum() + dy_mask.sum()) * 3.0).clamp_min(1.0)
+    return (dx_loss.sum() + dy_loss.sum()) / denom
+
+
 class InverseUVLoss(nn.Module):
     def __init__(
         self,
@@ -51,12 +69,14 @@ class InverseUVLoss(nn.Module):
         lambda_rgb=1.0,
         lambda_alpha=0.5,
         lambda_render=0.1,
+        lambda_edge=0.25,
         render_foreground_weight=1.0,
     ):
         super().__init__()
         self.lambda_rgb = lambda_rgb
         self.lambda_alpha = lambda_alpha
         self.lambda_render = lambda_render
+        self.lambda_edge = lambda_edge
         self.render_foreground_weight = render_foreground_weight
 
         self.renderer = DifferentiableRenderer(mappings_dir=mappings_dir, bg_color=bg_color)
@@ -105,14 +125,17 @@ class InverseUVLoss(nn.Module):
         loss_rgb = alpha_masked_rgb_l1(pred_uv, gt_uv, uv_mask)
         loss_alpha = alpha_bce(pred_uv, gt_uv, uv_mask)
         loss_render = self.render_loss(pred_uv, gt_uv)
+        loss_edge = edge_l1(pred_uv, gt_uv, uv_mask)
         loss_total = (
             self.lambda_rgb * loss_rgb
             + self.lambda_alpha * loss_alpha
             + self.lambda_render * loss_render
+            + self.lambda_edge * loss_edge
         )
         return {
             "loss_total": loss_total,
             "loss_rgb": loss_rgb,
             "loss_alpha": loss_alpha,
             "loss_render": loss_render,
+            "loss_edge": loss_edge,
         }
