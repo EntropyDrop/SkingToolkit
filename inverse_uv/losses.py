@@ -32,14 +32,9 @@ def alpha_masked_rgb_l1(pred_uv, gt_uv, uv_mask=None):
 
 
 def alpha_bce(pred_uv, gt_uv, uv_mask=None):
+    _ = uv_mask
     pred_alpha = pred_uv[:, 3:4].clamp(1e-4, 1.0 - 1e-4)
-    loss = F.binary_cross_entropy(pred_alpha, gt_uv[:, 3:4], reduction="none")
-    if uv_mask is not None:
-        loss = loss * uv_mask
-        denom = uv_mask.sum()
-        if denom > 0:
-            return loss.sum() / (loss.shape[0] * denom)
-    return loss.mean()
+    return F.binary_cross_entropy(pred_alpha, gt_uv[:, 3:4])
 
 
 def edge_l1(pred_uv, gt_uv, uv_mask=None):

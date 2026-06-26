@@ -48,6 +48,41 @@ def load_skin(path, bg_color=(128, 128, 128), normalize_model=True):
     return rgba.clamp(0.0, 1.0)
 
 
+def load_uv_mask():
+    mask_path = Path(__file__).resolve().parent / "skin-mask.png"
+    decor_mask_path = Path(__file__).resolve().parent / "skin-decor-mask.png"
+    if not mask_path.exists() or not decor_mask_path.exists():
+        return None
+
+    skin_mask = np.array(Image.open(mask_path).convert("RGBA"))
+    skin_decor_mask = np.array(Image.open(decor_mask_path).convert("RGBA"))
+    valid_mask = (skin_mask[:, :, 3] > 0) | (skin_decor_mask[:, :, 3] > 0)
+    return torch.from_numpy(valid_mask).float().unsqueeze(0)
+
+
+def apply_uv_mask(tensor):
+    if tensor.shape[-3] != 4:
+        raise ValueError(f"Expected RGBA tensor with 4 channels, got shape {tuple(tensor.shape)}.")
+
+    uv_mask = load_uv_mask()
+    if uv_mask is None:
+        return tensor
+
+    uv_mask = uv_mask.to(device=tensor.device, dtype=tensor.dtype)
+    if tensor.dim() == 4:
+        uv_mask = uv_mask.unsqueeze(0)
+        out = tensor.clone()
+        out[:, :3] = out[:, :3] * uv_mask
+        out[:, 3:4] = out[:, 3:4] * uv_mask
+        return out
+    if tensor.dim() == 3:
+        out = tensor.clone()
+        out[:3] = out[:3] * uv_mask
+        out[3:4] = out[3:4] * uv_mask
+        return out
+    raise ValueError(f"Expected CHW or NCHW tensor, got shape {tuple(tensor.shape)}.")
+
+
 def view_native_size(renderer, view):
     mask = getattr(renderer, f"{view}_inner_mask")
     return tuple(mask.shape)

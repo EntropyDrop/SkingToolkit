@@ -14,7 +14,7 @@ WORKSPACE_ROOT = TOOLKIT_ROOT.parent
 if str(WORKSPACE_ROOT) not in sys.path:
     sys.path.insert(0, str(WORKSPACE_ROOT))
 
-from SkingToolkit.inverse_uv.dataset import InverseUVDataset  # noqa: E402
+from SkingToolkit.inverse_uv.dataset import InverseUVDataset, apply_uv_mask  # noqa: E402
 from SkingToolkit.inverse_uv.losses import InverseUVLoss  # noqa: E402
 from SkingToolkit.inverse_uv.model import InverseUVNet, count_parameters  # noqa: E402
 
@@ -51,7 +51,9 @@ def move_batch(batch, device):
 
 def save_preview(pred_uv, gt_uv, output_path, max_items=4):
     count = min(max_items, pred_uv.shape[0])
-    preview = torch.cat([pred_uv[:count].detach().cpu(), gt_uv[:count].detach().cpu()], dim=0)
+    pred = apply_uv_mask(pred_uv[:count].detach().cpu())
+    gt = apply_uv_mask(gt_uv[:count].detach().cpu())
+    preview = torch.cat([pred, gt], dim=0)
     save_image(preview.clamp(0.0, 1.0), output_path, nrow=count)
 
 

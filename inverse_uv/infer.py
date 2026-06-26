@@ -13,6 +13,7 @@ if str(WORKSPACE_ROOT) not in sys.path:
     sys.path.insert(0, str(WORKSPACE_ROOT))
 
 from SkingToolkit.inverse_uv.dataset import (  # noqa: E402
+    apply_uv_mask,
     parse_views,
     tensor_to_rgba_image,
     unproject_renders_to_uv,
@@ -114,7 +115,7 @@ def main():
 
     conditioning = load_conditioning(args, checkpoint_args, input_channels).to(device)
     with torch.no_grad():
-        pred_uv = model(conditioning)[0]
+        pred_uv = apply_uv_mask(model(conditioning)[0])
 
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
