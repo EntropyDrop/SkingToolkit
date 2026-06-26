@@ -1,6 +1,9 @@
 import sys
 from pathlib import Path
 
+import numpy as np
+from PIL import Image
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -19,16 +22,24 @@ def parse_views(views):
     return list(views)
 
 
-def alpha_masked_rgb_l1(pred_uv, gt_uv):
+def alpha_masked_rgb_l1(pred_uv, gt_uv, uv_mask=None):
     alpha_gt = gt_uv[:, 3:4].detach()
+    if uv_mask is not None:
+        alpha_gt = alpha_gt * uv_mask
     denom = (alpha_gt.sum(dim=(1, 2, 3)) * 3.0).clamp_min(1.0)
     per_sample = ((pred_uv[:, :3] - gt_uv[:, :3]).abs() * alpha_gt).sum(dim=(1, 2, 3)) / denom
     return per_sample.mean()
 
 
-def alpha_bce(pred_uv, gt_uv):
+def alpha_bce(pred_uv, gt_uv, uv_mask=None):
     pred_alpha = pred_uv[:, 3:4].clamp(1e-4, 1.0 - 1e-4)
-    return F.binary_cross_entropy(pred_alpha, gt_uv[:, 3:4])
+    loss = F.binary_cross_entropy(pred_alpha, gt_uv[:, 3:4], reduction="none")
+    if uv_mask is not None:
+        loss = loss * uv_mask
+        denom = uv_mask.sum()
+        if denom > 0:
+            return loss.sum() / (loss.shape[0] * denom)
+    return loss.mean()
 
 
 class InverseUVLoss(nn.Module):
@@ -57,6 +68,20 @@ class InverseUVLoss(nn.Module):
                 f"Available views: {', '.join(self.renderer.views)}"
             )
 
+        # Load UV mask
+        mask_path = Path(__file__).resolve().parent / "skin-mask.png"
+        decor_mask_path = Path(__file__).resolve().parent / "skin-decor-mask.png"
+        
+        if mask_path.exists() and decor_mask_path.exists():
+            skin_mask = np.array(Image.open(mask_path).convert("RGBA"))
+            skin_decor_mask = np.array(Image.open(decor_mask_path).convert("RGBA"))
+            valid_mask = (skin_mask[:, :, 3] > 0) | (skin_decor_mask[:, :, 3] > 0)
+            uv_mask = torch.from_numpy(valid_mask).float().unsqueeze(0).unsqueeze(0)
+            self.register_buffer("uv_mask", uv_mask)
+        else:
+            print("WARNING: UV masks not found, falling back to full UV loss.")
+            self.uv_mask = None
+
     def render_loss(self, pred_uv, gt_uv):
         if self.lambda_render <= 0:
             return pred_uv.new_tensor(0.0)
@@ -76,8 +101,9 @@ class InverseUVLoss(nn.Module):
         return total / max(len(self.views), 1)
 
     def forward(self, pred_uv, gt_uv):
-        loss_rgb = alpha_masked_rgb_l1(pred_uv, gt_uv)
-        loss_alpha = alpha_bce(pred_uv, gt_uv)
+        uv_mask = getattr(self, "uv_mask", None)
+        loss_rgb = alpha_masked_rgb_l1(pred_uv, gt_uv, uv_mask)
+        loss_alpha = alpha_bce(pred_uv, gt_uv, uv_mask)
         loss_render = self.render_loss(pred_uv, gt_uv)
         loss_total = (
             self.lambda_rgb * loss_rgb
