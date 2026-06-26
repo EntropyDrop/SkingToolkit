@@ -31,18 +31,6 @@ def alpha_bce(pred_uv, gt_uv):
     return F.binary_cross_entropy(pred_alpha, gt_uv[:, 3:4])
 
 
-def block_flatness_loss(pred_uv, block_size=4):
-    if block_size <= 1:
-        return pred_uv.new_tensor(0.0)
-    rgb = pred_uv[:, :3]
-    height = (rgb.shape[-2] // block_size) * block_size
-    width = (rgb.shape[-1] // block_size) * block_size
-    rgb = rgb[:, :, :height, :width]
-    blocks = rgb.unfold(2, block_size, block_size).unfold(3, block_size, block_size)
-    mean = blocks.mean(dim=(-1, -2), keepdim=True)
-    return (blocks - mean).abs().mean()
-
-
 class InverseUVLoss(nn.Module):
     def __init__(
         self,
@@ -52,17 +40,13 @@ class InverseUVLoss(nn.Module):
         lambda_rgb=1.0,
         lambda_alpha=0.5,
         lambda_render=0.1,
-        lambda_block_flatness=0.0,
         render_foreground_weight=1.0,
-        block_size=4,
     ):
         super().__init__()
         self.lambda_rgb = lambda_rgb
         self.lambda_alpha = lambda_alpha
         self.lambda_render = lambda_render
-        self.lambda_block_flatness = lambda_block_flatness
         self.render_foreground_weight = render_foreground_weight
-        self.block_size = block_size
 
         self.renderer = DifferentiableRenderer(mappings_dir=mappings_dir, bg_color=bg_color)
         self.views = parse_views(views)
@@ -95,17 +79,14 @@ class InverseUVLoss(nn.Module):
         loss_rgb = alpha_masked_rgb_l1(pred_uv, gt_uv)
         loss_alpha = alpha_bce(pred_uv, gt_uv)
         loss_render = self.render_loss(pred_uv, gt_uv)
-        loss_flatness = block_flatness_loss(pred_uv, block_size=self.block_size)
         loss_total = (
             self.lambda_rgb * loss_rgb
             + self.lambda_alpha * loss_alpha
             + self.lambda_render * loss_render
-            + self.lambda_block_flatness * loss_flatness
         )
         return {
             "loss_total": loss_total,
             "loss_rgb": loss_rgb,
             "loss_alpha": loss_alpha,
             "loss_render": loss_render,
-            "loss_block_flatness": loss_flatness,
         }

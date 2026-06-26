@@ -138,9 +138,7 @@ def build_arg_parser():
     parser.add_argument("--lambda_rgb", type=float, default=1.0)
     parser.add_argument("--lambda_alpha", type=float, default=0.5)
     parser.add_argument("--lambda_render", type=float, default=0.1)
-    parser.add_argument("--lambda_block_flatness", type=float, default=0.0)
     parser.add_argument("--render_foreground_weight", type=float, default=1.0)
-    parser.add_argument("--block_size", type=int, default=4)
     parser.add_argument("--save_every", type=int, default=1)
     parser.add_argument("--preview_every", type=int, default=1)
     parser.add_argument("--resume", default=None, help="Checkpoint path to resume from.")
@@ -200,9 +198,7 @@ def main():
         lambda_rgb=args.lambda_rgb,
         lambda_alpha=args.lambda_alpha,
         lambda_render=args.lambda_render,
-        lambda_block_flatness=args.lambda_block_flatness,
         render_foreground_weight=args.render_foreground_weight,
-        block_size=args.block_size,
     ).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scaler = build_grad_scaler(device, args.mixed_precision)

@@ -26,7 +26,6 @@ Useful knobs:
 - `--lambda_rgb`: visible-RGB UV reconstruction weight.
 - `--lambda_alpha`: alpha reconstruction weight.
 - `--lambda_render`: differentiable render consistency weight.
-- `--lambda_block_flatness`: optional pixel-art flatness prior.
 - `--include_alpha`: also feed render alpha channels to the model.
 
 ## Infer
