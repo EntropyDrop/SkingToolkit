@@ -53,9 +53,49 @@ SkingToolkit/
     └── run_foreground_alpha_infer.sh   # Inference script for foreground_alpha
 ```
 
-`inverse_uv/` is a separate supervised inverse-mapping pipeline. It reuses the
-same renderer and GT skin normalization utilities, but keeps its dataset/model
-losses/train script isolated from the Flux/LoRA training path.
+## 🧩 Subproject Deep Dive
+
+SkingToolkit houses three main subprojects, each designed for a specific part of the Minecraft skin generation and reconstruction lifecycle:
+
+### 1. 🎨 `img2skin` (Flux2/Klein Model Fine-Tuning)
+This subproject is the core of the toolkit. It fine-tunes the **Flux2Klein** Minecraft Skin Generator model by linking it directly with a 3D Differentiable Renderer.
+
+* **Key Concept**: Gradients from visual rendering differences (e.g., comparing 3D character views of the generated skin vs ground truth) flow backwards through the VAE decoder directly into the Flux model weights.
+* **Core Workflow**:
+  1. Caches prompt text embeddings from system memory and unloads Qwen text encoders to save ~8GB VRAM.
+  2. Runs Phase 1 (Latent Warmup) optimizing Flow Matching Latent MSE.
+  3. Runs Phase 2 (Differentiable Rendering) to decode estimated latents to RGBA skin textures, render 3D views, and calculate foreground-weighted pixel MSE + LPIPS losses.
+* **How to Run**:
+  * **Test Setup**: `python SkingToolkit/img2skin/test_toolkit_setup.py` (runs mock setup and fits a learnable skin in 10 steps).
+  * **Train**: `bash SkingToolkit/img2skin/run_img2skin_training.sh`
+
+---
+
+### 2. 📐 `inverse_uv` (Supervised Render-to-UV Reconstruction)
+A supervised deep learning pipeline designed to map 2D multi-view renders back into flat `64x64` RGBA Minecraft skin layouts.
+
+* **Key Concept**: Instead of forcing the model to learn long-distance pixel translation from 2D images to 64x64 flat sheets, it uses Differentiable Renderer camera coordinates to **unproject** the renders into an aligned UV canvas. A U-Net then fills/inpaints the unprojected UV canvas to output the clean skin texture.
+* **Core Workflow**:
+  1. Unprojects views into a unified UV canvas.
+  2. Feeds unprojected inputs into a supervised `InverseUVNet` architecture.
+  3. Minimizes visible RGB reconstruction loss, alpha reconstruction loss, and UV-space edge alignment losses.
+* **How to Run**:
+  * **Train**: `python SkingToolkit/inverse_uv/train.py --data_dir /path/to/skins --output_dir runs/inverse_uv_run` (or launch via `bash SkingToolkit/inverse_uv/run_inverse_uv_training.sh`).
+  * **Inference**: `bash SkingToolkit/inverse_uv/run_inverse_uv_infer.sh`
+
+---
+
+### 3. 🖼️ `foreground_alpha` (RGB to RGBA Foreground Alpha Extraction)
+A specialized segmentation network to isolate character pixels from production backgrounds.
+
+* **Key Concept**: Converts standard 3-channel RGB Minecraft renders (with solid backgrounds) into clean 4-channel RGBA renders by predicting the foreground alpha mask. This is critical for `inverse_uv` to reconstruct clean skins from renders with solid backgrounds.
+* **Core Workflow**:
+  1. Composites character renders over random solid RGB backgrounds during training.
+  2. Trains a `ForegroundAlphaNet` (U-Net style segmenter) using Binary Cross-Entropy (BCE), Dice, and L1 edge alignment losses.
+  3. Predicts alpha masks and optionally runs "uncomposition" to recover clean anti-aliased edge RGB colors from the background.
+* **How to Run**:
+  * **Train**: `bash SkingToolkit/foreground_alpha/run_foreground_alpha_training.sh`
+  * **Inference**: `bash SkingToolkit/foreground_alpha/run_foreground_alpha_infer.sh`
 
 ---
 
