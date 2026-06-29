@@ -28,7 +28,6 @@
 SkingToolkit/
 ├── README.md              # Technical documentation & guide
 ├── renderer.py            # Common Differentiable Renderer using PyTorch grid mapping
-├── dataset.py             # Common utilities: Alex-to-Steve & Voxel resolver
 ├── img2skin/              # Subproject 1: Flux2/Klein model & fine-tuning
 │   ├── flux2_src/         # Custom Flux2/Klein model modules
 │   ├── dataset.py         # MinecraftSkinDataset wrapper for Flux2 target packing
