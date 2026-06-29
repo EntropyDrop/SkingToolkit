@@ -2,6 +2,21 @@ import torch
 import numpy as np
 from PIL import Image
 import os
+import sys
+from pathlib import Path
+
+# Inject workspace root into sys.path to allow absolute imports
+TOOLKIT_ROOT = Path(__file__).resolve().parents[1]
+WORKSPACE_ROOT = TOOLKIT_ROOT.parent
+if str(WORKSPACE_ROOT) not in sys.path:
+    sys.path.insert(0, str(WORKSPACE_ROOT))
+
+# Also add the script's directory so that local imports like `import dataset` work
+# even when run with different sys.path settings
+SCRIPT_DIR = str(Path(__file__).resolve().parent)
+if SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, SCRIPT_DIR)
+
 from dataset import MinecraftSkinDataset
 
 def main():

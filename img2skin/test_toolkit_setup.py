@@ -4,10 +4,25 @@ import torch.nn as nn
 import torch.optim as optim
 from PIL import Image
 
+import sys
+from pathlib import Path
+
+# Inject workspace root into sys.path to allow absolute imports
+TOOLKIT_ROOT = Path(__file__).resolve().parents[1]
+WORKSPACE_ROOT = TOOLKIT_ROOT.parent
+if str(WORKSPACE_ROOT) not in sys.path:
+    sys.path.insert(0, str(WORKSPACE_ROOT))
+
+# Also add the script's directory so that local imports like `import dataset` work
+# even when run with different sys.path settings
+SCRIPT_DIR = str(Path(__file__).resolve().parent)
+if SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, SCRIPT_DIR)
+
 # Import local modules
 from dataset import MinecraftSkinDataset
-from renderer import DifferentiableRenderer
 from loss import MinecraftLoss
+from SkingToolkit.renderer import DifferentiableRenderer
 
 def run_verification():
     print("==========================================================")
@@ -16,9 +31,13 @@ def run_verification():
     
     # 1. Resolve local paths
     current_dir = os.path.dirname(os.path.abspath(__file__))
-    workspace_dir = os.path.abspath(os.path.join(current_dir, ".."))
+    # TOOLKIT_ROOT is the SkingToolkit directory
+    toolkit_dir = os.path.dirname(current_dir)
+    workspace_dir = os.path.dirname(toolkit_dir)
     
     data_dir = os.path.join(workspace_dir, "SkingDataset", "skins")
+    if not os.path.exists(data_dir):
+        data_dir = os.path.join(workspace_dir, "Sking", "skins")
     mappings_dir = os.path.join(workspace_dir, "differentiable_minecraft_renderer", "mappings")
     
     print(f"[*] Dataset skins path: {data_dir}")

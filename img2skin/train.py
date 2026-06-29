@@ -9,6 +9,21 @@ from accelerate import Accelerator
 from tqdm.auto import tqdm
 from PIL import Image
 
+import sys
+from pathlib import Path
+
+# Inject workspace root into sys.path to allow absolute imports
+TOOLKIT_ROOT = Path(__file__).resolve().parents[1]
+WORKSPACE_ROOT = TOOLKIT_ROOT.parent
+if str(WORKSPACE_ROOT) not in sys.path:
+    sys.path.insert(0, str(WORKSPACE_ROOT))
+
+# Also add the script's directory so that local imports like `import dataset` work
+# even when run with different sys.path settings
+SCRIPT_DIR = str(Path(__file__).resolve().parent)
+if SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, SCRIPT_DIR)
+
 # Import local modules
 from dataset import MinecraftSkinDataset
 from loss import MinecraftLoss
@@ -654,7 +669,6 @@ def main():
     all_prompts.add("")
                         
     # Encode them
-    from tqdm import tqdm
     for p in tqdm(all_prompts, desc="Encoding Prompts", disable=not accelerator.is_local_main_process):
         with torch.no_grad():
             pe, ppe = encode_prompt_qwen(tokenizer1, text_encoder1, [p], device)

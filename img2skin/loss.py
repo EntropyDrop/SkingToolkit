@@ -1,11 +1,18 @@
 import os
+import sys
+from pathlib import Path
+
+# Inject workspace root into sys.path to allow absolute imports
+TOOLKIT_ROOT = Path(__file__).resolve().parents[1]
+WORKSPACE_ROOT = TOOLKIT_ROOT.parent
+if str(WORKSPACE_ROOT) not in sys.path:
+    sys.path.insert(0, str(WORKSPACE_ROOT))
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-try:
-    from renderer import DifferentiableRenderer
-except ImportError:
-    from .renderer import DifferentiableRenderer
+
+from SkingToolkit.renderer import DifferentiableRenderer
 
 class MinecraftLoss(nn.Module):
     def __init__(

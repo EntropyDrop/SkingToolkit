@@ -57,7 +57,7 @@ echo "Views for loss:    $VIEWS"
 echo "=========================================================="
 
 # Run the training script via Hugging Face Accelerate or Python directly
-accelerate launch train.py \
+accelerate launch img2skin/train.py \
     --model_path "$MODEL_PATH" \
     --text_encoder_path "$TEXT_ENCODER_PATH" \
     --data_dir "$DATA_DIR" \

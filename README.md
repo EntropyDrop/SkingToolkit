@@ -27,18 +27,22 @@
 ```bash
 SkingToolkit/
 ├── README.md              # Technical documentation & guide
-├── flux2_src/             # Localized custom Flux2/Klein model package
-│   ├── __init__.py
-│   ├── model.py
-│   ├── autoencoder.py
-│   └── sampling.py
-├── renderer.py            # Differentiable Renderer using PyTorch grid mapping
-├── loss.py                # Multi-view MSE & LPIPS foreground-weighted losses
-├── dataset.py             # MinecraftSkinDataset, Alex-Steve, & Voxel resolver
-├── train.py               # Core training execution loop & backprop pipeline
-├── inverse_uv/            # Supervised fixed-view render -> 64x64 UV training
-├── test_toolkit_setup.py  # Local self-contained math/setup verification script
-└── run_training.sh        # Shell launcher configured for Flux2Klein4B
+├── renderer.py            # Common Differentiable Renderer using PyTorch grid mapping
+├── dataset.py             # Common utilities: Alex-to-Steve & Voxel resolver
+├── img2skin/              # Subproject 1: Flux2/Klein model & fine-tuning
+│   ├── flux2_src/         # Custom Flux2/Klein model modules
+│   ├── dataset.py         # MinecraftSkinDataset wrapper for Flux2 target packing
+│   ├── loss.py            # MinecraftLoss combines UV and multi-view MSE/LPIPS
+│   ├── train.py           # Differentiable fine-tuning script
+│   ├── export_debug_target.py # Debug tool for target canvas outputs
+│   └── test_toolkit_setup.py  # Local mathematical setup verification test
+├── inverse_uv/            # Subproject 2: Supervised fixed-view render -> 64x64 UV training
+├── foreground_alpha/      # Subproject 3: Foreground alpha extraction training utilities
+├── run_img2skin_training.sh        # Shell launcher for img2skin fine-tuning
+├── run_inverse_uv_training.sh      # Shell launcher for inverse_uv training
+├── run_inverse_uv_infer_test.sh    # Test inference script for inverse_uv
+├── run_foreground_alpha_training.sh # Shell launcher for foreground_alpha training
+└── run_foreground_alpha_infer.sh   # Inference script for foreground_alpha
 ```
 
 `inverse_uv/` is a separate supervised inverse-mapping pipeline. It reuses the
@@ -61,7 +65,7 @@ pip install torch torchvision diffusers transformers accelerate peft einops tqdm
 ### 2. Verify Setup
 Run the self-contained setup test script to mathematically prove that gradients flow correctly through the VAE and Renderer back to the model:
 ```bash
-python SkingToolkit/test_toolkit_setup.py
+python SkingToolkit/img2skin/test_toolkit_setup.py
 ```
 This script will mock a small dataset batch, compile views, run a 10-step mock backpropagation fitting, and display the gradient norm.
 
@@ -69,9 +73,9 @@ This script will mock a small dataset batch, compile views, run a 10-step mock b
 
 ## 🏋️ How to Train
 
-Use [run_training.sh](run_training.sh) to quickly configure parameters and launch training:
+Use [run_img2skin_training.sh](run_img2skin_training.sh) to quickly configure parameters and launch training:
 ```bash
-bash SkingToolkit/run_training.sh
+bash SkingToolkit/run_img2skin_training.sh
 ```
 
 ### Script Configuration Parameters
