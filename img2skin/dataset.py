@@ -14,8 +14,9 @@ import torch
 from torch.utils.data import Dataset
 import torchvision.transforms as transforms
 
-# Import common utilities from the root dataset
-from SkingToolkit.dataset import alice_to_steve, resolve_voxel_consistency
+# Import common utilities from the mc_skin_utils library
+from mc_skin_utils.alice_to_steve import alice_to_steve
+from mc_skin_utils.mc_voxel_texture_resolver import resolve_voxel_consistency
 
 class MinecraftSkinDataset(Dataset):
     def __init__(

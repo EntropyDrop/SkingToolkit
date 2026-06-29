@@ -13,7 +13,8 @@ WORKSPACE_ROOT = TOOLKIT_ROOT.parent
 if str(WORKSPACE_ROOT) not in sys.path:
     sys.path.insert(0, str(WORKSPACE_ROOT))
 
-from SkingToolkit.dataset import alice_to_steve, resolve_voxel_consistency  # noqa: E402
+from mc_skin_utils.alice_to_steve import alice_to_steve  # noqa: E402
+from mc_skin_utils.mc_voxel_texture_resolver import resolve_voxel_consistency  # noqa: E402
 from SkingToolkit.renderer import DifferentiableRenderer  # noqa: E402
 
 
