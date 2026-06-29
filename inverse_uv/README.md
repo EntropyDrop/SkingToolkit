@@ -6,11 +6,36 @@ This module trains a supervised inpainting model for:
 fixed-view render images -> unprojected UV conditioning -> original 64x64 RGBA Minecraft skin UV
 ```
 
-It is intentionally separate from the existing Flux/LoRA training path. The main
-supervision is GT UV reconstruction; differentiable render consistency and a
-light edge loss are auxiliary terms. Renderer mappings are used to unproject
-each view into aligned UV space before the U-Net sees the sample, so the model
-learns UV-space inpainting instead of long-distance render-to-UV pixel moves.
+It is intentionally separate from the existing Flux/LoRA training path.
+
+---
+
+## 🧬 Working Principles & Core Architecture
+
+Reconstructing a flat 64x64 Minecraft skin layout from 2D camera renders is a difficult spatial mapping problem. Standard Convolutional Neural Networks (CNNs) struggle to map pixels over long coordinate distances (e.g., from the side of a character's arm in a render to its exact coordinate on a flat 64x64 texture map). 
+
+To solve this, `inverse_uv` utilizes coordinate-guided unprojection combined with UV-space inpainting:
+
+### 1. Coordinate-Guided Unprojection
+Instead of learning the render-to-sheet translation from scratch, the system utilizes camera mapping files (`*.pt`) from the `DifferentiableRenderer`. 
+* Each camera view has a matching coordinate grid that details exactly where each pixel in the 2D render maps onto the 64x64 flat UV canvas.
+* Before feeding the views into the neural network, the dataset script uses these coordinates to **unproject** the multi-view renders into a combined 64x64 UV conditioning tensor (with layers for inner, outer, and known masks).
+* This shifts the network's objective from *complex coordinate translation* to *UV-space image inpainting/denoising*, which U-Nets are highly suited for.
+
+### 2. Network Architecture (`InverseUVNet`)
+* The model is a custom 2D U-Net-like segmentation network.
+* **Encoder**: Consists of a Conv Stem followed by 3 Down-sampling blocks. Each down-block uses Group Normalization (dynamically selecting groups based on channels) and SiLU activations.
+* **Decoder**: Features 3 Up-sampling blocks with bilinear interpolation and skip connections from the encoder to retain high-frequency textures.
+* **Output Head**: Predicts a 4-channel (RGBA) flat skin in `[0, 1]` using a Sigmoid activation.
+
+### 3. Multi-Term Loss Formulation (`InverseUVLoss`)
+To guarantee both flat UV accuracy and visual rendering consistency, training optimizes a weighted sum of four loss terms:
+1. **Alpha-Masked RGB L1 Loss (`loss_rgb`)**: Supervises RGB reconstruction strictly on valid skin UV regions, ignoring empty padding.
+2. **Alpha Binary Cross-Entropy (`loss_alpha`)**: Supervises the transparency layout (sigmoidal BCE).
+3. **Differentiable Render Consistency L1 Loss (`loss_render`)**: Passively runs the predicted 64x64 skin through the `DifferentiableRenderer` to generate 2D camera views, comparing them against the ground truth renders. This forces the network to resolve overlapping texture layers correctly.
+4. **UV-Space Edge L1 Loss (`loss_edge`)**: Computes L1 difference between the gradients (x and y directions) of predicted vs ground truth skins to enforce sharp pixel boundaries.
+
+---
 
 ## Train
 
