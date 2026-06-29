@@ -104,24 +104,30 @@ A specialized segmentation network to isolate character pixels from production b
 Before running training, verify the installation, coordinate mappings, and gradient backpropagation math on your machine.
 
 ### 1. Requirements
-Install necessary dependencies:
+Install necessary dependencies for the entire toolkit:
 ```bash
 pip install torch torchvision diffusers transformers accelerate peft einops tqdm pillow numpy
 ```
-*Note: To run perceptual losses, optionally install `lpips` (`pip install lpips`).*
+*Note: To run perceptual losses for `img2skin`, optionally install `lpips` (`pip install lpips`).*
 
-### 2. Verify Setup
+### 2. Verify `img2skin` Setup
 Run the self-contained setup test script to mathematically prove that gradients flow correctly through the VAE and Renderer back to the model:
 ```bash
 python SkingToolkit/img2skin/test_toolkit_setup.py
 ```
 This script will mock a small dataset batch, compile views, run a 10-step mock backpropagation fitting, and display the gradient norm.
 
+### 3. Verify `inverse_uv` and `foreground_alpha` Setup
+These models require dataset preparation. Refer to their localized documentation for dataset specs:
+- **`inverse_uv`**: Needs flat ground truth skin textures (see [inverse_uv/README.md](inverse_uv/README.md)).
+- **`foreground_alpha`**: Needs ground truth skin textures to generate custom 3D renders (see [foreground_alpha/README.md](foreground_alpha/README.md)).
+You can run a dry-run check by launching their training scripts with `--epochs 1` to verify they compile and load on your environment.
+
 ---
 
-## 🏋️ How to Train
+## 🏋️ How to Train (img2skin)
 
-Use [run_img2skin_training.sh](img2skin/run_img2skin_training.sh) to quickly configure parameters and launch training:
+Use [run_img2skin_training.sh](img2skin/run_img2skin_training.sh) to quickly configure parameters and launch Flux2/Klein fine-tuning:
 ```bash
 bash SkingToolkit/img2skin/run_img2skin_training.sh
 ```
@@ -149,7 +155,38 @@ bash SkingToolkit/img2skin/run_img2skin_training.sh
 
 ---
 
-## 💡 Training Tips & Loss Scaling
+## 🏋️ How to Train (inverse_uv)
+
+Use the launcher script in the `inverse_uv` directory to train the supervised Render-to-UV mapping model:
+```bash
+bash SkingToolkit/inverse_uv/run_inverse_uv_training.sh
+```
+
+Key arguments in the script:
+* `--data_dir`: Directory containing ground truth 64x64 skins.
+* `--views`: Views to train UV unprojection on.
+* `--lambda_rgb`, `--lambda_alpha`, `--lambda_render`, `--lambda_edge`: Loss balance weights.
+
+For full parameter details, see [inverse_uv/README.md](inverse_uv/README.md).
+
+---
+
+## 🏋️ How to Train (foreground_alpha)
+
+Use the launcher script in the `foreground_alpha` directory to train the foreground alpha segmentation model:
+```bash
+bash SkingToolkit/foreground_alpha/run_foreground_alpha_training.sh
+```
+
+Key arguments in the script:
+* `--data_dir`: Directory containing skins to generate simulated renders.
+* `--background_mode`: Background style to overlay characters (e.g. `random` or solid color).
+
+For full parameter details, see [foreground_alpha/README.md](foreground_alpha/README.md).
+
+---
+
+## 💡 Training Tips & Loss Scaling (img2skin)
 
 Because **Latent MSE** is calculated on flow-matching noise velocities (which have a large variance and magnitude, e.g., ~0.1 - 0.5), while **UV/Render MSE** are calculated on normalized pixel arrays in `[0, 1]` (resulting in extremely small absolute squared errors like ~0.001), you must scale up the auxiliary losses significantly to make them affect the gradients.
 
@@ -159,7 +196,7 @@ Because **Latent MSE** is calculated on flow-matching noise velocities (which ha
 
 ---
 
-## 🛤️ The Full Training Workflow Explained
+## 🛤️ The Full Training Workflow Explained (img2skin)
 
 Understanding the lifecycle of a training run helps in debugging and parameter tuning. Here is exactly what happens when you execute `run_img2skin_training.sh`:
 
@@ -185,7 +222,7 @@ Every `VALIDATION_STEPS`, the model pauses training to sample images from pure n
 
 ---
 
-## 🧬 Differentiable rendering workflow
+## 🧬 Differentiable rendering workflow (img2skin)
 
 ```mermaid
 graph TD
