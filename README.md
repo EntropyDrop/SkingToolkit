@@ -34,14 +34,23 @@ SkingToolkit/
 │   ├── loss.py            # MinecraftLoss combines UV and multi-view MSE/LPIPS
 │   ├── train.py           # Differentiable fine-tuning script
 │   ├── export_debug_target.py # Debug tool for target canvas outputs
-│   └── test_toolkit_setup.py  # Local mathematical setup verification test
+│   ├── test_toolkit_setup.py  # Local mathematical setup verification test
+│   └── run_img2skin_training.sh # Shell launcher for img2skin fine-tuning
 ├── inverse_uv/            # Subproject 2: Supervised fixed-view render -> 64x64 UV training
-├── foreground_alpha/      # Subproject 3: Foreground alpha extraction training utilities
-├── run_img2skin_training.sh        # Shell launcher for img2skin fine-tuning
-├── run_inverse_uv_training.sh      # Shell launcher for inverse_uv training
-├── run_inverse_uv_infer_test.sh    # Test inference script for inverse_uv
-├── run_foreground_alpha_training.sh # Shell launcher for foreground_alpha training
-└── run_foreground_alpha_infer.sh   # Inference script for foreground_alpha
+│   ├── dataset.py
+│   ├── model.py
+│   ├── losses.py
+│   ├── train.py
+│   ├── infer.py
+│   ├── run_inverse_uv_training.sh # Shell launcher for inverse_uv training
+│   └── run_inverse_uv_infer.sh    # Test inference script for inverse_uv
+└── foreground_alpha/      # Subproject 3: Foreground alpha extraction training utilities
+    ├── dataset.py
+    ├── model.py
+    ├── train.py
+    ├── infer.py
+    ├── run_foreground_alpha_training.sh # Shell launcher for foreground_alpha training
+    └── run_foreground_alpha_infer.sh   # Inference script for foreground_alpha
 ```
 
 `inverse_uv/` is a separate supervised inverse-mapping pipeline. It reuses the
@@ -72,9 +81,9 @@ This script will mock a small dataset batch, compile views, run a 10-step mock b
 
 ## 🏋️ How to Train
 
-Use [run_img2skin_training.sh](run_img2skin_training.sh) to quickly configure parameters and launch training:
+Use [run_img2skin_training.sh](img2skin/run_img2skin_training.sh) to quickly configure parameters and launch training:
 ```bash
-bash SkingToolkit/run_img2skin_training.sh
+bash SkingToolkit/img2skin/run_img2skin_training.sh
 ```
 
 ### Script Configuration Parameters
@@ -104,7 +113,7 @@ bash SkingToolkit/run_img2skin_training.sh
 
 Because **Latent MSE** is calculated on flow-matching noise velocities (which have a large variance and magnitude, e.g., ~0.1 - 0.5), while **UV/Render MSE** are calculated on normalized pixel arrays in `[0, 1]` (resulting in extremely small absolute squared errors like ~0.001), you must scale up the auxiliary losses significantly to make them affect the gradients.
 
-* **Scale Up Lambdas:** We highly recommend setting `LAMBDA_UV=20.0` and `LAMBDA_RENDER=50.0` in your `run_training.sh` script to force the optimizer to respect the 3D structure.
+* **Scale Up Lambdas:** We highly recommend setting `LAMBDA_UV=20.0` and `LAMBDA_RENDER=50.0` in your `run_img2skin_training.sh` script to force the optimizer to respect the 3D structure.
 * **Progress Bar Display:** The real-time progress bar logs display the **raw, unscaled** MSE values. Therefore, seeing `UV MSE=0.0008` during training is completely normal and healthy; the scaling multiplier is applied automatically in the backend gradients.
 * **LPIPS for Texture:** Standard MSE loss often produces blurry or overly smooth textures. Setting `LAMBDA_LPIPS=0.5` significantly sharpens the pixel art grain and fabric folds.
 
@@ -112,7 +121,7 @@ Because **Latent MSE** is calculated on flow-matching noise velocities (which ha
 
 ## 🛤️ The Full Training Workflow Explained
 
-Understanding the lifecycle of a training run helps in debugging and parameter tuning. Here is exactly what happens when you execute `run_training.sh`:
+Understanding the lifecycle of a training run helps in debugging and parameter tuning. Here is exactly what happens when you execute `run_img2skin_training.sh`:
 
 ### 1. Initialization & VRAM Purge
 The dataset script initializes by scanning your `skins` folder. If it detects any 3-pixel arm (Alex) skins, it dynamically converts them to standard 4-pixel arm (Steve) format to ensure geometric consistency. 
