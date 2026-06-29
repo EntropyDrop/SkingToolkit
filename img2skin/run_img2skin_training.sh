@@ -4,12 +4,12 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-MODEL_PATH="../black-forest-labs/FLUX.2-klein-base-4B"  # Path containing Flux2Klein weights (e.g. flux-2-klein-base-4b.safetensors and VAE)
-TEXT_ENCODER_PATH="../Qwen/Qwen3-4B" # Path to Qwen text encoder model
-DATA_DIR="../SkingDataset/skins"
-PHOTOS_DIR="../SkingDataset/control_imgs"
-OUTPUT_DIR="output/flux_skin_lora"
-VALIDATION_PHOTOS_DIR="../SkingValidation" # 测试验证图根目录（包含 front/ 和 back/）
+MODEL_PATH="../../black-forest-labs/FLUX.2-klein-base-4B"  # Path containing Flux2Klein weights (e.g. flux-2-klein-base-4b.safetensors and VAE)
+TEXT_ENCODER_PATH="../../Qwen/Qwen3-4B" # Path to Qwen text encoder model
+DATA_DIR="../../SkingDataset/skins"
+PHOTOS_DIR="../../SkingDataset/control_imgs"
+OUTPUT_DIR="./output/flux_skin_lora"
+VALIDATION_PHOTOS_DIR="../../SkingValidation" # 测试验证图根目录（包含 front/ 和 back/）
 VALIDATION_STEPS=100
 
 # Hyperparameters
@@ -36,7 +36,7 @@ LORA_LINEAR_ALPHA=32
 LORA_CONV_RANK=16
 LORA_CONV_ALPHA=16
 
-MAPPINGS_DIR="../github/differentiable_minecraft_renderer/mappings"
+MAPPINGS_DIR="../../github/differentiable_minecraft_renderer/mappings"
 
 # Print info
 echo "=========================================================="
