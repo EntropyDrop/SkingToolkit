@@ -16,7 +16,6 @@ import torchvision.transforms as transforms
 
 # Import common utilities from the mc_skin_utils library
 from mc_skin_utils.alice_to_steve import alice_to_steve
-from mc_skin_utils.mc_voxel_texture_resolver import resolve_voxel_consistency
 
 class MinecraftSkinDataset(Dataset):
     def __init__(
@@ -81,9 +80,6 @@ class MinecraftSkinDataset(Dataset):
         if is_slim:
             skin = alice_to_steve(skin)
             
-        # Resolve transparent voxel edge consistency
-        skin = resolve_voxel_consistency(skin)
-        
         # Opaque conversion check (standardizes all alpha channel to fully opaque or transparent)
         skin_np = np.array(skin)
         alpha = skin_np[..., 3]

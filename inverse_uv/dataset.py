@@ -14,7 +14,6 @@ if str(WORKSPACE_ROOT) not in sys.path:
     sys.path.insert(0, str(WORKSPACE_ROOT))
 
 from mc_skin_utils.alice_to_steve import alice_to_steve  # noqa: E402
-from mc_skin_utils.mc_voxel_texture_resolver import resolve_voxel_consistency  # noqa: E402
 from SkingToolkit.renderer import DifferentiableRenderer  # noqa: E402
 
 
@@ -34,8 +33,6 @@ def load_skin(path, bg_color=(128, 128, 128), normalize_model=True):
     skin = Image.open(path).convert("RGBA")
     if normalize_model and skin.getpixel((47, 52))[3] == 0:
         skin = alice_to_steve(skin)
-    if normalize_model:
-        skin = resolve_voxel_consistency(skin)
 
     skin_np = np.array(skin, dtype=np.uint8)
     alpha_np = skin_np[..., 3]

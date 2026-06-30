@@ -159,7 +159,7 @@ def build_arg_parser():
     parser.add_argument(
         "--covered_inner_alpha_threshold",
         type=float,
-        default=0.5,
+        default=0.1,
         help="GT outer-layer alpha threshold used to ignore matching covered inner-layer UV texels.",
     )
     parser.add_argument("--save_every", type=int, default=1)
