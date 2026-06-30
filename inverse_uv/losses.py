@@ -32,9 +32,111 @@ def alpha_masked_rgb_l1(pred_uv, gt_uv, uv_mask=None):
 
 
 def alpha_bce(pred_uv, gt_uv, uv_mask=None):
-    _ = uv_mask
     pred_alpha = pred_uv[:, 3:4].clamp(1e-4, 1.0 - 1e-4)
-    return F.binary_cross_entropy(pred_alpha, gt_uv[:, 3:4])
+    loss = F.binary_cross_entropy(pred_alpha, gt_uv[:, 3:4], reduction="none")
+    if uv_mask is None:
+        return loss.mean()
+
+    uv_mask = uv_mask.to(device=loss.device, dtype=loss.dtype)
+    if uv_mask.shape != loss.shape:
+        uv_mask = uv_mask.expand_as(loss)
+    denom = uv_mask.sum(dim=(1, 2, 3)).clamp_min(1.0)
+    return ((loss * uv_mask).sum(dim=(1, 2, 3)) / denom).mean()
+
+
+def minecraft_layer_rects(is_slim=False):
+    arm_width = 3 if is_slim else 4
+    slim_shift = 1 if is_slim else 0
+    parts = [
+        (
+            [
+                ((8, 8), (8, 8)),
+                ((8, 8), (24, 8)),
+                ((8, 8), (16, 8)),
+                ((8, 8), (0, 8)),
+                ((8, 8), (8, 0)),
+                ((8, 8), (16, 0)),
+            ],
+            (32, 0),
+        ),
+        (
+            [
+                ((8, 12), (20, 20)),
+                ((8, 12), (32, 20)),
+                ((4, 12), (28, 20)),
+                ((4, 12), (16, 20)),
+                ((8, 4), (20, 16)),
+                ((8, 4), (28, 16)),
+            ],
+            (0, 16),
+        ),
+        (
+            [
+                ((arm_width, 12), (36, 52)),
+                ((arm_width, 12), (44 - slim_shift, 52)),
+                ((4, 12), (40 - slim_shift, 52)),
+                ((4, 12), (32, 52)),
+                ((arm_width, 4), (36, 48)),
+                ((arm_width, 4), (40 - slim_shift, 48)),
+            ],
+            (16, 0),
+        ),
+        (
+            [
+                ((arm_width, 12), (44, 20)),
+                ((arm_width, 12), (52 - slim_shift, 20)),
+                ((4, 12), (48 - slim_shift, 20)),
+                ((4, 12), (40, 20)),
+                ((arm_width, 4), (44, 16)),
+                ((arm_width, 4), (48 - slim_shift, 16)),
+            ],
+            (0, 16),
+        ),
+        (
+            [
+                ((4, 12), (20, 52)),
+                ((4, 12), (28, 52)),
+                ((4, 12), (24, 52)),
+                ((4, 12), (16, 52)),
+                ((4, 4), (20, 48)),
+                ((4, 4), (24, 48)),
+            ],
+            (-16, 0),
+        ),
+        (
+            [
+                ((4, 12), (4, 20)),
+                ((4, 12), (12, 20)),
+                ((4, 12), (8, 20)),
+                ((4, 12), (0, 20)),
+                ((4, 4), (4, 16)),
+                ((4, 4), (8, 16)),
+            ],
+            (0, 16),
+        ),
+    ]
+
+    rects = []
+    for faces, decor_offset in parts:
+        for (width, height), (inner_x, inner_y) in faces:
+            rects.append((inner_x, inner_y, width, height, decor_offset[0], decor_offset[1]))
+    return rects
+
+
+def covered_inner_mask(gt_uv, rects, alpha_threshold=0.5):
+    outer_alpha = gt_uv[:, 3:4].detach()
+    covered = gt_uv.new_zeros((gt_uv.shape[0], 1, gt_uv.shape[2], gt_uv.shape[3]))
+
+    for inner_x, inner_y, width, height, decor_dx, decor_dy in rects:
+        outer_x = inner_x + decor_dx
+        outer_y = inner_y + decor_dy
+        outer_visible = outer_alpha[:, :, outer_y : outer_y + height, outer_x : outer_x + width] > alpha_threshold
+        inner_slice = covered[:, :, inner_y : inner_y + height, inner_x : inner_x + width]
+        covered[:, :, inner_y : inner_y + height, inner_x : inner_x + width] = torch.maximum(
+            inner_slice,
+            outer_visible.to(dtype=covered.dtype),
+        )
+    return covered
 
 
 def edge_l1(pred_uv, gt_uv, uv_mask=None):
@@ -66,6 +168,8 @@ class InverseUVLoss(nn.Module):
         lambda_render=0.1,
         lambda_edge=0.25,
         render_foreground_weight=1.0,
+        ignore_covered_inner=True,
+        covered_inner_alpha_threshold=0.1,
     ):
         super().__init__()
         self.lambda_rgb = lambda_rgb
@@ -73,6 +177,9 @@ class InverseUVLoss(nn.Module):
         self.lambda_render = lambda_render
         self.lambda_edge = lambda_edge
         self.render_foreground_weight = render_foreground_weight
+        self.ignore_covered_inner = ignore_covered_inner
+        self.covered_inner_alpha_threshold = covered_inner_alpha_threshold
+        self.covered_inner_rects = minecraft_layer_rects(is_slim=False)
 
         self.renderer = DifferentiableRenderer(mappings_dir=mappings_dir, bg_color=bg_color)
         self.views = parse_views(views)
@@ -117,6 +224,13 @@ class InverseUVLoss(nn.Module):
 
     def forward(self, pred_uv, gt_uv):
         uv_mask = getattr(self, "uv_mask", None)
+        if self.ignore_covered_inner:
+            supervised_inner_mask = 1.0 - covered_inner_mask(
+                gt_uv,
+                self.covered_inner_rects,
+                alpha_threshold=self.covered_inner_alpha_threshold,
+            )
+            uv_mask = supervised_inner_mask if uv_mask is None else uv_mask * supervised_inner_mask
         loss_rgb = alpha_masked_rgb_l1(pred_uv, gt_uv, uv_mask)
         loss_alpha = alpha_bce(pred_uv, gt_uv, uv_mask)
         loss_render = self.render_loss(pred_uv, gt_uv)

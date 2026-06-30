@@ -151,6 +151,17 @@ def build_arg_parser():
     parser.add_argument("--lambda_render", type=float, default=0.1)
     parser.add_argument("--lambda_edge", type=float, default=0.25)
     parser.add_argument("--render_foreground_weight", type=float, default=1.0)
+    parser.add_argument(
+        "--supervise_covered_inner",
+        action="store_true",
+        help="Also supervise inner-layer UV texels hidden behind opaque matching outer-layer texels.",
+    )
+    parser.add_argument(
+        "--covered_inner_alpha_threshold",
+        type=float,
+        default=0.5,
+        help="GT outer-layer alpha threshold used to ignore matching covered inner-layer UV texels.",
+    )
     parser.add_argument("--save_every", type=int, default=1)
     parser.add_argument("--preview_every", type=int, default=1)
     parser.add_argument("--resume", default=None, help="Checkpoint path to resume from.")
@@ -213,6 +224,8 @@ def main():
         lambda_render=args.lambda_render,
         lambda_edge=args.lambda_edge,
         render_foreground_weight=args.render_foreground_weight,
+        ignore_covered_inner=not args.supervise_covered_inner,
+        covered_inner_alpha_threshold=args.covered_inner_alpha_threshold,
     ).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scaler = build_grad_scaler(device, args.mixed_precision)

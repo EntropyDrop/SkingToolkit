@@ -30,8 +30,8 @@ Instead of learning the render-to-sheet translation from scratch, the system uti
 
 ### 3. Multi-Term Loss Formulation (`InverseUVLoss`)
 To guarantee both flat UV accuracy and visual rendering consistency, training optimizes a weighted sum of four loss terms:
-1. **Alpha-Masked RGB L1 Loss (`loss_rgb`)**: Supervises RGB reconstruction strictly on valid skin UV regions, ignoring empty padding.
-2. **Alpha Binary Cross-Entropy (`loss_alpha`)**: Supervises the transparency layout (sigmoidal BCE).
+1. **Alpha-Masked RGB L1 Loss (`loss_rgb`)**: Supervises RGB reconstruction strictly on valid skin UV regions, ignoring empty padding and inner-layer texels hidden behind opaque matching outer-layer texels.
+2. **Alpha Binary Cross-Entropy (`loss_alpha`)**: Supervises the transparency layout (sigmoidal BCE) on the same visible UV supervision mask.
 3. **Differentiable Render Consistency L1 Loss (`loss_render`)**: Passively runs the predicted 64x64 skin through the `DifferentiableRenderer` to generate 2D camera views, comparing them against the ground truth renders. This forces the network to resolve overlapping texture layers correctly.
 4. **UV-Space Edge L1 Loss (`loss_edge`)**: Computes L1 difference between the gradients (x and y directions) of predicted vs ground truth skins to enforce sharp pixel boundaries.
 
@@ -54,6 +54,8 @@ Useful knobs:
 - `--lambda_alpha`: alpha reconstruction weight.
 - `--lambda_render`: differentiable render consistency weight.
 - `--lambda_edge`: UV-space edge reconstruction weight for sharper pixel boundaries.
+- `--supervise_covered_inner`: keep supervising inner-layer UV texels even when opaque matching outer-layer texels hide them.
+- `--covered_inner_alpha_threshold`: GT outer-layer alpha threshold used to decide covered inner texels.
 - `--render_size`: deprecated compatibility option; UV unprojection uses native mapping sizes.
 - `--include_alpha`: deprecated compatibility option; conditioning always uses RGBA plus masks.
 
