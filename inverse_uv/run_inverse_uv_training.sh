@@ -1,7 +1,7 @@
 python inverse_uv/train.py \
   --data_dir ./skins \
   --output_dir runs/inverse_uv_test12 \
-  --views walk_perspective_ortho,walk_perspective_back_ortho \
+  --views walk_front_both_layer_ortho,walk_back_both_layer_ortho \
   --batch_size 16 \
   --epochs 100 \
   --val_split 0.1 \

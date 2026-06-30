@@ -1,7 +1,7 @@
 python foreground_alpha/train.py \
   --data_dir ./skins \
   --output_dir runs/foreground_alpha_test1 \
-  --views walk_perspective_ortho,walk_perspective_back_ortho \
+  --views walk_front_both_layer_ortho,walk_back_both_layer_ortho \
   --mappings_dir ../github/differentiable_minecraft_renderer/mappings \
   --background_mode random \
   --batch_size 4 \

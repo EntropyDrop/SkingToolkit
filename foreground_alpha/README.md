@@ -49,7 +49,7 @@ From `SkingToolkit/`:
 python foreground_alpha/train.py \
   --data_dir ./skins \
   --output_dir runs/foreground_alpha_test1 \
-  --views walk_perspective_ortho,walk_perspective_back_ortho \
+  --views walk_front_both_layer_ortho,walk_back_both_layer_ortho \
   --mappings_dir ../differentiable_minecraft_renderer/mappings \
   --background_mode random \
   --batch_size 4 \
@@ -74,8 +74,8 @@ For one image:
 ```bash
 python foreground_alpha/infer.py \
   --checkpoint runs/foreground_alpha_test1/best.pt \
-  --input /path/walk_perspective_ortho_black.png \
-  --output /path/walk_perspective_ortho_rgba.png
+  --input /path/walk_front_both_layer_ortho_black.png \
+  --output /path/walk_front_both_layer_ortho_rgba.png
 ```
 
 For a known solid background, enable uncomposition to recover cleaner edge RGB:
@@ -83,8 +83,8 @@ For a known solid background, enable uncomposition to recover cleaner edge RGB:
 ```bash
 python foreground_alpha/infer.py \
   --checkpoint runs/foreground_alpha_test1/best.pt \
-  --input /path/walk_perspective_ortho_black.png \
-  --output /path/walk_perspective_ortho_rgba.png \
+  --input /path/walk_front_both_layer_ortho_black.png \
+  --output /path/walk_front_both_layer_ortho_rgba.png \
   --bg_color 0,0,0 \
   --uncompose
 ```

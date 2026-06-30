@@ -156,7 +156,7 @@ def build_arg_parser():
     parser.add_argument("--data_dir", required=True, help="Folder containing GT 64x64 RGBA skin PNGs.")
     parser.add_argument("--output_dir", default="foreground_alpha_runs/default")
     parser.add_argument("--mappings_dir", default=None)
-    parser.add_argument("--views", default="walk_perspective_ortho,walk_perspective_back_ortho")
+    parser.add_argument("--views", default="walk_front_both_layer_ortho,walk_back_both_layer_ortho")
     parser.add_argument("--background_mode", choices=["random", "black", "white", "gray", "color"], default="random")
     parser.add_argument("--bg_color", default="0,0,0", help="Used when --background_mode color.")
     parser.add_argument("--base_channels", type=int, default=32)

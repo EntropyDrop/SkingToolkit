@@ -56,7 +56,7 @@ class ForegroundAlphaDataset(Dataset):
         self,
         data_dir,
         mappings_dir=None,
-        views="walk_perspective_ortho,walk_perspective_back_ortho",
+        views="walk_front_both_layer_ortho,walk_back_both_layer_ortho",
         background_mode="random",
         bg_color=(0, 0, 0),
         max_samples=None,
