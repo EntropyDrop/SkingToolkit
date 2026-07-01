@@ -7,4 +7,8 @@ python train.py \
   --val_split 0.1 \
   --mappings_dir ../../github/differentiable_minecraft_renderer/mappings \
   --save_every 1 \
-  --preview_every 1
+  --preview_every 1 \
+  --augment \
+  --perspective_scale 0.01 \
+  --distortion_scale 0.005 \
+  --translation_scale 0.02

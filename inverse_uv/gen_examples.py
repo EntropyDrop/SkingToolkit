@@ -89,15 +89,15 @@ def main():
     img_orig = tensor.clone()
     
     # 2. Translation only (shift) 2%
-    aug_t1 = RenderAugmenter(perspective_scale=0.0, distortion_scale=0.0, translation_scale=0.02, bg_color=bg_color)
+    aug_t1 = RenderAugmenter(perspective_scale=0.01, distortion_scale=0.0, translation_scale=0.02, bg_color=bg_color)
     img_t1 = aug_t1(tensor.clone())
     
     # 3. Translation only (shift) 5%
-    aug_t2 = RenderAugmenter(perspective_scale=0.0, distortion_scale=0.0, translation_scale=0.05, bg_color=bg_color)
+    aug_t2 = RenderAugmenter(perspective_scale=0.0, distortion_scale=0.0, translation_scale=0.02, bg_color=bg_color)
     img_t2 = aug_t2(tensor.clone())
     
     # 4. Combined: distortion 0.02, perspective 0.03, translation 0.02
-    aug_comb = RenderAugmenter(perspective_scale=0.03, distortion_scale=0.02, translation_scale=0.02, bg_color=bg_color)
+    aug_comb = RenderAugmenter(perspective_scale=0.01, distortion_scale=0.005, translation_scale=0.02, bg_color=bg_color)
     img_comb = aug_comb(tensor.clone())
     
     # Combined side-by-side
