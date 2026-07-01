@@ -46,15 +46,74 @@ class UpBlock(nn.Module):
         return self.block(torch.cat([x, skip], dim=1))
 
 
+class CoordConv(nn.Module):
+    def forward(self, x):
+        batch, _, height, width = x.shape
+        y = torch.linspace(-1.0, 1.0, height, device=x.device, dtype=x.dtype)
+        x_coords = torch.linspace(-1.0, 1.0, width, device=x.device, dtype=x.dtype)
+        yy, xx = torch.meshgrid(y, x_coords, indexing="ij")
+        coords = torch.stack((xx, yy), dim=0).unsqueeze(0).expand(batch, -1, -1, -1)
+        return torch.cat((x, coords), dim=1)
+
+
+class SpatialSelfAttention(nn.Module):
+    def __init__(self, channels, heads=4):
+        super().__init__()
+        heads = min(heads, channels)
+        while channels % heads != 0 and heads > 1:
+            heads -= 1
+        self.heads = heads
+        self.head_dim = channels // heads
+        self.scale = self.head_dim ** -0.5
+        self.norm = nn.GroupNorm(norm_groups(channels), channels)
+        self.qkv = nn.Conv2d(channels, channels * 3, kernel_size=1)
+        self.proj = nn.Conv2d(channels, channels, kernel_size=1)
+        nn.init.zeros_(self.proj.weight)
+        nn.init.zeros_(self.proj.bias)
+
+    def forward(self, x):
+        batch, channels, height, width = x.shape
+        tokens = height * width
+        qkv = self.qkv(self.norm(x)).reshape(
+            batch,
+            3,
+            self.heads,
+            self.head_dim,
+            tokens,
+        )
+        q, k, v = qkv.unbind(dim=1)
+        q = q.transpose(-2, -1)
+        v = v.transpose(-2, -1)
+        attention = torch.matmul(q * self.scale, k).softmax(dim=-1)
+        out = torch.matmul(attention, v)
+        out = out.transpose(-2, -1).reshape(batch, channels, height, width)
+        return x + self.proj(out)
+
+
 class InverseUVNet(nn.Module):
-    def __init__(self, input_channels=10, base_channels=64, output_channels=4):
+    def __init__(
+        self,
+        input_channels=10,
+        base_channels=64,
+        output_channels=4,
+        use_coordconv=True,
+        use_attention=True,
+        attention_heads=4,
+    ):
         super().__init__()
         c = base_channels
-        self.stem = ConvBlock(input_channels, c)
+        self.use_coordconv = use_coordconv
+        self.use_attention = use_attention
+        self.coordconv = CoordConv() if use_coordconv else nn.Identity()
+        stem_channels = input_channels + (2 if use_coordconv else 0)
+        self.stem = ConvBlock(stem_channels, c)
         self.down1 = DownBlock(c, c * 2)
         self.down2 = DownBlock(c * 2, c * 4)
         self.down3 = DownBlock(c * 4, c * 8)
         self.mid = ConvBlock(c * 8, c * 8)
+        self.mid_attention = (
+            SpatialSelfAttention(c * 8, heads=attention_heads) if use_attention else nn.Identity()
+        )
         self.up2 = UpBlock(c * 8, c * 4, c * 4)
         self.up1 = UpBlock(c * 4, c * 2, c * 2)
         self.up0 = UpBlock(c * 2, c, c)
@@ -68,11 +127,13 @@ class InverseUVNet(nn.Module):
         if x.shape[-1] != 64 or x.shape[-2] != 64:
             x = F.interpolate(x, size=(64, 64), mode="bilinear", align_corners=False)
 
+        x = self.coordconv(x)
         s0 = self.stem(x)
         s1 = self.down1(s0)
         s2 = self.down2(s1)
         s3 = self.down3(s2)
         x = self.mid(s3)
+        x = self.mid_attention(x)
         x = self.up2(x, s2)
         x = self.up1(x, s1)
         x = self.up0(x, s0)

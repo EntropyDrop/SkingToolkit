@@ -54,6 +54,9 @@ Useful knobs:
 - `--lambda_alpha`: alpha reconstruction weight.
 - `--lambda_render`: differentiable render consistency weight.
 - `--lambda_edge`: UV-space edge reconstruction weight for sharper pixel boundaries.
+- `--coordconv` / `--no-coordconv`: append normalized x/y coordinates inside `InverseUVNet` so the model sees absolute UV position.
+- `--bottleneck_attention` / `--no-bottleneck-attention`: enable or disable lightweight bottleneck self-attention.
+- `--attention_heads`: number of bottleneck self-attention heads.
 - `--supervise_covered_inner`: keep supervising inner-layer UV texels even when opaque matching outer-layer texels hide them.
 - `--covered_inner_alpha_threshold`: GT outer-layer alpha threshold used to decide covered inner texels; defaults to `0.1`.
 - `--render_size`: deprecated compatibility option; UV unprojection uses native mapping sizes.

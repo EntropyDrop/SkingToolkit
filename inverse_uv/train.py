@@ -107,6 +107,13 @@ def save_checkpoint(path, model, optimizer, epoch, args, input_channels, metrics
         "optimizer": optimizer.state_dict(),
         "args": vars(args),
         "input_channels": input_channels,
+        "model_config": {
+            "input_channels": input_channels,
+            "base_channels": args.base_channels,
+            "use_coordconv": args.coordconv,
+            "use_attention": args.bottleneck_attention,
+            "attention_heads": args.attention_heads,
+        },
         "metrics": metrics,
     }
     torch.save(checkpoint, path)
@@ -137,6 +144,28 @@ def build_arg_parser():
         help="Deprecated compatibility option; UV unprojection always builds RGBA plus mask conditioning.",
     )
     parser.add_argument("--base_channels", type=int, default=64, help="Base channel width for InverseUVNet.")
+    parser.add_argument(
+        "--coordconv",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Append normalized x/y coordinate channels inside InverseUVNet.",
+    )
+    parser.add_argument(
+        "--bottleneck_attention",
+        "--bottleneck-attention",
+        dest="bottleneck_attention",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Use a lightweight spatial self-attention block at the U-Net bottleneck.",
+    )
+    parser.add_argument(
+        "--attention_heads",
+        "--attention-heads",
+        dest="attention_heads",
+        type=int,
+        default=4,
+        help="Attention heads for bottleneck self-attention.",
+    )
     parser.add_argument("--augment", action="store_true", help="Enable online data augmentation during training.")
     parser.add_argument("--distortion_scale", type=float, default=0.08, help="Scale of random local elastic distortion.")
     parser.add_argument("--perspective_scale", type=float, default=0.04, help="Scale of random perspective warp.")
@@ -213,6 +242,26 @@ def main():
     else:
         train_dataset, val_dataset = dataset, None
 
+    resume_checkpoint = None
+    if args.resume:
+        resume_checkpoint = torch.load(args.resume, map_location=device)
+        checkpoint_model_config = resume_checkpoint.get("model_config")
+        checkpoint_args = resume_checkpoint.get("args", {})
+        if checkpoint_model_config is not None:
+            args.base_channels = checkpoint_model_config.get("base_channels", args.base_channels)
+            args.coordconv = checkpoint_model_config.get("use_coordconv", args.coordconv)
+            args.bottleneck_attention = checkpoint_model_config.get("use_attention", args.bottleneck_attention)
+            args.attention_heads = checkpoint_model_config.get("attention_heads", args.attention_heads)
+        elif "coordconv" in checkpoint_args or "bottleneck_attention" in checkpoint_args:
+            args.base_channels = checkpoint_args.get("base_channels", args.base_channels)
+            args.coordconv = checkpoint_args.get("coordconv", args.coordconv)
+            args.bottleneck_attention = checkpoint_args.get("bottleneck_attention", args.bottleneck_attention)
+            args.attention_heads = checkpoint_args.get("attention_heads", args.attention_heads)
+        else:
+            args.base_channels = checkpoint_args.get("base_channels", args.base_channels)
+            args.coordconv = False
+            args.bottleneck_attention = False
+
     pin_memory = device.type == "cuda"
     train_loader = DataLoader(
         train_dataset,
@@ -233,7 +282,13 @@ def main():
             persistent_workers=args.num_workers > 0,
         )
 
-    model = InverseUVNet(input_channels=input_channels, base_channels=args.base_channels).to(device)
+    model = InverseUVNet(
+        input_channels=input_channels,
+        base_channels=args.base_channels,
+        use_coordconv=args.coordconv,
+        use_attention=args.bottleneck_attention,
+        attention_heads=args.attention_heads,
+    ).to(device)
     criterion = InverseUVLoss(
         mappings_dir=args.mappings_dir,
         views=args.views,
@@ -249,8 +304,8 @@ def main():
     scaler = build_grad_scaler(device, args.mixed_precision)
 
     start_epoch = 1
-    if args.resume:
-        checkpoint = torch.load(args.resume, map_location=device)
+    if resume_checkpoint is not None:
+        checkpoint = resume_checkpoint
         model.load_state_dict(checkpoint["model"])
         optimizer.load_state_dict(checkpoint["optimizer"])
         start_epoch = checkpoint.get("epoch", 0) + 1
@@ -263,6 +318,9 @@ def main():
         "conditioning_mode": "uv_unproject_inpaint",
         "parameters": count_parameters(model),
         "views": dataset.views,
+        "coordconv": args.coordconv,
+        "bottleneck_attention": args.bottleneck_attention,
+        "attention_heads": args.attention_heads,
         "device": str(device),
     }
     with open(output_dir / "config.json", "w", encoding="utf-8") as handle:

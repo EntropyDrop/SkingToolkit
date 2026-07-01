@@ -82,6 +82,35 @@ def load_conditioning(args, checkpoint_args, input_channels):
     return conditioning.unsqueeze(0)
 
 
+def model_config_from_checkpoint(checkpoint, checkpoint_args, input_channels):
+    model_config = checkpoint.get("model_config")
+    if model_config is not None:
+        return {
+            "input_channels": model_config.get("input_channels", input_channels),
+            "base_channels": model_config.get("base_channels", checkpoint_args.get("base_channels", 64)),
+            "use_coordconv": model_config.get("use_coordconv", False),
+            "use_attention": model_config.get("use_attention", False),
+            "attention_heads": model_config.get("attention_heads", 4),
+        }
+
+    if "coordconv" in checkpoint_args or "bottleneck_attention" in checkpoint_args:
+        return {
+            "input_channels": input_channels,
+            "base_channels": checkpoint_args.get("base_channels", 64),
+            "use_coordconv": checkpoint_args.get("coordconv", False),
+            "use_attention": checkpoint_args.get("bottleneck_attention", False),
+            "attention_heads": checkpoint_args.get("attention_heads", 4),
+        }
+
+    return {
+        "input_channels": input_channels,
+        "base_channels": checkpoint_args.get("base_channels", 64),
+        "use_coordconv": False,
+        "use_attention": False,
+        "attention_heads": 4,
+    }
+
+
 def build_arg_parser():
     parser = argparse.ArgumentParser(description="Infer Minecraft UV from fixed render views.")
     parser.add_argument("--checkpoint", required=True, help="Path to best.pt/latest.pt.")
@@ -107,9 +136,15 @@ def main():
     checkpoint = torch.load(args.checkpoint, map_location=device)
     checkpoint_args = checkpoint.get("args", {})
     input_channels = checkpoint.get("input_channels", checkpoint_args.get("input_channels", 6))
-    base_channels = checkpoint_args.get("base_channels", 64)
+    model_config = model_config_from_checkpoint(checkpoint, checkpoint_args, input_channels)
 
-    model = InverseUVNet(input_channels=input_channels, base_channels=base_channels).to(device)
+    model = InverseUVNet(
+        input_channels=model_config["input_channels"],
+        base_channels=model_config["base_channels"],
+        use_coordconv=model_config["use_coordconv"],
+        use_attention=model_config["use_attention"],
+        attention_heads=model_config["attention_heads"],
+    ).to(device)
     model.load_state_dict(checkpoint["model"])
     model.eval()
 
