@@ -259,6 +259,23 @@ def build_arg_parser():
     return parser
 
 
+class Logger(object):
+    def __init__(self, filename, stream, mode="w"):
+        self.terminal = stream
+        self.log = open(filename, mode, encoding="utf-8")
+
+    def write(self, message):
+        self.terminal.write(message)
+        log_message = message.replace("\r", "")
+        if log_message:
+            self.log.write(log_message)
+            self.log.flush()
+
+    def flush(self):
+        self.terminal.flush()
+        self.log.flush()
+
+
 def main():
     args = build_arg_parser().parse_args()
     args.conditioning_mode = "uv_unproject_inpaint"
@@ -267,6 +284,10 @@ def main():
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "previews").mkdir(exist_ok=True)
+
+    log_mode = "a" if args.resume else "w"
+    sys.stdout = Logger(output_dir / "train.log", sys.stdout, mode=log_mode)
+    sys.stderr = Logger(output_dir / "train.log", sys.stderr, mode=log_mode)
 
     device = get_device(args.device)
     dataset = InverseUVDataset(
