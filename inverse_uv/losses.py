@@ -22,6 +22,51 @@ def parse_views(views):
     return list(views)
 
 
+def gaussian(window_size, sigma):
+    gauss = torch.exp(torch.tensor([-(x - window_size//2)**2 / (2 * sigma**2) for x in range(window_size)], dtype=torch.float32))
+    return gauss/gauss.sum()
+
+
+def create_window(window_size, channel):
+    _1D_window = gaussian(window_size, 1.5).unsqueeze(1)
+    _2D_window = _1D_window.mm(_1D_window.t()).float().unsqueeze(0).unsqueeze(0)
+    window = _2D_window.expand(channel, 1, window_size, window_size).contiguous()
+    return window
+
+
+def masked_ssim_loss(pred_rgb, gt_rgb, mask=None, window_size=11):
+    device = pred_rgb.device
+    dtype = pred_rgb.dtype
+    channel = 3
+    window = create_window(window_size, channel).to(device=device, dtype=dtype)
+    
+    mu1 = F.conv2d(pred_rgb, window, padding=window_size//2, groups=channel)
+    mu2 = F.conv2d(gt_rgb, window, padding=window_size//2, groups=channel)
+    
+    mu1_sq = mu1.pow(2)
+    mu2_sq = mu2.pow(2)
+    mu1_mu2 = mu1 * mu2
+    
+    sigma1_sq = F.conv2d(pred_rgb * pred_rgb, window, padding=window_size//2, groups=channel) - mu1_sq
+    sigma2_sq = F.conv2d(gt_rgb * gt_rgb, window, padding=window_size//2, groups=channel) - mu2_sq
+    sigma12 = F.conv2d(pred_rgb * gt_rgb, window, padding=window_size//2, groups=channel) - mu1_mu2
+    
+    C1 = 0.01 ** 2
+    C2 = 0.03 ** 2
+    
+    ssim_map = ((2 * mu1_mu2 + C1) * (2 * sigma12 + C2)) / ((mu1_sq + mu2_sq + C1) * (sigma1_sq + sigma2_sq + C2))
+    loss_map = 1.0 - ssim_map
+    
+    if mask is not None:
+        mask = mask.to(device=device, dtype=dtype)
+        mask_expanded = mask.expand(-1, channel, -1, -1)
+        denom = mask_expanded.sum(dim=(1, 2, 3)).clamp_min(1.0)
+        per_sample = (loss_map * mask_expanded).sum(dim=(1, 2, 3)) / denom
+        return per_sample.mean()
+    else:
+        return loss_map.mean()
+
+
 def alpha_masked_rgb_l1(pred_uv, gt_uv, uv_mask=None):
     alpha_gt = gt_uv[:, 3:4].detach()
     if uv_mask is not None:
@@ -167,6 +212,7 @@ class InverseUVLoss(nn.Module):
         lambda_alpha=0.5,
         lambda_render=0.1,
         lambda_edge=0.25,
+        lambda_ssim=0.2,
         render_foreground_weight=1.0,
         ignore_covered_inner=True,
         covered_inner_alpha_threshold=0.1,
@@ -176,6 +222,7 @@ class InverseUVLoss(nn.Module):
         self.lambda_alpha = lambda_alpha
         self.lambda_render = lambda_render
         self.lambda_edge = lambda_edge
+        self.lambda_ssim = lambda_ssim
         self.render_foreground_weight = render_foreground_weight
         self.ignore_covered_inner = ignore_covered_inner
         self.covered_inner_alpha_threshold = covered_inner_alpha_threshold
@@ -235,11 +282,21 @@ class InverseUVLoss(nn.Module):
         loss_alpha = alpha_bce(pred_uv, gt_uv, uv_mask)
         loss_render = self.render_loss(pred_uv, gt_uv)
         loss_edge = edge_l1(pred_uv, gt_uv, uv_mask)
+        
+        if self.lambda_ssim > 0:
+            alpha_gt = gt_uv[:, 3:4].detach()
+            if uv_mask is not None:
+                alpha_gt = alpha_gt * uv_mask
+            loss_ssim = masked_ssim_loss(pred_uv[:, :3], gt_uv[:, :3], alpha_gt)
+        else:
+            loss_ssim = pred_uv.new_tensor(0.0)
+
         loss_total = (
             self.lambda_rgb * loss_rgb
             + self.lambda_alpha * loss_alpha
             + self.lambda_render * loss_render
             + self.lambda_edge * loss_edge
+            + self.lambda_ssim * loss_ssim
         )
         return {
             "loss_total": loss_total,
@@ -247,4 +304,5 @@ class InverseUVLoss(nn.Module):
             "loss_alpha": loss_alpha,
             "loss_render": loss_render,
             "loss_edge": loss_edge,
+            "loss_ssim": loss_ssim,
         }

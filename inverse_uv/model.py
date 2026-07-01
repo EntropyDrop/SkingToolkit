@@ -26,24 +26,50 @@ class ConvBlock(nn.Module):
         return self.block(x)
 
 
-class DownBlock(nn.Module):
+class ResBlock(nn.Module):
     def __init__(self, in_channels, out_channels):
         super().__init__()
+        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1)
+        self.norm1 = nn.GroupNorm(norm_groups(out_channels), out_channels)
+        self.act1 = nn.SiLU(inplace=True)
+        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1)
+        self.norm2 = nn.GroupNorm(norm_groups(out_channels), out_channels)
+        self.act2 = nn.SiLU(inplace=True)
+
+        if in_channels != out_channels:
+            self.shortcut = nn.Sequential(
+                nn.Conv2d(in_channels, out_channels, kernel_size=1),
+                nn.GroupNorm(norm_groups(out_channels), out_channels)
+            )
+        else:
+            self.shortcut = nn.Identity()
+
+    def forward(self, x):
+        return self.act2(self.conv2(self.norm2(self.act1(self.conv1(x)))) + self.shortcut(x))
+
+
+class DownBlock(nn.Module):
+    def __init__(self, in_channels, out_channels, block_cls=ConvBlock):
+        super().__init__()
         self.down = nn.Conv2d(in_channels, out_channels, kernel_size=4, stride=2, padding=1)
-        self.block = ConvBlock(out_channels, out_channels)
+        self.block = block_cls(out_channels, out_channels)
 
     def forward(self, x):
         return self.block(self.down(x))
 
 
 class UpBlock(nn.Module):
-    def __init__(self, in_channels, skip_channels, out_channels):
+    def __init__(self, in_channels, skip_channels, out_channels, block_cls=ConvBlock, use_coordconv=False):
         super().__init__()
-        self.block = ConvBlock(in_channels + skip_channels, out_channels)
+        self.use_coordconv = use_coordconv
+        self.coordconv = CoordConv() if use_coordconv else nn.Identity()
+        block_in_channels = in_channels + skip_channels + (2 if use_coordconv else 0)
+        self.block = block_cls(block_in_channels, out_channels)
 
     def forward(self, x, skip):
         x = F.interpolate(x, size=skip.shape[-2:], mode="bilinear", align_corners=False)
-        return self.block(torch.cat([x, skip], dim=1))
+        x_cat = torch.cat([x, skip], dim=1)
+        return self.block(self.coordconv(x_cat))
 
 
 class CoordConv(nn.Module):
@@ -99,24 +125,36 @@ class InverseUVNet(nn.Module):
         use_coordconv=True,
         use_attention=True,
         attention_heads=4,
+        use_resnet=True,
+        multi_scale_coord=True,
     ):
         super().__init__()
         c = base_channels
         self.use_coordconv = use_coordconv
         self.use_attention = use_attention
+        self.use_resnet = use_resnet
+        self.multi_scale_coord = multi_scale_coord
+        
         self.coordconv = CoordConv() if use_coordconv else nn.Identity()
         stem_channels = input_channels + (2 if use_coordconv else 0)
-        self.stem = ConvBlock(stem_channels, c)
-        self.down1 = DownBlock(c, c * 2)
-        self.down2 = DownBlock(c * 2, c * 4)
-        self.down3 = DownBlock(c * 4, c * 8)
-        self.mid = ConvBlock(c * 8, c * 8)
+        
+        block_cls = ResBlock if use_resnet else ConvBlock
+        
+        self.stem = block_cls(stem_channels, c)
+        self.down1 = DownBlock(c, c * 2, block_cls=block_cls)
+        self.down2 = DownBlock(c * 2, c * 4, block_cls=block_cls)
+        self.down3 = DownBlock(c * 4, c * 8, block_cls=block_cls)
+        
+        mid_in_channels = c * 8 + (2 if (use_coordconv and multi_scale_coord) else 0)
+        self.mid_coordconv = CoordConv() if (use_coordconv and multi_scale_coord) else nn.Identity()
+        self.mid = block_cls(mid_in_channels, c * 8)
         self.mid_attention = (
             SpatialSelfAttention(c * 8, heads=attention_heads) if use_attention else nn.Identity()
         )
-        self.up2 = UpBlock(c * 8, c * 4, c * 4)
-        self.up1 = UpBlock(c * 4, c * 2, c * 2)
-        self.up0 = UpBlock(c * 2, c, c)
+        
+        self.up2 = UpBlock(c * 8, c * 4, c * 4, block_cls=block_cls, use_coordconv=(use_coordconv and multi_scale_coord))
+        self.up1 = UpBlock(c * 4, c * 2, c * 2, block_cls=block_cls, use_coordconv=(use_coordconv and multi_scale_coord))
+        self.up0 = UpBlock(c * 2, c, c, block_cls=block_cls, use_coordconv=(use_coordconv and multi_scale_coord))
         self.head = nn.Sequential(
             nn.Conv2d(c, c, kernel_size=3, padding=1),
             nn.SiLU(inplace=True),
@@ -132,8 +170,11 @@ class InverseUVNet(nn.Module):
         s1 = self.down1(s0)
         s2 = self.down2(s1)
         s3 = self.down3(s2)
-        x = self.mid(s3)
+        
+        mid_in = self.mid_coordconv(s3)
+        x = self.mid(mid_in)
         x = self.mid_attention(x)
+        
         x = self.up2(x, s2)
         x = self.up1(x, s1)
         x = self.up0(x, s0)

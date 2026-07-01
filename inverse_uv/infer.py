@@ -91,6 +91,8 @@ def model_config_from_checkpoint(checkpoint, checkpoint_args, input_channels):
             "use_coordconv": model_config.get("use_coordconv", False),
             "use_attention": model_config.get("use_attention", False),
             "attention_heads": model_config.get("attention_heads", 4),
+            "use_resnet": model_config.get("use_resnet", False),
+            "multi_scale_coord": model_config.get("multi_scale_coord", False),
         }
 
     if "coordconv" in checkpoint_args or "bottleneck_attention" in checkpoint_args:
@@ -100,6 +102,8 @@ def model_config_from_checkpoint(checkpoint, checkpoint_args, input_channels):
             "use_coordconv": checkpoint_args.get("coordconv", False),
             "use_attention": checkpoint_args.get("bottleneck_attention", False),
             "attention_heads": checkpoint_args.get("attention_heads", 4),
+            "use_resnet": checkpoint_args.get("resnet", False),
+            "multi_scale_coord": checkpoint_args.get("multi_scale_coord", False),
         }
 
     return {
@@ -108,6 +112,8 @@ def model_config_from_checkpoint(checkpoint, checkpoint_args, input_channels):
         "use_coordconv": False,
         "use_attention": False,
         "attention_heads": 4,
+        "use_resnet": False,
+        "multi_scale_coord": False,
     }
 
 
@@ -144,6 +150,8 @@ def main():
         use_coordconv=model_config["use_coordconv"],
         use_attention=model_config["use_attention"],
         attention_heads=model_config["attention_heads"],
+        use_resnet=model_config["use_resnet"],
+        multi_scale_coord=model_config["multi_scale_coord"],
     ).to(device)
     model.load_state_dict(checkpoint["model"])
     model.eval()

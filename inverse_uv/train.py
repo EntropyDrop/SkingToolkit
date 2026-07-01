@@ -25,6 +25,26 @@ except ImportError:
     tqdm = None
 
 
+class WarmupCosineScheduler:
+    def __init__(self, optimizer, warmup_epochs, total_epochs, base_lr, min_lr=1e-6):
+        self.optimizer = optimizer
+        self.warmup_epochs = warmup_epochs
+        self.total_epochs = total_epochs
+        self.base_lr = base_lr
+        self.min_lr = min_lr
+
+    def step(self, epoch):
+        if epoch <= self.warmup_epochs:
+            lr = self.base_lr * (epoch / max(self.warmup_epochs, 1))
+        else:
+            import math
+            progress = (epoch - self.warmup_epochs) / max(self.total_epochs - self.warmup_epochs, 1)
+            lr = self.min_lr + 0.5 * (self.base_lr - self.min_lr) * (1.0 + math.cos(math.pi * progress))
+        for param_group in self.optimizer.param_groups:
+            param_group["lr"] = lr
+        return lr
+
+
 def get_device(device_arg):
     if device_arg != "auto":
         return torch.device(device_arg)
@@ -126,6 +146,8 @@ def save_checkpoint(path, model, optimizer, epoch, args, input_channels, metrics
             "use_coordconv": args.coordconv,
             "use_attention": args.bottleneck_attention,
             "attention_heads": args.attention_heads,
+            "use_resnet": args.resnet,
+            "multi_scale_coord": args.multi_scale_coord,
         },
         "metrics": metrics,
     }
@@ -162,6 +184,20 @@ def build_arg_parser():
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Append normalized x/y coordinate channels inside InverseUVNet.",
+    )
+    parser.add_argument(
+        "--resnet",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Use ResNet-style residual blocks (ResUNet) instead of vanilla ConvBlocks.",
+    )
+    parser.add_argument(
+        "--multi_scale_coord",
+        "--multi-scale-coord",
+        dest="multi_scale_coord",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Inject CoordConv coordinates at bottleneck and decoder stages.",
     )
     parser.add_argument(
         "--bottleneck_attention",
@@ -203,6 +239,8 @@ def build_arg_parser():
     parser.add_argument("--lambda_alpha", type=float, default=0.5)
     parser.add_argument("--lambda_render", type=float, default=0.1)
     parser.add_argument("--lambda_edge", type=float, default=0.25)
+    parser.add_argument("--lambda_ssim", type=float, default=0.2)
+    parser.add_argument("--warmup_epochs", type=int, default=5)
     parser.add_argument("--render_foreground_weight", type=float, default=1.0)
     parser.add_argument(
         "--supervise_covered_inner",
@@ -271,15 +309,21 @@ def main():
             args.coordconv = checkpoint_model_config.get("use_coordconv", args.coordconv)
             args.bottleneck_attention = checkpoint_model_config.get("use_attention", args.bottleneck_attention)
             args.attention_heads = checkpoint_model_config.get("attention_heads", args.attention_heads)
+            args.resnet = checkpoint_model_config.get("use_resnet", False)
+            args.multi_scale_coord = checkpoint_model_config.get("multi_scale_coord", False)
         elif "coordconv" in checkpoint_args or "bottleneck_attention" in checkpoint_args:
             args.base_channels = checkpoint_args.get("base_channels", args.base_channels)
             args.coordconv = checkpoint_args.get("coordconv", args.coordconv)
             args.bottleneck_attention = checkpoint_args.get("bottleneck_attention", args.bottleneck_attention)
             args.attention_heads = checkpoint_args.get("attention_heads", args.attention_heads)
+            args.resnet = checkpoint_args.get("resnet", False)
+            args.multi_scale_coord = checkpoint_args.get("multi_scale_coord", False)
         else:
             args.base_channels = checkpoint_args.get("base_channels", args.base_channels)
             args.coordconv = False
             args.bottleneck_attention = False
+            args.resnet = False
+            args.multi_scale_coord = False
 
     pin_memory = device.type == "cuda"
     train_loader = DataLoader(
@@ -307,6 +351,8 @@ def main():
         use_coordconv=args.coordconv,
         use_attention=args.bottleneck_attention,
         attention_heads=args.attention_heads,
+        use_resnet=args.resnet,
+        multi_scale_coord=args.multi_scale_coord,
     ).to(device)
     criterion = InverseUVLoss(
         mappings_dir=args.mappings_dir,
@@ -315,6 +361,7 @@ def main():
         lambda_alpha=args.lambda_alpha,
         lambda_render=args.lambda_render,
         lambda_edge=args.lambda_edge,
+        lambda_ssim=args.lambda_ssim,
         render_foreground_weight=args.render_foreground_weight,
         ignore_covered_inner=not args.supervise_covered_inner,
         covered_inner_alpha_threshold=args.covered_inner_alpha_threshold,
@@ -343,6 +390,8 @@ def main():
         "coordconv": args.coordconv,
         "bottleneck_attention": args.bottleneck_attention,
         "attention_heads": args.attention_heads,
+        "use_resnet": args.resnet,
+        "multi_scale_coord": args.multi_scale_coord,
         "lr": optimizer.param_groups[0]["lr"],
         "device": str(device),
     }
@@ -361,7 +410,15 @@ def main():
         )
 
     best_metric = float("inf")
+    scheduler = WarmupCosineScheduler(
+        optimizer=optimizer,
+        warmup_epochs=args.warmup_epochs,
+        total_epochs=args.epochs,
+        base_lr=args.lr,
+        min_lr=1e-6,
+    )
     for epoch in range(start_epoch, args.epochs + 1):
+        current_lr = scheduler.step(epoch)
         train_metrics = run_epoch(
             model,
             criterion,
@@ -392,7 +449,7 @@ def main():
             metrics["val"] = val_metrics
 
         metric = metrics.get("val", metrics["train"])["loss_total"]
-        print(f"epoch={epoch} metrics={json.dumps(metrics, sort_keys=True)}")
+        print(f"epoch={epoch} lr={current_lr:.2e} metrics={json.dumps(metrics, sort_keys=True)}")
 
         if epoch % args.preview_every == 0:
             model.eval()
