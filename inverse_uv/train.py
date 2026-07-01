@@ -186,6 +186,12 @@ def build_arg_parser():
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument(
+        "--resume_lr",
+        type=float,
+        default=None,
+        help="Override optimizer learning rate after loading a resumed checkpoint.",
+    )
     parser.add_argument("--weight_decay", type=float, default=1e-4)
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--val_split", type=float, default=0.05)
@@ -321,6 +327,9 @@ def main():
         checkpoint = resume_checkpoint
         model.load_state_dict(checkpoint["model"])
         optimizer.load_state_dict(checkpoint["optimizer"])
+        if args.resume_lr is not None:
+            for group in optimizer.param_groups:
+                group["lr"] = args.resume_lr
         start_epoch = checkpoint.get("epoch", 0) + 1
 
     metadata = {
@@ -334,6 +343,7 @@ def main():
         "coordconv": args.coordconv,
         "bottleneck_attention": args.bottleneck_attention,
         "attention_heads": args.attention_heads,
+        "lr": optimizer.param_groups[0]["lr"],
         "device": str(device),
     }
     with open(output_dir / "config.json", "w", encoding="utf-8") as handle:
