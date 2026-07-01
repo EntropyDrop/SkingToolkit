@@ -15,7 +15,7 @@ WORKSPACE_ROOT = TOOLKIT_ROOT.parent
 if str(WORKSPACE_ROOT) not in sys.path:
     sys.path.insert(0, str(WORKSPACE_ROOT))
 
-from SkingToolkit.inverse_uv.dataset import InverseUVDataset, apply_uv_mask  # noqa: E402
+from SkingToolkit.inverse_uv.dataset import InverseUVDataset, apply_uv_mask, RenderAugmenter, build_conditioning  # noqa: E402
 from SkingToolkit.inverse_uv.losses import InverseUVLoss  # noqa: E402
 from SkingToolkit.inverse_uv.model import InverseUVNet, count_parameters  # noqa: E402
 
@@ -43,11 +43,13 @@ def autocast_context(device, precision):
 
 
 def move_batch(batch, device):
-    return {
-        "conditioning": batch["conditioning"].to(device, non_blocking=True),
+    res = {
         "uv": batch["uv"].to(device, non_blocking=True),
         "path": batch["path"],
     }
+    if "conditioning" in batch:
+        res["conditioning"] = batch["conditioning"].to(device, non_blocking=True)
+    return res
 
 
 def save_preview(pred_uv, gt_uv, output_path, max_items=4):
@@ -62,7 +64,7 @@ def format_losses(loss_sums, count):
     return {name: value / max(count, 1) for name, value in loss_sums.items()}
 
 
-def run_epoch(model, criterion, loader, optimizer, scaler, device, precision, train=True):
+def run_epoch(model, criterion, loader, optimizer, scaler, device, precision, train=True, views=None, augmenter=None):
     model.train(train)
     loss_sums = {}
     sample_count = 0
@@ -71,6 +73,17 @@ def run_epoch(model, criterion, loader, optimizer, scaler, device, precision, tr
     for batch in iterator:
         batch = move_batch(batch, device)
         batch_size = batch["uv"].shape[0]
+        
+        # Build conditioning on GPU
+        with torch.no_grad():
+            batch_augmenter = augmenter if train else None
+            batch["conditioning"] = build_conditioning(
+                batch["uv"],
+                criterion.renderer,
+                views,
+                augmenter=batch_augmenter,
+            )
+
         with torch.set_grad_enabled(train):
             with autocast_context(device, precision):
                 pred_uv = model(batch["conditioning"])
@@ -327,16 +340,44 @@ def main():
         json.dump({"args": vars(args), "metadata": metadata}, handle, indent=2)
     print(json.dumps(metadata, indent=2))
 
+    # Instantiate augmenter if training and args.augment is true
+    augmenter = None
+    if args.augment:
+        augmenter = RenderAugmenter(
+            distortion_scale=args.distortion_scale,
+            perspective_scale=args.perspective_scale,
+            translation_scale=args.translation_scale,
+            bg_color=dataset.bg_color,
+        )
+
     best_metric = float("inf")
     for epoch in range(start_epoch, args.epochs + 1):
         train_metrics = run_epoch(
-            model, criterion, train_loader, optimizer, scaler, device, args.mixed_precision, train=True
+            model,
+            criterion,
+            train_loader,
+            optimizer,
+            scaler,
+            device,
+            args.mixed_precision,
+            train=True,
+            views=dataset.views,
+            augmenter=augmenter,
         )
         metrics = {"train": train_metrics}
         if val_loader is not None:
             with torch.no_grad():
                 val_metrics = run_epoch(
-                    model, criterion, val_loader, optimizer, scaler, device, args.mixed_precision, train=False
+                    model,
+                    criterion,
+                    val_loader,
+                    optimizer,
+                    scaler,
+                    device,
+                    args.mixed_precision,
+                    train=False,
+                    views=dataset.views,
+                    augmenter=None,
                 )
             metrics["val"] = val_metrics
 
@@ -347,7 +388,13 @@ def main():
             model.eval()
             preview_batch = move_batch(next(iter(val_loader or train_loader)), device)
             with torch.no_grad():
-                pred_uv = model(preview_batch["conditioning"])
+                preview_conditioning = build_conditioning(
+                    preview_batch["uv"],
+                    criterion.renderer,
+                    dataset.views,
+                    augmenter=None,
+                )
+                pred_uv = model(preview_conditioning)
             save_preview(pred_uv, preview_batch["uv"], output_dir / "previews" / f"epoch_{epoch:04d}.png")
 
         if epoch % args.save_every == 0:

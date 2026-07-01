@@ -32,10 +32,14 @@ class RenderAugmenter:
         self.bg_color = bg_color
         
     def __call__(self, rendered_tensor):
-        # rendered_tensor shape: (C, H, W)
+        # Support both (C, H, W) and (B, C, H, W)
+        is_batched = rendered_tensor.dim() == 4
+        if not is_batched:
+            rendered_tensor = rendered_tensor.unsqueeze(0)
+            
+        B, C, H, W = rendered_tensor.shape
         device = rendered_tensor.device
         dtype = rendered_tensor.dtype
-        C, H, W = rendered_tensor.shape
         
         fill_color = [self.bg_color[0] / 255.0, self.bg_color[1] / 255.0, self.bg_color[2] / 255.0, 0.0]
         
@@ -43,13 +47,11 @@ class RenderAugmenter:
         if self.translation_scale > 0:
             dx = int((torch.rand(1).item() - 0.5) * 2 * self.translation_scale * W)
             dy = int((torch.rand(1).item() - 0.5) * 2 * self.translation_scale * H)
-            img_batch = rendered_tensor.unsqueeze(0)
-            img_batch = TF.affine(
-                img_batch, angle=0.0, translate=[dx, dy], scale=1.0, shear=[0.0, 0.0],
+            rendered_tensor = TF.affine(
+                rendered_tensor, angle=0.0, translate=[dx, dy], scale=1.0, shear=[0.0, 0.0],
                 interpolation=TF.InterpolationMode.BILINEAR,
                 fill=fill_color
             )
-            rendered_tensor = img_batch.squeeze(0)
             
         # 2. Perspective warp (approximates viewpoint shift)
         if self.perspective_scale > 0:
@@ -60,13 +62,11 @@ class RenderAugmenter:
                 dy = (torch.rand(1).item() - 0.5) * 2 * self.perspective_scale * H
                 endpoints.append([x + dx, y + dy])
             
-            img_batch = rendered_tensor.unsqueeze(0)
-            img_batch = TF.perspective(
-                img_batch, startpoints, endpoints, 
+            rendered_tensor = TF.perspective(
+                rendered_tensor, startpoints, endpoints, 
                 interpolation=TF.InterpolationMode.BILINEAR,
                 fill=fill_color
             )
-            rendered_tensor = img_batch.squeeze(0)
             
         # 3. Local Elastic / Grid distortion (simulates random warping)
         if self.distortion_scale > 0:
@@ -75,24 +75,25 @@ class RenderAugmenter:
                 torch.linspace(-1, 1, W, device=device, dtype=dtype),
                 indexing='ij'
             )
+            grid = torch.stack([grid_x, grid_y], dim=-1).unsqueeze(0).expand(B, -1, -1, -1) # (B, H, W, 2)
             
             noise_h, noise_w = 8, 8
-            disp_noise = torch.randn(1, 2, noise_h, noise_w, device=device, dtype=dtype) * self.distortion_scale
+            disp_noise = torch.randn(B, 2, noise_h, noise_w, device=device, dtype=dtype) * self.distortion_scale
             disp_field = F.interpolate(
                 disp_noise, size=(H, W), 
                 mode='bilinear', align_corners=True
-            ).squeeze(0).permute(1, 2, 0) # (H, W, 2)
+            ).permute(0, 2, 3, 1) # (B, H, W, 2)
             
-            deformed_grid = torch.stack([grid_x, grid_y], dim=-1) + disp_field
-            deformed_grid = deformed_grid.clamp(-1.0, 1.0).unsqueeze(0) # (1, H, W, 2)
+            deformed_grid = grid + disp_field
+            deformed_grid = deformed_grid.clamp(-1.0, 1.0)
             
-            img_batch = rendered_tensor.unsqueeze(0)
-            img_batch = F.grid_sample(
-                img_batch, deformed_grid, 
+            rendered_tensor = F.grid_sample(
+                rendered_tensor, deformed_grid, 
                 mode='bilinear', padding_mode='border', align_corners=True
             )
-            rendered_tensor = img_batch.squeeze(0)
             
+        if not is_batched:
+            rendered_tensor = rendered_tensor.squeeze(0)
         return rendered_tensor
 
 
@@ -167,15 +168,27 @@ def _uv_indices_from_grid(grid, mask):
 
 
 def _ensure_rgba(rendered, geometry_mask=None):
-    if rendered.shape[0] == 4:
-        return rendered
-    if rendered.shape[0] != 3:
-        raise ValueError(f"Expected RGB or RGBA render tensor, got {rendered.shape[0]} channels.")
-    if geometry_mask is None:
-        alpha = torch.ones_like(rendered[:1])
+    is_batched = rendered.dim() == 4
+    if not is_batched:
+        if rendered.shape[0] == 4:
+            return rendered
+        if rendered.shape[0] != 3:
+            raise ValueError(f"Expected RGB or RGBA render tensor, got {rendered.shape[0]} channels.")
+        if geometry_mask is None:
+            alpha = torch.ones_like(rendered[:1])
+        else:
+            alpha = geometry_mask.to(dtype=rendered.dtype, device=rendered.device).unsqueeze(0)
+        return torch.cat([rendered, alpha], dim=0)
     else:
-        alpha = geometry_mask.to(dtype=rendered.dtype, device=rendered.device).unsqueeze(0)
-    return torch.cat([rendered, alpha], dim=0)
+        if rendered.shape[1] == 4:
+            return rendered
+        if rendered.shape[1] != 3:
+            raise ValueError(f"Expected RGB or RGBA render tensor, got {rendered.shape[1]} channels.")
+        if geometry_mask is None:
+            alpha = torch.ones_like(rendered[:, :1])
+        else:
+            alpha = geometry_mask.to(dtype=rendered.dtype, device=rendered.device).unsqueeze(0).unsqueeze(1).expand(rendered.shape[0], 1, -1, -1)
+        return torch.cat([rendered, alpha], dim=1)
 
 
 def unproject_renders_to_uv(rendered_views, renderer, views, bg_color=(128, 128, 128)):
@@ -184,36 +197,69 @@ def unproject_renders_to_uv(rendered_views, renderer, views, bg_color=(128, 128,
         raise ValueError(f"Expected {len(views)} rendered views, got {len(rendered_views)}.")
 
     sample = rendered_views[0]
+    is_batched = sample.dim() == 4
     device = sample.device
     dtype = sample.dtype
-    accum = sample.new_zeros(len(CONDITIONING_LAYERS), 4, UV_SIZE, UV_SIZE)
-    counts = sample.new_zeros(len(CONDITIONING_LAYERS), 1, UV_SIZE, UV_SIZE)
+    
+    if not is_batched:
+        accum = sample.new_zeros(len(CONDITIONING_LAYERS), 4, UV_SIZE, UV_SIZE)
+        counts = sample.new_zeros(len(CONDITIONING_LAYERS), 1, UV_SIZE, UV_SIZE)
 
-    for view, rendered in zip(views, rendered_views):
-        inner_mask = getattr(renderer, f"{view}_inner_mask").to(device=device).bool()
-        outer_mask = getattr(renderer, f"{view}_outer_mask").to(device=device).bool()
-        geometry_mask = inner_mask | outer_mask
-        rendered = _ensure_rgba(rendered.to(device=device, dtype=dtype), geometry_mask=geometry_mask)
+        for view, rendered in zip(views, rendered_views):
+            inner_mask = getattr(renderer, f"{view}_inner_mask").to(device=device).bool()
+            outer_mask = getattr(renderer, f"{view}_outer_mask").to(device=device).bool()
+            geometry_mask = inner_mask | outer_mask
+            rendered = _ensure_rgba(rendered.to(device=device, dtype=dtype), geometry_mask=geometry_mask)
 
-        for layer_index, layer in enumerate(CONDITIONING_LAYERS):
-            mask = getattr(renderer, f"{view}_{layer}_mask").to(device=device).bool()
-            if not bool(mask.any()):
-                continue
-            grid = getattr(renderer, f"{view}_{layer}_grid").to(device=device, dtype=dtype)
-            flat_uv = _uv_indices_from_grid(grid, mask)
-            values = rendered[:, mask]
+            for layer_index, layer in enumerate(CONDITIONING_LAYERS):
+                mask = getattr(renderer, f"{view}_{layer}_mask").to(device=device).bool()
+                if not bool(mask.any()):
+                    continue
+                grid = getattr(renderer, f"{view}_{layer}_grid").to(device=device, dtype=dtype)
+                flat_uv = _uv_indices_from_grid(grid, mask)
+                values = rendered[:, mask]
 
-            accum[layer_index].reshape(4, -1).index_add_(1, flat_uv, values)
-            ones = torch.ones((1, values.shape[1]), dtype=dtype, device=device)
-            counts[layer_index].reshape(1, -1).index_add_(1, flat_uv, ones)
+                accum[layer_index].reshape(4, -1).index_add_(1, flat_uv, values)
+                ones = torch.ones((1, values.shape[1]), dtype=dtype, device=device)
+                counts[layer_index].reshape(1, -1).index_add_(1, flat_uv, ones)
 
-    known = (counts > 0).to(dtype=dtype)
-    averaged = accum / counts.clamp_min(1.0)
-    bg = sample.new_tensor(bg_color, dtype=dtype).view(1, 3, 1, 1) / 255.0
-    rgb = torch.where(known.expand(-1, 3, -1, -1) > 0, averaged[:, :3], bg.expand_as(averaged[:, :3]))
-    alpha = torch.where(known > 0, averaged[:, 3:4], torch.zeros_like(averaged[:, 3:4]))
-    layers = torch.cat([rgb, alpha, known], dim=1)
-    return layers.reshape(-1, UV_SIZE, UV_SIZE).clamp(0.0, 1.0)
+        known = (counts > 0).to(dtype=dtype)
+        averaged = accum / counts.clamp_min(1.0)
+        bg = sample.new_tensor(bg_color, dtype=dtype).view(1, 3, 1, 1) / 255.0
+        rgb = torch.where(known.expand(-1, 3, -1, -1) > 0, averaged[:, :3], bg.expand_as(averaged[:, :3]))
+        alpha = torch.where(known > 0, averaged[:, 3:4], torch.zeros_like(averaged[:, 3:4]))
+        layers = torch.cat([rgb, alpha, known], dim=1)
+        return layers.reshape(-1, UV_SIZE, UV_SIZE).clamp(0.0, 1.0)
+    else:
+        B = sample.shape[0]
+        accum = sample.new_zeros(B, len(CONDITIONING_LAYERS), 4, UV_SIZE, UV_SIZE)
+        counts = sample.new_zeros(B, len(CONDITIONING_LAYERS), 1, UV_SIZE, UV_SIZE)
+
+        for view, rendered in zip(views, rendered_views):
+            inner_mask = getattr(renderer, f"{view}_inner_mask").to(device=device).bool()
+            outer_mask = getattr(renderer, f"{view}_outer_mask").to(device=device).bool()
+            geometry_mask = inner_mask | outer_mask
+            rendered = _ensure_rgba(rendered.to(device=device, dtype=dtype), geometry_mask=geometry_mask)
+
+            for layer_index, layer in enumerate(CONDITIONING_LAYERS):
+                mask = getattr(renderer, f"{view}_{layer}_mask").to(device=device).bool()
+                if not bool(mask.any()):
+                    continue
+                grid = getattr(renderer, f"{view}_{layer}_grid").to(device=device, dtype=dtype)
+                flat_uv = _uv_indices_from_grid(grid, mask)
+                values = rendered[:, :, mask] # (B, 4, N_pixels)
+
+                accum[:, layer_index].reshape(B, 4, -1).index_add_(2, flat_uv, values)
+                ones = torch.ones((B, 1, values.shape[2]), dtype=dtype, device=device)
+                counts[:, layer_index].reshape(B, 1, -1).index_add_(2, flat_uv, ones)
+
+        known = (counts > 0).to(dtype=dtype)
+        averaged = accum / counts.clamp_min(1.0)
+        bg = sample.new_tensor(bg_color, dtype=dtype).view(1, 1, 3, 1, 1) / 255.0
+        rgb = torch.where(known.expand(-1, -1, 3, -1, -1) > 0, averaged[:, :, :3], bg.expand_as(averaged[:, :, :3]))
+        alpha = torch.where(known > 0, averaged[:, :, 3:4], torch.zeros_like(averaged[:, :, 3:4]))
+        layers = torch.cat([rgb, alpha, known], dim=2)
+        return layers.reshape(B, -1, UV_SIZE, UV_SIZE).clamp(0.0, 1.0)
 
 
 def build_conditioning(
@@ -226,13 +272,22 @@ def build_conditioning(
 ):
     _ = image_size, include_alpha
     rendered_views = []
-    with torch.no_grad():
+    
+    is_batched = skin.dim() == 4
+    if not is_batched:
         skin_batch = skin.unsqueeze(0)
+    else:
+        skin_batch = skin
+        
+    with torch.no_grad():
         for view in views:
-            rendered = renderer.forward_view(skin_batch, view).squeeze(0)
+            rendered = renderer.forward_view(skin_batch, view)
+            if not is_batched:
+                rendered = rendered.squeeze(0)
             if augmenter is not None:
                 rendered = augmenter(rendered)
             rendered_views.append(rendered)
+            
     return unproject_renders_to_uv(rendered_views, renderer, views)
 
 
@@ -251,6 +306,7 @@ class InverseUVDataset(Dataset):
         distortion_scale=0.08,
         perspective_scale=0.04,
         translation_scale=0.02,
+        return_conditioning=False,
     ):
         self.data_dir = data_dir
         self.views = parse_views(views)
@@ -262,6 +318,7 @@ class InverseUVDataset(Dataset):
         self.distortion_scale = distortion_scale
         self.perspective_scale = perspective_scale
         self.translation_scale = translation_scale
+        self.return_conditioning = return_conditioning
         self.renderer = DifferentiableRenderer(
             mappings_dir=mappings_dir,
             bg_color=tuple(channel / 255.0 for channel in bg_color),
@@ -296,27 +353,29 @@ class InverseUVDataset(Dataset):
             bg_color=self.bg_color,
             normalize_model=self.normalize_model,
         )
-        augmenter = None
-        if self.augment:
-            augmenter = RenderAugmenter(
-                distortion_scale=self.distortion_scale,
-                perspective_scale=self.perspective_scale,
-                translation_scale=self.translation_scale,
-                bg_color=self.bg_color,
-            )
-        conditioning = build_conditioning(
-            uv,
-            self.renderer,
-            self.views,
-            image_size=self.image_size,
-            include_alpha=self.include_alpha,
-            augmenter=augmenter,
-        )
-        return {
-            "conditioning": conditioning,
+        res = {
             "uv": uv,
             "path": skin_path,
         }
+        if self.return_conditioning:
+            augmenter = None
+            if self.augment:
+                augmenter = RenderAugmenter(
+                    distortion_scale=self.distortion_scale,
+                    perspective_scale=self.perspective_scale,
+                    translation_scale=self.translation_scale,
+                    bg_color=self.bg_color,
+                )
+            conditioning = build_conditioning(
+                uv,
+                self.renderer,
+                self.views,
+                image_size=self.image_size,
+                include_alpha=self.include_alpha,
+                augmenter=augmenter,
+            )
+            res["conditioning"] = conditioning
+        return res
 
 
 def tensor_to_rgba_image(tensor):
