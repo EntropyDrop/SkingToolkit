@@ -19,6 +19,8 @@ RESUME="${RESUME:-}"
 PERSPECTIVE_SCALE="${PERSPECTIVE_SCALE:-0.01}"
 DISTORTION_SCALE="${DISTORTION_SCALE:-0.005}"
 TRANSLATION_SCALE="${TRANSLATION_SCALE:-0.02}"
+LAMBDA_SSIM="${LAMBDA_SSIM:-0.2}"
+WARMUP_EPOCHS="${WARMUP_EPOCHS:-5}"
 
 resume_args=()
 if [[ -n "$RESUME" ]]; then
@@ -42,4 +44,6 @@ python train.py \
   --perspective_scale "$PERSPECTIVE_SCALE" \
   --distortion_scale "$DISTORTION_SCALE" \
   --translation_scale "$TRANSLATION_SCALE" \
-  "${resume_args[@]}"
+  --lambda_ssim "$LAMBDA_SSIM" \
+  --warmup_epochs "$WARMUP_EPOCHS" \
+  ${resume_args[@]+"${resume_args[@]}"}
