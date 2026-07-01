@@ -7,7 +7,7 @@ cd "$(dirname "$0")"
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-16}"
 export MKL_NUM_THREADS="${MKL_NUM_THREADS:-16}"
 
-RUN_NAME="${RUN_NAME:-inverse_uv_test17}"
+RUN_NAME="${RUN_NAME:-inverse_uv_test18}"
 DATA_DIR="${DATA_DIR:-../skins}"
 MAPPINGS_DIR="${MAPPINGS_DIR:-../../github/differentiable_minecraft_renderer/mappings}"
 MAX_SAMPLES="${MAX_SAMPLES:-10000}"
