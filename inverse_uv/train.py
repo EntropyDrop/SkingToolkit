@@ -88,7 +88,7 @@ def run_epoch(model, criterion, loader, optimizer, scaler, device, precision, tr
     model.train(train)
     loss_sums = {}
     sample_count = 0
-    iterator = tqdm(loader, leave=False) if tqdm is not None else loader
+    iterator = tqdm(loader, leave=False, file=sys.__stderr__ or sys.stderr) if tqdm is not None else loader
 
     for batch in iterator:
         batch = move_batch(batch, device)
@@ -308,9 +308,10 @@ class Logger(object):
 
     def write(self, message):
         self.terminal.write(message)
-        log_message = message.replace("\r", "")
-        if log_message:
-            self.log.write(log_message)
+        if "\r" in message:
+            return
+        if message:
+            self.log.write(message)
             self.log.flush()
 
     def flush(self):
