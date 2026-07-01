@@ -1,5 +1,6 @@
 python train.py \
   --data_dir ../skins \
+  --max_samples 1000 \
   --output_dir runs/inverse_uv_test14 \
   --views walk_front_both_layer_ortho,walk_back_both_layer_ortho \
   --batch_size 16 \
