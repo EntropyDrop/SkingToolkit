@@ -7,15 +7,15 @@ cd "$(dirname "$0")"
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-16}"
 export MKL_NUM_THREADS="${MKL_NUM_THREADS:-16}"
 
-RUN_NAME="${RUN_NAME:-inverse_uv_light_v1}"
+MODEL="${MODEL:-full}"
+RUN_NAME="${RUN_NAME:-inverse_uv_${MODEL}_v1}"
 DATA_DIR="${DATA_DIR:-../skins}"
 MAPPINGS_DIR="${MAPPINGS_DIR:-../../github/differentiable_minecraft_renderer/mappings}"
 MAX_SAMPLES="${MAX_SAMPLES:-10000}"
-MODEL="${MODEL:-light}"
 BATCH_SIZE="${BATCH_SIZE:-32}"
 NUM_WORKERS="${NUM_WORKERS:-16}"
 EPOCHS="${EPOCHS:-50}"
-LR="${LR:-3e-4}"
+LR="${LR:-}"
 RESUME="${RESUME:-}"
 # Augmentation scales operate on 512×1024 rendered views, not 64×64 UV.
 # 0.01 perspective ≈ 5-10px corner shift; 0.005 distortion ≈ 2.5-5px elastic;
@@ -23,13 +23,32 @@ RESUME="${RESUME:-}"
 PERSPECTIVE_SCALE="${PERSPECTIVE_SCALE:-0.01}"
 DISTORTION_SCALE="${DISTORTION_SCALE:-0.005}"
 TRANSLATION_SCALE="${TRANSLATION_SCALE:-0.02}"
-LAMBDA_SSIM="${LAMBDA_SSIM:-0.0}"
-LAMBDA_EDGE="${LAMBDA_EDGE:-0.0}"
-WARMUP_EPOCHS="${WARMUP_EPOCHS:-3}"
+LAMBDA_SSIM="${LAMBDA_SSIM:-}"
+LAMBDA_EDGE="${LAMBDA_EDGE:-}"
+WARMUP_EPOCHS="${WARMUP_EPOCHS:-}"
 
 resume_args=()
 if [[ -n "$RESUME" ]]; then
-  resume_args=(--resume "$RESUME" --resume_lr "$LR")
+  # If resuming, use the provided LR if explicitly set, otherwise let python train.py handle it
+  if [[ -n "$LR" ]]; then
+    resume_args=(--resume "$RESUME" --resume_lr "$LR")
+  else
+    resume_args=(--resume "$RESUME")
+  fi
+fi
+
+extra_args=()
+if [[ -n "$LR" ]]; then
+  extra_args+=(--lr "$LR")
+fi
+if [[ -n "$LAMBDA_SSIM" ]]; then
+  extra_args+=(--lambda_ssim "$LAMBDA_SSIM")
+fi
+if [[ -n "$LAMBDA_EDGE" ]]; then
+  extra_args+=(--lambda_edge "$LAMBDA_EDGE")
+fi
+if [[ -n "$WARMUP_EPOCHS" ]]; then
+  extra_args+=(--warmup_epochs "$WARMUP_EPOCHS")
 fi
 
 python train.py \
@@ -41,7 +60,6 @@ python train.py \
   --batch_size "$BATCH_SIZE" \
   --num_workers "$NUM_WORKERS" \
   --epochs "$EPOCHS" \
-  --lr "$LR" \
   --val_split 0.1 \
   --mappings_dir "$MAPPINGS_DIR" \
   --save_every 1 \
@@ -50,7 +68,5 @@ python train.py \
   --perspective_scale "$PERSPECTIVE_SCALE" \
   --distortion_scale "$DISTORTION_SCALE" \
   --translation_scale "$TRANSLATION_SCALE" \
-  --lambda_ssim "$LAMBDA_SSIM" \
-  --lambda_edge "$LAMBDA_EDGE" \
-  --warmup_epochs "$WARMUP_EPOCHS" \
+  ${extra_args[@]+"${extra_args[@]}"} \
   ${resume_args[@]+"${resume_args[@]}"}
