@@ -65,6 +65,48 @@ class DifferentiableRenderer(nn.Module):
                     self.register_buffer(f"{view_name}_inner_mask", inner_mask)
                     self.register_buffer(f"{view_name}_outer_grid", outer_grid)
                     self.register_buffer(f"{view_name}_outer_mask", outer_mask)
+
+                    if "outer_uv_layers" in data and "outer_masks" in data:
+                        outer_uv_layers = data["outer_uv_layers"].float()
+                        outer_mask_layers = data["outer_masks"].float()
+                        outer_grid_layers = torch.zeros_like(outer_uv_layers)
+                        outer_grid_layers[..., 0] = (outer_uv_layers[..., 0] / 63.0) * 2.0 - 1.0
+                        outer_grid_layers[..., 1] = (outer_uv_layers[..., 1] / 63.0) * 2.0 - 1.0
+                        self.register_buffer(f"{view_name}_outer_grid_layers", outer_grid_layers)
+                        self.register_buffer(f"{view_name}_outer_mask_layers", outer_mask_layers)
+
+                    if "composite_uv_layers" in data and "composite_masks" in data:
+                        composite_uv_layers = data["composite_uv_layers"].float()
+                        composite_mask_layers = data["composite_masks"].float()
+                        composite_grid_layers = torch.zeros_like(composite_uv_layers)
+                        composite_grid_layers[..., 0] = (composite_uv_layers[..., 0] / 63.0) * 2.0 - 1.0
+                        composite_grid_layers[..., 1] = (composite_uv_layers[..., 1] / 63.0) * 2.0 - 1.0
+                        self.register_buffer(f"{view_name}_composite_grid_layers", composite_grid_layers)
+                        self.register_buffer(f"{view_name}_composite_mask_layers", composite_mask_layers)
+                        if "composite_is_decor_layers" in data:
+                            self.register_buffer(
+                                f"{view_name}_composite_is_decor_layers",
+                                data["composite_is_decor_layers"].bool(),
+                            )
+
+                    if (
+                        "geometry_uv_layers" in data
+                        and "geometry_masks" in data
+                        and ("geometry_sort_indices" in data or "geometry_depth_layers" in data)
+                    ):
+                        geometry_uv_layers = data["geometry_uv_layers"].float()
+                        geometry_mask_layers = data["geometry_masks"].float()
+                        geometry_grid_layers = torch.zeros_like(geometry_uv_layers)
+                        geometry_grid_layers[..., 0] = (geometry_uv_layers[..., 0] / 63.0) * 2.0 - 1.0
+                        geometry_grid_layers[..., 1] = (geometry_uv_layers[..., 1] / 63.0) * 2.0 - 1.0
+                        if "geometry_sort_indices" in data:
+                            geometry_sort_indices = data["geometry_sort_indices"].long()
+                        else:
+                            geometry_depth_layers = data["geometry_depth_layers"].float()
+                            geometry_sort_indices = torch.argsort(geometry_depth_layers, dim=0)
+                        self.register_buffer(f"{view_name}_geometry_grid_layers", geometry_grid_layers)
+                        self.register_buffer(f"{view_name}_geometry_mask_layers", geometry_mask_layers)
+                        self.register_buffer(f"{view_name}_geometry_sort_indices", geometry_sort_indices)
         else:
             print(f"WARNING: mappings_dir '{self.mappings_dir}' does not exist yet. Views list is empty.")
 
@@ -116,6 +158,106 @@ class DifferentiableRenderer(nn.Module):
         
         # Calculate final alpha mask (for background/foreground separation)
         final_alpha = outer_alpha + (1.0 - outer_alpha) * inner_alpha
+
+        composite_grid_name = f"{view_name}_composite_grid_layers"
+        composite_decor_name = f"{view_name}_composite_is_decor_layers"
+        if hasattr(self, composite_grid_name) and hasattr(self, composite_decor_name):
+            composite_grid_layers = getattr(self, composite_grid_name).to(dtype=dtype)
+            composite_mask_layers = getattr(self, f"{view_name}_composite_mask_layers").to(dtype=dtype)
+            composite_is_decor_layers = getattr(self, composite_decor_name)
+            num_layers = composite_grid_layers.shape[0]
+            out_h, out_w = composite_grid_layers.shape[1:3]
+
+            composite_grid = composite_grid_layers.unsqueeze(0).expand(B, -1, -1, -1, -1)
+            composite_grid = composite_grid.reshape(B * num_layers, out_h, out_w, 2)
+            skin_layers = skins.unsqueeze(1).expand(-1, num_layers, -1, -1, -1)
+            skin_layers = skin_layers.reshape(B * num_layers, C, H_in, W_in)
+            composite_sampled = F.grid_sample(
+                skin_layers,
+                composite_grid,
+                mode='bilinear',
+                padding_mode='zeros',
+                align_corners=True,
+            )
+            composite_sampled = composite_sampled.reshape(B, num_layers, C, out_h, out_w)
+            composite_mask = composite_mask_layers.unsqueeze(0).unsqueeze(2).expand(B, -1, -1, -1, -1)
+            composite_sampled = composite_sampled * composite_mask
+
+            composite_render_rgb = bg
+            composite_render_alpha = torch.zeros_like(final_alpha)
+            for layer_index in range(num_layers - 1, -1, -1):
+                layer = composite_sampled[:, layer_index]
+                layer_rgb = layer[:, :3]
+                layer_alpha = layer[:, 3:4]
+                composite_render_rgb = layer_alpha * layer_rgb + (1.0 - layer_alpha) * composite_render_rgb
+                composite_render_alpha = layer_alpha + (1.0 - layer_alpha) * composite_render_alpha
+
+            layer_alpha = composite_sampled[:, :, 3:4]
+            visible = (layer_alpha > 1e-4) & (composite_mask > 0.5)
+            layer_indices = torch.arange(num_layers, device=skins.device).view(1, num_layers, 1, 1, 1)
+            fallback_indices = torch.full(visible.shape, num_layers, device=skins.device, dtype=torch.long)
+            visible_indices = torch.where(visible, layer_indices, fallback_indices)
+            first_visible_index = visible_indices.amin(dim=1)
+            has_visible = first_visible_index < num_layers
+
+            decor_layers = composite_is_decor_layers.unsqueeze(0).unsqueeze(2).expand(B, -1, -1, -1, -1)
+            first_layer = layer_indices == first_visible_index.unsqueeze(1)
+            first_visible_is_decor = (visible & first_layer & decor_layers).any(dim=1)
+            trust_composite = has_visible & (first_visible_is_decor | (first_visible_index <= 1))
+
+            final_rgb = torch.where(trust_composite, composite_render_rgb, final_rgb)
+            final_alpha = torch.where(trust_composite, composite_render_alpha, final_alpha)
+
+            geometry_grid_name = f"{view_name}_geometry_grid_layers"
+            if hasattr(self, geometry_grid_name) and num_layers > 0:
+                geometry_grid_layers = getattr(self, geometry_grid_name).to(dtype=dtype)
+                geometry_mask_layers = getattr(self, f"{view_name}_geometry_mask_layers").to(dtype=dtype)
+                geometry_sort_indices = getattr(self, f"{view_name}_geometry_sort_indices").to(device=skins.device)
+                geometry_layers = geometry_grid_layers.shape[0]
+                if geometry_layers > 0:
+                    geometry_grid = geometry_grid_layers.unsqueeze(0).expand(B, -1, -1, -1, -1)
+                    geometry_grid = geometry_grid.reshape(B * geometry_layers, out_h, out_w, 2)
+                    geometry_skin_layers = skins.unsqueeze(1).expand(-1, geometry_layers, -1, -1, -1)
+                    geometry_skin_layers = geometry_skin_layers.reshape(B * geometry_layers, C, H_in, W_in)
+                    geometry_sampled = F.grid_sample(
+                        geometry_skin_layers,
+                        geometry_grid,
+                        mode='bilinear',
+                        padding_mode='zeros',
+                        align_corners=True,
+                    )
+                    geometry_sampled = geometry_sampled.reshape(B, geometry_layers, C, out_h, out_w)
+                    geometry_mask = geometry_mask_layers.unsqueeze(0).unsqueeze(2).expand(
+                        B, -1, -1, -1, -1
+                    )
+                    geometry_sampled = geometry_sampled * geometry_mask
+                    geometry_order = geometry_sort_indices.unsqueeze(0).unsqueeze(2).expand(
+                        B, -1, C, -1, -1
+                    )
+                    geometry_sampled = torch.gather(geometry_sampled, dim=1, index=geometry_order)
+
+                    geometry_render_rgb = bg
+                    geometry_render_alpha = torch.zeros_like(final_alpha)
+                    for layer_index in range(geometry_layers):
+                        layer = geometry_sampled[:, layer_index]
+                        layer_rgb = layer[:, :3]
+                        layer_alpha = layer[:, 3:4]
+                        geometry_render_rgb = (
+                            layer_alpha * layer_rgb + (1.0 - layer_alpha) * geometry_render_rgb
+                        )
+                        geometry_render_alpha = layer_alpha + (1.0 - layer_alpha) * geometry_render_alpha
+
+                    front_decor = composite_is_decor_layers[0].unsqueeze(0).unsqueeze(1)
+                    front_mask = (composite_mask_layers[0] > 0.5).unsqueeze(0).unsqueeze(1)
+                    front_alpha = composite_sampled[:, 0, 3:4]
+                    geometry_fallback = (
+                        front_mask
+                        & front_decor
+                        & (front_alpha <= 1e-4)
+                        & (geometry_render_alpha > 1e-4)
+                    )
+                    final_rgb = torch.where(geometry_fallback, geometry_render_rgb, final_rgb)
+                    final_alpha = torch.where(geometry_fallback, geometry_render_alpha, final_alpha)
         
         return torch.cat([final_rgb, final_alpha], dim=1)
 
