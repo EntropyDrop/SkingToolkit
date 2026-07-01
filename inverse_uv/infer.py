@@ -19,7 +19,7 @@ from SkingToolkit.inverse_uv.dataset import (  # noqa: E402
     unproject_renders_to_uv,
     view_native_size,
 )
-from SkingToolkit.inverse_uv.model import InverseUVNet  # noqa: E402
+from SkingToolkit.inverse_uv.model import InverseUVNet, LightInverseUVNet  # noqa: E402
 from SkingToolkit.inverse_uv.train import get_device  # noqa: E402
 from SkingToolkit.renderer import DifferentiableRenderer  # noqa: E402
 
@@ -85,18 +85,27 @@ def load_conditioning(args, checkpoint_args, input_channels):
 def model_config_from_checkpoint(checkpoint, checkpoint_args, input_channels):
     model_config = checkpoint.get("model_config")
     if model_config is not None:
-        return {
+        model_type = model_config.get("model_type", "full")
+        result = {
+            "model_type": model_type,
             "input_channels": model_config.get("input_channels", input_channels),
             "base_channels": model_config.get("base_channels", checkpoint_args.get("base_channels", 64)),
             "use_coordconv": model_config.get("use_coordconv", False),
-            "use_attention": model_config.get("use_attention", False),
-            "attention_heads": model_config.get("attention_heads", 4),
-            "use_resnet": model_config.get("use_resnet", False),
-            "multi_scale_coord": model_config.get("multi_scale_coord", False),
         }
+        if model_type == "light":
+            result["use_pixelshuffle"] = model_config.get("use_pixelshuffle", False)
+        else:
+            result.update({
+                "use_attention": model_config.get("use_attention", False),
+                "attention_heads": model_config.get("attention_heads", 4),
+                "use_resnet": model_config.get("use_resnet", False),
+                "multi_scale_coord": model_config.get("multi_scale_coord", False),
+            })
+        return result
 
     if "coordconv" in checkpoint_args or "bottleneck_attention" in checkpoint_args:
         return {
+            "model_type": checkpoint_args.get("model", "full"),
             "input_channels": input_channels,
             "base_channels": checkpoint_args.get("base_channels", 64),
             "use_coordconv": checkpoint_args.get("coordconv", False),
@@ -107,6 +116,7 @@ def model_config_from_checkpoint(checkpoint, checkpoint_args, input_channels):
         }
 
     return {
+        "model_type": "full",
         "input_channels": input_channels,
         "base_channels": checkpoint_args.get("base_channels", 64),
         "use_coordconv": False,
@@ -144,15 +154,24 @@ def main():
     input_channels = checkpoint.get("input_channels", checkpoint_args.get("input_channels", 6))
     model_config = model_config_from_checkpoint(checkpoint, checkpoint_args, input_channels)
 
-    model = InverseUVNet(
-        input_channels=model_config["input_channels"],
-        base_channels=model_config["base_channels"],
-        use_coordconv=model_config["use_coordconv"],
-        use_attention=model_config["use_attention"],
-        attention_heads=model_config["attention_heads"],
-        use_resnet=model_config["use_resnet"],
-        multi_scale_coord=model_config["multi_scale_coord"],
-    ).to(device)
+    model_type = model_config.get("model_type", "full")
+    if model_type == "light":
+        model = LightInverseUVNet(
+            input_channels=model_config["input_channels"],
+            base_channels=model_config["base_channels"],
+            use_coordconv=model_config.get("use_coordconv", True),
+            use_pixelshuffle=model_config.get("use_pixelshuffle", False),
+        ).to(device)
+    else:
+        model = InverseUVNet(
+            input_channels=model_config["input_channels"],
+            base_channels=model_config["base_channels"],
+            use_coordconv=model_config.get("use_coordconv", False),
+            use_attention=model_config.get("use_attention", False),
+            attention_heads=model_config.get("attention_heads", 4),
+            use_resnet=model_config.get("use_resnet", False),
+            multi_scale_coord=model_config.get("multi_scale_coord", False),
+        ).to(device)
     model.load_state_dict(checkpoint["model"])
     model.eval()
 

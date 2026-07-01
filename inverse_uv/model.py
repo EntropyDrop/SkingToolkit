@@ -181,5 +181,75 @@ class InverseUVNet(nn.Module):
         return torch.sigmoid(self.head(x))
 
 
+class PixelShuffleUpBlock(nn.Module):
+    """Upsampling block using PixelShuffle for sharper outputs vs bilinear."""
+    def __init__(self, in_channels, skip_channels, out_channels, block_cls=ConvBlock):
+        super().__init__()
+        self.upsample = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels * 4, kernel_size=1),
+            nn.PixelShuffle(2),
+        )
+        self.block = block_cls(out_channels + skip_channels, out_channels)
+
+    def forward(self, x, skip):
+        x = self.upsample(x)
+        if x.shape[-2:] != skip.shape[-2:]:
+            x = F.interpolate(x, size=skip.shape[-2:], mode="bilinear", align_corners=False)
+        return self.block(torch.cat([x, skip], dim=1))
+
+
+class LightInverseUVNet(nn.Module):
+    """Lightweight U-Net for mild-deformation UV inpainting (~1M params).
+
+    Uses only 2 downsampling levels (bottleneck at 16×16) and CoordConv
+    only at the stem.  No self-attention.  Designed for scenarios where
+    the input conditioning is already a close UV-space approximation and
+    the network mainly needs to fill occluded regions and correct minor
+    misalignment.
+    """
+
+    def __init__(
+        self,
+        input_channels=10,
+        base_channels=32,
+        output_channels=4,
+        use_coordconv=True,
+        use_pixelshuffle=False,
+    ):
+        super().__init__()
+        c = base_channels
+        self.use_coordconv = use_coordconv
+        self.use_pixelshuffle = use_pixelshuffle
+
+        self.coordconv = CoordConv() if use_coordconv else nn.Identity()
+        stem_in = input_channels + (2 if use_coordconv else 0)
+
+        self.stem = ConvBlock(stem_in, c)
+        self.down1 = DownBlock(c, c * 2)
+        self.down2 = DownBlock(c * 2, c * 4)
+
+        self.mid = ConvBlock(c * 4, c * 4)
+
+        up_cls = PixelShuffleUpBlock if use_pixelshuffle else UpBlock
+        self.up1 = up_cls(c * 4, c * 2, c * 2)
+        self.up0 = up_cls(c * 2, c, c)
+        self.head = nn.Sequential(
+            nn.Conv2d(c, output_channels, kernel_size=1),
+        )
+
+    def forward(self, x):
+        if x.shape[-1] != 64 or x.shape[-2] != 64:
+            x = F.interpolate(x, size=(64, 64), mode="bilinear", align_corners=False)
+
+        x = self.coordconv(x)
+        s0 = self.stem(x)
+        s1 = self.down1(s0)
+        s2 = self.down2(s1)
+        x = self.mid(s2)
+        x = self.up1(x, s1)
+        x = self.up0(x, s0)
+        return torch.sigmoid(self.head(x))
+
+
 def count_parameters(model):
     return sum(param.numel() for param in model.parameters() if param.requires_grad)

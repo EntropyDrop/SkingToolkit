@@ -213,6 +213,7 @@ class InverseUVLoss(nn.Module):
         lambda_render=0.1,
         lambda_edge=0.25,
         lambda_ssim=0.2,
+        ssim_window_size=11,
         render_foreground_weight=1.0,
         ignore_covered_inner=True,
         covered_inner_alpha_threshold=0.1,
@@ -223,6 +224,7 @@ class InverseUVLoss(nn.Module):
         self.lambda_render = lambda_render
         self.lambda_edge = lambda_edge
         self.lambda_ssim = lambda_ssim
+        self.ssim_window_size = ssim_window_size
         self.render_foreground_weight = render_foreground_weight
         self.ignore_covered_inner = ignore_covered_inner
         self.covered_inner_alpha_threshold = covered_inner_alpha_threshold
@@ -287,7 +289,7 @@ class InverseUVLoss(nn.Module):
             alpha_gt = gt_uv[:, 3:4].detach()
             if uv_mask is not None:
                 alpha_gt = alpha_gt * uv_mask
-            loss_ssim = masked_ssim_loss(pred_uv[:, :3], gt_uv[:, :3], alpha_gt)
+            loss_ssim = masked_ssim_loss(pred_uv[:, :3], gt_uv[:, :3], alpha_gt, window_size=self.ssim_window_size)
         else:
             loss_ssim = pred_uv.new_tensor(0.0)
 
