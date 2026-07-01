@@ -27,6 +27,8 @@ if [[ -n "$RESUME" ]]; then
   resume_args=(--resume "$RESUME" --resume_lr "$LR")
 fi
 
+mkdir -p "runs/$RUN_NAME"
+
 python train.py \
   --data_dir "$DATA_DIR" \
   --max_samples "$MAX_SAMPLES" \
@@ -46,4 +48,4 @@ python train.py \
   --translation_scale "$TRANSLATION_SCALE" \
   --lambda_ssim "$LAMBDA_SSIM" \
   --warmup_epochs "$WARMUP_EPOCHS" \
-  ${resume_args[@]+"${resume_args[@]}"}
+  ${resume_args[@]+"${resume_args[@]}"} 2>&1 | tee "runs/$RUN_NAME/train.log"
