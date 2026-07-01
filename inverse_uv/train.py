@@ -1,4 +1,5 @@
 import argparse
+import copy
 import json
 import os
 import sys
@@ -136,6 +137,10 @@ def build_arg_parser():
         help="Deprecated compatibility option; UV unprojection always builds RGBA plus mask conditioning.",
     )
     parser.add_argument("--base_channels", type=int, default=64, help="Base channel width for InverseUVNet.")
+    parser.add_argument("--augment", action="store_true", help="Enable online data augmentation during training.")
+    parser.add_argument("--distortion_scale", type=float, default=0.08, help="Scale of random local elastic distortion.")
+    parser.add_argument("--perspective_scale", type=float, default=0.04, help="Scale of random perspective warp.")
+    parser.add_argument("--translation_scale", type=float, default=0.02, help="Scale of random horizontal/vertical translation (shift).")
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--lr", type=float, default=1e-4)
@@ -185,13 +190,26 @@ def main():
         image_size=args.render_size,
         include_alpha=args.include_alpha,
         max_samples=args.max_samples,
+        augment=args.augment,
+        distortion_scale=args.distortion_scale,
+        perspective_scale=args.perspective_scale,
+        translation_scale=args.translation_scale,
     )
     input_channels = dataset.input_channels
 
     val_len = int(len(dataset) * args.val_split) if args.val_split > 0 else 0
     if val_len > 0 and len(dataset) - val_len > 0:
         generator = torch.Generator().manual_seed(args.seed)
-        train_dataset, val_dataset = random_split(dataset, [len(dataset) - val_len, val_len], generator=generator)
+        indices = torch.randperm(len(dataset), generator=generator).tolist()
+        val_indices = indices[:val_len]
+        train_indices = indices[val_len:]
+        
+        from torch.utils.data import Subset
+        train_dataset = Subset(dataset, train_indices)
+        
+        val_dataset_base = copy.copy(dataset)
+        val_dataset_base.augment = False
+        val_dataset = Subset(val_dataset_base, val_indices)
     else:
         train_dataset, val_dataset = dataset, None
 

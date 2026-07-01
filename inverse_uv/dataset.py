@@ -7,6 +7,7 @@ import torch
 from PIL import Image
 from torch.utils.data import Dataset
 import torchvision.transforms.functional as TF
+import torch.nn.functional as F
 
 TOOLKIT_ROOT = Path(__file__).resolve().parents[1]
 WORKSPACE_ROOT = TOOLKIT_ROOT.parent
@@ -21,6 +22,78 @@ IMAGE_EXTENSIONS = (".png", ".webp", ".jpg", ".jpeg")
 UV_SIZE = 64
 CONDITIONING_LAYERS = ("inner", "outer")
 CONDITIONING_CHANNELS = len(CONDITIONING_LAYERS) * 5
+
+
+class RenderAugmenter:
+    def __init__(self, distortion_scale=0.08, perspective_scale=0.04, translation_scale=0.02, bg_color=(128, 128, 128)):
+        self.distortion_scale = distortion_scale
+        self.perspective_scale = perspective_scale
+        self.translation_scale = translation_scale
+        self.bg_color = bg_color
+        
+    def __call__(self, rendered_tensor):
+        # rendered_tensor shape: (C, H, W)
+        device = rendered_tensor.device
+        dtype = rendered_tensor.dtype
+        C, H, W = rendered_tensor.shape
+        
+        fill_color = [self.bg_color[0] / 255.0, self.bg_color[1] / 255.0, self.bg_color[2] / 255.0, 0.0]
+        
+        # 1. Random translation (offset)
+        if self.translation_scale > 0:
+            dx = int((torch.rand(1).item() - 0.5) * 2 * self.translation_scale * W)
+            dy = int((torch.rand(1).item() - 0.5) * 2 * self.translation_scale * H)
+            img_batch = rendered_tensor.unsqueeze(0)
+            img_batch = TF.affine(
+                img_batch, angle=0.0, translate=[dx, dy], scale=1.0, shear=[0.0, 0.0],
+                interpolation=TF.InterpolationMode.BILINEAR,
+                fill=fill_color
+            )
+            rendered_tensor = img_batch.squeeze(0)
+            
+        # 2. Perspective warp (approximates viewpoint shift)
+        if self.perspective_scale > 0:
+            startpoints = [[0, 0], [W - 1, 0], [W - 1, H - 1], [0, H - 1]]
+            endpoints = []
+            for x, y in startpoints:
+                dx = (torch.rand(1).item() - 0.5) * 2 * self.perspective_scale * W
+                dy = (torch.rand(1).item() - 0.5) * 2 * self.perspective_scale * H
+                endpoints.append([x + dx, y + dy])
+            
+            img_batch = rendered_tensor.unsqueeze(0)
+            img_batch = TF.perspective(
+                img_batch, startpoints, endpoints, 
+                interpolation=TF.InterpolationMode.BILINEAR,
+                fill=fill_color
+            )
+            rendered_tensor = img_batch.squeeze(0)
+            
+        # 3. Local Elastic / Grid distortion (simulates random warping)
+        if self.distortion_scale > 0:
+            grid_y, grid_x = torch.meshgrid(
+                torch.linspace(-1, 1, H, device=device, dtype=dtype),
+                torch.linspace(-1, 1, W, device=device, dtype=dtype),
+                indexing='ij'
+            )
+            
+            noise_h, noise_w = 8, 8
+            disp_noise = torch.randn(1, 2, noise_h, noise_w, device=device, dtype=dtype) * self.distortion_scale
+            disp_field = F.interpolate(
+                disp_noise, size=(H, W), 
+                mode='bilinear', align_corners=True
+            ).squeeze(0).permute(1, 2, 0) # (H, W, 2)
+            
+            deformed_grid = torch.stack([grid_x, grid_y], dim=-1) + disp_field
+            deformed_grid = deformed_grid.clamp(-1.0, 1.0).unsqueeze(0) # (1, H, W, 2)
+            
+            img_batch = rendered_tensor.unsqueeze(0)
+            img_batch = F.grid_sample(
+                img_batch, deformed_grid, 
+                mode='bilinear', padding_mode='border', align_corners=True
+            )
+            rendered_tensor = img_batch.squeeze(0)
+            
+        return rendered_tensor
 
 
 def parse_views(views):
@@ -149,6 +222,7 @@ def build_conditioning(
     views,
     image_size=256,
     include_alpha=False,
+    augmenter=None,
 ):
     _ = image_size, include_alpha
     rendered_views = []
@@ -156,6 +230,8 @@ def build_conditioning(
         skin_batch = skin.unsqueeze(0)
         for view in views:
             rendered = renderer.forward_view(skin_batch, view).squeeze(0)
+            if augmenter is not None:
+                rendered = augmenter(rendered)
             rendered_views.append(rendered)
     return unproject_renders_to_uv(rendered_views, renderer, views)
 
@@ -171,6 +247,10 @@ class InverseUVDataset(Dataset):
         bg_color=(128, 128, 128),
         max_samples=None,
         normalize_model=True,
+        augment=False,
+        distortion_scale=0.08,
+        perspective_scale=0.04,
+        translation_scale=0.02,
     ):
         self.data_dir = data_dir
         self.views = parse_views(views)
@@ -178,6 +258,10 @@ class InverseUVDataset(Dataset):
         self.include_alpha = include_alpha
         self.bg_color = bg_color
         self.normalize_model = normalize_model
+        self.augment = augment
+        self.distortion_scale = distortion_scale
+        self.perspective_scale = perspective_scale
+        self.translation_scale = translation_scale
         self.renderer = DifferentiableRenderer(
             mappings_dir=mappings_dir,
             bg_color=tuple(channel / 255.0 for channel in bg_color),
@@ -212,12 +296,21 @@ class InverseUVDataset(Dataset):
             bg_color=self.bg_color,
             normalize_model=self.normalize_model,
         )
+        augmenter = None
+        if self.augment:
+            augmenter = RenderAugmenter(
+                distortion_scale=self.distortion_scale,
+                perspective_scale=self.perspective_scale,
+                translation_scale=self.translation_scale,
+                bg_color=self.bg_color,
+            )
         conditioning = build_conditioning(
             uv,
             self.renderer,
             self.views,
             image_size=self.image_size,
             include_alpha=self.include_alpha,
+            augmenter=augmenter,
         )
         return {
             "conditioning": conditioning,
