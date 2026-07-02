@@ -31,7 +31,8 @@ DISTORTION_SCALE="${DISTORTION_SCALE:-0.005}"
 TRANSLATION_SCALE="${TRANSLATION_SCALE:-0.02}"
 LAMBDA_SSIM="${LAMBDA_SSIM:-}"
 LAMBDA_EDGE="${LAMBDA_EDGE:-}"
-WARMUP_EPOCHS="${WARMUP_EPOCHS:-}"
+WARMUP_EPOCHS="${WARMUP_EPOCHS:-3}"
+MIXED_PRECISION="${MIXED_PRECISION:-fp16}"
 
 resume_args=()
 if [[ -n "$RESUME" ]]; then
@@ -74,5 +75,6 @@ python train.py \
   --perspective_scale "$PERSPECTIVE_SCALE" \
   --distortion_scale "$DISTORTION_SCALE" \
   --translation_scale "$TRANSLATION_SCALE" \
+  --mixed_precision "$MIXED_PRECISION" \
   ${extra_args[@]+"${extra_args[@]}"} \
   ${resume_args[@]+"${resume_args[@]}"}
