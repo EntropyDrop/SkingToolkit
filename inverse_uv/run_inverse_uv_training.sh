@@ -23,12 +23,10 @@ NUM_WORKERS="${NUM_WORKERS:-16}"
 EPOCHS="${EPOCHS:-50}"
 LR="${LR:-}"
 RESUME="${RESUME:-}"
-# Augmentation scales operate on 512×1024 rendered views, not 64×64 UV.
-# 0.01 perspective ≈ 5-10px corner shift; 0.005 distortion ≈ 2.5-5px elastic;
-# 0.02 translation ≈ 10-20px offset — already meaningful at this resolution.
-PERSPECTIVE_SCALE="${PERSPECTIVE_SCALE:-0.01}"
-DISTORTION_SCALE="${DISTORTION_SCALE:-0.005}"
+# Augmentation: only translation + uniform scale (fast, single affine call).
+# Perspective and elastic distortion are disabled by default (expensive, marginal benefit).
 TRANSLATION_SCALE="${TRANSLATION_SCALE:-0.02}"
+SCALE_RANGE="${SCALE_RANGE:-0.02}"
 LAMBDA_SSIM="${LAMBDA_SSIM:-}"
 LAMBDA_EDGE="${LAMBDA_EDGE:-}"
 WARMUP_EPOCHS="${WARMUP_EPOCHS:-3}"
@@ -72,9 +70,8 @@ python train.py \
   --save_every 1 \
   --preview_every 1 \
   --augment \
-  --perspective_scale "$PERSPECTIVE_SCALE" \
-  --distortion_scale "$DISTORTION_SCALE" \
   --translation_scale "$TRANSLATION_SCALE" \
+  --scale_range "$SCALE_RANGE" \
   --mixed_precision "$MIXED_PRECISION" \
   ${extra_args[@]+"${extra_args[@]}"} \
   ${resume_args[@]+"${resume_args[@]}"}

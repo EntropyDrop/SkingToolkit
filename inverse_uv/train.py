@@ -239,9 +239,10 @@ def build_arg_parser():
         help="Attention heads for bottleneck self-attention (full model only).",
     )
     parser.add_argument("--augment", action="store_true", help="Enable online data augmentation during training.")
-    parser.add_argument("--distortion_scale", type=float, default=0.08, help="Scale of random local elastic distortion.")
-    parser.add_argument("--perspective_scale", type=float, default=0.04, help="Scale of random perspective warp.")
     parser.add_argument("--translation_scale", type=float, default=0.02, help="Scale of random horizontal/vertical translation (shift).")
+    parser.add_argument("--scale_range", type=float, default=0.02, help="Range of random uniform scale [1-s, 1+s].")
+    parser.add_argument("--distortion_scale", type=float, default=0.0, help="Scale of random local elastic distortion.")
+    parser.add_argument("--perspective_scale", type=float, default=0.0, help="Scale of random perspective warp.")
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--lr", type=float, default=None, help="Learning rate (default: 3e-4 for light, 1e-4 for full).")
@@ -345,9 +346,10 @@ def main():
         include_alpha=args.include_alpha,
         max_samples=args.max_samples,
         augment=args.augment,
+        translation_scale=args.translation_scale,
+        scale_range=args.scale_range,
         distortion_scale=args.distortion_scale,
         perspective_scale=args.perspective_scale,
-        translation_scale=args.translation_scale,
     )
     input_channels = dataset.input_channels
 
@@ -491,9 +493,10 @@ def main():
     augmenter = None
     if args.augment:
         augmenter = RenderAugmenter(
+            translation_scale=args.translation_scale,
+            scale_range=args.scale_range,
             distortion_scale=args.distortion_scale,
             perspective_scale=args.perspective_scale,
-            translation_scale=args.translation_scale,
             bg_color=dataset.bg_color,
         )
 

@@ -25,30 +25,32 @@ CONDITIONING_CHANNELS = len(CONDITIONING_LAYERS) * 5
 
 
 class RenderAugmenter:
-    def __init__(self, distortion_scale=0.08, perspective_scale=0.04, translation_scale=0.02, bg_color=(128, 128, 128)):
+    def __init__(self, translation_scale=0.02, scale_range=0.02, distortion_scale=0.08, perspective_scale=0.04, bg_color=(128, 128, 128)):
+        self.translation_scale = translation_scale
+        self.scale_range = scale_range
         self.distortion_scale = distortion_scale
         self.perspective_scale = perspective_scale
-        self.translation_scale = translation_scale
         self.bg_color = bg_color
-        
+
     def __call__(self, rendered_tensor):
         # Support both (C, H, W) and (B, C, H, W)
         is_batched = rendered_tensor.dim() == 4
         if not is_batched:
             rendered_tensor = rendered_tensor.unsqueeze(0)
-            
+
         B, C, H, W = rendered_tensor.shape
         device = rendered_tensor.device
         dtype = rendered_tensor.dtype
-        
+
         fill_color = [self.bg_color[0] / 255.0, self.bg_color[1] / 255.0, self.bg_color[2] / 255.0, 0.0]
-        
-        # 1. Random translation (offset)
-        if self.translation_scale > 0:
-            dx = int((torch.rand(1).item() - 0.5) * 2 * self.translation_scale * W)
-            dy = int((torch.rand(1).item() - 0.5) * 2 * self.translation_scale * H)
+
+        # 1. Random translation + uniform scale (single affine call)
+        if self.translation_scale > 0 or self.scale_range > 0:
+            dx = int((torch.rand(1).item() - 0.5) * 2 * self.translation_scale * W) if self.translation_scale > 0 else 0
+            dy = int((torch.rand(1).item() - 0.5) * 2 * self.translation_scale * H) if self.translation_scale > 0 else 0
+            s = 1.0 + (torch.rand(1).item() - 0.5) * 2 * self.scale_range if self.scale_range > 0 else 1.0
             rendered_tensor = TF.affine(
-                rendered_tensor, angle=0.0, translate=[dx, dy], scale=1.0, shear=[0.0, 0.0],
+                rendered_tensor, angle=0.0, translate=[dx, dy], scale=s, shear=[0.0, 0.0],
                 interpolation=TF.InterpolationMode.BILINEAR,
                 fill=fill_color
             )
@@ -310,9 +312,10 @@ class InverseUVDataset(Dataset):
         max_samples=None,
         normalize_model=True,
         augment=False,
+        translation_scale=0.02,
+        scale_range=0.02,
         distortion_scale=0.08,
         perspective_scale=0.04,
-        translation_scale=0.02,
         return_conditioning=False,
     ):
         self.data_dir = data_dir
@@ -322,9 +325,10 @@ class InverseUVDataset(Dataset):
         self.bg_color = bg_color
         self.normalize_model = normalize_model
         self.augment = augment
+        self.translation_scale = translation_scale
+        self.scale_range = scale_range
         self.distortion_scale = distortion_scale
         self.perspective_scale = perspective_scale
-        self.translation_scale = translation_scale
         self.return_conditioning = return_conditioning
         self.renderer = DifferentiableRenderer(
             mappings_dir=mappings_dir,
@@ -368,9 +372,10 @@ class InverseUVDataset(Dataset):
             augmenter = None
             if self.augment:
                 augmenter = RenderAugmenter(
+                    translation_scale=self.translation_scale,
+                    scale_range=self.scale_range,
                     distortion_scale=self.distortion_scale,
                     perspective_scale=self.perspective_scale,
-                    translation_scale=self.translation_scale,
                     bg_color=self.bg_color,
                 )
             conditioning = build_conditioning(
