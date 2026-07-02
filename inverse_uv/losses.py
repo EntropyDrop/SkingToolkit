@@ -77,12 +77,14 @@ def alpha_masked_rgb_l1(pred_uv, gt_uv, uv_mask=None):
 
 
 def alpha_bce(pred_uv, gt_uv, uv_mask=None):
-    pred_alpha = pred_uv[:, 3:4].clamp(1e-4, 1.0 - 1e-4)
-    loss = F.binary_cross_entropy(pred_alpha, gt_uv[:, 3:4], reduction="none")
+    # BCE is unsafe under fp16 autocast; force float32 for numerical stability
+    pred_alpha = pred_uv[:, 3:4].clamp(1e-4, 1.0 - 1e-4).float()
+    gt_alpha = gt_uv[:, 3:4].float()
+    loss = F.binary_cross_entropy(pred_alpha, gt_alpha, reduction="none")
     if uv_mask is None:
         return loss.mean()
 
-    uv_mask = uv_mask.to(device=loss.device, dtype=loss.dtype)
+    uv_mask = uv_mask.to(device=loss.device, dtype=torch.float32)
     if uv_mask.shape != loss.shape:
         uv_mask = uv_mask.expand_as(loss)
     denom = uv_mask.sum(dim=(1, 2, 3)).clamp_min(1.0)
