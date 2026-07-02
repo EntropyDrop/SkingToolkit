@@ -8,7 +8,13 @@ export OMP_NUM_THREADS="${OMP_NUM_THREADS:-16}"
 export MKL_NUM_THREADS="${MKL_NUM_THREADS:-16}"
 
 MODEL="${MODEL:-full}"
-RUN_NAME="${RUN_NAME:-inverse_uv_${MODEL}_v1}"
+if [[ -z "${RUN_NAME:-}" ]]; then
+  v=1
+  while [[ -d "runs/inverse_uv_${MODEL}_v${v}" ]]; do
+    ((v++))
+  done
+  RUN_NAME="inverse_uv_${MODEL}_v${v}"
+fi
 DATA_DIR="${DATA_DIR:-../skins}"
 MAPPINGS_DIR="${MAPPINGS_DIR:-../../github/differentiable_minecraft_renderer/mappings}"
 MAX_SAMPLES="${MAX_SAMPLES:-10000}"
