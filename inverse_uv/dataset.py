@@ -269,26 +269,33 @@ def build_conditioning(
     image_size=256,
     include_alpha=False,
     augmenter=None,
+    return_renders=False,
 ):
     _ = image_size, include_alpha
     rendered_views = []
-    
+    gt_renders = {} if return_renders else None
+
     is_batched = skin.dim() == 4
     if not is_batched:
         skin_batch = skin.unsqueeze(0)
     else:
         skin_batch = skin
-        
+
     with torch.no_grad():
         for view in views:
             rendered = renderer.forward_view(skin_batch, view)
             if not is_batched:
                 rendered = rendered.squeeze(0)
+            if return_renders:
+                gt_renders[view] = rendered  # save clean render before augmentation
             if augmenter is not None:
                 rendered = augmenter(rendered)
             rendered_views.append(rendered)
-            
-    return unproject_renders_to_uv(rendered_views, renderer, views)
+
+    conditioning = unproject_renders_to_uv(rendered_views, renderer, views)
+    if return_renders:
+        return conditioning, gt_renders
+    return conditioning
 
 
 class InverseUVDataset(Dataset):

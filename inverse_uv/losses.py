@@ -216,7 +216,7 @@ class InverseUVLoss(nn.Module):
         ssim_window_size=11,
         render_foreground_weight=1.0,
         ignore_covered_inner=True,
-        covered_inner_alpha_threshold=0.1,
+        covered_inner_alpha_threshold=0.5,
     ):
         super().__init__()
         self.lambda_rgb = lambda_rgb
@@ -253,15 +253,18 @@ class InverseUVLoss(nn.Module):
             print("WARNING: UV masks not found, falling back to full UV loss.")
             self.uv_mask = None
 
-    def render_loss(self, pred_uv, gt_uv):
+    def render_loss(self, pred_uv, gt_uv, gt_renders=None):
         if self.lambda_render <= 0:
             return pred_uv.new_tensor(0.0)
 
         total = pred_uv.new_tensor(0.0)
         for view in self.views:
             pred_render = self.renderer.forward_view(pred_uv, view)
-            with torch.no_grad():
-                gt_render = self.renderer.forward_view(gt_uv, view)
+            if gt_renders is not None and view in gt_renders:
+                gt_render = gt_renders[view]
+            else:
+                with torch.no_grad():
+                    gt_render = self.renderer.forward_view(gt_uv, view)
             fg_mask = torch.maximum(pred_render[:, 3:4], gt_render[:, 3:4]).detach()
             if self.render_foreground_weight > 0:
                 denom = (fg_mask.sum(dim=(1, 2, 3)) * 3.0).clamp_min(1.0)
@@ -271,7 +274,7 @@ class InverseUVLoss(nn.Module):
                 total = total + F.l1_loss(pred_render[:, :3], gt_render[:, :3])
         return total / max(len(self.views), 1)
 
-    def forward(self, pred_uv, gt_uv):
+    def forward(self, pred_uv, gt_uv, gt_renders=None):
         uv_mask = getattr(self, "uv_mask", None)
         if self.ignore_covered_inner:
             supervised_inner_mask = 1.0 - covered_inner_mask(
@@ -282,7 +285,7 @@ class InverseUVLoss(nn.Module):
             uv_mask = supervised_inner_mask if uv_mask is None else uv_mask * supervised_inner_mask
         loss_rgb = alpha_masked_rgb_l1(pred_uv, gt_uv, uv_mask)
         loss_alpha = alpha_bce(pred_uv, gt_uv, uv_mask)
-        loss_render = self.render_loss(pred_uv, gt_uv)
+        loss_render = self.render_loss(pred_uv, gt_uv, gt_renders=gt_renders)
         loss_edge = edge_l1(pred_uv, gt_uv, uv_mask)
         
         if self.lambda_ssim > 0:

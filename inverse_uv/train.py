@@ -97,17 +97,18 @@ def run_epoch(model, criterion, loader, optimizer, scaler, device, precision, tr
         # Build conditioning on GPU
         with torch.no_grad():
             batch_augmenter = augmenter if train else None
-            batch["conditioning"] = build_conditioning(
+            batch["conditioning"], gt_renders = build_conditioning(
                 batch["uv"],
                 criterion.renderer,
                 views,
                 augmenter=batch_augmenter,
+                return_renders=True,
             )
 
         with torch.set_grad_enabled(train):
             with autocast_context(device, precision):
                 pred_uv = model(batch["conditioning"])
-                losses = criterion(pred_uv, batch["uv"])
+                losses = criterion(pred_uv, batch["uv"], gt_renders=gt_renders)
                 loss = losses["loss_total"]
 
         if train:
@@ -296,9 +297,9 @@ def apply_model_defaults(args):
     if args.lambda_ssim is None:
         args.lambda_ssim = 0.0 if is_light else 0.2
     if args.ssim_window_size is None:
-        args.ssim_window_size = 5 if is_light else 11
+        args.ssim_window_size = 5  # small window better suited to 64×64 pixel-art UVs
     if args.warmup_epochs is None:
-        args.warmup_epochs = 3 if is_light else 5
+        args.warmup_epochs = 3  # reach peak LR faster
 
 
 class Logger(object):
@@ -334,6 +335,8 @@ def main():
     sys.stderr = Logger(output_dir / "train.log", sys.stderr, mode=log_mode)
 
     device = get_device(args.device)
+    if device.type == "cuda":
+        torch.backends.cudnn.benchmark = True
     dataset = InverseUVDataset(
         data_dir=args.data_dir,
         mappings_dir=args.mappings_dir,
