@@ -77,10 +77,11 @@ def alpha_masked_rgb_l1(pred_uv, gt_uv, uv_mask=None):
 
 
 def alpha_bce(pred_uv, gt_uv, uv_mask=None):
-    # BCE is unsafe under fp16 autocast; force float32 for numerical stability
+    # BCE is unsafe under fp16 autocast; disable autocast and use float32
     pred_alpha = pred_uv[:, 3:4].clamp(1e-4, 1.0 - 1e-4).float()
     gt_alpha = gt_uv[:, 3:4].float()
-    loss = F.binary_cross_entropy(pred_alpha, gt_alpha, reduction="none")
+    with torch.cuda.amp.autocast(enabled=False):
+        loss = F.binary_cross_entropy(pred_alpha, gt_alpha, reduction="none")
     if uv_mask is None:
         return loss.mean()
 
