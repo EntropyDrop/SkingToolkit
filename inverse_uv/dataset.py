@@ -228,7 +228,11 @@ def unproject_renders_to_uv(rendered_views, renderer, views, bg_color=(128, 128,
         bg = sample.new_tensor(bg_color, dtype=dtype).view(1, 3, 1, 1) / 255.0
         rgb = torch.where(known.expand(-1, 3, -1, -1) > 0, averaged[:, :3], bg.expand_as(averaged[:, :3]))
         alpha = torch.where(known > 0, averaged[:, 3:4], torch.zeros_like(averaged[:, 3:4]))
-        layers = torch.cat([rgb, alpha, known], dim=1)
+        # Log-normalized observation count as confidence (richer than binary known)
+        log_counts = torch.log1p(counts.to(dtype))
+        max_log = log_counts.amax(dim=(1, 2, 3), keepdim=True).clamp_min(1.0)
+        confidence = log_counts / max_log
+        layers = torch.cat([rgb, alpha, confidence], dim=1)
         return layers.reshape(-1, UV_SIZE, UV_SIZE).clamp(0.0, 1.0)
     else:
         B = sample.shape[0]
@@ -258,7 +262,11 @@ def unproject_renders_to_uv(rendered_views, renderer, views, bg_color=(128, 128,
         bg = sample.new_tensor(bg_color, dtype=dtype).view(1, 1, 3, 1, 1) / 255.0
         rgb = torch.where(known.expand(-1, -1, 3, -1, -1) > 0, averaged[:, :, :3], bg.expand_as(averaged[:, :, :3]))
         alpha = torch.where(known > 0, averaged[:, :, 3:4], torch.zeros_like(averaged[:, :, 3:4]))
-        layers = torch.cat([rgb, alpha, known], dim=2)
+        # Log-normalized observation count as confidence (richer than binary known)
+        log_counts = torch.log1p(counts.to(dtype))
+        max_log = log_counts.amax(dim=(2, 3, 4), keepdim=True).clamp_min(1.0)
+        confidence = log_counts / max_log
+        layers = torch.cat([rgb, alpha, confidence], dim=2)
         return layers.reshape(B, -1, UV_SIZE, UV_SIZE).clamp(0.0, 1.0)
 
 

@@ -7,7 +7,7 @@ cd "$(dirname "$0")"
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-16}"
 export MKL_NUM_THREADS="${MKL_NUM_THREADS:-16}"
 
-MODEL="${MODEL:-full}"
+MODEL="${MODEL:-light}"
 if [[ -z "${RUN_NAME:-}" ]]; then
   v=1
   while [[ -d "runs/inverse_uv_${MODEL}_v${v}" ]]; do
