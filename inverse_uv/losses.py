@@ -213,7 +213,7 @@ class InverseUVLoss(nn.Module):
         bg_color=(128 / 255, 128 / 255, 128 / 255),
         lambda_rgb=1.0,
         lambda_alpha=0.3,
-        lambda_render=0.5,
+        lambda_render=0.3,
         lambda_edge=0.25,
         lambda_ssim=0.2,
         ssim_window_size=11,

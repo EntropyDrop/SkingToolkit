@@ -260,7 +260,7 @@ def build_arg_parser():
     parser.add_argument("--mixed_precision", choices=["no", "fp16", "bf16"], default="no")
     parser.add_argument("--lambda_rgb", type=float, default=1.0)
     parser.add_argument("--lambda_alpha", type=float, default=0.3)
-    parser.add_argument("--lambda_render", type=float, default=0.5)
+    parser.add_argument("--lambda_render", type=float, default=0.3)
     parser.add_argument("--lambda_edge", type=float, default=None, help="Edge loss weight (default: 0.0 for light, 0.25 for full).")
     parser.add_argument("--lambda_ssim", type=float, default=None, help="SSIM loss weight (default: 0.0 for light, 0.2 for full).")
     parser.add_argument("--ssim_window_size", type=int, default=None, help="SSIM window size (default: 5 for light, 11 for full).")
@@ -293,7 +293,7 @@ def apply_model_defaults(args):
     if args.weight_decay is None:
         args.weight_decay = 1e-5 if is_light else 1e-4
     if args.lambda_edge is None:
-        args.lambda_edge = 0.0 if is_light else 0.25
+        args.lambda_edge = 0.1 if is_light else 0.25
     if args.lambda_ssim is None:
         args.lambda_ssim = 0.0 if is_light else 0.2
     if args.ssim_window_size is None:
