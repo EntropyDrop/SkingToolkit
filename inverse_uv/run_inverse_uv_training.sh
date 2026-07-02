@@ -7,7 +7,7 @@ cd "$(dirname "$0")"
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-16}"
 export MKL_NUM_THREADS="${MKL_NUM_THREADS:-16}"
 
-MODEL="${MODEL:-light}"
+MODEL="${MODEL:-full}"
 if [[ -z "${RUN_NAME:-}" ]]; then
   v=1
   while [[ -d "runs/inverse_uv_${MODEL}_v${v}" ]]; do
@@ -23,13 +23,15 @@ NUM_WORKERS="${NUM_WORKERS:-16}"
 EPOCHS="${EPOCHS:-50}"
 LR="${LR:-}"
 RESUME="${RESUME:-}"
-# Augmentation: only translation + uniform scale (fast, single affine call).
-# Perspective and elastic distortion are disabled by default (expensive, marginal benefit).
 TRANSLATION_SCALE="${TRANSLATION_SCALE:-0.02}"
 SCALE_RANGE="${SCALE_RANGE:-0.02}"
-LAMBDA_SSIM="${LAMBDA_SSIM:-}"
-LAMBDA_EDGE="${LAMBDA_EDGE:-}"
-WARMUP_EPOCHS="${WARMUP_EPOCHS:-3}"
+PERSPECTIVE_SCALE="${PERSPECTIVE_SCALE:-0.0}"
+DISTORTION_SCALE="${DISTORTION_SCALE:-0.0}"
+LAMBDA_ALPHA="${LAMBDA_ALPHA:-0.4}"
+LAMBDA_SSIM="${LAMBDA_SSIM:-0.2}"
+LAMBDA_EDGE="${LAMBDA_EDGE:-0.25}"
+WARMUP_EPOCHS="${WARMUP_EPOCHS:-5}"
+SUPERVISE_COVERED_INNER="${SUPERVISE_COVERED_INNER:-true}"
 MIXED_PRECISION="${MIXED_PRECISION:-fp16}"
 
 resume_args=()
@@ -46,6 +48,9 @@ extra_args=()
 if [[ -n "$LR" ]]; then
   extra_args+=(--lr "$LR")
 fi
+if [[ -n "$LAMBDA_ALPHA" ]]; then
+  extra_args+=(--lambda_alpha "$LAMBDA_ALPHA")
+fi
 if [[ -n "$LAMBDA_SSIM" ]]; then
   extra_args+=(--lambda_ssim "$LAMBDA_SSIM")
 fi
@@ -54,6 +59,15 @@ if [[ -n "$LAMBDA_EDGE" ]]; then
 fi
 if [[ -n "$WARMUP_EPOCHS" ]]; then
   extra_args+=(--warmup_epochs "$WARMUP_EPOCHS")
+fi
+if [[ "$SUPERVISE_COVERED_INNER" == "true" ]]; then
+  extra_args+=(--supervise_covered_inner)
+fi
+if [[ -n "$PERSPECTIVE_SCALE" ]]; then
+  extra_args+=(--perspective_scale "$PERSPECTIVE_SCALE")
+fi
+if [[ -n "$DISTORTION_SCALE" ]]; then
+  extra_args+=(--distortion_scale "$DISTORTION_SCALE")
 fi
 
 python train.py \
