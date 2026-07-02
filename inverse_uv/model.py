@@ -45,7 +45,12 @@ class ResBlock(nn.Module):
             self.shortcut = nn.Identity()
 
     def forward(self, x):
-        return self.act2(self.conv2(self.norm2(self.act1(self.norm1(self.conv1(x))))) + self.shortcut(x))
+        out = self.conv1(x)
+        out = self.norm1(out)
+        out = self.act1(out)
+        out = self.conv2(out)
+        out = self.norm2(out)
+        return self.act2(out + self.shortcut(x))
 
 
 class DownBlock(nn.Module):
