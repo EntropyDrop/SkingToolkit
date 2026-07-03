@@ -23,12 +23,13 @@ NUM_WORKERS="${NUM_WORKERS:-16}"
 EPOCHS="${EPOCHS:-50}"
 LR="${LR:-}"
 RESUME="${RESUME:-}"
-LAMBDA_ALPHA="${LAMBDA_ALPHA:-0.4}"
-LAMBDA_SSIM="${LAMBDA_SSIM:-0.1}"
+LAMBDA_ALPHA="${LAMBDA_ALPHA:-0.5}"
+LAMBDA_RENDER="${LAMBDA_RENDER:-0.1}"
+LAMBDA_SSIM="${LAMBDA_SSIM:-0.0}"
 LAMBDA_EDGE="${LAMBDA_EDGE:-0.25}"
 WARMUP_EPOCHS="${WARMUP_EPOCHS:-5}"
 SUPERVISE_COVERED_INNER="${SUPERVISE_COVERED_INNER:-true}"
-MIXED_PRECISION="${MIXED_PRECISION:-bf16}"
+MIXED_PRECISION="${MIXED_PRECISION:-no}"
 
 resume_args=()
 if [[ -n "$RESUME" ]]; then
@@ -46,6 +47,9 @@ if [[ -n "$LR" ]]; then
 fi
 if [[ -n "$LAMBDA_ALPHA" ]]; then
   extra_args+=(--lambda_alpha "$LAMBDA_ALPHA")
+fi
+if [[ -n "$LAMBDA_RENDER" ]]; then
+  extra_args+=(--lambda_render "$LAMBDA_RENDER")
 fi
 if [[ -n "$LAMBDA_SSIM" ]]; then
   extra_args+=(--lambda_ssim "$LAMBDA_SSIM")

@@ -197,7 +197,7 @@ def build_arg_parser():
     parser.add_argument(
         "--coordconv",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=False,
         help="Append normalized x/y coordinate channels inside InverseUVNet.",
     )
     parser.add_argument(
@@ -209,7 +209,7 @@ def build_arg_parser():
     parser.add_argument(
         "--resnet",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=False,
         help="Use ResNet-style residual blocks (full model only).",
     )
     parser.add_argument(
@@ -217,7 +217,7 @@ def build_arg_parser():
         "--multi-scale-coord",
         dest="multi_scale_coord",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=False,
         help="Inject CoordConv coordinates at bottleneck and decoder stages (full model only).",
     )
     parser.add_argument(
@@ -225,7 +225,7 @@ def build_arg_parser():
         "--bottleneck-attention",
         dest="bottleneck_attention",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=False,
         help="Use a lightweight spatial self-attention block at the U-Net bottleneck (full model only).",
     )
     parser.add_argument(
@@ -254,10 +254,10 @@ def build_arg_parser():
     parser.add_argument("--device", default="auto")
     parser.add_argument("--mixed_precision", choices=["no", "fp16", "bf16"], default="no")
     parser.add_argument("--lambda_rgb", type=float, default=1.0)
-    parser.add_argument("--lambda_alpha", type=float, default=0.3)
-    parser.add_argument("--lambda_render", type=float, default=0.3)
+    parser.add_argument("--lambda_alpha", type=float, default=0.5)
+    parser.add_argument("--lambda_render", type=float, default=0.1)
     parser.add_argument("--lambda_edge", type=float, default=None, help="Edge loss weight (default: 0.0 for light, 0.25 for full).")
-    parser.add_argument("--lambda_ssim", type=float, default=None, help="SSIM loss weight (default: 0.0 for light, 0.1 for full).")
+    parser.add_argument("--lambda_ssim", type=float, default=None, help="SSIM loss weight (default: 0.0 for light, 0.0 for full).")
     parser.add_argument("--ssim_window_size", type=int, default=5, help="SSIM window size (default: 5).")
     parser.add_argument("--warmup_epochs", type=int, default=None, help="Warmup epochs (default: 3 for light, 5 for full).")
     parser.add_argument("--render_foreground_weight", type=float, default=1.0)
@@ -290,7 +290,7 @@ def apply_model_defaults(args):
     if args.lambda_edge is None:
         args.lambda_edge = 0.1 if is_light else 0.25
     if args.lambda_ssim is None:
-        args.lambda_ssim = 0.0 if is_light else 0.2
+        args.lambda_ssim = 0.0
     if args.ssim_window_size is None:
         args.ssim_window_size = 5  # small window better suited to 64×64 pixel-art UVs
     if args.warmup_epochs is None:
