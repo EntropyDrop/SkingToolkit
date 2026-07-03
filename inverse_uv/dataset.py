@@ -308,7 +308,7 @@ class InverseUVDataset(Dataset):
         bg_color=(128, 128, 128),
         max_samples=None,
         normalize_model=True,
-        return_conditioning=False,
+        return_conditioning=True,
     ):
         self.data_dir = data_dir
         self.views = parse_views(views)

@@ -93,20 +93,11 @@ def run_epoch(model, criterion, loader, optimizer, scaler, device, precision, tr
     for batch in iterator:
         batch = move_batch(batch, device)
         batch_size = batch["uv"].shape[0]
-        
-        # Build conditioning on GPU
-        with torch.no_grad():
-            batch["conditioning"], gt_renders = build_conditioning(
-                batch["uv"],
-                criterion.renderer,
-                views,
-                return_renders=True,
-            )
 
         with torch.set_grad_enabled(train):
             with autocast_context(device, precision):
                 pred_uv = model(batch["conditioning"])
-                losses = criterion(pred_uv, batch["uv"], gt_renders=gt_renders)
+                losses = criterion(pred_uv, batch["uv"])
                 loss = losses["loss_total"]
 
         if train:
