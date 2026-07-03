@@ -83,9 +83,9 @@ python train.py \
   --mappings_dir "$MAPPINGS_DIR" \
   --save_every 1 \
   --preview_every 1 \
-  --augment \
   --translation_scale "$TRANSLATION_SCALE" \
   --scale_range "$SCALE_RANGE" \
   --mixed_precision "$MIXED_PRECISION" \
   ${extra_args[@]+"${extra_args[@]}"} \
   ${resume_args[@]+"${resume_args[@]}"}
+  #--augment \
