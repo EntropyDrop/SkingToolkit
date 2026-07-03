@@ -15,7 +15,7 @@ WORKSPACE_ROOT = TOOLKIT_ROOT.parent
 if str(WORKSPACE_ROOT) not in sys.path:
     sys.path.insert(0, str(WORKSPACE_ROOT))
 
-from SkingToolkit.inverse_uv.dataset import InverseUVDataset, apply_uv_mask, RenderAugmenter, build_conditioning  # noqa: E402
+from SkingToolkit.inverse_uv.dataset import InverseUVDataset, apply_uv_mask, build_conditioning  # noqa: E402
 from SkingToolkit.inverse_uv.losses import InverseUVLoss  # noqa: E402
 from SkingToolkit.inverse_uv.model import InverseUVNet, LightInverseUVNet, count_parameters  # noqa: E402
 
@@ -84,7 +84,7 @@ def format_losses(loss_sums, count):
     return {name: value / max(count, 1) for name, value in loss_sums.items()}
 
 
-def run_epoch(model, criterion, loader, optimizer, scaler, device, precision, train=True, views=None, augmenter=None):
+def run_epoch(model, criterion, loader, optimizer, scaler, device, precision, train=True, views=None):
     model.train(train)
     loss_sums = {}
     sample_count = 0
@@ -96,12 +96,10 @@ def run_epoch(model, criterion, loader, optimizer, scaler, device, precision, tr
         
         # Build conditioning on GPU
         with torch.no_grad():
-            batch_augmenter = augmenter if train else None
             batch["conditioning"], gt_renders = build_conditioning(
                 batch["uv"],
                 criterion.renderer,
                 views,
-                augmenter=batch_augmenter,
                 return_renders=True,
             )
 
@@ -238,11 +236,7 @@ def build_arg_parser():
         default=4,
         help="Attention heads for bottleneck self-attention (full model only).",
     )
-    parser.add_argument("--augment", action="store_true", help="Enable online data augmentation during training.")
-    parser.add_argument("--translation_scale", type=float, default=0.02, help="Scale of random horizontal/vertical translation (shift).")
-    parser.add_argument("--scale_range", type=float, default=0.02, help="Range of random uniform scale [1-s, 1+s].")
-    parser.add_argument("--distortion_scale", type=float, default=0.0, help="Scale of random local elastic distortion.")
-    parser.add_argument("--perspective_scale", type=float, default=0.0, help="Scale of random perspective warp.")
+
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--lr", type=float, default=None, help="Learning rate (default: 3e-4 for light, 1e-4 for full).")
@@ -348,11 +342,6 @@ def main():
         image_size=args.render_size,
         include_alpha=args.include_alpha,
         max_samples=args.max_samples,
-        augment=args.augment,
-        translation_scale=args.translation_scale,
-        scale_range=args.scale_range,
-        distortion_scale=args.distortion_scale,
-        perspective_scale=args.perspective_scale,
     )
     input_channels = dataset.input_channels
 
@@ -492,17 +481,6 @@ def main():
         json.dump({"args": vars(args), "metadata": metadata}, handle, indent=2)
     print(json.dumps(metadata, indent=2))
 
-    # Instantiate augmenter if training and args.augment is true
-    augmenter = None
-    if args.augment:
-        augmenter = RenderAugmenter(
-            translation_scale=args.translation_scale,
-            scale_range=args.scale_range,
-            distortion_scale=args.distortion_scale,
-            perspective_scale=args.perspective_scale,
-            bg_color=dataset.bg_color,
-        )
-
     best_metric = float("inf")
     scheduler = WarmupCosineScheduler(
         optimizer=optimizer,
@@ -523,7 +501,6 @@ def main():
             args.mixed_precision,
             train=True,
             views=dataset.views,
-            augmenter=augmenter,
         )
         metrics = {"train": train_metrics}
         if val_loader is not None:
@@ -538,7 +515,6 @@ def main():
                     args.mixed_precision,
                     train=False,
                     views=dataset.views,
-                    augmenter=None,
                 )
             metrics["val"] = val_metrics
 

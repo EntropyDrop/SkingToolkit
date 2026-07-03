@@ -270,7 +270,6 @@ def build_conditioning(
     views,
     image_size=256,
     include_alpha=False,
-    augmenter=None,
     return_renders=False,
 ):
     _ = image_size, include_alpha
@@ -289,9 +288,7 @@ def build_conditioning(
             if not is_batched:
                 rendered = rendered.squeeze(0)
             if return_renders:
-                gt_renders[view] = rendered  # save clean render before augmentation
-            if augmenter is not None:
-                rendered = augmenter(rendered)
+                gt_renders[view] = rendered
             rendered_views.append(rendered)
 
     conditioning = unproject_renders_to_uv(rendered_views, renderer, views)
@@ -311,11 +308,6 @@ class InverseUVDataset(Dataset):
         bg_color=(128, 128, 128),
         max_samples=None,
         normalize_model=True,
-        augment=False,
-        translation_scale=0.02,
-        scale_range=0.02,
-        distortion_scale=0.08,
-        perspective_scale=0.04,
         return_conditioning=False,
     ):
         self.data_dir = data_dir
@@ -324,11 +316,6 @@ class InverseUVDataset(Dataset):
         self.include_alpha = include_alpha
         self.bg_color = bg_color
         self.normalize_model = normalize_model
-        self.augment = augment
-        self.translation_scale = translation_scale
-        self.scale_range = scale_range
-        self.distortion_scale = distortion_scale
-        self.perspective_scale = perspective_scale
         self.return_conditioning = return_conditioning
         self.renderer = DifferentiableRenderer(
             mappings_dir=mappings_dir,
@@ -369,22 +356,12 @@ class InverseUVDataset(Dataset):
             "path": skin_path,
         }
         if self.return_conditioning:
-            augmenter = None
-            if self.augment:
-                augmenter = RenderAugmenter(
-                    translation_scale=self.translation_scale,
-                    scale_range=self.scale_range,
-                    distortion_scale=self.distortion_scale,
-                    perspective_scale=self.perspective_scale,
-                    bg_color=self.bg_color,
-                )
             conditioning = build_conditioning(
                 uv,
                 self.renderer,
                 self.views,
                 image_size=self.image_size,
                 include_alpha=self.include_alpha,
-                augmenter=augmenter,
             )
             res["conditioning"] = conditioning
         return res

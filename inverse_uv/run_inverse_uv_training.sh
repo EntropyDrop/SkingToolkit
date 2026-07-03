@@ -23,10 +23,6 @@ NUM_WORKERS="${NUM_WORKERS:-16}"
 EPOCHS="${EPOCHS:-50}"
 LR="${LR:-}"
 RESUME="${RESUME:-}"
-TRANSLATION_SCALE="${TRANSLATION_SCALE:-0.0}"
-SCALE_RANGE="${SCALE_RANGE:-0.0}"
-PERSPECTIVE_SCALE="${PERSPECTIVE_SCALE:-0.0}"
-DISTORTION_SCALE="${DISTORTION_SCALE:-0.0}"
 LAMBDA_ALPHA="${LAMBDA_ALPHA:-0.4}"
 LAMBDA_SSIM="${LAMBDA_SSIM:-0.1}"
 LAMBDA_EDGE="${LAMBDA_EDGE:-0.25}"
@@ -63,12 +59,6 @@ fi
 if [[ "$SUPERVISE_COVERED_INNER" == "true" ]]; then
   extra_args+=(--supervise_covered_inner)
 fi
-if [[ -n "$PERSPECTIVE_SCALE" ]]; then
-  extra_args+=(--perspective_scale "$PERSPECTIVE_SCALE")
-fi
-if [[ -n "$DISTORTION_SCALE" ]]; then
-  extra_args+=(--distortion_scale "$DISTORTION_SCALE")
-fi
 
 python train.py \
   --data_dir "$DATA_DIR" \
@@ -83,9 +73,7 @@ python train.py \
   --mappings_dir "$MAPPINGS_DIR" \
   --save_every 1 \
   --preview_every 1 \
-  --translation_scale "$TRANSLATION_SCALE" \
-  --scale_range "$SCALE_RANGE" \
   --mixed_precision "$MIXED_PRECISION" \
   ${extra_args[@]+"${extra_args[@]}"} \
   ${resume_args[@]+"${resume_args[@]}"}
-  #--augment \
+
