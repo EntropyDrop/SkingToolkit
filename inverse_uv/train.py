@@ -7,7 +7,7 @@ from contextlib import nullcontext
 from pathlib import Path
 
 import torch
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader
 from torchvision.utils import save_image
 
 TOOLKIT_ROOT = Path(__file__).resolve().parents[1]
@@ -15,34 +15,14 @@ WORKSPACE_ROOT = TOOLKIT_ROOT.parent
 if str(WORKSPACE_ROOT) not in sys.path:
     sys.path.insert(0, str(WORKSPACE_ROOT))
 
-from SkingToolkit.inverse_uv.dataset import InverseUVDataset, apply_uv_mask, build_conditioning  # noqa: E402
+from SkingToolkit.inverse_uv.dataset import InverseUVDataset, apply_uv_mask  # noqa: E402
 from SkingToolkit.inverse_uv.losses import InverseUVLoss  # noqa: E402
-from SkingToolkit.inverse_uv.model import InverseUVNet, LightInverseUVNet, count_parameters  # noqa: E402
+from SkingToolkit.inverse_uv.model import InverseUVNet, count_parameters  # noqa: E402
 
 try:
     from tqdm import tqdm
 except ImportError:
     tqdm = None
-
-
-class WarmupCosineScheduler:
-    def __init__(self, optimizer, warmup_epochs, total_epochs, base_lr, min_lr=1e-6):
-        self.optimizer = optimizer
-        self.warmup_epochs = warmup_epochs
-        self.total_epochs = total_epochs
-        self.base_lr = base_lr
-        self.min_lr = min_lr
-
-    def step(self, epoch):
-        if epoch <= self.warmup_epochs:
-            lr = self.base_lr * (epoch / max(self.warmup_epochs, 1))
-        else:
-            import math
-            progress = (epoch - self.warmup_epochs) / max(self.total_epochs - self.warmup_epochs, 1)
-            lr = self.min_lr + 0.5 * (self.base_lr - self.min_lr) * (1.0 + math.cos(math.pi * progress))
-        for param_group in self.optimizer.param_groups:
-            param_group["lr"] = lr
-        return lr
 
 
 def get_device(device_arg):
@@ -63,13 +43,11 @@ def autocast_context(device, precision):
 
 
 def move_batch(batch, device):
-    res = {
+    return {
+        "conditioning": batch["conditioning"].to(device, non_blocking=True),
         "uv": batch["uv"].to(device, non_blocking=True),
         "path": batch["path"],
     }
-    if "conditioning" in batch:
-        res["conditioning"] = batch["conditioning"].to(device, non_blocking=True)
-    return res
 
 
 def save_preview(pred_uv, gt_uv, output_path, max_items=4):
@@ -84,7 +62,7 @@ def format_losses(loss_sums, count):
     return {name: value / max(count, 1) for name, value in loss_sums.items()}
 
 
-def run_epoch(model, criterion, loader, optimizer, scaler, device, precision, train=True, views=None):
+def run_epoch(model, criterion, loader, optimizer, scaler, device, precision, train=True):
     model.train(train)
     loss_sums = {}
     sample_count = 0
@@ -124,31 +102,12 @@ def run_epoch(model, criterion, loader, optimizer, scaler, device, precision, tr
 
 
 def save_checkpoint(path, model, optimizer, epoch, args, input_channels, metrics):
-    model_config = {
-        "input_channels": input_channels,
-        "base_channels": args.base_channels,
-        "model_type": args.model,
-    }
-    if args.model == "light":
-        model_config.update({
-            "use_coordconv": args.coordconv,
-            "use_pixelshuffle": args.pixelshuffle,
-        })
-    else:
-        model_config.update({
-            "use_coordconv": args.coordconv,
-            "use_attention": args.bottleneck_attention,
-            "attention_heads": args.attention_heads,
-            "use_resnet": args.resnet,
-            "multi_scale_coord": args.multi_scale_coord,
-        })
     checkpoint = {
         "epoch": epoch,
         "model": model.state_dict(),
         "optimizer": optimizer.state_dict(),
         "args": vars(args),
         "input_channels": input_channels,
-        "model_config": model_config,
         "metrics": metrics,
     }
     torch.save(checkpoint, path)
@@ -168,12 +127,6 @@ def build_arg_parser():
     parser.add_argument("--mappings_dir", default=None, help="Renderer mappings directory.")
     parser.add_argument("--views", default="static_front,static_back", help="Comma-separated render views.")
     parser.add_argument(
-        "--model",
-        choices=["full", "light"],
-        default="light",
-        help="Model variant: 'full' (original ~14M ResUNet) or 'light' (~1M lightweight UNet).",
-    )
-    parser.add_argument(
         "--render_size",
         type=int,
         default=256,
@@ -184,60 +137,11 @@ def build_arg_parser():
         action="store_true",
         help="Deprecated compatibility option; UV unprojection always builds RGBA plus mask conditioning.",
     )
-    parser.add_argument("--base_channels", type=int, default=None, help="Base channel width (default: 32 for light, 64 for full).")
-    parser.add_argument(
-        "--coordconv",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Append normalized x/y coordinate channels inside InverseUVNet.",
-    )
-    parser.add_argument(
-        "--pixelshuffle",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Use PixelShuffle upsampling instead of bilinear (light model only).",
-    )
-    parser.add_argument(
-        "--resnet",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Use ResNet-style residual blocks (full model only).",
-    )
-    parser.add_argument(
-        "--multi_scale_coord",
-        "--multi-scale-coord",
-        dest="multi_scale_coord",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Inject CoordConv coordinates at bottleneck and decoder stages (full model only).",
-    )
-    parser.add_argument(
-        "--bottleneck_attention",
-        "--bottleneck-attention",
-        dest="bottleneck_attention",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Use a lightweight spatial self-attention block at the U-Net bottleneck (full model only).",
-    )
-    parser.add_argument(
-        "--attention_heads",
-        "--attention-heads",
-        dest="attention_heads",
-        type=int,
-        default=4,
-        help="Attention heads for bottleneck self-attention (full model only).",
-    )
-
+    parser.add_argument("--base_channels", type=int, default=64, help="Base channel width for InverseUVNet.")
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--epochs", type=int, default=20)
-    parser.add_argument("--lr", type=float, default=None, help="Learning rate (default: 3e-4 for light, 1e-4 for full).")
-    parser.add_argument(
-        "--resume_lr",
-        type=float,
-        default=None,
-        help="Override optimizer learning rate after loading a resumed checkpoint.",
-    )
-    parser.add_argument("--weight_decay", type=float, default=None, help="AdamW weight decay (default: 1e-5 for light, 1e-4 for full).")
+    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--weight_decay", type=float, default=1e-4)
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--val_split", type=float, default=0.05)
     parser.add_argument("--max_samples", type=int, default=None)
@@ -247,10 +151,7 @@ def build_arg_parser():
     parser.add_argument("--lambda_rgb", type=float, default=1.0)
     parser.add_argument("--lambda_alpha", type=float, default=0.5)
     parser.add_argument("--lambda_render", type=float, default=0.1)
-    parser.add_argument("--lambda_edge", type=float, default=None, help="Edge loss weight (default: 0.0 for light, 0.25 for full).")
-    parser.add_argument("--lambda_ssim", type=float, default=None, help="SSIM loss weight (default: 0.0 for light, 0.0 for full).")
-    parser.add_argument("--ssim_window_size", type=int, default=5, help="SSIM window size (default: 5).")
-    parser.add_argument("--warmup_epochs", type=int, default=None, help="Warmup epochs (default: 3 for light, 5 for full).")
+    parser.add_argument("--lambda_edge", type=float, default=0.25)
     parser.add_argument("--render_foreground_weight", type=float, default=1.0)
     parser.add_argument(
         "--supervise_covered_inner",
@@ -267,25 +168,6 @@ def build_arg_parser():
     parser.add_argument("--preview_every", type=int, default=1)
     parser.add_argument("--resume", default=None, help="Checkpoint path to resume from.")
     return parser
-
-
-def apply_model_defaults(args):
-    """Fill in None-valued arguments with model-type-appropriate defaults."""
-    is_light = args.model == "light"
-    if args.base_channels is None:
-        args.base_channels = 32 if is_light else 64
-    if args.lr is None:
-        args.lr = 3e-4 if is_light else 1e-4
-    if args.weight_decay is None:
-        args.weight_decay = 1e-5 if is_light else 1e-4
-    if args.lambda_edge is None:
-        args.lambda_edge = 0.1 if is_light else 0.25
-    if args.lambda_ssim is None:
-        args.lambda_ssim = 0.0
-    if args.ssim_window_size is None:
-        args.ssim_window_size = 5  # small window better suited to 64×64 pixel-art UVs
-    if args.warmup_epochs is None:
-        args.warmup_epochs = 3  # reach peak LR faster
 
 
 class Logger(object):
@@ -308,7 +190,6 @@ class Logger(object):
 
 def main():
     args = build_arg_parser().parse_args()
-    apply_model_defaults(args)
     args.conditioning_mode = "uv_unproject_inpaint"
     torch.manual_seed(args.seed)
 
@@ -321,11 +202,6 @@ def main():
     sys.stderr = Logger(output_dir / "train.log", sys.stderr, mode=log_mode)
 
     device = get_device(args.device)
-    if device.type == "cuda":
-        torch.backends.cudnn.benchmark = True
-        if args.mixed_precision == "bf16" and hasattr(torch.cuda, "is_bf16_supported") and not torch.cuda.is_bf16_supported():
-            print("WARNING: bfloat16 is not supported on this CUDA device. Falling back to fp16.")
-            args.mixed_precision = "fp16"
     dataset = InverseUVDataset(
         data_dir=args.data_dir,
         mappings_dir=args.mappings_dir,
@@ -342,47 +218,12 @@ def main():
         indices = torch.randperm(len(dataset), generator=generator).tolist()
         val_indices = indices[:val_len]
         train_indices = indices[val_len:]
-        
+
         from torch.utils.data import Subset
         train_dataset = Subset(dataset, train_indices)
-        
-        val_dataset_base = copy.copy(dataset)
-        val_dataset_base.augment = False
-        val_dataset = Subset(val_dataset_base, val_indices)
+        val_dataset = Subset(dataset, val_indices)
     else:
         train_dataset, val_dataset = dataset, None
-
-    resume_checkpoint = None
-    if args.resume:
-        resume_checkpoint = torch.load(args.resume, map_location=device)
-        checkpoint_model_config = resume_checkpoint.get("model_config")
-        checkpoint_args = resume_checkpoint.get("args", {})
-        if checkpoint_model_config is not None:
-            args.model = checkpoint_model_config.get("model_type", args.model)
-            args.base_channels = checkpoint_model_config.get("base_channels", args.base_channels)
-            args.coordconv = checkpoint_model_config.get("use_coordconv", args.coordconv)
-            if args.model == "light":
-                args.pixelshuffle = checkpoint_model_config.get("use_pixelshuffle", False)
-            else:
-                args.bottleneck_attention = checkpoint_model_config.get("use_attention", args.bottleneck_attention)
-                args.attention_heads = checkpoint_model_config.get("attention_heads", args.attention_heads)
-                args.resnet = checkpoint_model_config.get("use_resnet", False)
-                args.multi_scale_coord = checkpoint_model_config.get("multi_scale_coord", False)
-        elif "coordconv" in checkpoint_args or "bottleneck_attention" in checkpoint_args:
-            args.model = checkpoint_args.get("model", "full")
-            args.base_channels = checkpoint_args.get("base_channels", args.base_channels)
-            args.coordconv = checkpoint_args.get("coordconv", args.coordconv)
-            args.bottleneck_attention = checkpoint_args.get("bottleneck_attention", args.bottleneck_attention)
-            args.attention_heads = checkpoint_args.get("attention_heads", args.attention_heads)
-            args.resnet = checkpoint_args.get("resnet", False)
-            args.multi_scale_coord = checkpoint_args.get("multi_scale_coord", False)
-        else:
-            args.model = "full"
-            args.base_channels = checkpoint_args.get("base_channels", args.base_channels)
-            args.coordconv = False
-            args.bottleneck_attention = False
-            args.resnet = False
-            args.multi_scale_coord = False
 
     pin_memory = device.type == "cuda"
     train_loader = DataLoader(
@@ -404,23 +245,7 @@ def main():
             persistent_workers=args.num_workers > 0,
         )
 
-    if args.model == "light":
-        model = LightInverseUVNet(
-            input_channels=input_channels,
-            base_channels=args.base_channels,
-            use_coordconv=args.coordconv,
-            use_pixelshuffle=args.pixelshuffle,
-        ).to(device)
-    else:
-        model = InverseUVNet(
-            input_channels=input_channels,
-            base_channels=args.base_channels,
-            use_coordconv=args.coordconv,
-            use_attention=args.bottleneck_attention,
-            attention_heads=args.attention_heads,
-            use_resnet=args.resnet,
-            multi_scale_coord=args.multi_scale_coord,
-        ).to(device)
+    model = InverseUVNet(input_channels=input_channels, base_channels=args.base_channels).to(device)
     criterion = InverseUVLoss(
         mappings_dir=args.mappings_dir,
         views=args.views,
@@ -428,8 +253,6 @@ def main():
         lambda_alpha=args.lambda_alpha,
         lambda_render=args.lambda_render,
         lambda_edge=args.lambda_edge,
-        lambda_ssim=args.lambda_ssim,
-        ssim_window_size=args.ssim_window_size,
         render_foreground_weight=args.render_foreground_weight,
         ignore_covered_inner=not args.supervise_covered_inner,
         covered_inner_alpha_threshold=args.covered_inner_alpha_threshold,
@@ -438,17 +261,13 @@ def main():
     scaler = build_grad_scaler(device, args.mixed_precision)
 
     start_epoch = 1
-    if resume_checkpoint is not None:
-        checkpoint = resume_checkpoint
+    if args.resume:
+        checkpoint = torch.load(args.resume, map_location=device)
         model.load_state_dict(checkpoint["model"])
         optimizer.load_state_dict(checkpoint["optimizer"])
-        if args.resume_lr is not None:
-            for group in optimizer.param_groups:
-                group["lr"] = args.resume_lr
         start_epoch = checkpoint.get("epoch", 0) + 1
 
     metadata = {
-        "model_type": args.model,
         "num_samples": len(dataset),
         "train_samples": len(train_dataset),
         "val_samples": len(val_dataset) if val_dataset is not None else 0,
@@ -456,73 +275,33 @@ def main():
         "conditioning_mode": "uv_unproject_inpaint",
         "parameters": count_parameters(model),
         "views": dataset.views,
-        "base_channels": args.base_channels,
-        "coordconv": args.coordconv,
-        "lr": optimizer.param_groups[0]["lr"],
         "device": str(device),
     }
-    if args.model == "light":
-        metadata["pixelshuffle"] = args.pixelshuffle
-    else:
-        metadata["bottleneck_attention"] = args.bottleneck_attention
-        metadata["attention_heads"] = args.attention_heads
-        metadata["use_resnet"] = args.resnet
-        metadata["multi_scale_coord"] = args.multi_scale_coord
     with open(output_dir / "config.json", "w", encoding="utf-8") as handle:
         json.dump({"args": vars(args), "metadata": metadata}, handle, indent=2)
     print(json.dumps(metadata, indent=2))
 
     best_metric = float("inf")
-    scheduler = WarmupCosineScheduler(
-        optimizer=optimizer,
-        warmup_epochs=args.warmup_epochs,
-        total_epochs=args.epochs,
-        base_lr=args.lr,
-        min_lr=1e-6,
-    )
     for epoch in range(start_epoch, args.epochs + 1):
-        current_lr = scheduler.step(epoch)
         train_metrics = run_epoch(
-            model,
-            criterion,
-            train_loader,
-            optimizer,
-            scaler,
-            device,
-            args.mixed_precision,
-            train=True,
-            views=dataset.views,
+            model, criterion, train_loader, optimizer, scaler, device, args.mixed_precision, train=True
         )
         metrics = {"train": train_metrics}
         if val_loader is not None:
             with torch.no_grad():
                 val_metrics = run_epoch(
-                    model,
-                    criterion,
-                    val_loader,
-                    optimizer,
-                    scaler,
-                    device,
-                    args.mixed_precision,
-                    train=False,
-                    views=dataset.views,
+                    model, criterion, val_loader, optimizer, scaler, device, args.mixed_precision, train=False
                 )
             metrics["val"] = val_metrics
 
         metric = metrics.get("val", metrics["train"])["loss_total"]
-        print(f"epoch={epoch} lr={current_lr:.2e} metrics={json.dumps(metrics, sort_keys=True)}")
+        print(f"epoch={epoch} metrics={json.dumps(metrics, sort_keys=True)}")
 
         if epoch % args.preview_every == 0:
             model.eval()
             preview_batch = move_batch(next(iter(val_loader or train_loader)), device)
             with torch.no_grad():
-                preview_conditioning = build_conditioning(
-                    preview_batch["uv"],
-                    criterion.renderer,
-                    dataset.views,
-                    augmenter=None,
-                )
-                pred_uv = model(preview_conditioning)
+                pred_uv = model(preview_batch["conditioning"])
             save_preview(pred_uv, preview_batch["uv"], output_dir / "previews" / f"epoch_{epoch:04d}.png")
 
         if epoch % args.save_every == 0:

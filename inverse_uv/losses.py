@@ -22,52 +22,6 @@ def parse_views(views):
     return list(views)
 
 
-def gaussian(window_size, sigma):
-    gauss = torch.exp(torch.tensor([-(x - window_size//2)**2 / (2 * sigma**2) for x in range(window_size)], dtype=torch.float32))
-    return gauss/gauss.sum()
-
-
-def create_window(window_size, channel):
-    _1D_window = gaussian(window_size, 1.5).unsqueeze(1)
-    _2D_window = _1D_window.mm(_1D_window.t()).float().unsqueeze(0).unsqueeze(0)
-    window = _2D_window.expand(channel, 1, window_size, window_size).contiguous()
-    return window
-
-
-def masked_ssim_loss(pred_rgb, gt_rgb, mask=None, window_size=5):
-    pred_rgb = pred_rgb.float()
-    gt_rgb = gt_rgb.float()
-    device = pred_rgb.device
-    channel = 3
-    window = create_window(window_size, channel).to(device=device, dtype=torch.float32)
-    
-    mu1 = F.conv2d(pred_rgb, window, padding=window_size//2, groups=channel)
-    mu2 = F.conv2d(gt_rgb, window, padding=window_size//2, groups=channel)
-    
-    mu1_sq = mu1.pow(2)
-    mu2_sq = mu2.pow(2)
-    mu1_mu2 = mu1 * mu2
-    
-    sigma1_sq = (F.conv2d(pred_rgb * pred_rgb, window, padding=window_size//2, groups=channel) - mu1_sq).clamp_min(0.0)
-    sigma2_sq = (F.conv2d(gt_rgb * gt_rgb, window, padding=window_size//2, groups=channel) - mu2_sq).clamp_min(0.0)
-    sigma12 = F.conv2d(pred_rgb * gt_rgb, window, padding=window_size//2, groups=channel) - mu1_mu2
-    
-    C1 = 0.01 ** 2
-    C2 = 0.03 ** 2
-    
-    ssim_map = ((2 * mu1_mu2 + C1) * (2 * sigma12 + C2)) / ((mu1_sq + mu2_sq + C1) * (sigma1_sq + sigma2_sq + C2))
-    loss_map = 1.0 - ssim_map
-    
-    if mask is not None:
-        mask = mask.to(device=device, dtype=torch.float32)
-        mask_expanded = mask.expand(-1, channel, -1, -1)
-        denom = mask_expanded.sum(dim=(1, 2, 3)).clamp_min(1.0)
-        per_sample = (loss_map * mask_expanded).sum(dim=(1, 2, 3)) / denom
-        return per_sample.mean()
-    else:
-        return loss_map.mean()
-
-
 def alpha_masked_rgb_l1(pred_uv, gt_uv, uv_mask=None):
     pred_uv = pred_uv.float()
     gt_uv = gt_uv.float()
@@ -216,22 +170,18 @@ class InverseUVLoss(nn.Module):
         views="static_front,static_back",
         bg_color=(128 / 255, 128 / 255, 128 / 255),
         lambda_rgb=1.0,
-        lambda_alpha=0.3,
-        lambda_render=0.3,
+        lambda_alpha=0.5,
+        lambda_render=0.1,
         lambda_edge=0.25,
-        lambda_ssim=0.1,
-        ssim_window_size=5,
         render_foreground_weight=1.0,
         ignore_covered_inner=True,
-        covered_inner_alpha_threshold=0.5,
+        covered_inner_alpha_threshold=0.1,
     ):
         super().__init__()
         self.lambda_rgb = lambda_rgb
         self.lambda_alpha = lambda_alpha
         self.lambda_render = lambda_render
         self.lambda_edge = lambda_edge
-        self.lambda_ssim = lambda_ssim
-        self.ssim_window_size = ssim_window_size
         self.render_foreground_weight = render_foreground_weight
         self.ignore_covered_inner = ignore_covered_inner
         self.covered_inner_alpha_threshold = covered_inner_alpha_threshold
@@ -260,18 +210,15 @@ class InverseUVLoss(nn.Module):
             print("WARNING: UV masks not found, falling back to full UV loss.")
             self.uv_mask = None
 
-    def render_loss(self, pred_uv, gt_uv, gt_renders=None):
+    def render_loss(self, pred_uv, gt_uv):
         if self.lambda_render <= 0:
             return pred_uv.new_tensor(0.0)
 
         total = pred_uv.new_tensor(0.0)
         for view in self.views:
             pred_render = self.renderer.forward_view(pred_uv, view)
-            if gt_renders is not None and view in gt_renders:
-                gt_render = gt_renders[view]
-            else:
-                with torch.no_grad():
-                    gt_render = self.renderer.forward_view(gt_uv, view)
+            with torch.no_grad():
+                gt_render = self.renderer.forward_view(gt_uv, view)
             fg_mask = torch.maximum(pred_render[:, 3:4], gt_render[:, 3:4]).detach()
             if self.render_foreground_weight > 0:
                 denom = (fg_mask.sum(dim=(1, 2, 3)) * 3.0).clamp_min(1.0)
@@ -281,45 +228,33 @@ class InverseUVLoss(nn.Module):
                 total = total + F.l1_loss(pred_render[:, :3], gt_render[:, :3])
         return total / max(len(self.views), 1)
 
-    def forward(self, pred_uv, gt_uv, gt_renders=None):
+    def forward(self, pred_uv, gt_uv):
         pred_uv = pred_uv.float()
         gt_uv = gt_uv.float()
-        with torch.amp.autocast(pred_uv.device.type, enabled=False):
-            uv_mask = getattr(self, "uv_mask", None)
-            if uv_mask is not None:
-                uv_mask = uv_mask.to(device=pred_uv.device, dtype=torch.float32)
-            if self.ignore_covered_inner:
-                supervised_inner_mask = 1.0 - covered_inner_mask(
-                    gt_uv,
-                    self.covered_inner_rects,
-                    alpha_threshold=self.covered_inner_alpha_threshold,
-                )
-                uv_mask = supervised_inner_mask if uv_mask is None else uv_mask * supervised_inner_mask
-            loss_rgb = alpha_masked_rgb_l1(pred_uv, gt_uv, uv_mask)
-            loss_alpha = alpha_bce(pred_uv, gt_uv, uv_mask)
-            loss_render = self.render_loss(pred_uv, gt_uv, gt_renders=gt_renders)
-            loss_edge = edge_l1(pred_uv, gt_uv, uv_mask)
-            
-            if self.lambda_ssim > 0:
-                alpha_gt = gt_uv[:, 3:4].detach()
-                if uv_mask is not None:
-                    alpha_gt = alpha_gt * uv_mask
-                loss_ssim = masked_ssim_loss(pred_uv[:, :3], gt_uv[:, :3], alpha_gt, window_size=self.ssim_window_size)
-            else:
-                loss_ssim = pred_uv.new_tensor(0.0)
-
-            loss_total = (
-                self.lambda_rgb * loss_rgb
-                + self.lambda_alpha * loss_alpha
-                + self.lambda_render * loss_render
-                + self.lambda_edge * loss_edge
-                + self.lambda_ssim * loss_ssim
+        uv_mask = getattr(self, "uv_mask", None)
+        if uv_mask is not None:
+            uv_mask = uv_mask.to(device=pred_uv.device, dtype=torch.float32)
+        if self.ignore_covered_inner:
+            supervised_inner_mask = 1.0 - covered_inner_mask(
+                gt_uv,
+                self.covered_inner_rects,
+                alpha_threshold=self.covered_inner_alpha_threshold,
             )
-            return {
-                "loss_total": loss_total,
-                "loss_rgb": loss_rgb,
-                "loss_alpha": loss_alpha,
-                "loss_render": loss_render,
-                "loss_edge": loss_edge,
-                "loss_ssim": loss_ssim,
-            }
+            uv_mask = supervised_inner_mask if uv_mask is None else uv_mask * supervised_inner_mask
+        loss_rgb = alpha_masked_rgb_l1(pred_uv, gt_uv, uv_mask)
+        loss_alpha = alpha_bce(pred_uv, gt_uv, uv_mask)
+        loss_render = self.render_loss(pred_uv, gt_uv)
+        loss_edge = edge_l1(pred_uv, gt_uv, uv_mask)
+        loss_total = (
+            self.lambda_rgb * loss_rgb
+            + self.lambda_alpha * loss_alpha
+            + self.lambda_render * loss_render
+            + self.lambda_edge * loss_edge
+        )
+        return {
+            "loss_total": loss_total,
+            "loss_rgb": loss_rgb,
+            "loss_alpha": loss_alpha,
+            "loss_render": loss_render,
+            "loss_edge": loss_edge,
+        }
