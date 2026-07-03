@@ -47,7 +47,7 @@ class UpBlock(nn.Module):
 
 
 class InverseUVNet(nn.Module):
-    def __init__(self, input_channels=10, base_channels=64, output_channels=4):
+    def __init__(self, input_channels=10, base_channels=64, output_channels=4, **kwargs):
         super().__init__()
         c = base_channels
         self.stem = ConvBlock(input_channels, c)
@@ -81,3 +81,7 @@ class InverseUVNet(nn.Module):
 
 def count_parameters(model):
     return sum(param.numel() for param in model.parameters() if param.requires_grad)
+
+
+# Backward compatibility alias
+LightInverseUVNet = InverseUVNet

@@ -154,24 +154,10 @@ def main():
     input_channels = checkpoint.get("input_channels", checkpoint_args.get("input_channels", 6))
     model_config = model_config_from_checkpoint(checkpoint, checkpoint_args, input_channels)
 
-    model_type = model_config.get("model_type", "full")
-    if model_type == "light":
-        model = LightInverseUVNet(
-            input_channels=model_config["input_channels"],
-            base_channels=model_config["base_channels"],
-            use_coordconv=model_config.get("use_coordconv", True),
-            use_pixelshuffle=model_config.get("use_pixelshuffle", False),
-        ).to(device)
-    else:
-        model = InverseUVNet(
-            input_channels=model_config["input_channels"],
-            base_channels=model_config["base_channels"],
-            use_coordconv=model_config.get("use_coordconv", False),
-            use_attention=model_config.get("use_attention", False),
-            attention_heads=model_config.get("attention_heads", 4),
-            use_resnet=model_config.get("use_resnet", False),
-            multi_scale_coord=model_config.get("multi_scale_coord", False),
-        ).to(device)
+    model = InverseUVNet(
+        input_channels=model_config["input_channels"],
+        base_channels=model_config["base_channels"],
+    ).to(device)
     model.load_state_dict(checkpoint["model"])
     model.eval()
 
