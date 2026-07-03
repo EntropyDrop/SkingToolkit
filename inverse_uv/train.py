@@ -263,8 +263,8 @@ def build_arg_parser():
     parser.add_argument("--lambda_alpha", type=float, default=0.3)
     parser.add_argument("--lambda_render", type=float, default=0.3)
     parser.add_argument("--lambda_edge", type=float, default=None, help="Edge loss weight (default: 0.0 for light, 0.25 for full).")
-    parser.add_argument("--lambda_ssim", type=float, default=None, help="SSIM loss weight (default: 0.0 for light, 0.2 for full).")
-    parser.add_argument("--ssim_window_size", type=int, default=None, help="SSIM window size (default: 5 for light, 11 for full).")
+    parser.add_argument("--lambda_ssim", type=float, default=None, help="SSIM loss weight (default: 0.0 for light, 0.1 for full).")
+    parser.add_argument("--ssim_window_size", type=int, default=5, help="SSIM window size (default: 5).")
     parser.add_argument("--warmup_epochs", type=int, default=None, help="Warmup epochs (default: 3 for light, 5 for full).")
     parser.add_argument("--render_foreground_weight", type=float, default=1.0)
     parser.add_argument(
@@ -338,6 +338,9 @@ def main():
     device = get_device(args.device)
     if device.type == "cuda":
         torch.backends.cudnn.benchmark = True
+        if args.mixed_precision == "bf16" and hasattr(torch.cuda, "is_bf16_supported") and not torch.cuda.is_bf16_supported():
+            print("WARNING: bfloat16 is not supported on this CUDA device. Falling back to fp16.")
+            args.mixed_precision = "fp16"
     dataset = InverseUVDataset(
         data_dir=args.data_dir,
         mappings_dir=args.mappings_dir,

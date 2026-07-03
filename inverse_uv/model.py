@@ -112,11 +112,18 @@ class SpatialSelfAttention(nn.Module):
             self.head_dim,
             tokens,
         )
-        q, k, v = qkv.unbind(dim=1)
-        q = q.transpose(-2, -1)
-        v = v.transpose(-2, -1)
-        attention = torch.matmul(q * self.scale, k).softmax(dim=-1)
-        out = torch.matmul(attention, v)
+        q, k, v = qkv.unbind(dim=1)  # (batch, heads, head_dim, tokens)
+        q = q.transpose(-2, -1)     # (batch, heads, tokens, head_dim)
+        v = v.transpose(-2, -1)     # (batch, heads, tokens, head_dim)
+        if hasattr(F, "scaled_dot_product_attention"):
+            k = k.transpose(-2, -1) # (batch, heads, tokens, head_dim)
+            out = F.scaled_dot_product_attention(q, k, v)
+        else:
+            q_f32 = q.float() * self.scale
+            k_f32 = k.float()
+            v_f32 = v.float()
+            attention = torch.matmul(q_f32, k_f32).softmax(dim=-1)
+            out = torch.matmul(attention, v_f32).to(dtype=x.dtype)
         out = out.transpose(-2, -1).reshape(batch, channels, height, width)
         return x + self.proj(out)
 
