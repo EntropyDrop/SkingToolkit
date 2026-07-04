@@ -23,6 +23,33 @@ except ImportError:
     tqdm = None
 
 
+try:
+    from torch.utils.tensorboard import SummaryWriter
+except ImportError:
+    try:
+        from tensorboardX import SummaryWriter
+    except ImportError:
+        SummaryWriter = None
+
+
+class Logger(object):
+    def __init__(self, filename, stream, mode="w"):
+        self.terminal = stream
+        self.log = open(filename, mode, encoding="utf-8")
+
+    def write(self, message):
+        self.terminal.write(message)
+        if "\r" in message:
+            return
+        if message:
+            self.log.write(message)
+            self.log.flush()
+
+    def flush(self):
+        self.terminal.flush()
+        self.log.flush()
+
+
 def get_device(device_arg):
     if device_arg != "auto":
         return torch.device(device_arg)
@@ -106,7 +133,7 @@ def run_epoch(model, loader, optimizer, scaler, device, precision, args, train=T
     model.train(train)
     loss_sums = {}
     sample_count = 0
-    iterator = tqdm(loader, leave=False) if tqdm is not None else loader
+    iterator = tqdm(loader, leave=False, file=sys.__stderr__ or sys.stderr) if tqdm is not None else loader
 
     for batch in iterator:
         batch = move_batch(batch, device)
@@ -204,6 +231,12 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "previews").mkdir(exist_ok=True)
 
+    log_mode = "a" if args.resume else "w"
+    sys.stdout = Logger(output_dir / "train.log", sys.stdout, mode=log_mode)
+    sys.stderr = Logger(output_dir / "train.log", sys.stderr, mode=log_mode)
+
+    tb_writer = SummaryWriter(log_dir=str(output_dir / "tb_logs")) if SummaryWriter is not None else None
+
     device = get_device(args.device)
     dataset = ForegroundAlphaDataset(
         data_dir=args.data_dir,
@@ -266,6 +299,15 @@ def main():
         json.dump({"args": vars(args), "metadata": metadata}, handle, indent=2)
     print(json.dumps(metadata, indent=2))
 
+    history_path = output_dir / "history.json"
+    history = []
+    if args.resume and history_path.exists():
+        try:
+            with open(history_path, "r", encoding="utf-8") as hf:
+                history = json.load(hf)
+        except Exception:
+            history = []
+
     best_metric = float("inf")
     for epoch in range(start_epoch, args.epochs + 1):
         train_metrics = run_epoch(model, train_loader, optimizer, scaler, device, args.mixed_precision, args, train=True)
@@ -276,7 +318,25 @@ def main():
             metrics["val"] = val_metrics
 
         metric = metrics.get("val", metrics["train"])["loss_total"]
-        print(f"epoch={epoch} metrics={json.dumps(metrics, sort_keys=True)}")
+        current_lr = optimizer.param_groups[0]["lr"]
+        print(f"epoch={epoch} lr={current_lr:.6e} metrics={json.dumps(metrics, sort_keys=True)}")
+
+        log_entry = {
+            "epoch": epoch,
+            "lr": current_lr,
+            "metrics": metrics,
+        }
+        history.append(log_entry)
+        with open(history_path, "w", encoding="utf-8") as hf:
+            json.dump(history, hf, indent=2)
+
+        if tb_writer is not None:
+            for k, v in train_metrics.items():
+                tb_writer.add_scalar(f"train/{k}", v, epoch)
+            if "val" in metrics:
+                for k, v in metrics["val"].items():
+                    tb_writer.add_scalar(f"val/{k}", v, epoch)
+            tb_writer.add_scalar("lr", current_lr, epoch)
 
         if epoch % args.preview_every == 0:
             model.eval()
@@ -290,6 +350,9 @@ def main():
         if metric < best_metric:
             best_metric = metric
             save_checkpoint(output_dir / "best.pt", model, optimizer, epoch, args, metrics)
+
+    if tb_writer is not None:
+        tb_writer.close()
 
 
 if __name__ == "__main__":
