@@ -97,6 +97,8 @@ def build_arg_parser():
     parser.add_argument("--inputs", nargs="*", default=None, help="Multiple input RGB/RGBA images.")
     parser.add_argument("--output", default=None, help="Output RGBA PNG for --input.")
     parser.add_argument("--output_dir", default="foreground_alpha_outputs", help="Output folder for --inputs.")
+    parser.add_argument("--output_front", default=None, help="Explicit output file path for split front RGBA image.")
+    parser.add_argument("--output_back", default=None, help="Explicit output file path for split back RGBA image.")
     parser.add_argument("--bg_color", default="0,0,0", help="Known input background for --uncompose, as r,g,b.")
     parser.add_argument("--uncompose", action="store_true", help="Recover foreground RGB from a known solid background.")
     parser.add_argument("--fill_holes", action="store_true", help="Fill interior transparent holes inside predicted alpha mask.")
@@ -127,8 +129,8 @@ def main():
         input_paths.extend(args.inputs)
     if not input_paths:
         raise ValueError("Provide --input or --inputs.")
-    if args.output and len(input_paths) != 1:
-        raise ValueError("--output can only be used with a single --input.")
+    if (args.output or args.output_front or args.output_back) and len(input_paths) != 1:
+        raise ValueError("--output, --output_front, and --output_back can only be used with a single input image.")
 
     device = get_device(args.device)
     checkpoint = torch.load(args.checkpoint, map_location=device)
@@ -160,13 +162,31 @@ def main():
             tensor_to_rgba_image(merged_rgb.cpu(), merged_alpha.cpu()).save(output_path)
             print(f"Saved merged output {output_path}")
 
-            if args.save_split:
+            if args.output_front:
+                front_out_path = Path(args.output_front)
+            elif args.save_split:
                 output_dir = output_path.parent if args.output else Path(args.output_dir)
                 front_out_path = output_dir / f"{input_path.stem}_front_rgba.png"
+            else:
+                front_out_path = None
+
+            if args.output_back:
+                back_out_path = Path(args.output_back)
+            elif args.save_split:
+                output_dir = output_path.parent if args.output else Path(args.output_dir)
                 back_out_path = output_dir / f"{input_path.stem}_back_rgba.png"
+            else:
+                back_out_path = None
+
+            if front_out_path:
+                front_out_path.parent.mkdir(parents=True, exist_ok=True)
                 tensor_to_rgba_image(front_rgb.cpu(), front_alpha.cpu()).save(front_out_path)
+                print(f"Saved front split output {front_out_path}")
+
+            if back_out_path:
+                back_out_path.parent.mkdir(parents=True, exist_ok=True)
                 tensor_to_rgba_image(back_rgb.cpu(), back_alpha.cpu()).save(back_out_path)
-                print(f"Saved split outputs {front_out_path} and {back_out_path}")
+                print(f"Saved back split output {back_out_path}")
         else:
             out_rgb, alpha = process_single_image(model, pil_img, device, args, bg_color)
             output_path = output_path_for(input_path, args)
