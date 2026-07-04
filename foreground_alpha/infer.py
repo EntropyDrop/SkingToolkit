@@ -16,8 +16,11 @@ from SkingToolkit.foreground_alpha.model import ForegroundAlphaNet  # noqa: E402
 from SkingToolkit.foreground_alpha.train import get_device  # noqa: E402
 
 
-def image_to_tensor(path):
-    image = Image.open(path).convert("RGB")
+def image_to_tensor(path_or_image):
+    if isinstance(path_or_image, (str, Path)):
+        image = Image.open(path_or_image).convert("RGB")
+    else:
+        image = path_or_image.convert("RGB")
     return TF.to_tensor(image).clamp(0.0, 1.0)
 
 
@@ -40,6 +43,8 @@ def fill_alpha_holes(alpha, threshold=0.5):
         return torch.from_numpy(filled_np).unsqueeze(0).to(device=alpha.device, dtype=alpha.dtype)
     except ImportError:
         # Fallback when scipy is not installed: PyTorch max_pool2d morphological closing
+        import torch.nn.functional as F
+
         kernel_size = 5
         pad = kernel_size // 2
         tensor_mask = (alpha > threshold).float().unsqueeze(0)  # [1, 1, H, W]
@@ -63,6 +68,28 @@ def output_path_for(input_path, args):
     return output_dir / f"{input_path.stem}_rgba.png"
 
 
+def is_merged_image(pil_img, split_mode="auto"):
+    if split_mode == "always":
+        return True
+    if split_mode == "never":
+        return False
+    w, h = pil_img.size
+    # Merged front+back renders have side-by-side layout (w/h >= 0.75, typically ~1.0 for two 1:2 views)
+    return (w / h) >= 0.75
+
+
+def process_single_image(model, image, device, args, bg_color):
+    rgb = image_to_tensor(image).to(device)
+    with torch.no_grad():
+        alpha = model(rgb.unsqueeze(0))[0].clamp(0.0, 1.0)
+    if args.fill_holes:
+        alpha = fill_alpha_holes(alpha, threshold=args.hole_threshold)
+    if args.threshold is not None:
+        alpha = (alpha >= args.threshold).to(dtype=alpha.dtype)
+    out_rgb = uncompose_background(rgb, alpha, bg_color, args.min_alpha) if args.uncompose else rgb
+    return out_rgb, alpha
+
+
 def build_arg_parser():
     parser = argparse.ArgumentParser(description="Extract foreground alpha from RGB render PNGs.")
     parser.add_argument("--checkpoint", required=True)
@@ -76,6 +103,17 @@ def build_arg_parser():
     parser.add_argument("--hole_threshold", type=float, default=0.5, help="Binary threshold for hole filling.")
     parser.add_argument("--min_alpha", type=float, default=0.05)
     parser.add_argument("--threshold", type=float, default=None, help="Optional hard alpha threshold.")
+    parser.add_argument(
+        "--split_merged",
+        choices=["auto", "always", "never"],
+        default="auto",
+        help="Automatically split merged front/back image (left half front, right half back).",
+    )
+    parser.add_argument(
+        "--save_split",
+        action="store_true",
+        help="When processing merged images, also save separated front and back RGBA images.",
+    )
     parser.add_argument("--device", default="auto")
     return parser
 
@@ -102,20 +140,42 @@ def main():
 
     bg_color = parse_color(args.bg_color)
     for input_path in input_paths:
-        rgb = image_to_tensor(input_path).to(device)
-        with torch.no_grad():
-            alpha = model(rgb.unsqueeze(0))[0].clamp(0.0, 1.0)
-        if args.fill_holes:
-            alpha = fill_alpha_holes(alpha, threshold=args.hole_threshold)
-        if args.threshold is not None:
-            alpha = (alpha >= args.threshold).to(dtype=alpha.dtype)
-        out_rgb = uncompose_background(rgb, alpha, bg_color, args.min_alpha) if args.uncompose else rgb
-        output_path = output_path_for(input_path, args)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        tensor_to_rgba_image(out_rgb.cpu(), alpha.cpu()).save(output_path)
-        print(f"Saved {output_path}")
+        input_path = Path(input_path)
+        pil_img = Image.open(input_path).convert("RGB")
+
+        if is_merged_image(pil_img, args.split_merged):
+            w, h = pil_img.size
+            split_w = w // 2
+            front_img = pil_img.crop((0, 0, split_w, h))
+            back_img = pil_img.crop((split_w, 0, w, h))
+
+            front_rgb, front_alpha = process_single_image(model, front_img, device, args, bg_color)
+            back_rgb, back_alpha = process_single_image(model, back_img, device, args, bg_color)
+
+            merged_rgb = torch.cat([front_rgb, back_rgb], dim=2)
+            merged_alpha = torch.cat([front_alpha, back_alpha], dim=2)
+
+            output_path = output_path_for(input_path, args)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            tensor_to_rgba_image(merged_rgb.cpu(), merged_alpha.cpu()).save(output_path)
+            print(f"Saved merged output {output_path}")
+
+            if args.save_split:
+                output_dir = output_path.parent if args.output else Path(args.output_dir)
+                front_out_path = output_dir / f"{input_path.stem}_front_rgba.png"
+                back_out_path = output_dir / f"{input_path.stem}_back_rgba.png"
+                tensor_to_rgba_image(front_rgb.cpu(), front_alpha.cpu()).save(front_out_path)
+                tensor_to_rgba_image(back_rgb.cpu(), back_alpha.cpu()).save(back_out_path)
+                print(f"Saved split outputs {front_out_path} and {back_out_path}")
+        else:
+            out_rgb, alpha = process_single_image(model, pil_img, device, args, bg_color)
+            output_path = output_path_for(input_path, args)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            tensor_to_rgba_image(out_rgb.cpu(), alpha.cpu()).save(output_path)
+            print(f"Saved {output_path}")
 
 
 if __name__ == "__main__":
     main()
+
 
