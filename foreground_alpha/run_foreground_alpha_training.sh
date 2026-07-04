@@ -1,9 +1,12 @@
 python foreground_alpha/train.py \
   --data_dir ../skins \
-  --output_dir runs/foreground_alpha_test1 \
+  --output_dir runs/foreground_alpha_test2 \
   --views walk_front_both_layer_ortho,walk_back_both_layer_ortho \
   --mappings_dir ../../github/differentiable_minecraft_renderer/mappings \
   --background_mode random \
+  --hard_bg_prob 0.3 \
+  --max_samples 1000 \
+  --lambda_hole 1.0 \
   --batch_size 4 \
   --epochs 1 \
   --val_split 0.1 \

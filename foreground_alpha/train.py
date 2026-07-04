@@ -72,6 +72,12 @@ def dice_loss(pred, target, eps=1e-6):
     return (1.0 - (2.0 * intersect + eps) / (denom + eps)).mean()
 
 
+def hole_loss(pred, target):
+    fg_mask = (target > 0.8).float()
+    hole_diff = F.relu(target - pred)
+    return (fg_mask * (hole_diff ** 2)).sum() / (fg_mask.sum() + 1e-6)
+
+
 def alpha_losses(pred, target, args):
     pred = pred.clamp(1e-6, 1.0 - 1e-6)
     losses = {
@@ -79,12 +85,15 @@ def alpha_losses(pred, target, args):
         "loss_l1": F.l1_loss(pred, target),
         "loss_dice": dice_loss(pred, target),
         "loss_edge": edge_loss(pred, target),
+        "loss_hole": hole_loss(pred, target),
     }
+    lambda_hole = getattr(args, "lambda_hole", 1.0)
     losses["loss_total"] = (
         args.lambda_bce * losses["loss_bce"]
         + args.lambda_l1 * losses["loss_l1"]
         + args.lambda_dice * losses["loss_dice"]
         + args.lambda_edge * losses["loss_edge"]
+        + lambda_hole * losses["loss_hole"]
     )
     return losses
 
@@ -157,8 +166,13 @@ def build_arg_parser():
     parser.add_argument("--output_dir", default="foreground_alpha_runs/default")
     parser.add_argument("--mappings_dir", default=None)
     parser.add_argument("--views", default="walk_front_both_layer_ortho,walk_back_both_layer_ortho")
-    parser.add_argument("--background_mode", choices=["random", "black", "white", "gray", "color"], default="random")
+    parser.add_argument(
+        "--background_mode",
+        choices=["random", "black", "white", "gray", "color", "gradient", "pattern", "hard"],
+        default="random",
+    )
     parser.add_argument("--bg_color", default="0,0,0", help="Used when --background_mode color.")
+    parser.add_argument("--hard_bg_prob", type=float, default=0.3, help="Probability of sampling foreground color as background.")
     parser.add_argument("--base_channels", type=int, default=32)
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--epochs", type=int, default=20)
@@ -174,6 +188,7 @@ def build_arg_parser():
     parser.add_argument("--lambda_l1", type=float, default=1.0)
     parser.add_argument("--lambda_dice", type=float, default=0.5)
     parser.add_argument("--lambda_edge", type=float, default=0.25)
+    parser.add_argument("--lambda_hole", type=float, default=1.0, help="Weight for interior foreground hole penalty loss.")
     parser.add_argument("--save_every", type=int, default=1)
     parser.add_argument("--preview_every", type=int, default=1)
     parser.add_argument("--resume", default=None)
@@ -196,6 +211,7 @@ def main():
         views=args.views,
         background_mode=args.background_mode,
         bg_color=args.bg_color,
+        hard_bg_prob=args.hard_bg_prob,
         max_samples=args.max_samples,
     )
 

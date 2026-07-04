@@ -26,6 +26,28 @@ def tensor_to_rgba_image(rgb, alpha):
     return TF.to_pil_image(rgba)
 
 
+def fill_alpha_holes(alpha, threshold=0.5):
+    # alpha shape: [1, H, W]
+    alpha_np = alpha.squeeze(0).cpu().numpy()
+    binary_mask = alpha_np > threshold
+    try:
+        import numpy as np
+        from scipy.ndimage import binary_fill_holes
+
+        filled_mask = binary_fill_holes(binary_mask)
+        filled_np = alpha_np.copy()
+        filled_np[filled_mask & (~binary_mask)] = 1.0
+        return torch.from_numpy(filled_np).unsqueeze(0).to(device=alpha.device, dtype=alpha.dtype)
+    except ImportError:
+        # Fallback when scipy is not installed: PyTorch max_pool2d morphological closing
+        kernel_size = 5
+        pad = kernel_size // 2
+        tensor_mask = (alpha > threshold).float().unsqueeze(0)  # [1, 1, H, W]
+        dilated = F.max_pool2d(tensor_mask, kernel_size=kernel_size, stride=1, padding=pad)
+        eroded = -F.max_pool2d(-dilated, kernel_size=kernel_size, stride=1, padding=pad)
+        return torch.max(alpha, eroded.squeeze(0))
+
+
 def uncompose_background(rgb, alpha, bg_color, min_alpha):
     bg = torch.tensor(bg_color, dtype=rgb.dtype, device=rgb.device).view(3, 1, 1) / 255.0
     fg = (rgb - bg * (1.0 - alpha)) / alpha.clamp_min(min_alpha)
@@ -50,6 +72,8 @@ def build_arg_parser():
     parser.add_argument("--output_dir", default="foreground_alpha_outputs", help="Output folder for --inputs.")
     parser.add_argument("--bg_color", default="0,0,0", help="Known input background for --uncompose, as r,g,b.")
     parser.add_argument("--uncompose", action="store_true", help="Recover foreground RGB from a known solid background.")
+    parser.add_argument("--fill_holes", action="store_true", help="Fill interior transparent holes inside predicted alpha mask.")
+    parser.add_argument("--hole_threshold", type=float, default=0.5, help="Binary threshold for hole filling.")
     parser.add_argument("--min_alpha", type=float, default=0.05)
     parser.add_argument("--threshold", type=float, default=None, help="Optional hard alpha threshold.")
     parser.add_argument("--device", default="auto")
@@ -81,6 +105,8 @@ def main():
         rgb = image_to_tensor(input_path).to(device)
         with torch.no_grad():
             alpha = model(rgb.unsqueeze(0))[0].clamp(0.0, 1.0)
+        if args.fill_holes:
+            alpha = fill_alpha_holes(alpha, threshold=args.hole_threshold)
         if args.threshold is not None:
             alpha = (alpha >= args.threshold).to(dtype=alpha.dtype)
         out_rgb = uncompose_background(rgb, alpha, bg_color, args.min_alpha) if args.uncompose else rgb
@@ -92,3 +118,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

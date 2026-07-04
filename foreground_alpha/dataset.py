@@ -28,7 +28,41 @@ def _solid_background(color, height, width, dtype):
     return color.expand(3, height, width)
 
 
-def make_background(mode, color, height, width, dtype):
+def _gradient_background(height, width, dtype):
+    c1 = torch.rand(3, 1, 1, dtype=dtype)
+    c2 = torch.rand(3, 1, 1, dtype=dtype)
+    if torch.rand(1).item() < 0.5:
+        grid = torch.linspace(0, 1, steps=width, dtype=dtype).view(1, 1, width)
+    else:
+        grid = torch.linspace(0, 1, steps=height, dtype=dtype).view(1, height, 1)
+    return c1 * (1.0 - grid) + c2 * grid
+
+
+def _pattern_background(height, width, dtype):
+    c1 = torch.rand(3, 1, 1, dtype=dtype)
+    c2 = torch.rand(3, 1, 1, dtype=dtype)
+    grid_size = torch.randint(4, 16, (1,)).item()
+    y_idx = torch.arange(height, dtype=torch.int64).view(1, height, 1) // grid_size
+    x_idx = torch.arange(width, dtype=torch.int64).view(1, 1, width) // grid_size
+    checker = ((y_idx + x_idx) % 2).to(dtype=dtype)
+    return c1 * checker + c2 * (1.0 - checker)
+
+
+def _hard_color_background(rendered_rgba, height, width, dtype):
+    if rendered_rgba is not None and rendered_rgba.shape[0] >= 4:
+        mask = rendered_rgba[3] > 0.5
+        if mask.any():
+            fg_pixels = rendered_rgba[:3][:, mask]  # [3, N]
+            idx = torch.randint(0, fg_pixels.shape[1], (1,)).item()
+            color = fg_pixels[:, idx].view(3, 1, 1)
+            # Add slight random noise to simulate subtle color variations
+            color = (color + (torch.rand_like(color) - 0.5) * 0.1).clamp(0.0, 1.0)
+            return color.expand(3, height, width)
+    random_color = torch.randint(0, 256, (3, 1, 1), dtype=torch.int64).to(dtype=dtype) / 255.0
+    return random_color.expand(3, height, width)
+
+
+def make_background(mode, color, height, width, dtype, rendered_rgba=None, hard_bg_prob=0.3):
     if mode == "black":
         return _solid_background((0, 0, 0), height, width, dtype)
     if mode == "white":
@@ -37,10 +71,27 @@ def make_background(mode, color, height, width, dtype):
         return _solid_background((128, 128, 128), height, width, dtype)
     if mode == "color":
         return _solid_background(color, height, width, dtype)
+    if mode == "gradient":
+        return _gradient_background(height, width, dtype)
+    if mode == "pattern":
+        return _pattern_background(height, width, dtype)
+    if mode == "hard":
+        return _hard_color_background(rendered_rgba, height, width, dtype)
+
     if mode != "random":
         raise ValueError(f"Unknown background_mode={mode!r}.")
-    random_color = torch.randint(0, 256, (3, 1, 1), dtype=torch.int64).to(dtype=dtype) / 255.0
-    return random_color.expand(3, height, width)
+
+    # "random" mode: dynamically pick among solid, hard color (color matching foreground), gradient, and pattern
+    rand_val = torch.rand(1).item()
+    if rand_val < hard_bg_prob and rendered_rgba is not None:
+        return _hard_color_background(rendered_rgba, height, width, dtype)
+    elif rand_val < hard_bg_prob + 0.2:
+        return _gradient_background(height, width, dtype)
+    elif rand_val < hard_bg_prob + 0.3:
+        return _pattern_background(height, width, dtype)
+    else:
+        random_color = torch.randint(0, 256, (3, 1, 1), dtype=torch.int64).to(dtype=dtype) / 255.0
+        return random_color.expand(3, height, width)
 
 
 def composite_over_background(rendered_rgba, background):
@@ -59,6 +110,7 @@ class ForegroundAlphaDataset(Dataset):
         views="walk_front_both_layer_ortho,walk_back_both_layer_ortho",
         background_mode="random",
         bg_color=(0, 0, 0),
+        hard_bg_prob=0.3,
         max_samples=None,
         normalize_model=True,
     ):
@@ -66,6 +118,7 @@ class ForegroundAlphaDataset(Dataset):
         self.views = parse_views(views)
         self.background_mode = background_mode
         self.bg_color = parse_color(bg_color)
+        self.hard_bg_prob = hard_bg_prob
         self.normalize_model = normalize_model
         self.renderer = DifferentiableRenderer(mappings_dir=mappings_dir, bg_color=(0.0, 0.0, 0.0))
 
@@ -100,7 +153,15 @@ class ForegroundAlphaDataset(Dataset):
             rendered = self.renderer.forward_view(skin.unsqueeze(0), view).squeeze(0).clamp(0.0, 1.0)
 
         height, width = rendered.shape[-2:]
-        background = make_background(self.background_mode, self.bg_color, height, width, rendered.dtype)
+        background = make_background(
+            self.background_mode,
+            self.bg_color,
+            height,
+            width,
+            rendered.dtype,
+            rendered_rgba=rendered,
+            hard_bg_prob=self.hard_bg_prob,
+        )
         rgb, alpha = composite_over_background(rendered, background)
         return {
             "image": rgb,
@@ -108,3 +169,4 @@ class ForegroundAlphaDataset(Dataset):
             "path": skin_path,
             "view": view,
         }
+
