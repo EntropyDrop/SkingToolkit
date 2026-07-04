@@ -14,18 +14,38 @@ class DifferentiableRenderer(nn.Module):
         """
         super().__init__()
         if mappings_dir is None:
-            # Try to resolve to differentiable_minecraft_renderer/mappings relative to workspace root
-            # or local mappings subdirectory.
-            local_mappings = os.path.join(os.path.dirname(__file__), "mappings")
-            sibling_mappings = os.path.abspath(
-                os.path.join(os.path.dirname(__file__), "..", "differentiable_minecraft_renderer", "mappings")
-            )
-            if os.path.exists(local_mappings):
-                mappings_dir = local_mappings
-            elif os.path.exists(sibling_mappings):
-                mappings_dir = sibling_mappings
+            env_mappings_dir = os.environ.get("RENDERER_MAPPINGS_DIR")
+            if env_mappings_dir and os.path.exists(env_mappings_dir):
+                mappings_dir = env_mappings_dir
             else:
-                mappings_dir = "mappings"  # fallback
+                try:
+                    import sys
+                    dmr_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "differentiable_minecraft_renderer"))
+                    if dmr_dir not in sys.path:
+                        sys.path.insert(0, dmr_dir)
+                    from config import size as config_size
+                    size_suffix = f"_{config_size[0]}x{config_size[1]}"
+                except Exception:
+                    size_suffix = ""
+
+                local_size_mappings = os.path.join(os.path.dirname(__file__), f"mappings{size_suffix}")
+                local_mappings = os.path.join(os.path.dirname(__file__), "mappings")
+                sibling_size_mappings = os.path.abspath(
+                    os.path.join(os.path.dirname(__file__), "..", "differentiable_minecraft_renderer", f"mappings{size_suffix}")
+                )
+                sibling_mappings = os.path.abspath(
+                    os.path.join(os.path.dirname(__file__), "..", "differentiable_minecraft_renderer", "mappings")
+                )
+                if os.path.exists(local_size_mappings):
+                    mappings_dir = local_size_mappings
+                elif os.path.exists(local_mappings):
+                    mappings_dir = local_mappings
+                elif os.path.exists(sibling_size_mappings):
+                    mappings_dir = sibling_size_mappings
+                elif os.path.exists(sibling_mappings):
+                    mappings_dir = sibling_mappings
+                else:
+                    mappings_dir = "mappings"
             
         self.mappings_dir = mappings_dir
         self.register_buffer("bg_color", torch.tensor(bg_color, dtype=torch.float32))
