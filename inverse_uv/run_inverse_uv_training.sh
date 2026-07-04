@@ -17,10 +17,10 @@ if [[ -z "${RUN_NAME:-}" ]]; then
 fi
 DATA_DIR="${DATA_DIR:-../skins}"
 MAPPINGS_DIR="${MAPPINGS_DIR:-../../github/differentiable_minecraft_renderer/mappings}"
-MAX_SAMPLES="${MAX_SAMPLES:-20000}"
-BATCH_SIZE="${BATCH_SIZE:-16}"
+MAX_SAMPLES="${MAX_SAMPLES:-50000}"
+BATCH_SIZE="${BATCH_SIZE:-32}"
 NUM_WORKERS="${NUM_WORKERS:-16}"
-EPOCHS="${EPOCHS:-50}"
+EPOCHS="${EPOCHS:-100}"
 LR="${LR:-1e-4}"
 RESUME="${RESUME:-}"
 MIXED_PRECISION="${MIXED_PRECISION:-no}"
