@@ -1,4 +1,4 @@
-python foreground_alpha/train.py \
+python train.py \
   --data_dir ../skins \
   --output_dir runs/foreground_alpha_test2 \
   --views walk_front_both_layer_ortho,walk_back_both_layer_ortho \
@@ -8,7 +8,7 @@ python foreground_alpha/train.py \
   --max_samples 1000 \
   --lambda_hole 1.0 \
   --batch_size 4 \
-  --epochs 1 \
+  --epochs 10 \
   --val_split 0.1 \
   --save_every 1 \
   --preview_every 1
