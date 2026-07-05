@@ -107,20 +107,25 @@ def hole_loss(pred, target):
 
 def alpha_losses(pred, target, args):
     pred = pred.clamp(1e-6, 1.0 - 1e-6)
+    bg_mask = (target < 0.1).float()
+    loss_bg = (bg_mask * (pred ** 2)).sum() / (bg_mask.sum() + 1e-6)
     losses = {
         "loss_bce": F.binary_cross_entropy(pred, target),
         "loss_l1": F.l1_loss(pred, target),
         "loss_dice": dice_loss(pred, target),
         "loss_edge": edge_loss(pred, target),
         "loss_hole": hole_loss(pred, target),
+        "loss_bg": loss_bg,
     }
     lambda_hole = getattr(args, "lambda_hole", 1.0)
+    lambda_bg = getattr(args, "lambda_bg", 2.0)
     losses["loss_total"] = (
         args.lambda_bce * losses["loss_bce"]
         + args.lambda_l1 * losses["loss_l1"]
         + args.lambda_dice * losses["loss_dice"]
         + args.lambda_edge * losses["loss_edge"]
         + lambda_hole * losses["loss_hole"]
+        + lambda_bg * losses["loss_bg"]
     )
     return losses
 
@@ -216,6 +221,7 @@ def build_arg_parser():
     parser.add_argument("--lambda_dice", type=float, default=0.5)
     parser.add_argument("--lambda_edge", type=float, default=0.25)
     parser.add_argument("--lambda_hole", type=float, default=1.0, help="Weight for interior foreground hole penalty loss.")
+    parser.add_argument("--lambda_bg", type=float, default=2.0, help="Weight for background noise suppression penalty loss.")
     parser.add_argument("--save_every", type=int, default=1)
     parser.add_argument("--preview_every", type=int, default=1)
     parser.add_argument("--resume", default=None)

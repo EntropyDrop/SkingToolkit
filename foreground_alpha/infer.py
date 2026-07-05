@@ -82,6 +82,8 @@ def process_single_image(model, image, device, args, bg_color):
     rgb = image_to_tensor(image).to(device)
     with torch.no_grad():
         alpha = model(rgb.unsqueeze(0))[0].clamp(0.0, 1.0)
+    if getattr(args, "bg_threshold", None) is not None and args.bg_threshold > 0.0:
+        alpha = torch.where(alpha < args.bg_threshold, torch.zeros_like(alpha), alpha)
     if args.fill_holes:
         alpha = fill_alpha_holes(alpha, threshold=args.hole_threshold)
     if args.threshold is not None:
@@ -103,6 +105,7 @@ def build_arg_parser():
     parser.add_argument("--uncompose", action="store_true", help="Recover foreground RGB from a known solid background.")
     parser.add_argument("--fill_holes", action="store_true", help="Fill interior transparent holes inside predicted alpha mask.")
     parser.add_argument("--hole_threshold", type=float, default=0.5, help="Binary threshold for hole filling.")
+    parser.add_argument("--bg_threshold", type=float, default=0.15, help="Alpha threshold below which background noise is suppressed to 0.0.")
     parser.add_argument("--min_alpha", type=float, default=0.05)
     parser.add_argument("--threshold", type=float, default=None, help="Optional hard alpha threshold.")
     parser.add_argument(

@@ -25,6 +25,7 @@ LR="${LR:-1e-4}"
 BACKGROUND_MODE="${BACKGROUND_MODE:-random}"
 HARD_BG_PROB="${HARD_BG_PROB:-0.3}"
 LAMBDA_HOLE="${LAMBDA_HOLE:-1.0}"
+LAMBDA_BG="${LAMBDA_BG:-2.0}"
 VAL_SPLIT="${VAL_SPLIT:-0.1}"
 RESUME="${RESUME:-}"
 MIXED_PRECISION="${MIXED_PRECISION:-no}"
@@ -43,6 +44,7 @@ python train.py \
   --background_mode "$BACKGROUND_MODE" \
   --hard_bg_prob "$HARD_BG_PROB" \
   --lambda_hole "$LAMBDA_HOLE" \
+  --lambda_bg "$LAMBDA_BG" \
   --batch_size "$BATCH_SIZE" \
   --num_workers "$NUM_WORKERS" \
   --epochs "$EPOCHS" \
