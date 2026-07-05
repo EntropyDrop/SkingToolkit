@@ -4,4 +4,5 @@ python ./infer.py \
   --output_front ../test_imgs/front_rgba.png \
   --output_back ../test_imgs/back_rgba.png \
   --bg_threshold 0.15 \
-  --fill_holes
+  --fill_holes \
+  --clean_noise
