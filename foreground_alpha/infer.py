@@ -29,20 +29,39 @@ def tensor_to_rgba_image(rgb, alpha):
     return TF.to_pil_image(rgba)
 
 
-def fill_alpha_holes(alpha, threshold=0.5):
+def clean_alpha_mask(alpha, threshold=0.5, fill_holes=True, clean_noise=True, min_component_size=100):
     # alpha shape: [1, H, W]
     alpha_np = alpha.squeeze(0).cpu().numpy()
     binary_mask = alpha_np > threshold
     try:
         import numpy as np
-        from scipy.ndimage import binary_fill_holes
+        from scipy.ndimage import binary_fill_holes, label
 
-        filled_mask = binary_fill_holes(binary_mask)
-        filled_np = alpha_np.copy()
-        filled_np[filled_mask & (~binary_mask)] = 1.0
-        return torch.from_numpy(filled_np).unsqueeze(0).to(device=alpha.device, dtype=alpha.dtype)
+        if clean_noise and binary_mask.any():
+            labeled_array, num_features = label(binary_mask)
+            if num_features > 0:
+                component_sizes = np.bincount(labeled_array.ravel())
+                component_sizes[0] = 0  # Ignore background label 0
+                if min_component_size is None or min_component_size <= 0:
+                    # Keep only the largest single component (main character body)
+                    largest_label = component_sizes.argmax()
+                    binary_mask = (labeled_array == largest_label)
+                else:
+                    # Keep components larger than min_component_size (or largest if none)
+                    valid_labels = np.where(component_sizes >= min_component_size)[0]
+                    if len(valid_labels) > 0:
+                        binary_mask = np.isin(labeled_array, valid_labels)
+                    else:
+                        largest_label = component_sizes.argmax()
+                        binary_mask = (labeled_array == largest_label)
+
+        if fill_holes and binary_mask.any():
+            binary_mask = binary_fill_holes(binary_mask)
+
+        out_np = np.where(binary_mask, np.maximum(alpha_np, 1.0 if threshold is not None else alpha_np), 0.0)
+        return torch.from_numpy(out_np).unsqueeze(0).to(device=alpha.device, dtype=alpha.dtype)
     except ImportError:
-        # Fallback when scipy is not installed: PyTorch max_pool2d morphological closing
+        # Fallback when scipy is not installed
         import torch.nn.functional as F
 
         kernel_size = 5
@@ -51,6 +70,10 @@ def fill_alpha_holes(alpha, threshold=0.5):
         dilated = F.max_pool2d(tensor_mask, kernel_size=kernel_size, stride=1, padding=pad)
         eroded = -F.max_pool2d(-dilated, kernel_size=kernel_size, stride=1, padding=pad)
         return torch.max(alpha, eroded.squeeze(0))
+
+
+def fill_alpha_holes(alpha, threshold=0.5):
+    return clean_alpha_mask(alpha, threshold=threshold, fill_holes=True, clean_noise=False)
 
 
 def uncompose_background(rgb, alpha, bg_color, min_alpha):
@@ -84,9 +107,18 @@ def process_single_image(model, image, device, args, bg_color):
         alpha = model(rgb.unsqueeze(0))[0].clamp(0.0, 1.0)
     if getattr(args, "bg_threshold", None) is not None and args.bg_threshold > 0.0:
         alpha = torch.where(alpha < args.bg_threshold, torch.zeros_like(alpha), alpha)
-    if args.fill_holes:
-        alpha = fill_alpha_holes(alpha, threshold=args.hole_threshold)
-    if args.threshold is not None:
+    clean_noise = getattr(args, "clean_noise", False)
+    fill_holes = getattr(args, "fill_holes", False)
+    if clean_noise or fill_holes:
+        thresh = args.threshold if args.threshold is not None else args.hole_threshold
+        alpha = clean_alpha_mask(
+            alpha,
+            threshold=thresh,
+            fill_holes=fill_holes,
+            clean_noise=clean_noise,
+            min_component_size=getattr(args, "min_component_size", 100),
+        )
+    elif args.threshold is not None:
         alpha = (alpha >= args.threshold).to(dtype=alpha.dtype)
     out_rgb = uncompose_background(rgb, alpha, bg_color, args.min_alpha) if args.uncompose else rgb
     return out_rgb, alpha
@@ -104,7 +136,9 @@ def build_arg_parser():
     parser.add_argument("--bg_color", default="0,0,0", help="Known input background for --uncompose, as r,g,b.")
     parser.add_argument("--uncompose", action="store_true", help="Recover foreground RGB from a known solid background.")
     parser.add_argument("--fill_holes", action="store_true", help="Fill interior transparent holes inside predicted alpha mask.")
-    parser.add_argument("--hole_threshold", type=float, default=0.5, help="Binary threshold for hole filling.")
+    parser.add_argument("--clean_noise", action="store_true", help="Remove isolated floating background noise islands using connected component analysis.")
+    parser.add_argument("--min_component_size", type=int, default=100, help="Minimum pixel area for connected components (0 or <=0 keeps only the single largest main body component).")
+    parser.add_argument("--hole_threshold", type=float, default=0.5, help="Binary threshold for hole filling and noise cleaning.")
     parser.add_argument("--bg_threshold", type=float, default=0.15, help="Alpha threshold below which background noise is suppressed to 0.0.")
     parser.add_argument("--min_alpha", type=float, default=0.05)
     parser.add_argument("--threshold", type=float, default=None, help="Optional hard alpha threshold.")
