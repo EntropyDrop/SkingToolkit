@@ -16,8 +16,8 @@ if [[ -z "${RUN_NAME:-}" ]]; then
   RUN_NAME="inverse_uv_${MODEL}_v${v}"
 fi
 DATA_DIR="${DATA_DIR:-../skins}"
-MAPPINGS_DIR="${MAPPINGS_DIR:-../../github/differentiable_minecraft_renderer/mappings}"
-MAX_SAMPLES="${MAX_SAMPLES:-50000}"
+MAPPINGS_DIR="${MAPPINGS_DIR:-../../github/differentiable_minecraft_renderer/mappings_512x1024}"
+MAX_SAMPLES="${MAX_SAMPLES:-10000}"
 BATCH_SIZE="${BATCH_SIZE:-32}"
 NUM_WORKERS="${NUM_WORKERS:-16}"
 EPOCHS="${EPOCHS:-100}"
