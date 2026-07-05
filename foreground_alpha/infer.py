@@ -132,12 +132,59 @@ def is_merged_image(pil_img, split_mode="auto"):
     return (w / h) >= 0.75
 
 
+def magic_wand_alpha(rgb, bg_color=(0, 0, 0), tolerance=0.1):
+    # rgb shape: [3, H, W]
+    import numpy as np
+    from collections import deque
+
+    rgb_np = rgb.permute(1, 2, 0).cpu().numpy()  # [H, W, 3]
+    h, w, _ = rgb_np.shape
+
+    bg_target = np.array(bg_color, dtype=np.float32).reshape(1, 1, 3) / 255.0
+    dist = np.linalg.norm(rgb_np - bg_target, axis=2)
+    bg_candidate = dist <= tolerance
+
+    visited_bg = np.zeros((h, w), dtype=bool)
+    queue = deque()
+
+    # Seed from outer boundary (all 4 edges)
+    for r in range(h):
+        for c in (0, w - 1):
+            if bg_candidate[r, c] and not visited_bg[r, c]:
+                visited_bg[r, c] = True
+                queue.append((r, c))
+    for c in range(w):
+        for r in (0, h - 1):
+            if bg_candidate[r, c] and not visited_bg[r, c]:
+                visited_bg[r, c] = True
+                queue.append((r, c))
+
+    dr = [-1, 1, 0, 0]
+    dc = [0, 0, -1, 1]
+    while queue:
+        r, c = queue.popleft()
+        for i in range(4):
+            nr, nc = r + dr[i], c + dc[i]
+            if 0 <= nr < h and 0 <= nc < w:
+                if not visited_bg[nr, nc] and bg_candidate[nr, nc]:
+                    visited_bg[nr, nc] = True
+                    queue.append((nr, nc))
+
+    fg_mask = (~visited_bg).astype(np.float32)
+    return torch.from_numpy(fg_mask).unsqueeze(0).to(device=rgb.device, dtype=rgb.dtype)
+
+
 def process_single_image(model, image, device, args, bg_color):
     rgb = image_to_tensor(image).to(device)
-    with torch.no_grad():
-        alpha = model(rgb.unsqueeze(0))[0].clamp(0.0, 1.0)
-    if getattr(args, "bg_threshold", None) is not None and args.bg_threshold > 0.0:
-        alpha = torch.where(alpha < args.bg_threshold, torch.zeros_like(alpha), alpha)
+
+    if getattr(args, "magic_wand", False):
+        alpha = magic_wand_alpha(rgb, bg_color=bg_color, tolerance=getattr(args, "wand_tolerance", 0.1))
+    else:
+        with torch.no_grad():
+            alpha = model(rgb.unsqueeze(0))[0].clamp(0.0, 1.0)
+        if getattr(args, "bg_threshold", None) is not None and args.bg_threshold > 0.0:
+            alpha = torch.where(alpha < args.bg_threshold, torch.zeros_like(alpha), alpha)
+
     clean_noise = getattr(args, "clean_noise", False)
     fill_holes = getattr(args, "fill_holes", False)
     if clean_noise or fill_holes:
@@ -169,6 +216,8 @@ def build_arg_parser():
     parser.add_argument("--bg_color", default="0,0,0", help="Known input background for --uncompose, as r,g,b.")
     parser.add_argument("--uncompose", action="store_true", help="Recover foreground RGB from a known solid background.")
     parser.add_argument("--fill_holes", action="store_true", help="Fill interior transparent holes inside predicted alpha mask.")
+    parser.add_argument("--magic_wand", action="store_true", help="Use flood-fill Magic Wand algorithm starting from corners instead of neural network (ideal for solid/near-solid background renders).")
+    parser.add_argument("--wand_tolerance", type=float, default=0.1, help="Color tolerance for Magic Wand flood fill (0.0 to 1.0, default 0.1).")
     parser.add_argument("--clean_noise", action="store_true", help="Remove isolated floating background noise islands using connected component analysis.")
     parser.add_argument("--min_component_size", type=int, default=0, help="Minimum pixel area for connected components (0 keeps ONLY the single largest main body component).")
     parser.add_argument("--opening_size", type=int, default=5, help="Kernel size for morphological opening to break thin necks connecting noise blobs to body.")
