@@ -29,36 +29,67 @@ def tensor_to_rgba_image(rgb, alpha):
     return TF.to_pil_image(rgba)
 
 
-def clean_alpha_mask(alpha, threshold=0.5, fill_holes=True, clean_noise=True, min_component_size=100):
+def clean_alpha_mask(
+    alpha,
+    threshold=0.5,
+    fill_holes=True,
+    clean_noise=True,
+    min_component_size=0,
+    opening_kernel_size=5,
+    hard_threshold=None,
+):
     # alpha shape: [1, H, W]
     alpha_np = alpha.squeeze(0).cpu().numpy()
-    binary_mask = alpha_np > threshold
+    thresh_val = threshold if threshold is not None else 0.5
+    binary_mask = alpha_np > thresh_val
+
     try:
         import numpy as np
-        from scipy.ndimage import binary_fill_holes, label
+        from scipy.ndimage import binary_dilation, binary_fill_holes, binary_opening, label
 
         if clean_noise and binary_mask.any():
-            labeled_array, num_features = label(binary_mask)
+            # 1. Morphological opening to sever thin bridges (necks) connecting noise blobs to character body
+            if opening_kernel_size and opening_kernel_size > 1:
+                structure = np.ones((opening_kernel_size, opening_kernel_size), dtype=bool)
+                opened_mask = binary_opening(binary_mask, structure=structure)
+                work_mask = opened_mask if opened_mask.any() else binary_mask
+            else:
+                work_mask = binary_mask
+
+            # 2. Connected component analysis to isolate the single main character component
+            labeled_array, num_features = label(work_mask)
             if num_features > 0:
                 component_sizes = np.bincount(labeled_array.ravel())
                 component_sizes[0] = 0  # Ignore background label 0
                 if min_component_size is None or min_component_size <= 0:
-                    # Keep only the largest single component (main character body)
+                    # Keep ONLY the single largest component (the main character body)
                     largest_label = component_sizes.argmax()
-                    binary_mask = (labeled_array == largest_label)
+                    main_body_mask = (labeled_array == largest_label)
                 else:
-                    # Keep components larger than min_component_size (or largest if none)
                     valid_labels = np.where(component_sizes >= min_component_size)[0]
                     if len(valid_labels) > 0:
-                        binary_mask = np.isin(labeled_array, valid_labels)
+                        main_body_mask = np.isin(labeled_array, valid_labels)
                     else:
                         largest_label = component_sizes.argmax()
-                        binary_mask = (labeled_array == largest_label)
+                        main_body_mask = (labeled_array == largest_label)
 
+                # Dilate slightly to recover any body edges trimmed by binary_opening
+                if opening_kernel_size and opening_kernel_size > 1 and opened_mask.any():
+                    pad_structure = np.ones((opening_kernel_size, opening_kernel_size), dtype=bool)
+                    main_body_mask = binary_dilation(main_body_mask, structure=pad_structure) & binary_mask
+
+                binary_mask = main_body_mask
+
+        # 3. Fill interior transparent holes (eyes, face, hair, clothing) inside the main body
         if fill_holes and binary_mask.any():
             binary_mask = binary_fill_holes(binary_mask)
 
-        out_np = np.where(binary_mask, np.maximum(alpha_np, 1.0 if threshold is not None else alpha_np), 0.0)
+        # 4. Final output assignment
+        if hard_threshold is not None:
+            out_np = np.where(binary_mask, 1.0, 0.0)
+        else:
+            out_np = np.where(binary_mask, np.maximum(alpha_np, 1.0 if threshold is not None else alpha_np), 0.0)
+
         return torch.from_numpy(out_np).unsqueeze(0).to(device=alpha.device, dtype=alpha.dtype)
     except ImportError:
         # Fallback when scipy is not installed
@@ -66,7 +97,7 @@ def clean_alpha_mask(alpha, threshold=0.5, fill_holes=True, clean_noise=True, mi
 
         kernel_size = 5
         pad = kernel_size // 2
-        tensor_mask = (alpha > threshold).float().unsqueeze(0)  # [1, 1, H, W]
+        tensor_mask = (alpha > thresh_val).float().unsqueeze(0)  # [1, 1, H, W]
         dilated = F.max_pool2d(tensor_mask, kernel_size=kernel_size, stride=1, padding=pad)
         eroded = -F.max_pool2d(-dilated, kernel_size=kernel_size, stride=1, padding=pad)
         return torch.max(alpha, eroded.squeeze(0))
@@ -110,13 +141,15 @@ def process_single_image(model, image, device, args, bg_color):
     clean_noise = getattr(args, "clean_noise", False)
     fill_holes = getattr(args, "fill_holes", False)
     if clean_noise or fill_holes:
-        thresh = args.threshold if args.threshold is not None else args.hole_threshold
+        thresh = args.hole_threshold if args.hole_threshold is not None else 0.5
         alpha = clean_alpha_mask(
             alpha,
             threshold=thresh,
             fill_holes=fill_holes,
             clean_noise=clean_noise,
-            min_component_size=getattr(args, "min_component_size", 100),
+            min_component_size=getattr(args, "min_component_size", 0),
+            opening_kernel_size=getattr(args, "opening_size", 5),
+            hard_threshold=args.threshold,
         )
     elif args.threshold is not None:
         alpha = (alpha >= args.threshold).to(dtype=alpha.dtype)
@@ -137,7 +170,8 @@ def build_arg_parser():
     parser.add_argument("--uncompose", action="store_true", help="Recover foreground RGB from a known solid background.")
     parser.add_argument("--fill_holes", action="store_true", help="Fill interior transparent holes inside predicted alpha mask.")
     parser.add_argument("--clean_noise", action="store_true", help="Remove isolated floating background noise islands using connected component analysis.")
-    parser.add_argument("--min_component_size", type=int, default=100, help="Minimum pixel area for connected components (0 or <=0 keeps only the single largest main body component).")
+    parser.add_argument("--min_component_size", type=int, default=0, help="Minimum pixel area for connected components (0 keeps ONLY the single largest main body component).")
+    parser.add_argument("--opening_size", type=int, default=5, help="Kernel size for morphological opening to break thin necks connecting noise blobs to body.")
     parser.add_argument("--hole_threshold", type=float, default=0.5, help="Binary threshold for hole filling and noise cleaning.")
     parser.add_argument("--bg_threshold", type=float, default=0.15, help="Alpha threshold below which background noise is suppressed to 0.0.")
     parser.add_argument("--min_alpha", type=float, default=0.05)
