@@ -44,13 +44,19 @@ SkingToolkit/
 │   ├── infer.py
 │   ├── run_inverse_uv_training.sh # Shell launcher for inverse_uv training
 │   └── run_inverse_uv_infer.sh    # Test inference script for inverse_uv
-└── foreground_alpha/      # Subproject 3: Foreground alpha extraction training utilities
-    ├── dataset.py
-    ├── model.py
-    ├── train.py
-    ├── infer.py
-    ├── run_foreground_alpha_training.sh # Shell launcher for foreground_alpha training
-    └── run_foreground_alpha_infer.sh   # Inference script for foreground_alpha
+├── foreground_alpha/      # Subproject 3: Foreground alpha extraction neural network model
+│   ├── dataset.py
+│   ├── model.py
+│   ├── train.py
+│   ├── infer.py
+│   ├── run_foreground_alpha_training.sh # Shell launcher for foreground_alpha training
+│   └── run_foreground_alpha_infer.sh   # Inference script for foreground_alpha
+└── foreground_alpha_simple/ # Subproject 4: Simple seed (0,0) magic-wand floodfill background removal
+    ├── __init__.py
+    ├── floodfill.py       # Core flood fill algorithm
+    ├── infer.py           # CLI tool
+    ├── run_foreground_alpha_simple_infer.sh # Launcher script
+    └── README.md
 ```
 
 ## 🧩 Subproject Deep Dive
