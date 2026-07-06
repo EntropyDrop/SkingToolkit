@@ -164,6 +164,12 @@ def build_arg_parser():
         default=0.1,
         help="GT outer-layer alpha threshold used to ignore matching covered inner-layer UV texels.",
     )
+    parser.add_argument(
+        "--unproject_mode",
+        choices=["mode", "mean", "medoid"],
+        default="mode",
+        help="Method to aggregate render pixels into 64x64 UV texels ('mode'=most frequent color, 'mean'=average, 'medoid'=spatial median).",
+    )
     parser.add_argument("--save_every", type=int, default=1)
     parser.add_argument("--preview_every", type=int, default=1)
     parser.add_argument("--resume", default=None, help="Checkpoint path to resume from.")
@@ -209,6 +215,7 @@ def main():
         image_size=args.render_size,
         include_alpha=args.include_alpha,
         max_samples=args.max_samples,
+        unproject_mode=args.unproject_mode,
     )
     input_channels = dataset.input_channels
 
@@ -273,6 +280,7 @@ def main():
         "val_samples": len(val_dataset) if val_dataset is not None else 0,
         "input_channels": input_channels,
         "conditioning_mode": "uv_unproject_inpaint",
+        "unproject_mode": args.unproject_mode,
         "parameters": count_parameters(model),
         "views": dataset.views,
         "device": str(device),

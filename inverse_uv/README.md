@@ -50,6 +50,7 @@ python SkingToolkit/inverse_uv/train.py \
 
 Useful knobs:
 
+- `--unproject_mode`: aggregation method for render pixels unprojected into 64x64 UV texels (`mode`=most frequent 8-bit color, `mean`=average, `medoid`=spatial median). Defaults to `mode` to prevent color averaging at block boundaries.
 - `--lambda_rgb`: visible-RGB UV reconstruction weight.
 - `--lambda_alpha`: alpha reconstruction weight.
 - `--lambda_render`: differentiable render consistency weight.

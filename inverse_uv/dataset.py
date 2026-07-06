@@ -105,16 +105,21 @@ def _ensure_rgba(rendered, geometry_mask=None):
     return torch.cat([rendered, alpha], dim=0)
 
 
-def unproject_renders_to_uv(rendered_views, renderer, views, bg_color=(128, 128, 128)):
+def unproject_renders_to_uv(rendered_views, renderer, views, bg_color=(128, 128, 128), unproject_mode="mode"):
     views = parse_views(views)
     if len(rendered_views) != len(views):
         raise ValueError(f"Expected {len(views)} rendered views, got {len(rendered_views)}.")
+    if unproject_mode not in ("mode", "mean", "medoid"):
+        raise ValueError(f"Unsupported unproject_mode={unproject_mode!r}. Options: 'mode', 'mean', 'medoid'.")
 
     sample = rendered_views[0]
     device = sample.device
     dtype = sample.dtype
     accum = sample.new_zeros(len(CONDITIONING_LAYERS), 4, UV_SIZE, UV_SIZE)
     counts = sample.new_zeros(len(CONDITIONING_LAYERS), 1, UV_SIZE, UV_SIZE)
+
+    layer_values_list = [[] for _ in CONDITIONING_LAYERS]
+    layer_uv_list = [[] for _ in CONDITIONING_LAYERS]
 
     for view, rendered in zip(views, rendered_views):
         inner_mask = getattr(renderer, f"{view}_inner_mask").to(device=device).bool()
@@ -130,15 +135,65 @@ def unproject_renders_to_uv(rendered_views, renderer, views, bg_color=(128, 128,
             flat_uv = _uv_indices_from_grid(grid, mask)
             values = rendered[:, mask]
 
-            accum[layer_index].reshape(4, -1).index_add_(1, flat_uv, values)
-            ones = torch.ones((1, values.shape[1]), dtype=dtype, device=device)
-            counts[layer_index].reshape(1, -1).index_add_(1, flat_uv, ones)
+            if unproject_mode == "mean":
+                accum[layer_index].reshape(4, -1).index_add_(1, flat_uv, values)
+                ones = torch.ones((1, values.shape[1]), dtype=dtype, device=device)
+                counts[layer_index].reshape(1, -1).index_add_(1, flat_uv, ones)
+            else:
+                layer_values_list[layer_index].append(values)
+                layer_uv_list[layer_index].append(flat_uv)
 
-    known = (counts > 0).to(dtype=dtype)
-    averaged = accum / counts.clamp_min(1.0)
+    if unproject_mode == "mean":
+        known = (counts > 0).to(dtype=dtype)
+        aggregated = accum / counts.clamp_min(1.0)
+    else:
+        aggregated = sample.new_zeros(len(CONDITIONING_LAYERS), 4, UV_SIZE, UV_SIZE)
+        counts = sample.new_zeros(len(CONDITIONING_LAYERS), 1, UV_SIZE, UV_SIZE)
+
+        for layer_index in range(len(CONDITIONING_LAYERS)):
+            if not layer_values_list[layer_index]:
+                continue
+            all_values = torch.cat(layer_values_list[layer_index], dim=1)
+            all_flat_uv = torch.cat(layer_uv_list[layer_index], dim=0)
+
+            ones = torch.ones((1, all_values.shape[1]), dtype=dtype, device=device)
+            counts[layer_index].reshape(1, -1).index_add_(1, all_flat_uv, ones)
+
+            unique_uvs = torch.unique(all_flat_uv)
+            flat_aggregated = aggregated[layer_index].reshape(4, -1)
+
+            if unproject_mode == "mode":
+                quant = (all_values.clamp(0.0, 1.0) * 255.0 + 0.5).to(torch.int64)
+                keys = quant[0] | (quant[1] << 8) | (quant[2] << 16) | (quant[3] << 24)
+                for u_idx in unique_uvs:
+                    mask_u = (all_flat_uv == u_idx)
+                    texel_keys = keys[mask_u]
+                    if texel_keys.numel() == 1:
+                        mode_key = texel_keys[0].item()
+                    else:
+                        uniques, cnts = torch.unique(texel_keys, return_counts=True)
+                        mode_key = uniques[cnts.argmax()].item()
+                    r = (mode_key & 255) / 255.0
+                    g = ((mode_key >> 8) & 255) / 255.0
+                    b = ((mode_key >> 16) & 255) / 255.0
+                    a = ((mode_key >> 24) & 255) / 255.0
+                    flat_aggregated[:, u_idx] = torch.tensor([r, g, b, a], dtype=dtype, device=device)
+            elif unproject_mode == "medoid":
+                for u_idx in unique_uvs:
+                    mask_u = (all_flat_uv == u_idx)
+                    texel_vals = all_values[:, mask_u]
+                    if texel_vals.shape[1] == 1:
+                        medoid_val = texel_vals[:, 0]
+                    else:
+                        dists = torch.cdist(texel_vals.t(), texel_vals.t(), p=2)
+                        medoid_val = texel_vals[:, dists.sum(dim=1).argmin()]
+                    flat_aggregated[:, u_idx] = medoid_val
+
+        known = (counts > 0).to(dtype=dtype)
+
     bg = sample.new_tensor(bg_color, dtype=dtype).view(1, 3, 1, 1) / 255.0
-    rgb = torch.where(known.expand(-1, 3, -1, -1) > 0, averaged[:, :3], bg.expand_as(averaged[:, :3]))
-    alpha = torch.where(known > 0, averaged[:, 3:4], torch.zeros_like(averaged[:, 3:4]))
+    rgb = torch.where(known.expand(-1, 3, -1, -1) > 0, aggregated[:, :3], bg.expand_as(aggregated[:, :3]))
+    alpha = torch.where(known > 0, aggregated[:, 3:4], torch.zeros_like(averaged if 'averaged' in locals() else aggregated)[:, 3:4])
     layers = torch.cat([rgb, alpha, known], dim=1)
     return layers.reshape(-1, UV_SIZE, UV_SIZE).clamp(0.0, 1.0)
 
@@ -149,6 +204,7 @@ def build_conditioning(
     views,
     image_size=256,
     include_alpha=False,
+    unproject_mode="mode",
 ):
     _ = image_size, include_alpha
     rendered_views = []
@@ -157,7 +213,7 @@ def build_conditioning(
         for view in views:
             rendered = renderer.forward_view(skin_batch, view).squeeze(0)
             rendered_views.append(rendered)
-    return unproject_renders_to_uv(rendered_views, renderer, views)
+    return unproject_renders_to_uv(rendered_views, renderer, views, unproject_mode=unproject_mode)
 
 
 class InverseUVDataset(Dataset):
@@ -171,6 +227,7 @@ class InverseUVDataset(Dataset):
         bg_color=(128, 128, 128),
         max_samples=None,
         normalize_model=True,
+        unproject_mode="mode",
     ):
         self.data_dir = data_dir
         self.views = parse_views(views)
@@ -178,6 +235,7 @@ class InverseUVDataset(Dataset):
         self.include_alpha = include_alpha
         self.bg_color = bg_color
         self.normalize_model = normalize_model
+        self.unproject_mode = unproject_mode
         self.renderer = DifferentiableRenderer(
             mappings_dir=mappings_dir,
             bg_color=tuple(channel / 255.0 for channel in bg_color),
@@ -218,6 +276,7 @@ class InverseUVDataset(Dataset):
             self.views,
             image_size=self.image_size,
             include_alpha=self.include_alpha,
+            unproject_mode=self.unproject_mode,
         )
         return {
             "conditioning": conditioning,

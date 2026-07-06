@@ -24,6 +24,7 @@ EPOCHS="${EPOCHS:-100}"
 LR="${LR:-1e-4}"
 RESUME="${RESUME:-}"
 MIXED_PRECISION="${MIXED_PRECISION:-no}"
+UNPROJECT_MODE="${UNPROJECT_MODE:-mode}"
 
 resume_args=()
 if [[ -n "$RESUME" ]]; then
@@ -44,4 +45,5 @@ python train.py \
   --save_every 1 \
   --preview_every 1 \
   --mixed_precision "$MIXED_PRECISION" \
+  --unproject_mode "$UNPROJECT_MODE" \
   ${resume_args[@]+"${resume_args[@]}"}

@@ -76,7 +76,11 @@ def load_conditioning(args, checkpoint_args, input_channels):
         image_to_render_tensor(image, view_native_size(renderer, view))
         for image, view in zip(images, views)
     ]
-    conditioning = unproject_renders_to_uv(rendered_views, renderer, views)
+    unproject_mode = args.unproject_mode
+    if unproject_mode is None:
+        unproject_mode = checkpoint_args.get("unproject_mode", "mode")
+
+    conditioning = unproject_renders_to_uv(rendered_views, renderer, views, unproject_mode=unproject_mode)
     if conditioning.shape[0] != input_channels:
         raise ValueError(f"Conditioning has {conditioning.shape[0]} channels, checkpoint expects {input_channels}.")
     return conditioning.unsqueeze(0)
@@ -136,6 +140,12 @@ def build_arg_parser():
     parser.add_argument("--combined", default=None, help="Combined side-by-side front/back image.")
     parser.add_argument("--view_images", nargs="*", default=None, help="Images matching checkpoint view order.")
     parser.add_argument("--mappings_dir", default=None, help="Override renderer mappings directory from checkpoint.")
+    parser.add_argument(
+        "--unproject_mode",
+        choices=["mode", "mean", "medoid"],
+        default=None,
+        help="Method to aggregate render pixels into UV texels. Defaults to checkpoint's unproject_mode (or 'mode').",
+    )
     parser.add_argument(
         "--render_size",
         type=int,

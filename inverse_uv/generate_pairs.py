@@ -43,6 +43,7 @@ def build_arg_parser():
     parser.add_argument("--output_dir", required=True, help="Output render folder.")
     parser.add_argument("--mappings_dir", default=None)
     parser.add_argument("--views", default="static_front,static_back")
+    parser.add_argument("--unproject_mode", choices=["mode", "mean", "medoid"], default="mode")
     parser.add_argument("--include_alpha", action="store_true")
     parser.add_argument("--combined", action="store_true", help="Also save side-by-side combined images.")
     parser.add_argument("--max_samples", type=int, default=None)

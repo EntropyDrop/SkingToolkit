@@ -69,7 +69,7 @@ GT skin (64×64 RGBA)
 
 ### Input conditioning (10 channels)
 
-Built by `dataset.unproject_renders_to_uv()`: two layers (inner, outer) × 5 channels (RGB + Alpha + known-mask). The known-mask indicates which UV texels received pixel data from the renders. This is always 10 channels regardless of view count.
+Built by `dataset.unproject_renders_to_uv()`: two layers (inner, outer) × 5 channels (RGB + Alpha + known-mask). The known-mask indicates which UV texels received pixel data from the renders. This is always 10 channels regardless of view count. Render pixels mapping to each UV texel are aggregated via `--unproject_mode` (`mode`=most frequent color, `mean`=average, `medoid`=spatial median). Default is `mode` to prevent color bleeding across block edges.
 
 ### Model variants (`model.py`)
 
