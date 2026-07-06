@@ -6,7 +6,6 @@ cd "$SCRIPT_DIR"
 
 MODEL_PATH="../../black-forest-labs/FLUX.2-klein-base-4B"
 TEXT_ENCODER_PATH="../../Qwen/Qwen3-4B"
-DATA_DIR="../skins"
 PHOTOS_DIR="./control_imgs"
 TARGET_IMGS_DIR="./target_imgs"
 OUTPUT_DIR="./output/flux_inverse_uv_lora"
@@ -32,7 +31,6 @@ echo "=========================================================="
 echo "Starting Flux Inverse UV LoRA Fine-Tuning..."
 echo "Model Path:        $MODEL_PATH"
 echo "Text Encoder Path: $TEXT_ENCODER_PATH"
-echo "Data Dir (skins):  $DATA_DIR"
 echo "Photos Dir:        $PHOTOS_DIR"
 echo "Target Imgs Dir:   $TARGET_IMGS_DIR"
 echo "Output Dir:        $OUTPUT_DIR"
@@ -47,7 +45,6 @@ echo "=========================================================="
 accelerate launch train.py \
     --model_path "$MODEL_PATH" \
     --text_encoder_path "$TEXT_ENCODER_PATH" \
-    --data_dir "$DATA_DIR" \
     --photos_dir "$PHOTOS_DIR" \
     --target_imgs_dir "$TARGET_IMGS_DIR" \
     --output_dir "$OUTPUT_DIR" \

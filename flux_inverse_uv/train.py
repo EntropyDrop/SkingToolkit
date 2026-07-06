@@ -170,9 +170,9 @@ def parse_args():
     # Model and paths
     parser.add_argument("--model_path", type=str, required=True, help="Base Flux model path on Hugging Face or local path.")
     parser.add_argument("--text_encoder_path", type=str, default=None, help="Path to Qwen text encoder model.")
-    parser.add_argument("--data_dir", type=str, required=True, help="Path to skins folder containing target 64x64 skin PNGs.")
     parser.add_argument("--photos_dir", type=str, default=None, help="Path to conditioning control_imgs folder.")
     parser.add_argument("--target_imgs_dir", type=str, default=None, help="Path to pre-built target_imgs folder.")
+    parser.add_argument("--data_dir", type=str, default=None, help="Optional path to skins folder containing target 64x64 skin PNGs.")
     parser.add_argument("--output_dir", type=str, default="output/flux_inverse_uv_lora", help="Path to save checkpoints.")
     
     # Training hyperparameters
