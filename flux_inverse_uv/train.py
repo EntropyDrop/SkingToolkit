@@ -294,7 +294,7 @@ def run_validation(args, transformer, vae, prompt_cache, device, weight_dtype, g
                 back_img = combined_img.crop((w // 2, 0, w, h)).resize((target_width, target_height), resample=Image.Resampling.LANCZOS)
                 
             prompt = ""
-            caption_path = os.path.join(args.validation_photos_dir, stem + ".txt")
+            caption_path = os.path.join(val_dir, stem + ".txt")
             if os.path.exists(caption_path):
                 with open(caption_path, "r", encoding="utf-8") as f:
                     prompt = f.read().strip()
