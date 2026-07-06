@@ -19,6 +19,7 @@ import torchvision.transforms as transforms
 class FluxInverseUVDataset(Dataset):
     def __init__(
         self,
+        control_imgs_dir=None,
         photos_dir=None,
         target_imgs_dir=None,
         data_dir=None,
@@ -31,7 +32,8 @@ class FluxInverseUVDataset(Dataset):
         """
         PyTorch Dataset for Flux Inverse UV Fine-tuning.
         Args:
-            photos_dir: Path to conditioning control_imgs folder.
+            control_imgs_dir: Path to conditioning control_imgs folder.
+            photos_dir: Alias for control_imgs_dir.
             target_imgs_dir: Path to pre-built target_imgs folder (512x512 target skin images).
             data_dir: Optional path to skins folder containing 64x64 skin PNGs.
             captions_dir: Optional path to captions folder.
@@ -40,10 +42,11 @@ class FluxInverseUVDataset(Dataset):
             bg_color: Solid gray color (128,128,128) for matte background.
             default_caption: Caption used when no .txt caption exists.
         """
-        self.photos_dir = photos_dir or str(FLUX_INVERSE_UV_DIR / "control_imgs")
+        self.control_imgs_dir = control_imgs_dir or photos_dir or str(FLUX_INVERSE_UV_DIR / "control_imgs")
+        self.photos_dir = self.control_imgs_dir
         self.target_imgs_dir = target_imgs_dir or str(FLUX_INVERSE_UV_DIR / "target_imgs")
         self.data_dir = data_dir
-        self.captions_dir = captions_dir or self.photos_dir
+        self.captions_dir = captions_dir or self.control_imgs_dir
         self.cond_size = cond_size
         self.is_square = is_square
         self.target_height = cond_size

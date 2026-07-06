@@ -170,7 +170,8 @@ def parse_args():
     # Model and paths
     parser.add_argument("--model_path", type=str, required=True, help="Base Flux model path on Hugging Face or local path.")
     parser.add_argument("--text_encoder_path", type=str, default=None, help="Path to Qwen text encoder model.")
-    parser.add_argument("--photos_dir", type=str, default=None, help="Path to conditioning control_imgs folder.")
+    parser.add_argument("--control_imgs_dir", type=str, default=None, help="Path to conditioning control_imgs folder.")
+    parser.add_argument("--photos_dir", type=str, default=None, help="Alias for --control_imgs_dir.")
     parser.add_argument("--target_imgs_dir", type=str, default=None, help="Path to pre-built target_imgs folder.")
     parser.add_argument("--data_dir", type=str, default=None, help="Optional path to skins folder containing target 64x64 skin PNGs.")
     parser.add_argument("--output_dir", type=str, default="output/flux_inverse_uv_lora", help="Path to save checkpoints.")
@@ -196,7 +197,8 @@ def parse_args():
     parser.add_argument("--lora_target_modules", type=str, default=None, help="Comma-separated LoRA target module names.")
     
     # Validation parameters
-    parser.add_argument("--validation_photos_dir", type=str, default=None, help="Folder containing validation/test conditioning images.")
+    parser.add_argument("--validation_dir", type=str, default=None, help="Folder containing validation/test conditioning images.")
+    parser.add_argument("--validation_photos_dir", type=str, default=None, help="Alias for --validation_dir.")
     parser.add_argument("--validation_steps", type=int, default=100, help="Run validation sampling once every N update steps.")
     
     return parser.parse_args()
@@ -241,7 +243,8 @@ def encode_prompt_qwen(tokenizer, text_encoder, prompt, device, max_sequence_len
     return prompt_embeds, None
 
 def run_validation(args, transformer, vae, prompt_cache, device, weight_dtype, global_step, accelerator):
-    if not args.validation_photos_dir or not os.path.exists(args.validation_photos_dir):
+    val_dir = args.validation_dir or args.validation_photos_dir
+    if not val_dir or not os.path.exists(val_dir):
         return
         
     print(f"\n[*] Running validation sampling at step {global_step}...")
@@ -250,8 +253,8 @@ def run_validation(args, transformer, vae, prompt_cache, device, weight_dtype, g
     
     val_pairs = []
     image_extensions = (".png", ".jpg", ".jpeg", ".webp")
-    front_dir = os.path.join(args.validation_photos_dir, "front")
-    back_dir = os.path.join(args.validation_photos_dir, "back")
+    front_dir = os.path.join(val_dir, "front")
+    back_dir = os.path.join(val_dir, "back")
     
     if os.path.exists(front_dir) and os.path.exists(back_dir):
         for f in sorted(os.listdir(front_dir)):
@@ -263,13 +266,13 @@ def run_validation(args, transformer, vae, prompt_cache, device, weight_dtype, g
                         val_pairs.append({"type": "split", "stem": stem, "front": os.path.join(front_dir, f), "back": b_path})
                         break
     else:
-        for f in sorted(os.listdir(args.validation_photos_dir)):
-            if os.path.isfile(os.path.join(args.validation_photos_dir, f)) and f.lower().endswith(image_extensions):
+        for f in sorted(os.listdir(val_dir)):
+            if os.path.isfile(os.path.join(val_dir, f)) and f.lower().endswith(image_extensions):
                 stem, _ = os.path.splitext(f)
-                val_pairs.append({"type": "single", "stem": stem, "path": os.path.join(args.validation_photos_dir, f)})
+                val_pairs.append({"type": "single", "stem": stem, "path": os.path.join(val_dir, f)})
                 
     if not val_pairs:
-        print("[!] No validation images found in validation_photos_dir.")
+        print("[!] No validation images found in validation_dir.")
         return
         
     unwrapped_transformer = accelerator.unwrap_model(transformer)
@@ -452,10 +455,11 @@ def main():
     transformer.to(dtype=weight_dtype)
     
     # Dataset and DataLoader
+    control_imgs_dir = args.control_imgs_dir or args.photos_dir
     dataset = FluxInverseUVDataset(
-        data_dir=args.data_dir,
-        photos_dir=args.photos_dir,
+        control_imgs_dir=control_imgs_dir,
         target_imgs_dir=args.target_imgs_dir,
+        data_dir=args.data_dir,
         cond_size=args.resolution,
         is_square=True,
         default_caption=""

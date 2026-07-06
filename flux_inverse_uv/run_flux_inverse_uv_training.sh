@@ -6,10 +6,10 @@ cd "$SCRIPT_DIR"
 
 MODEL_PATH="../../black-forest-labs/FLUX.2-klein-base-4B"
 TEXT_ENCODER_PATH="../../Qwen/Qwen3-4B"
-PHOTOS_DIR="./control_imgs"
+CONTROL_IMGS_DIR="./control_imgs"
 TARGET_IMGS_DIR="./target_imgs"
 OUTPUT_DIR="./output/flux_inverse_uv_lora"
-VALIDATION_PHOTOS_DIR="../../SkingDataset/DDJ_real2render/test_output"
+VALIDATION_DIR="../../SkingDataset/DDJ_real2render/test_output"
 VALIDATION_STEPS=100
 
 # Hyperparameters
@@ -31,8 +31,9 @@ echo "=========================================================="
 echo "Starting Flux Inverse UV LoRA Fine-Tuning..."
 echo "Model Path:        $MODEL_PATH"
 echo "Text Encoder Path: $TEXT_ENCODER_PATH"
-echo "Photos Dir:        $PHOTOS_DIR"
+echo "Control Imgs Dir:  $CONTROL_IMGS_DIR"
 echo "Target Imgs Dir:   $TARGET_IMGS_DIR"
+echo "Validation Dir:    $VALIDATION_DIR"
 echo "Output Dir:        $OUTPUT_DIR"
 echo "Batch Size:        $BATCH_SIZE"
 echo "Epochs:            $EPOCHS"
@@ -45,7 +46,7 @@ echo "=========================================================="
 accelerate launch train.py \
     --model_path "$MODEL_PATH" \
     --text_encoder_path "$TEXT_ENCODER_PATH" \
-    --photos_dir "$PHOTOS_DIR" \
+    --control_imgs_dir "$CONTROL_IMGS_DIR" \
     --target_imgs_dir "$TARGET_IMGS_DIR" \
     --output_dir "$OUTPUT_DIR" \
     --lr "$LR" \
@@ -59,5 +60,5 @@ accelerate launch train.py \
     --lora_conv_rank "$LORA_CONV_RANK" \
     --lora_conv_alpha "$LORA_CONV_ALPHA" \
     --lora_target_modules "qkv,linear1,linear2,proj" \
-    --validation_photos_dir "$VALIDATION_PHOTOS_DIR" \
+    --validation_dir "$VALIDATION_DIR" \
     --validation_steps "$VALIDATION_STEPS"
