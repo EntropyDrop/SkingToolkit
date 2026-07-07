@@ -6,14 +6,18 @@ import os
 import numpy as np
 import asyncio
 import random
+from pathlib import Path
 
 IMAGE_WIDTH  = 512
 IMAGE_HEIGHT = 512
 
-SKIN_MASK = "skin-mask.png"
-SKIN_DECOR_MASK = "skin-decor-mask.png"
+SCRIPT_DIR = Path(__file__).resolve().parent
+SKIN_MASK = SCRIPT_DIR / "skin-mask.png"
+SKIN_DECOR_MASK = SCRIPT_DIR / "skin-decor-mask.png"
 
 bg = (128,128,128)
+dot = (255, 255, 255)
+alpha_threshold = 128
 
 def create_mask():
     if os.path.exists(SKIN_MASK) and os.path.exists(SKIN_DECOR_MASK):
@@ -95,29 +99,28 @@ def create_training_image(skin_image):
     decor_mask_np = np.array(skin_decor_mask)
     active_mask = (skin_mask_np[..., 3] > 0) | (decor_mask_np[..., 3] > 0)
     
-    training_image = Image.new('RGBA', (IMAGE_WIDTH, IMAGE_HEIGHT), (*bg, 255))
-    SCALING_RATIO = IMAGE_WIDTH/64
-    scaled_skin_image = skin_image.resize((int(64 * SCALING_RATIO), int(64 * SCALING_RATIO)),
-                                          resample=Image.BOX)
-                        
-    training_image.paste(scaled_skin_image, (0,0)) 
-
-    # Optimized: Use NumPy for transparency and dot drawing
-    tr_arr = np.array(training_image)
-    
-    # Fill transparent background areas
-    tr_arr[tr_arr[..., 3] == 0] = [*bg, 255]
-    
-    # Draw white dots for skin transparency
+    skin_image = skin_image.resize((64, 64), resample=Image.Resampling.NEAREST)
     skin_arr = np.array(skin_image)
-    y_indices, x_indices = np.where((skin_arr[..., 3] == 0) & active_mask)
-    
+
+    tr_arr = np.full((IMAGE_HEIGHT, IMAGE_WIDTH, 4), [*bg, 255], dtype=np.uint8)
+    scaling_ratio = IMAGE_WIDTH // 64
+    dot_size = max(1, scaling_ratio // 2)
+    dot_start = (scaling_ratio - dot_size) // 2
+    dot_end = dot_start + dot_size
+
+    y_indices, x_indices = np.where(active_mask)
     for x, y in zip(x_indices, y_indices):
-        cx = int(x * SCALING_RATIO ) + int(SCALING_RATIO/2)
-        cy = int(y * SCALING_RATIO ) + int(SCALING_RATIO/2)
-        # Apply 4x4 white dot centered at (cx, cy)
-        tr_arr[cy-2:cy+2, cx-2:cx+2] = [255, 255, 255, 255]
-        
+        x0 = x * scaling_ratio
+        y0 = y * scaling_ratio
+        block = tr_arr[y0:y0 + scaling_ratio, x0:x0 + scaling_ratio]
+
+        if skin_arr[y, x, 3] < alpha_threshold:
+            block[:, :] = [*bg, 255]
+            block[dot_start:dot_end, dot_start:dot_end] = [*dot, 255]
+        else:
+            r, g, b = skin_arr[y, x, :3]
+            block[:, :] = [r, g, b, 255]
+
     training_image = Image.fromarray(tr_arr)
 
     return training_image

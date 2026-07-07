@@ -206,6 +206,28 @@ def parse_args():
     
     return parser.parse_args()
 
+def expand_block_mask(mask_64, block_size):
+    return mask_64.repeat_interleave(block_size, dim=-2).repeat_interleave(block_size, dim=-1)
+
+def make_dot_core_mask(dot_mask_64, block_size):
+    bsz, channels, height, width = dot_mask_64.shape
+    dot_size = max(1, block_size // 2)
+    dot_start = (block_size - dot_size) // 2
+    dot_end = dot_start + dot_size
+
+    mask = torch.zeros(
+        (bsz, channels, height, block_size, width, block_size),
+        device=dot_mask_64.device,
+        dtype=dot_mask_64.dtype,
+    )
+    mask[:, :, :, dot_start:dot_end, :, dot_start:dot_end] = dot_mask_64.unsqueeze(3).unsqueeze(5)
+    return mask.permute(0, 1, 2, 4, 3, 5).reshape(
+        bsz,
+        channels,
+        height * block_size,
+        width * block_size,
+    )
+
 def encode_prompt_qwen(tokenizer, text_encoder, prompt, device, max_sequence_length=512):
     from einops import rearrange
     all_input_ids = []
@@ -453,21 +475,6 @@ def main():
     transformer.print_trainable_parameters()
     transformer.to(dtype=weight_dtype)
     
-    # Load template mask for active area computation in pixel loss
-    mask_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "skin-mask.png")
-    decor_mask_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "skin-decor-mask.png")
-    
-    if not (os.path.exists(mask_path) and os.path.exists(decor_mask_path)):
-        raise FileNotFoundError(f"Required template masks '{mask_path}' and/or '{decor_mask_path}' not found!")
-
-    mask_np = np.array(Image.open(mask_path))
-    decor_mask_np = np.array(Image.open(decor_mask_path))
-    active_mask_np = (mask_np[..., 3] > 0) | (decor_mask_np[..., 3] > 0)
-            
-    active_mask_64 = torch.from_numpy(active_mask_np).to(device)
-    active_mask_512 = active_mask_64.repeat_interleave(8, dim=0).repeat_interleave(8, dim=1)
-    active_mask_512 = active_mask_512.unsqueeze(0).unsqueeze(0).to(dtype=weight_dtype)
-
     # Dataset and DataLoader
     control_imgs_dir = args.control_imgs_dir or args.photos_dir
     dataset = FluxInverseUVDataset(
@@ -519,6 +526,9 @@ def main():
             with accelerator.accumulate(transformer):
                 target_latent_image = batch["target_latent_image"].to(device, dtype=weight_dtype)
                 cond_image = batch["cond_image"].to(device, dtype=weight_dtype)
+                active_mask_64 = batch["active_mask_64"].to(device, dtype=weight_dtype)
+                dot_mask_64 = batch["dot_mask_64"].to(device, dtype=weight_dtype)
+                opaque_mask_64 = batch["opaque_mask_64"].to(device, dtype=weight_dtype)
                 prompts = batch["prompt"]
                 
                 B = target_latent_image.shape[0]
@@ -586,28 +596,25 @@ def main():
                         # 1. Weighted Reconstruction Loss (inside active mask only)
                         # target_latent_image is normalized to [-1, 1]
                         loss_recon = F.l1_loss(pred_decoded, target_latent_image, reduction="none")
+
+                        B_dec, C, H, W = pred_decoded.shape
+                        if H % 64 != 0 or W % 64 != 0:
+                            raise ValueError(f"Decoded target size must be divisible by 64, got {H}x{W}")
+                        block_h = H // 64
+                        block_w = W // 64
+                        if block_h != block_w:
+                            raise ValueError(f"Decoded target blocks must be square, got {block_h}x{block_w}")
+
+                        active_mask = expand_block_mask(active_mask_64, block_h)
+                        dot_core_mask = make_dot_core_mask(dot_mask_64, block_h)
+
+                        weights = active_mask.expand_as(loss_recon)
+                        weights = weights + dot_core_mask.expand_as(loss_recon) * (args.lambda_dot_weight - 1.0)
+                        loss_pixel_recon = (loss_recon * weights).sum() / (weights.sum() + 1e-8)
                         
-                        # Find white dot pixels in target (where target is close to 1.0)
-                        is_white_dot = (target_latent_image > 0.8) # (B, 3, 512, 512)
-                        
-                        weights = torch.ones_like(target_latent_image)
-                        weights[is_white_dot] = args.lambda_dot_weight
-                        
-                        # Apply active mask to pixel loss
-                        # active_mask_512 shape: (1, 1, 512, 512)
-                        active_mask_512_expanded = active_mask_512.expand_as(loss_recon)
-                        loss_pixel_recon = (loss_recon * weights * active_mask_512_expanded).sum() / (active_mask_512_expanded.sum() + 1e-8)
-                        
-                        # 2. Block Uniformity Loss for Opaque blocks (inside active mask only)
-                        # Reshape pred_decoded to (B, C, 64, 8, 64, 8)
-                        B, C, H, W = pred_decoded.shape
-                        blocks = pred_decoded.view(B, C, 64, 8, 64, 8).permute(0, 2, 4, 1, 3, 5) # (B, 64, 64, C, 8, 8)
-                        
-                        # Reshape is_white_dot to (B, 64, 8, 64, 8)
-                        dots_blocks = is_white_dot.view(B, C, 64, 8, 64, 8).permute(0, 2, 4, 1, 3, 5) # (B, 64, 64, C, 8, 8)
-                        
-                        # A block has a dot if any of its pixels has a dot (check across C, 8, 8)
-                        block_has_dot = dots_blocks.any(dim=-3).any(dim=-2).any(dim=-1) # (B, 64, 64)
+                        # 2. Block Uniformity Loss for opaque blocks only.
+                        # Reshape pred_decoded to (B, C, 64, block, 64, block)
+                        blocks = pred_decoded.view(B_dec, C, 64, block_h, 64, block_w).permute(0, 2, 4, 1, 3, 5) # (B, 64, 64, C, block, block)
                         
                         # Block mean color
                         block_mean = blocks.mean(dim=(-2, -1), keepdim=True) # (B, 64, 64, C, 1, 1)
@@ -615,10 +622,8 @@ def main():
                         # Uniformity loss: deviation from mean for blocks without dots
                         block_deviation = (blocks - block_mean) ** 2
                         
-                        # Mask for blocks without dots AND inside active mask (B, 64, 64)
-                        # active_mask_64 shape: (64, 64)
-                        active_mask_blocks = active_mask_64.unsqueeze(0).expand(B, 64, 64)
-                        opaque_mask_bool = (~block_has_dot) & active_mask_blocks # (B, 64, 64)
+                        # Mask for opaque blocks from the target encoder, not from RGB brightness.
+                        opaque_mask_bool = opaque_mask_64.squeeze(1) > 0.5 # (B, 64, 64)
                         
                         opaque_mask = opaque_mask_bool.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).to(dtype=weight_dtype) # (B, 64, 64, 1, 1, 1)
                         opaque_mask_expanded = opaque_mask.expand_as(block_deviation)

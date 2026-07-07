@@ -8,6 +8,7 @@ MODEL_PATH="../../black-forest-labs/FLUX.2-klein-base-4B"
 TEXT_ENCODER_PATH="../../Qwen/Qwen3-4B"
 CONTROL_IMGS_DIR="./control_imgs"
 TARGET_IMGS_DIR="./target_imgs"
+DATA_DIR="../skins"
 OUTPUT_DIR="./output/flux_inverse_uv_lora_v4"
 VALIDATION_DIR="../../SkingDataset/DDJ_real2render/test_output"
 VALIDATION_STEPS=500
@@ -38,6 +39,7 @@ echo "Model Path:        $MODEL_PATH"
 echo "Text Encoder Path: $TEXT_ENCODER_PATH"
 echo "Control Imgs Dir:  $CONTROL_IMGS_DIR"
 echo "Target Imgs Dir:   $TARGET_IMGS_DIR"
+echo "Source Skins Dir:  $DATA_DIR"
 echo "Validation Dir:    $VALIDATION_DIR"
 echo "Output Dir:        $OUTPUT_DIR"
 echo "Batch Size:        $BATCH_SIZE"
@@ -54,6 +56,7 @@ accelerate launch train.py \
     --text_encoder_path "$TEXT_ENCODER_PATH" \
     --control_imgs_dir "$CONTROL_IMGS_DIR" \
     --target_imgs_dir "$TARGET_IMGS_DIR" \
+    --data_dir "$DATA_DIR" \
     --output_dir "$OUTPUT_DIR" \
     --lr "$LR" \
     --batch_size "$BATCH_SIZE" \
