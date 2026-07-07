@@ -81,31 +81,45 @@ def run_epoch(model, criterion, loader, optimizer, scaler, device, precision, tr
                 loss = losses["loss_total"]
 
         if train:
-            # Discriminator step
             loss_d = losses.get("loss_d", None)
-            if d_optimizer is not None and loss_d is not None and loss_d.item() != 0.0:
-                d_optimizer.zero_grad(set_to_none=True)
-                if scaler is not None:
-                    scaler.scale(loss_d).backward()
-                    scaler.unscale_(d_optimizer)
-                    torch.nn.utils.clip_grad_norm_(criterion.discriminator.parameters(), 1.0)
-                    scaler.step(d_optimizer)
-                else:
-                    loss_d.backward()
-                    torch.nn.utils.clip_grad_norm_(criterion.discriminator.parameters(), 1.0)
-                    d_optimizer.step()
+            has_d = d_optimizer is not None and loss_d is not None and loss_d.item() != 0.0
 
-            # Generator step
+            # Zero both optimizers before any backward
+            if has_d:
+                d_optimizer.zero_grad(set_to_none=True)
             optimizer.zero_grad(set_to_none=True)
+
+            # Accumulate discriminator gradients (retain graph for generator's GAN loss)
+            if has_d:
+                if scaler is not None:
+                    scaler.scale(loss_d).backward(retain_graph=True)
+                else:
+                    loss_d.backward(retain_graph=True)
+
+            # Accumulate generator gradients
             if scaler is not None:
                 scaler.scale(loss).backward()
+            else:
+                loss.backward()
+
+            # Step discriminator
+            if has_d:
+                if scaler is not None:
+                    scaler.unscale_(d_optimizer)
+                torch.nn.utils.clip_grad_norm_(criterion.discriminator.parameters(), 1.0)
+                if scaler is not None:
+                    scaler.step(d_optimizer)
+                else:
+                    d_optimizer.step()
+
+            # Step generator
+            if scaler is not None:
                 scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            if scaler is not None:
                 scaler.step(optimizer)
                 scaler.update()
             else:
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 optimizer.step()
 
         sample_count += batch_size
