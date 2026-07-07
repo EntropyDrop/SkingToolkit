@@ -8,7 +8,7 @@ MODEL_PATH="../../black-forest-labs/FLUX.2-klein-base-4B"
 TEXT_ENCODER_PATH="../../Qwen/Qwen3-4B"
 CONTROL_IMGS_DIR="./control_imgs"
 TARGET_IMGS_DIR="./target_imgs"
-OUTPUT_DIR="./output/flux_inverse_uv_lora_v3"
+OUTPUT_DIR="./output/flux_inverse_uv_lora_v4"
 VALIDATION_DIR="../../SkingDataset/DDJ_real2render/test_output"
 VALIDATION_STEPS=500
 
