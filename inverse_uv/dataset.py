@@ -163,8 +163,43 @@ def unproject_renders_to_uv(rendered_views, renderer, views, bg_color=(128, 128,
         raise ValueError(f"Unsupported unproject_mode={unproject_mode!r}. Options: 'mode', 'mean', 'medoid'.")
 
     sample = rendered_views[0]
+    is_batched = sample.dim() == 4
     device = sample.device
     dtype = sample.dtype
+
+    # Batched GPU path: uses mean aggregation only (fast, no Python loops)
+    if is_batched:
+        B = sample.shape[0]
+        accum = sample.new_zeros(B, len(CONDITIONING_LAYERS), 4, UV_SIZE, UV_SIZE)
+        counts = sample.new_zeros(B, len(CONDITIONING_LAYERS), 1, UV_SIZE, UV_SIZE)
+
+        for view, rendered in zip(views, rendered_views):
+            inner_mask = getattr(renderer, f"{view}_inner_mask").to(device=device).bool()
+            outer_mask = getattr(renderer, f"{view}_outer_mask").to(device=device).bool()
+            geometry_mask = inner_mask | outer_mask
+            rendered = _ensure_rgba(rendered.to(device=device, dtype=dtype), geometry_mask=geometry_mask)
+
+            for layer_index, layer in enumerate(CONDITIONING_LAYERS):
+                mask = getattr(renderer, f"{view}_{layer}_mask").to(device=device).bool()
+                if not bool(mask.any()):
+                    continue
+                grid = getattr(renderer, f"{view}_{layer}_grid").to(device=device, dtype=dtype)
+                flat_uv = _uv_indices_from_grid(grid, mask)
+                values = rendered[:, :, mask]  # (B, 4, N)
+
+                accum[:, layer_index].reshape(B, 4, -1).index_add_(2, flat_uv, values)
+                ones = torch.ones((B, 1, values.shape[2]), dtype=dtype, device=device)
+                counts[:, layer_index].reshape(B, 1, -1).index_add_(2, flat_uv, ones)
+
+        known = (counts > 0).to(dtype=dtype)
+        aggregated = accum / counts.clamp_min(1.0)
+        bg = sample.new_tensor(bg_color, dtype=dtype).view(1, 1, 3, 1, 1) / 255.0
+        rgb = torch.where(known.expand(-1, -1, 3, -1, -1) > 0, aggregated[:, :, :3], bg.expand_as(aggregated[:, :, :3]))
+        alpha = torch.where(known > 0, aggregated[:, :, 3:4], torch.zeros_like(aggregated[:, :, 3:4]))
+        layers = torch.cat([rgb, alpha, known], dim=2)
+        return layers.reshape(B, -1, UV_SIZE, UV_SIZE).clamp(0.0, 1.0)
+
+    # Unbatched path: supports mode/medoid/mean with per-texel aggregation
     accum = sample.new_zeros(len(CONDITIONING_LAYERS), 4, UV_SIZE, UV_SIZE)
     counts = sample.new_zeros(len(CONDITIONING_LAYERS), 1, UV_SIZE, UV_SIZE)
 
@@ -256,17 +291,36 @@ def build_conditioning(
     include_alpha=False,
     unproject_mode="mode",
     augmenter=None,
+    return_renders=False,
 ):
     _ = image_size, include_alpha
-    rendered_views = []
-    with torch.no_grad():
+    is_batched = skin.dim() == 4
+    if not is_batched:
         skin_batch = skin.unsqueeze(0)
+    else:
+        skin_batch = skin
+
+    rendered_views = []
+    gt_renders = {} if return_renders else None
+    with torch.no_grad():
         for view in views:
-            rendered = renderer.forward_view(skin_batch, view).squeeze(0)
+            rendered = renderer.forward_view(skin_batch, view)
+            if not is_batched:
+                rendered = rendered.squeeze(0)
+            if return_renders:
+                gt_renders[view] = rendered  # save clean renders for loss reuse
             if augmenter is not None:
-                rendered = augmenter(rendered)
+                # augmenter operates on individual unbatched views
+                if is_batched:
+                    aug_list = [augmenter(rendered[i]) for i in range(rendered.shape[0])]
+                    rendered = torch.stack(aug_list, dim=0)
+                else:
+                    rendered = augmenter(rendered)
             rendered_views.append(rendered)
-    return unproject_renders_to_uv(rendered_views, renderer, views, unproject_mode=unproject_mode)
+    conditioning = unproject_renders_to_uv(rendered_views, renderer, views, unproject_mode=unproject_mode)
+    if return_renders:
+        return conditioning, gt_renders
+    return conditioning
 
 
 class InverseUVDataset(Dataset):
@@ -331,25 +385,7 @@ class InverseUVDataset(Dataset):
             bg_color=self.bg_color,
             normalize_model=self.normalize_model,
         )
-        augmenter = None
-        if self.augment:
-            augmenter = RenderAugmenter(
-                translation_scale=self.translation_scale,
-                scale_range=self.scale_range,
-                perspective_scale=self.perspective_scale,
-                bg_color=self.bg_color,
-            )
-        conditioning = build_conditioning(
-            uv,
-            self.renderer,
-            self.views,
-            image_size=self.image_size,
-            include_alpha=self.include_alpha,
-            unproject_mode=self.unproject_mode,
-            augmenter=augmenter,
-        )
         return {
-            "conditioning": conditioning,
             "uv": uv,
             "path": skin_path,
         }
