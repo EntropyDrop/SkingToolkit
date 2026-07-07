@@ -285,7 +285,8 @@ class InverseUVLoss(nn.Module):
         # transparent pixels — no semi-transparent artifacts.
         alpha_cont = pred_uv[:, 3:4]
         alpha_binary = (alpha_cont > 0.5).to(dtype=pred_uv.dtype)
-        pred_uv[:, 3:4] = alpha_cont + (alpha_binary - alpha_cont).detach()
+        alpha_ste = alpha_cont + (alpha_binary - alpha_cont).detach()
+        pred_uv = torch.cat([pred_uv[:, :3], alpha_ste], dim=1)
 
         uv_mask = getattr(self, "uv_mask", None)
         if uv_mask is not None:
