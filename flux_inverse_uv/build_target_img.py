@@ -88,22 +88,19 @@ def create_training_image(skin_image):
 
     # Mask out any areas not directly mapping to the head, arm, leg, or
     # torso portion of the character.
-    skin_image_first_layer = apply_mask(skin_image,Image.open(SKIN_MASK))
-    skin_image_second_layer = apply_mask(skin_image,Image.open(SKIN_DECOR_MASK))
+    skin_mask = Image.open(SKIN_MASK)
+    skin_decor_mask = Image.open(SKIN_DECOR_MASK)
     
+    skin_mask_np = np.array(skin_mask)
+    decor_mask_np = np.array(skin_decor_mask)
+    active_mask = (skin_mask_np[..., 3] > 0) | (decor_mask_np[..., 3] > 0)
     
     training_image = Image.new('RGBA', (IMAGE_WIDTH, IMAGE_HEIGHT), (*bg, 255))
     SCALING_RATIO = IMAGE_WIDTH/64
     scaled_skin_image = skin_image.resize((int(64 * SCALING_RATIO), int(64 * SCALING_RATIO)),
                                           resample=Image.BOX)
-    #scaled_first_layer = skin_image_first_layer.resize((int(32 * SCALING_RATIO), int(32 * SCALING_RATIO)),
-    #                                      resample=Image.BOX)
-    #scaled_second_layer = skin_image_second_layer.resize((int(32 * SCALING_RATIO), int(32 * SCALING_RATIO)),
-    #                                      resample=Image.BOX)
                         
     training_image.paste(scaled_skin_image, (0,0)) 
-    #training_image.paste(scaled_first_layer, (0,0)) 
-    #training_image.paste(scaled_second_layer, (int(32 * SCALING_RATIO),0)) 
 
     # Optimized: Use NumPy for transparency and dot drawing
     tr_arr = np.array(training_image)
@@ -113,13 +110,13 @@ def create_training_image(skin_image):
     
     # Draw white dots for skin transparency
     skin_arr = np.array(skin_image)
-    y_indices, x_indices = np.where(skin_arr[..., 3] == 0)
+    y_indices, x_indices = np.where((skin_arr[..., 3] == 0) & active_mask)
     
     for x, y in zip(x_indices, y_indices):
         cx = int(x * SCALING_RATIO ) + int(SCALING_RATIO/2)
         cy = int(y * SCALING_RATIO ) + int(SCALING_RATIO/2)
-        # Apply 2x2 white dot
-        tr_arr[cy-1:cy+1, cx-1:cx+1] = [255, 255, 255, 255]
+        # Apply 4x4 white dot centered at (cx, cy)
+        tr_arr[cy-2:cy+2, cx-2:cx+2] = [255, 255, 255, 255]
         
     training_image = Image.fromarray(tr_arr)
 
