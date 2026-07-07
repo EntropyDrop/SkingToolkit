@@ -457,21 +457,12 @@ def main():
     mask_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "skin-mask.png")
     decor_mask_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "skin-decor-mask.png")
     
-    if os.path.exists(mask_path) and os.path.exists(decor_mask_path):
-        mask_np = np.array(Image.open(mask_path))
-        decor_mask_np = np.array(Image.open(decor_mask_path))
-        active_mask_np = (mask_np[..., 3] > 0) | (decor_mask_np[..., 3] > 0)
-    else:
-        # Fallback if templates not in flux_inverse_uv/
-        parent_mask = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "Sking", "skin-mask.png")
-        parent_decor = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "Sking", "skin-decor-mask.png")
-        if os.path.exists(parent_mask) and os.path.exists(parent_decor):
-            mask_np = np.array(Image.open(parent_mask))
-            decor_mask_np = np.array(Image.open(parent_decor))
-            active_mask_np = (mask_np[..., 3] > 0) | (decor_mask_np[..., 3] > 0)
-        else:
-            # dummy active mask (all true)
-            active_mask_np = np.ones((64, 64), dtype=bool)
+    if not (os.path.exists(mask_path) and os.path.exists(decor_mask_path)):
+        raise FileNotFoundError(f"Required template masks '{mask_path}' and/or '{decor_mask_path}' not found!")
+
+    mask_np = np.array(Image.open(mask_path))
+    decor_mask_np = np.array(Image.open(decor_mask_path))
+    active_mask_np = (mask_np[..., 3] > 0) | (decor_mask_np[..., 3] > 0)
             
     active_mask_64 = torch.from_numpy(active_mask_np).to(device)
     active_mask_512 = active_mask_64.repeat_interleave(8, dim=0).repeat_interleave(8, dim=1)
