@@ -10,13 +10,13 @@ CONTROL_IMGS_DIR="./control_imgs"
 TARGET_IMGS_DIR="./target_imgs"
 OUTPUT_DIR="./output/flux_inverse_uv_lora"
 VALIDATION_DIR="../../SkingDataset/DDJ_real2render/test_output"
-VALIDATION_STEPS=100
+VALIDATION_STEPS=500
 
 # Hyperparameters
 LR=1e-4
 BATCH_SIZE=1
 EPOCHS=1000
-SAVE_EVERY_EPOCHS=10
+SAVE_EVERY_EPOCHS=1
 PRECISION="bf16"
 RESOLUTION=512
 
