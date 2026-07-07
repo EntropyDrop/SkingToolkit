@@ -453,6 +453,30 @@ def main():
     transformer.print_trainable_parameters()
     transformer.to(dtype=weight_dtype)
     
+    # Load template mask for active area computation in pixel loss
+    mask_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "skin-mask.png")
+    decor_mask_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "skin-decor-mask.png")
+    
+    if os.path.exists(mask_path) and os.path.exists(decor_mask_path):
+        mask_np = np.array(Image.open(mask_path))
+        decor_mask_np = np.array(Image.open(decor_mask_path))
+        active_mask_np = (mask_np[..., 3] > 0) | (decor_mask_np[..., 3] > 0)
+    else:
+        # Fallback if templates not in flux_inverse_uv/
+        parent_mask = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "Sking", "skin-mask.png")
+        parent_decor = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "Sking", "skin-decor-mask.png")
+        if os.path.exists(parent_mask) and os.path.exists(parent_decor):
+            mask_np = np.array(Image.open(parent_mask))
+            decor_mask_np = np.array(Image.open(parent_decor))
+            active_mask_np = (mask_np[..., 3] > 0) | (decor_mask_np[..., 3] > 0)
+        else:
+            # dummy active mask (all true)
+            active_mask_np = np.ones((64, 64), dtype=bool)
+            
+    active_mask_64 = torch.from_numpy(active_mask_np).to(device)
+    active_mask_512 = active_mask_64.repeat_interleave(8, dim=0).repeat_interleave(8, dim=1)
+    active_mask_512 = active_mask_512.unsqueeze(0).unsqueeze(0).to(dtype=weight_dtype)
+
     # Dataset and DataLoader
     control_imgs_dir = args.control_imgs_dir or args.photos_dir
     dataset = FluxInverseUVDataset(
@@ -568,7 +592,7 @@ def main():
                         # Decode through VAE (decode method expects floats in [-1, 1] range)
                         pred_decoded = vae.decode(pred_x0.to(dtype=vae.dtype)).to(dtype=weight_dtype)
                         
-                        # 1. Weighted Reconstruction Loss
+                        # 1. Weighted Reconstruction Loss (inside active mask only)
                         # target_latent_image is normalized to [-1, 1]
                         loss_recon = F.l1_loss(pred_decoded, target_latent_image, reduction="none")
                         
@@ -578,9 +602,12 @@ def main():
                         weights = torch.ones_like(target_latent_image)
                         weights[is_white_dot] = args.lambda_dot_weight
                         
-                        loss_pixel_recon = (loss_recon * weights).mean()
+                        # Apply active mask to pixel loss
+                        # active_mask_512 shape: (1, 1, 512, 512)
+                        active_mask_512_expanded = active_mask_512.expand_as(loss_recon)
+                        loss_pixel_recon = (loss_recon * weights * active_mask_512_expanded).sum() / (active_mask_512_expanded.sum() + 1e-8)
                         
-                        # 2. Block Uniformity Loss for Opaque blocks
+                        # 2. Block Uniformity Loss for Opaque blocks (inside active mask only)
                         # Reshape pred_decoded to (B, C, 64, 8, 64, 8)
                         B, C, H, W = pred_decoded.shape
                         blocks = pred_decoded.view(B, C, 64, 8, 64, 8).permute(0, 2, 4, 1, 3, 5) # (B, 64, 64, C, 8, 8)
@@ -597,10 +624,15 @@ def main():
                         # Uniformity loss: deviation from mean for blocks without dots
                         block_deviation = (blocks - block_mean) ** 2
                         
-                        # Mask for blocks without dots (B, 64, 64, 1, 1, 1)
-                        opaque_mask = (~block_has_dot).unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
+                        # Mask for blocks without dots AND inside active mask (B, 64, 64)
+                        # active_mask_64 shape: (64, 64)
+                        active_mask_blocks = active_mask_64.unsqueeze(0).expand(B, 64, 64)
+                        opaque_mask_bool = (~block_has_dot) & active_mask_blocks # (B, 64, 64)
                         
-                        loss_uniformity = (block_deviation * opaque_mask).mean()
+                        opaque_mask = opaque_mask_bool.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).to(dtype=weight_dtype) # (B, 64, 64, 1, 1, 1)
+                        opaque_mask_expanded = opaque_mask.expand_as(block_deviation)
+                        
+                        loss_uniformity = (block_deviation * opaque_mask_expanded).sum() / (opaque_mask_expanded.sum() + 1e-8)
                         
                         # Add to total loss
                         loss += args.lambda_pixel * (loss_pixel_recon + args.lambda_uniformity * loss_uniformity)
