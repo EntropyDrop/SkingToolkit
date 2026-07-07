@@ -279,14 +279,13 @@ class InverseUVLoss(nn.Module):
         pred_uv = pred_uv.float()
         gt_uv = gt_uv.float()
 
-        # Binarize alpha via straight-through estimator: forward pass uses
-        # hard threshold, backward pass flows gradients through unchanged.
-        # This forces the model to output only fully opaque or fully
-        # transparent pixels — no semi-transparent artifacts.
+        # Binarize alpha for structural losses (RGB, edge, render, GAN).
+        # BCE loss uses continuous alpha so the model gets smooth gradient
+        # feedback on how close each pixel is to the 0.5 threshold.
         alpha_cont = pred_uv[:, 3:4]
         alpha_binary = (alpha_cont > 0.5).to(dtype=pred_uv.dtype)
         alpha_ste = alpha_cont + (alpha_binary - alpha_cont).detach()
-        pred_uv = torch.cat([pred_uv[:, :3], alpha_ste], dim=1)
+        pred_uv_binary = torch.cat([pred_uv[:, :3], alpha_ste], dim=1)
 
         uv_mask = getattr(self, "uv_mask", None)
         if uv_mask is not None:
@@ -298,15 +297,19 @@ class InverseUVLoss(nn.Module):
                 alpha_threshold=self.covered_inner_alpha_threshold,
             )
             uv_mask = supervised_inner_mask if uv_mask is None else uv_mask * supervised_inner_mask
-        loss_rgb = alpha_masked_rgb_l1(pred_uv, gt_uv, uv_mask)
-        loss_alpha = alpha_bce(pred_uv, gt_uv, uv_mask)
-        loss_render = self.render_loss(pred_uv, gt_uv, gt_renders=gt_renders)
-        loss_edge = edge_l1(pred_uv, gt_uv, uv_mask)
 
-        loss_gan = pred_uv.new_tensor(0.0)
-        loss_d = pred_uv.new_tensor(0.0)
+        # Alpha BCE on continuous alpha — smooth gradient signal for learning
+        loss_alpha = alpha_bce(pred_uv, gt_uv, uv_mask)
+
+        # All other losses on binarized alpha — see the sharp output
+        loss_rgb = alpha_masked_rgb_l1(pred_uv_binary, gt_uv, uv_mask)
+        loss_render = self.render_loss(pred_uv_binary, gt_uv, gt_renders=gt_renders)
+        loss_edge = edge_l1(pred_uv_binary, gt_uv, uv_mask)
+
+        loss_gan = pred_uv_binary.new_tensor(0.0)
+        loss_d = pred_uv_binary.new_tensor(0.0)
         if self.discriminator is not None and self.lambda_gan > 0:
-            loss_d, loss_gan = gan_loss(self.discriminator, pred_uv, gt_uv, uv_mask)
+            loss_d, loss_gan = gan_loss(self.discriminator, pred_uv_binary, gt_uv, uv_mask)
 
         loss_total = (
             self.lambda_rgb * loss_rgb
