@@ -26,9 +26,34 @@ RESUME="${RESUME:-}"
 MIXED_PRECISION="${MIXED_PRECISION:-no}"
 UNPROJECT_MODE="${UNPROJECT_MODE:-mode}"
 
+# --- Augmentation (pose robustness) ---
+AUGMENT="${AUGMENT:-true}"
+TRANSLATION_SCALE="${TRANSLATION_SCALE:-0.03}"
+SCALE_RANGE="${SCALE_RANGE:-0.03}"
+PERSPECTIVE_SCALE="${PERSPECTIVE_SCALE:-0.008}"
+
+# --- PatchGAN loss ---
+LAMBDA_GAN="${LAMBDA_GAN:-0.1}"
+
+# --- Loss weights ---
+LAMBDA_RGB="${LAMBDA_RGB:-1.0}"
+LAMBDA_ALPHA="${LAMBDA_ALPHA:-0.5}"
+LAMBDA_RENDER="${LAMBDA_RENDER:-0.1}"
+LAMBDA_EDGE="${LAMBDA_EDGE:-0.25}"
+
 resume_args=()
 if [[ -n "$RESUME" ]]; then
   resume_args=(--resume "$RESUME")
+fi
+
+augment_args=()
+if [[ "$AUGMENT" == "true" ]]; then
+  augment_args=(
+    --augment
+    --translation_scale "$TRANSLATION_SCALE"
+    --scale_range "$SCALE_RANGE"
+    --perspective_scale "$PERSPECTIVE_SCALE"
+  )
 fi
 
 python train.py \
@@ -46,4 +71,10 @@ python train.py \
   --preview_every 1 \
   --mixed_precision "$MIXED_PRECISION" \
   --unproject_mode "$UNPROJECT_MODE" \
+  --lambda_gan "$LAMBDA_GAN" \
+  --lambda_rgb "$LAMBDA_RGB" \
+  --lambda_alpha "$LAMBDA_ALPHA" \
+  --lambda_render "$LAMBDA_RENDER" \
+  --lambda_edge "$LAMBDA_EDGE" \
+  ${augment_args[@]+"${augment_args[@]}"} \
   ${resume_args[@]+"${resume_args[@]}"}
