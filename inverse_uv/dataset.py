@@ -144,15 +144,27 @@ def _uv_indices_from_grid(grid, mask):
 
 
 def _ensure_rgba(rendered, geometry_mask=None):
-    if rendered.shape[0] == 4:
-        return rendered
-    if rendered.shape[0] != 3:
-        raise ValueError(f"Expected RGB or RGBA render tensor, got {rendered.shape[0]} channels.")
-    if geometry_mask is None:
-        alpha = torch.ones_like(rendered[:1])
+    is_batched = rendered.dim() == 4
+    if is_batched:
+        if rendered.shape[1] == 4:
+            return rendered
+        if rendered.shape[1] != 3:
+            raise ValueError(f"Expected RGB or RGBA render tensor, got {rendered.shape[1]} channels.")
+        if geometry_mask is None:
+            alpha = torch.ones_like(rendered[:, :1])
+        else:
+            alpha = geometry_mask.to(dtype=rendered.dtype, device=rendered.device).unsqueeze(0).unsqueeze(1).expand(rendered.shape[0], 1, -1, -1)
+        return torch.cat([rendered, alpha], dim=1)
     else:
-        alpha = geometry_mask.to(dtype=rendered.dtype, device=rendered.device).unsqueeze(0)
-    return torch.cat([rendered, alpha], dim=0)
+        if rendered.shape[0] == 4:
+            return rendered
+        if rendered.shape[0] != 3:
+            raise ValueError(f"Expected RGB or RGBA render tensor, got {rendered.shape[0]} channels.")
+        if geometry_mask is None:
+            alpha = torch.ones_like(rendered[:1])
+        else:
+            alpha = geometry_mask.to(dtype=rendered.dtype, device=rendered.device).unsqueeze(0)
+        return torch.cat([rendered, alpha], dim=0)
 
 
 def unproject_renders_to_uv(rendered_views, renderer, views, bg_color=(128, 128, 128), unproject_mode="mode"):
