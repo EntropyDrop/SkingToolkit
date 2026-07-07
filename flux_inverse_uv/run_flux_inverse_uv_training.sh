@@ -9,7 +9,7 @@ TEXT_ENCODER_PATH="../../Qwen/Qwen3-4B"
 CONTROL_IMGS_DIR="./control_imgs"
 TARGET_IMGS_DIR="./target_imgs"
 DATA_DIR="../skins"
-OUTPUT_DIR="./output/flux_inverse_uv_lora_v4"
+OUTPUT_DIR="./output/flux_inverse_uv_lora_v5"
 VALIDATION_DIR="../../SkingDataset/DDJ_real2render/test_output"
 VALIDATION_STEPS=500
 
