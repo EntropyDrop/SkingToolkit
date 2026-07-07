@@ -4,6 +4,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from PIL import Image
 from torch.utils.data import Dataset
 import torchvision.transforms.functional as TF
@@ -21,6 +22,55 @@ IMAGE_EXTENSIONS = (".png", ".webp", ".jpg", ".jpeg")
 UV_SIZE = 64
 CONDITIONING_LAYERS = ("inner", "outer")
 CONDITIONING_CHANNELS = len(CONDITIONING_LAYERS) * 5
+
+
+class RenderAugmenter:
+    """Apply pose-robustness augmentation in render space before UV unprojection.
+
+    Translation + mild perspective warp simulate slight viewpoint shifts.
+    Uniform scaling simulates distance/camera zoom variation.
+    All transforms are applied to rendered views (not UV), so perturbed pixels
+    get mapped to slightly wrong UV texels during unprojection — teaching the
+    model to be robust to imperfect conditioning.
+    """
+
+    def __init__(self, translation_scale=0.03, scale_range=0.03, perspective_scale=0.008, bg_color=(128, 128, 128)):
+        self.translation_scale = translation_scale
+        self.scale_range = scale_range
+        self.perspective_scale = perspective_scale
+        self.bg_color = bg_color
+
+    def __call__(self, rendered_tensor):
+        # rendered_tensor: (C, H, W) — single render view
+        C, H, W = rendered_tensor.shape
+        device = rendered_tensor.device
+        dtype = rendered_tensor.dtype
+        fill_color = [self.bg_color[0] / 255.0, self.bg_color[1] / 255.0, self.bg_color[2] / 255.0, 0.0]
+        img = rendered_tensor.unsqueeze(0)  # (1, C, H, W)
+
+        # 1. Random translation + uniform scale (single affine call)
+        dx = int((torch.rand(1).item() - 0.5) * 2 * self.translation_scale * W)
+        dy = int((torch.rand(1).item() - 0.5) * 2 * self.translation_scale * H)
+        s = 1.0 + (torch.rand(1).item() - 0.5) * 2 * self.scale_range
+        img = TF.affine(
+            img, angle=0.0, translate=[dx, dy], scale=s, shear=[0.0, 0.0],
+            interpolation=TF.InterpolationMode.BILINEAR, fill=fill_color,
+        )
+
+        # 2. Mild perspective warp (simulates subtle viewpoint shift)
+        if self.perspective_scale > 0:
+            startpoints = [[0, 0], [W - 1, 0], [W - 1, H - 1], [0, H - 1]]
+            endpoints = []
+            for x, y in startpoints:
+                ex = (torch.rand(1).item() - 0.5) * 2 * self.perspective_scale * W
+                ey = (torch.rand(1).item() - 0.5) * 2 * self.perspective_scale * H
+                endpoints.append([x + ex, y + ey])
+            img = TF.perspective(
+                img, startpoints, endpoints,
+                interpolation=TF.InterpolationMode.BILINEAR, fill=fill_color,
+            )
+
+        return img.squeeze(0)
 
 
 def parse_views(views):
@@ -205,6 +255,7 @@ def build_conditioning(
     image_size=256,
     include_alpha=False,
     unproject_mode="mode",
+    augmenter=None,
 ):
     _ = image_size, include_alpha
     rendered_views = []
@@ -212,6 +263,8 @@ def build_conditioning(
         skin_batch = skin.unsqueeze(0)
         for view in views:
             rendered = renderer.forward_view(skin_batch, view).squeeze(0)
+            if augmenter is not None:
+                rendered = augmenter(rendered)
             rendered_views.append(rendered)
     return unproject_renders_to_uv(rendered_views, renderer, views, unproject_mode=unproject_mode)
 
@@ -228,6 +281,10 @@ class InverseUVDataset(Dataset):
         max_samples=None,
         normalize_model=True,
         unproject_mode="mode",
+        augment=False,
+        translation_scale=0.03,
+        scale_range=0.03,
+        perspective_scale=0.008,
     ):
         self.data_dir = data_dir
         self.views = parse_views(views)
@@ -236,6 +293,10 @@ class InverseUVDataset(Dataset):
         self.bg_color = bg_color
         self.normalize_model = normalize_model
         self.unproject_mode = unproject_mode
+        self.augment = augment
+        self.translation_scale = translation_scale
+        self.scale_range = scale_range
+        self.perspective_scale = perspective_scale
         self.renderer = DifferentiableRenderer(
             mappings_dir=mappings_dir,
             bg_color=tuple(channel / 255.0 for channel in bg_color),
@@ -270,6 +331,14 @@ class InverseUVDataset(Dataset):
             bg_color=self.bg_color,
             normalize_model=self.normalize_model,
         )
+        augmenter = None
+        if self.augment:
+            augmenter = RenderAugmenter(
+                translation_scale=self.translation_scale,
+                scale_range=self.scale_range,
+                perspective_scale=self.perspective_scale,
+                bg_color=self.bg_color,
+            )
         conditioning = build_conditioning(
             uv,
             self.renderer,
@@ -277,6 +346,7 @@ class InverseUVDataset(Dataset):
             image_size=self.image_size,
             include_alpha=self.include_alpha,
             unproject_mode=self.unproject_mode,
+            augmenter=augmenter,
         )
         return {
             "conditioning": conditioning,

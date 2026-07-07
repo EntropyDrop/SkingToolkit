@@ -17,7 +17,7 @@ if str(WORKSPACE_ROOT) not in sys.path:
 
 from SkingToolkit.inverse_uv.dataset import InverseUVDataset, apply_uv_mask  # noqa: E402
 from SkingToolkit.inverse_uv.losses import InverseUVLoss  # noqa: E402
-from SkingToolkit.inverse_uv.model import InverseUVNet, count_parameters  # noqa: E402
+from SkingToolkit.inverse_uv.model import InverseUVNet, PatchGANDiscriminator, count_parameters  # noqa: E402
 
 try:
     from tqdm import tqdm
@@ -62,8 +62,10 @@ def format_losses(loss_sums, count):
     return {name: value / max(count, 1) for name, value in loss_sums.items()}
 
 
-def run_epoch(model, criterion, loader, optimizer, scaler, device, precision, train=True):
+def run_epoch(model, criterion, loader, optimizer, scaler, device, precision, train=True, d_optimizer=None):
     model.train(train)
+    if criterion.discriminator is not None:
+        criterion.discriminator.train(train)
     loss_sums = {}
     sample_count = 0
     iterator = tqdm(loader, leave=False, file=sys.__stderr__ or sys.stderr) if tqdm is not None else loader
@@ -79,6 +81,21 @@ def run_epoch(model, criterion, loader, optimizer, scaler, device, precision, tr
                 loss = losses["loss_total"]
 
         if train:
+            # Discriminator step
+            loss_d = losses.get("loss_d", None)
+            if d_optimizer is not None and loss_d is not None and loss_d.item() != 0.0:
+                d_optimizer.zero_grad(set_to_none=True)
+                if scaler is not None:
+                    scaler.scale(loss_d).backward()
+                    scaler.unscale_(d_optimizer)
+                    torch.nn.utils.clip_grad_norm_(criterion.discriminator.parameters(), 1.0)
+                    scaler.step(d_optimizer)
+                else:
+                    loss_d.backward()
+                    torch.nn.utils.clip_grad_norm_(criterion.discriminator.parameters(), 1.0)
+                    d_optimizer.step()
+
+            # Generator step
             optimizer.zero_grad(set_to_none=True)
             if scaler is not None:
                 scaler.scale(loss).backward()
@@ -101,7 +118,7 @@ def run_epoch(model, criterion, loader, optimizer, scaler, device, precision, tr
     return format_losses(loss_sums, sample_count)
 
 
-def save_checkpoint(path, model, optimizer, epoch, args, input_channels, metrics):
+def save_checkpoint(path, model, optimizer, epoch, args, input_channels, metrics, discriminator=None, d_optimizer=None):
     checkpoint = {
         "epoch": epoch,
         "model": model.state_dict(),
@@ -110,6 +127,10 @@ def save_checkpoint(path, model, optimizer, epoch, args, input_channels, metrics
         "input_channels": input_channels,
         "metrics": metrics,
     }
+    if discriminator is not None:
+        checkpoint["discriminator"] = discriminator.state_dict()
+    if d_optimizer is not None:
+        checkpoint["d_optimizer"] = d_optimizer.state_dict()
     torch.save(checkpoint, path)
 
 
@@ -138,6 +159,10 @@ def build_arg_parser():
         help="Deprecated compatibility option; UV unprojection always builds RGBA plus mask conditioning.",
     )
     parser.add_argument("--base_channels", type=int, default=64, help="Base channel width for InverseUVNet.")
+    parser.add_argument("--augment", action="store_true", help="Enable render-space data augmentation for pose robustness.")
+    parser.add_argument("--translation_scale", type=float, default=0.03, help="Render-space translation scale for augmentation.")
+    parser.add_argument("--scale_range", type=float, default=0.03, help="Render-space uniform scale range for augmentation.")
+    parser.add_argument("--perspective_scale", type=float, default=0.008, help="Render-space perspective warp scale for augmentation.")
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--lr", type=float, default=1e-4)
@@ -152,6 +177,7 @@ def build_arg_parser():
     parser.add_argument("--lambda_alpha", type=float, default=0.5)
     parser.add_argument("--lambda_render", type=float, default=0.1)
     parser.add_argument("--lambda_edge", type=float, default=0.25)
+    parser.add_argument("--lambda_gan", type=float, default=0.1, help="PatchGAN adversarial loss weight.")
     parser.add_argument("--render_foreground_weight", type=float, default=1.0)
     parser.add_argument(
         "--supervise_covered_inner",
@@ -216,6 +242,10 @@ def main():
         include_alpha=args.include_alpha,
         max_samples=args.max_samples,
         unproject_mode=args.unproject_mode,
+        augment=args.augment,
+        translation_scale=args.translation_scale,
+        scale_range=args.scale_range,
+        perspective_scale=args.perspective_scale,
     )
     input_channels = dataset.input_channels
 
@@ -228,7 +258,10 @@ def main():
 
         from torch.utils.data import Subset
         train_dataset = Subset(dataset, train_indices)
-        val_dataset = Subset(dataset, val_indices)
+
+        val_dataset_base = copy.copy(dataset)
+        val_dataset_base.augment = False
+        val_dataset = Subset(val_dataset_base, val_indices)
     else:
         train_dataset, val_dataset = dataset, None
 
@@ -253,6 +286,13 @@ def main():
         )
 
     model = InverseUVNet(input_channels=input_channels, base_channels=args.base_channels).to(device)
+
+    discriminator = None
+    d_optimizer = None
+    if args.lambda_gan > 0:
+        discriminator = PatchGANDiscriminator(base_channels=64).to(device)
+        d_optimizer = torch.optim.AdamW(discriminator.parameters(), lr=args.lr, weight_decay=0.0)
+
     criterion = InverseUVLoss(
         mappings_dir=args.mappings_dir,
         views=args.views,
@@ -260,9 +300,11 @@ def main():
         lambda_alpha=args.lambda_alpha,
         lambda_render=args.lambda_render,
         lambda_edge=args.lambda_edge,
+        lambda_gan=args.lambda_gan,
         render_foreground_weight=args.render_foreground_weight,
         ignore_covered_inner=not args.supervise_covered_inner,
         covered_inner_alpha_threshold=args.covered_inner_alpha_threshold,
+        discriminator=discriminator,
     ).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scaler = build_grad_scaler(device, args.mixed_precision)
@@ -272,6 +314,10 @@ def main():
         checkpoint = torch.load(args.resume, map_location=device)
         model.load_state_dict(checkpoint["model"])
         optimizer.load_state_dict(checkpoint["optimizer"])
+        if discriminator is not None and "discriminator" in checkpoint:
+            discriminator.load_state_dict(checkpoint["discriminator"])
+        if d_optimizer is not None and "d_optimizer" in checkpoint:
+            d_optimizer.load_state_dict(checkpoint["d_optimizer"])
         start_epoch = checkpoint.get("epoch", 0) + 1
 
     metadata = {
@@ -292,13 +338,15 @@ def main():
     best_metric = float("inf")
     for epoch in range(start_epoch, args.epochs + 1):
         train_metrics = run_epoch(
-            model, criterion, train_loader, optimizer, scaler, device, args.mixed_precision, train=True
+            model, criterion, train_loader, optimizer, scaler, device, args.mixed_precision,
+            train=True, d_optimizer=d_optimizer,
         )
         metrics = {"train": train_metrics}
         if val_loader is not None:
             with torch.no_grad():
                 val_metrics = run_epoch(
-                    model, criterion, val_loader, optimizer, scaler, device, args.mixed_precision, train=False
+                    model, criterion, val_loader, optimizer, scaler, device, args.mixed_precision,
+                    train=False, d_optimizer=None,
                 )
             metrics["val"] = val_metrics
 
@@ -313,10 +361,12 @@ def main():
             save_preview(pred_uv, preview_batch["uv"], output_dir / "previews" / f"epoch_{epoch:04d}.png")
 
         if epoch % args.save_every == 0:
-            save_checkpoint(output_dir / "latest.pt", model, optimizer, epoch, args, input_channels, metrics)
+            save_checkpoint(output_dir / "latest.pt", model, optimizer, epoch, args, input_channels, metrics,
+                            discriminator=discriminator, d_optimizer=d_optimizer)
         if metric < best_metric:
             best_metric = metric
-            save_checkpoint(output_dir / "best.pt", model, optimizer, epoch, args, input_channels, metrics)
+            save_checkpoint(output_dir / "best.pt", model, optimizer, epoch, args, input_channels, metrics,
+                            discriminator=discriminator, d_optimizer=d_optimizer)
 
 
 if __name__ == "__main__":

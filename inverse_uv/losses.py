@@ -163,6 +163,46 @@ def edge_l1(pred_uv, gt_uv, uv_mask=None):
     return per_sample.mean()
 
 
+def gan_loss(discriminator, pred_uv, gt_uv, uv_mask=None):
+    """PatchGAN loss: discriminator judges realism; generator tries to fool it.
+
+    Returns (d_loss, g_loss) where:
+      d_loss: discriminator cross-entropy (real=1, fake=0)
+      g_loss: generator adversarial loss (want discriminator to say real=1)
+    """
+    device = pred_uv.device
+    dtype = pred_uv.dtype
+
+    # Apply UV mask so discriminator only sees valid skin regions
+    if uv_mask is not None:
+        uv_mask = uv_mask.to(device=device, dtype=dtype)
+        real = gt_uv * uv_mask
+        fake = pred_uv.detach() * uv_mask
+    else:
+        real = gt_uv
+        fake = pred_uv.detach()
+
+    # Discriminator loss
+    real_logits = discriminator(real)
+    fake_logits = discriminator(fake)
+    real_target = torch.ones_like(real_logits)
+    fake_target = torch.zeros_like(fake_logits)
+    d_loss = (F.binary_cross_entropy_with_logits(real_logits, real_target) +
+              F.binary_cross_entropy_with_logits(fake_logits, fake_target)) * 0.5
+
+    # Generator loss (on non-detached pred)
+    if uv_mask is not None:
+        pred_masked = pred_uv * uv_mask
+    else:
+        pred_masked = pred_uv
+    g_loss = F.binary_cross_entropy_with_logits(
+        discriminator(pred_masked),
+        torch.ones_like(real_logits),
+    )
+
+    return d_loss, g_loss
+
+
 class InverseUVLoss(nn.Module):
     def __init__(
         self,
@@ -173,19 +213,23 @@ class InverseUVLoss(nn.Module):
         lambda_alpha=0.5,
         lambda_render=0.1,
         lambda_edge=0.25,
+        lambda_gan=0.1,
         render_foreground_weight=1.0,
         ignore_covered_inner=True,
         covered_inner_alpha_threshold=0.1,
+        discriminator=None,
     ):
         super().__init__()
         self.lambda_rgb = lambda_rgb
         self.lambda_alpha = lambda_alpha
         self.lambda_render = lambda_render
         self.lambda_edge = lambda_edge
+        self.lambda_gan = lambda_gan
         self.render_foreground_weight = render_foreground_weight
         self.ignore_covered_inner = ignore_covered_inner
         self.covered_inner_alpha_threshold = covered_inner_alpha_threshold
         self.covered_inner_rects = minecraft_layer_rects(is_slim=False)
+        self.discriminator = discriminator
 
         self.renderer = DifferentiableRenderer(mappings_dir=mappings_dir, bg_color=bg_color)
         self.views = parse_views(views)
@@ -199,7 +243,7 @@ class InverseUVLoss(nn.Module):
         # Load UV mask
         mask_path = Path(__file__).resolve().parent / "skin-mask.png"
         decor_mask_path = Path(__file__).resolve().parent / "skin-decor-mask.png"
-        
+
         if mask_path.exists() and decor_mask_path.exists():
             skin_mask = np.array(Image.open(mask_path).convert("RGBA"))
             skin_decor_mask = np.array(Image.open(decor_mask_path).convert("RGBA"))
@@ -245,11 +289,18 @@ class InverseUVLoss(nn.Module):
         loss_alpha = alpha_bce(pred_uv, gt_uv, uv_mask)
         loss_render = self.render_loss(pred_uv, gt_uv)
         loss_edge = edge_l1(pred_uv, gt_uv, uv_mask)
+
+        loss_gan = pred_uv.new_tensor(0.0)
+        loss_d = pred_uv.new_tensor(0.0)
+        if self.discriminator is not None and self.lambda_gan > 0:
+            loss_d, loss_gan = gan_loss(self.discriminator, pred_uv, gt_uv, uv_mask)
+
         loss_total = (
             self.lambda_rgb * loss_rgb
             + self.lambda_alpha * loss_alpha
             + self.lambda_render * loss_render
             + self.lambda_edge * loss_edge
+            + self.lambda_gan * loss_gan
         )
         return {
             "loss_total": loss_total,
@@ -257,4 +308,6 @@ class InverseUVLoss(nn.Module):
             "loss_alpha": loss_alpha,
             "loss_render": loss_render,
             "loss_edge": loss_edge,
+            "loss_gan": loss_gan,
+            "loss_d": loss_d,
         }
