@@ -188,6 +188,9 @@ def parse_args():
     
     # Loss coefficient
     parser.add_argument("--lambda_latent", type=float, default=1.0, help="Flow matching latent loss coefficient.")
+    parser.add_argument("--lambda_pixel", type=float, default=0.0, help="Weight coefficient for pixel-level reconstruction loss (0.0 to disable).")
+    parser.add_argument("--lambda_dot_weight", type=float, default=10.0, help="Weight multiplier for transparent white dot pixels.")
+    parser.add_argument("--lambda_uniformity", type=float, default=1.0, help="Weight coefficient for opaque block uniformity loss.")
     
     # LoRA fine-tuning parameters
     parser.add_argument("--lora_rank", type=int, default=32, help="LoRA rank parameter for linear layers.")
@@ -555,6 +558,52 @@ def main():
                     target_velocity = noise - latents_gt
                     loss_latent = F.mse_loss(model_pred, target_velocity)
                     loss = args.lambda_latent * loss_latent
+                    
+                    if args.lambda_pixel > 0:
+                        # Decode predicted latent back to pixel space (using predicted x0)
+                        # pred_x0 = x_t - t_expanded * model_pred
+                        t_expanded = t.view(-1, 1, 1, 1)
+                        pred_x0 = x_t - t_expanded * model_pred
+                        
+                        # Decode through VAE (decode method expects floats in [-1, 1] range)
+                        pred_decoded = vae.decode(pred_x0.to(dtype=vae.dtype)).to(dtype=weight_dtype)
+                        
+                        # 1. Weighted Reconstruction Loss
+                        # target_latent_image is normalized to [-1, 1]
+                        loss_recon = F.l1_loss(pred_decoded, target_latent_image, reduction="none")
+                        
+                        # Find white dot pixels in target (where target is close to 1.0)
+                        is_white_dot = (target_latent_image > 0.8) # (B, 3, 512, 512)
+                        
+                        weights = torch.ones_like(target_latent_image)
+                        weights[is_white_dot] = args.lambda_dot_weight
+                        
+                        loss_pixel_recon = (loss_recon * weights).mean()
+                        
+                        # 2. Block Uniformity Loss for Opaque blocks
+                        # Reshape pred_decoded to (B, C, 64, 8, 64, 8)
+                        B, C, H, W = pred_decoded.shape
+                        blocks = pred_decoded.view(B, C, 64, 8, 64, 8).permute(0, 2, 4, 1, 3, 5) # (B, 64, 64, C, 8, 8)
+                        
+                        # Reshape is_white_dot to (B, 64, 8, 64, 8)
+                        dots_blocks = is_white_dot.view(B, C, 64, 8, 64, 8).permute(0, 2, 4, 1, 3, 5) # (B, 64, 64, C, 8, 8)
+                        
+                        # A block has a dot if any of its pixels has a dot (check across C, 8, 8)
+                        block_has_dot = dots_blocks.any(dim=-3).any(dim=-2).any(dim=-1) # (B, 64, 64)
+                        
+                        # Block mean color
+                        block_mean = blocks.mean(dim=(-2, -1), keepdim=True) # (B, 64, 64, C, 1, 1)
+                        
+                        # Uniformity loss: deviation from mean for blocks without dots
+                        block_deviation = (blocks - block_mean) ** 2
+                        
+                        # Mask for blocks without dots (B, 64, 64, 1, 1, 1)
+                        opaque_mask = (~block_has_dot).unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
+                        
+                        loss_uniformity = (block_deviation * opaque_mask).mean()
+                        
+                        # Add to total loss
+                        loss += args.lambda_pixel * (loss_pixel_recon + args.lambda_uniformity * loss_uniformity)
                         
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:

@@ -8,7 +8,7 @@ MODEL_PATH="../../black-forest-labs/FLUX.2-klein-base-4B"
 TEXT_ENCODER_PATH="../../Qwen/Qwen3-4B"
 CONTROL_IMGS_DIR="./control_imgs"
 TARGET_IMGS_DIR="./target_imgs"
-OUTPUT_DIR="./output/flux_inverse_uv_lora_v2"
+OUTPUT_DIR="./output/flux_inverse_uv_lora_v3"
 VALIDATION_DIR="../../SkingDataset/DDJ_real2render/test_output"
 VALIDATION_STEPS=500
 
@@ -19,6 +19,11 @@ EPOCHS=1000
 SAVE_EVERY_EPOCHS=1
 PRECISION="bf16"
 RESOLUTION=512
+
+# Auxiliary Pixel Loss hyperparameters (Set lambda_pixel > 0 to enable, requires more VRAM)
+LAMBDA_PIXEL=1.0
+LAMBDA_DOT_WEIGHT=15.0
+LAMBDA_UNIFORMITY=1.0
 
 # LoRA config
 LORA_LINEAR_RANK=32
@@ -39,6 +44,7 @@ echo "Batch Size:        $BATCH_SIZE"
 echo "Epochs:            $EPOCHS"
 echo "Precision:         $PRECISION"
 echo "Resolution:        $RESOLUTION"
+echo "Pixel Loss Weight: lambda_pixel=$LAMBDA_PIXEL (dot_weight=$LAMBDA_DOT_WEIGHT, uniformity=$LAMBDA_UNIFORMITY)"
 echo "LoRA Rank/Alpha:   rank=$LORA_LINEAR_RANK alpha=$LORA_LINEAR_ALPHA"
 echo "=========================================================="
 
@@ -55,6 +61,9 @@ accelerate launch train.py \
     --save_every_epochs "$SAVE_EVERY_EPOCHS" \
     --mixed_precision "$PRECISION" \
     --resolution "$RESOLUTION" \
+    --lambda_pixel "$LAMBDA_PIXEL" \
+    --lambda_dot_weight "$LAMBDA_DOT_WEIGHT" \
+    --lambda_uniformity "$LAMBDA_UNIFORMITY" \
     --lora_rank "$LORA_LINEAR_RANK" \
     --lora_alpha "$LORA_LINEAR_ALPHA" \
     --lora_conv_rank "$LORA_CONV_RANK" \
