@@ -278,6 +278,15 @@ class InverseUVLoss(nn.Module):
     def forward(self, pred_uv, gt_uv, gt_renders=None):
         pred_uv = pred_uv.float()
         gt_uv = gt_uv.float()
+
+        # Binarize alpha via straight-through estimator: forward pass uses
+        # hard threshold, backward pass flows gradients through unchanged.
+        # This forces the model to output only fully opaque or fully
+        # transparent pixels — no semi-transparent artifacts.
+        alpha_cont = pred_uv[:, 3:4]
+        alpha_binary = (alpha_cont > 0.5).to(dtype=pred_uv.dtype)
+        pred_uv[:, 3:4] = alpha_cont + (alpha_binary - alpha_cont).detach()
+
         uv_mask = getattr(self, "uv_mask", None)
         if uv_mask is not None:
             uv_mask = uv_mask.to(device=pred_uv.device, dtype=torch.float32)
