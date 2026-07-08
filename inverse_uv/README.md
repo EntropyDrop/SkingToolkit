@@ -39,6 +39,22 @@ To guarantee both flat UV accuracy and visual rendering consistency, training op
 
 ## Train
 
+Recommended first-stage training is color-first and edge-heavy:
+
+```bash
+./run_inverse_uv_training.sh
+```
+
+The shell script defaults to `LAMBDA_GAN=0`, `LAMBDA_RGB=2.0`, `LAMBDA_RENDER=0.2`, `LAMBDA_EDGE=1.0`, and `EPOCHS=30`. This avoids early GAN color drift while pushing visible RGB and UV pixel boundaries harder.
+
+For a short sharpening finetune after the first run, resume from the best checkpoint with a very small GAN weight:
+
+```bash
+RESUME=runs/inverse_uv_full_v1/best.pt RESUME_LR=5e-5 EPOCHS=15 LAMBDA_GAN=0.005 ./run_inverse_uv_training.sh
+```
+
+Use the actual run folder name in `RESUME`. Avoid jumping straight back to `LAMBDA_GAN=0.03` unless the colors are already stable.
+
 ```bash
 python SkingToolkit/inverse_uv/train.py \
   --data_dir /path/to/gt_skins \
@@ -60,7 +76,7 @@ Useful knobs:
 - `--lambda_alpha`: alpha reconstruction weight.
 - `--lambda_render`: differentiable render consistency weight.
 - `--lambda_render_alpha`: rendered alpha consistency weight for visible holes/false positives.
-- `--lambda_gan`: PatchGAN adversarial weight. Keep this low so GAN remains an auxiliary texture prior.
+- `--lambda_gan`: PatchGAN adversarial weight. Defaults to `0` for color-first reconstruction; use tiny values like `0.005` for a later sharpening finetune.
 - `--lambda_edge`: UV-space edge reconstruction weight for sharper pixel boundaries.
 - `--coordconv` / `--no-coordconv`: append normalized x/y coordinates inside `InverseUVNet` so the model sees absolute UV position.
 - `--bottleneck_attention` / `--no-bottleneck-attention`: enable or disable lightweight bottleneck self-attention.

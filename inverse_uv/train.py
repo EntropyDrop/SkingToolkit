@@ -287,12 +287,12 @@ def build_arg_parser():
     parser.add_argument("--matmul_precision", choices=["highest", "high", "medium"], default="high")
     parser.add_argument("--cudnn_benchmark", dest="cudnn_benchmark", action="store_true", default=True)
     parser.add_argument("--no_cudnn_benchmark", dest="cudnn_benchmark", action="store_false")
-    parser.add_argument("--lambda_rgb", type=float, default=1.0)
+    parser.add_argument("--lambda_rgb", type=float, default=2.0)
     parser.add_argument("--lambda_alpha", type=float, default=0.5)
-    parser.add_argument("--lambda_render", type=float, default=0.1)
+    parser.add_argument("--lambda_render", type=float, default=0.2)
     parser.add_argument("--lambda_render_alpha", type=float, default=0.1)
-    parser.add_argument("--lambda_edge", type=float, default=0.25)
-    parser.add_argument("--lambda_gan", type=float, default=0.03, help="PatchGAN adversarial loss weight.")
+    parser.add_argument("--lambda_edge", type=float, default=1.0)
+    parser.add_argument("--lambda_gan", type=float, default=0.0, help="PatchGAN adversarial loss weight.")
     parser.add_argument("--render_foreground_weight", type=float, default=1.0)
     parser.add_argument(
         "--supervise_covered_inner",

@@ -22,7 +22,7 @@ MAX_SAMPLES="${MAX_SAMPLES:-30000}"
 BATCH_SIZE="${BATCH_SIZE:-32}"
 NUM_WORKERS="${NUM_WORKERS:-16}"
 PREFETCH_FACTOR="${PREFETCH_FACTOR:-4}"
-EPOCHS="${EPOCHS:-100}"
+EPOCHS="${EPOCHS:-30}"
 LR="${LR:-1e-4}"
 RESUME="${RESUME:-}"
 RESUME_LR="${RESUME_LR:-}"
@@ -42,14 +42,16 @@ SCALE_RANGE="${SCALE_RANGE:-0.03}"
 PERSPECTIVE_SCALE="${PERSPECTIVE_SCALE:-0.0}"
 
 # --- PatchGAN loss ---
-LAMBDA_GAN="${LAMBDA_GAN:-0.03}"
+# Keep the default color-first. For a later texture-sharpening finetune,
+# resume from best.pt with a very small value such as LAMBDA_GAN=0.005.
+LAMBDA_GAN="${LAMBDA_GAN:-0.0}"
 
 # --- Loss weights ---
-LAMBDA_RGB="${LAMBDA_RGB:-1.0}"
+LAMBDA_RGB="${LAMBDA_RGB:-2.0}"
 LAMBDA_ALPHA="${LAMBDA_ALPHA:-0.5}"
-LAMBDA_RENDER="${LAMBDA_RENDER:-0.1}"
+LAMBDA_RENDER="${LAMBDA_RENDER:-0.2}"
 LAMBDA_RENDER_ALPHA="${LAMBDA_RENDER_ALPHA:-0.1}"
-LAMBDA_EDGE="${LAMBDA_EDGE:-0.25}"
+LAMBDA_EDGE="${LAMBDA_EDGE:-1.0}"
 
 resume_args=()
 if [[ -n "$RESUME" ]]; then
