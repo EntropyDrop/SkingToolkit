@@ -34,9 +34,12 @@ def alpha_masked_rgb_l1(pred_uv, gt_uv, uv_mask=None):
 
 
 def alpha_bce(pred_uv, gt_uv, uv_mask=None):
-    pred_alpha = pred_uv[:, 3:4].clamp(1e-4, 1.0 - 1e-4).float()
+    pred_alpha = pred_uv[:, 3:4].float()
     gt_alpha = gt_uv[:, 3:4].float()
-    loss = F.binary_cross_entropy(pred_alpha, gt_alpha, reduction="none")
+    # Manually compute binary cross entropy to avoid PyTorch's autocast safety block
+    eps = 1e-4
+    pred_alpha = pred_alpha.clamp(eps, 1.0 - eps)
+    loss = - (gt_alpha * pred_alpha.log() + (1.0 - gt_alpha) * (1.0 - pred_alpha).log())
     if uv_mask is None:
         return loss.mean()
 
