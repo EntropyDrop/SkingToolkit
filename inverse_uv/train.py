@@ -42,6 +42,13 @@ def autocast_context(device, precision):
     return torch.autocast(device_type=device.type, dtype=dtype)
 
 
+def configure_torch(args, device):
+    if hasattr(torch, "set_float32_matmul_precision"):
+        torch.set_float32_matmul_precision(args.matmul_precision)
+    if device.type == "cuda":
+        torch.backends.cudnn.benchmark = args.cudnn_benchmark
+
+
 def move_batch(batch, device):
     return {
         "uv": batch["uv"].to(device, non_blocking=True),
@@ -61,7 +68,13 @@ def save_preview(pred_uv, gt_uv, output_path, max_items=4):
 
 
 def format_losses(loss_sums, count):
-    return {name: value / max(count, 1) for name, value in loss_sums.items()}
+    formatted = {}
+    for name, value in loss_sums.items():
+        avg = value / max(count, 1)
+        if torch.is_tensor(avg):
+            avg = float(avg.detach().cpu())
+        formatted[name] = avg
+    return formatted
 
 
 def current_lr(optimizer):
@@ -99,15 +112,19 @@ def run_epoch(
     views=None,
     augmenter=None,
     unproject_mode="mean",
+    log_every=50,
 ):
     model.train(train)
     if criterion.discriminator is not None:
         criterion.discriminator.train(train)
     loss_sums = {}
     sample_count = 0
+    step_count = 0
+    total_steps = len(loader) if hasattr(loader, "__len__") else None
     iterator = tqdm(loader, leave=False, file=sys.__stderr__ or sys.stderr) if tqdm is not None else loader
 
     for batch in iterator:
+        step_count += 1
         batch = move_batch(batch, device)
         batch_size = batch["uv"].shape[0]
 
@@ -132,7 +149,7 @@ def run_epoch(
 
         if train:
             loss_d = losses.get("loss_d", None)
-            has_d = d_optimizer is not None and loss_d is not None and loss_d.item() != 0.0
+            has_d = d_optimizer is not None and loss_d is not None
 
             # Zero both optimizers before any backward
             if has_d:
@@ -174,8 +191,14 @@ def run_epoch(
 
         sample_count += batch_size
         for name, value in losses.items():
-            loss_sums[name] = loss_sums.get(name, 0.0) + float(value.detach().cpu()) * batch_size
-        if tqdm is not None:
+            detached = value.detach()
+            loss_sums[name] = loss_sums.get(name, detached.new_zeros(())) + detached * batch_size
+        should_log = (
+            tqdm is not None
+            and log_every > 0
+            and (step_count == 1 or step_count % log_every == 0 or step_count == total_steps)
+        )
+        if should_log:
             avg = format_losses(loss_sums, sample_count)
             iterator.set_postfix(
                 total=f"{avg['loss_total']:.4f}",
@@ -255,11 +278,15 @@ def build_arg_parser():
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--weight_decay", type=float, default=1e-4)
     parser.add_argument("--num_workers", type=int, default=4)
+    parser.add_argument("--prefetch_factor", type=int, default=4)
     parser.add_argument("--val_split", type=float, default=0.05)
     parser.add_argument("--max_samples", type=int, default=None)
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--mixed_precision", choices=["no", "fp16", "bf16"], default="no")
+    parser.add_argument("--matmul_precision", choices=["highest", "high", "medium"], default="high")
+    parser.add_argument("--cudnn_benchmark", dest="cudnn_benchmark", action="store_true", default=True)
+    parser.add_argument("--no_cudnn_benchmark", dest="cudnn_benchmark", action="store_false")
     parser.add_argument("--lambda_rgb", type=float, default=1.0)
     parser.add_argument("--lambda_alpha", type=float, default=0.5)
     parser.add_argument("--lambda_render", type=float, default=0.1)
@@ -297,6 +324,7 @@ def build_arg_parser():
         default=None,
         help="Override optimizer learning rates after loading a resumed checkpoint.",
     )
+    parser.add_argument("--log_every", type=int, default=50, help="Progress-bar metric sync interval in batches.")
     parser.add_argument("--save_every", type=int, default=1)
     parser.add_argument("--preview_every", type=int, default=1)
     parser.add_argument("--resume", default=None, help="Checkpoint path to resume from.")
@@ -335,6 +363,7 @@ def main():
     sys.stderr = Logger(output_dir / "train.log", sys.stderr, mode=log_mode)
 
     device = get_device(args.device)
+    configure_torch(args, device)
     dataset = InverseUVDataset(
         data_dir=args.data_dir,
         mappings_dir=args.mappings_dir,
@@ -367,13 +396,19 @@ def main():
         train_dataset, val_dataset = dataset, None
 
     pin_memory = device.type == "cuda"
+    loader_kwargs = {
+        "num_workers": args.num_workers,
+        "pin_memory": pin_memory,
+        "persistent_workers": args.num_workers > 0,
+    }
+    if args.num_workers > 0:
+        loader_kwargs["prefetch_factor"] = args.prefetch_factor
+
     train_loader = DataLoader(
         train_dataset,
         batch_size=args.batch_size,
         shuffle=True,
-        num_workers=args.num_workers,
-        pin_memory=pin_memory,
-        persistent_workers=args.num_workers > 0,
+        **loader_kwargs,
     )
     val_loader = None
     if val_dataset is not None:
@@ -381,9 +416,7 @@ def main():
             val_dataset,
             batch_size=args.batch_size,
             shuffle=False,
-            num_workers=args.num_workers,
-            pin_memory=pin_memory,
-            persistent_workers=args.num_workers > 0,
+            **loader_kwargs,
         )
 
     model = InverseUVNet(input_channels=input_channels, base_channels=args.base_channels).to(device)
@@ -456,6 +489,10 @@ def main():
         "best_metric": args.best_metric,
         "scheduler": args.scheduler,
         "min_lr": args.min_lr,
+        "log_every": args.log_every,
+        "prefetch_factor": args.prefetch_factor,
+        "matmul_precision": args.matmul_precision,
+        "cudnn_benchmark": args.cudnn_benchmark,
         "parameters": count_parameters(model),
         "views": dataset.views,
         "device": str(device),
@@ -480,7 +517,7 @@ def main():
         train_metrics = run_epoch(
             model, criterion, train_loader, optimizer, scaler, device, args.mixed_precision,
             train=True, d_optimizer=d_optimizer, views=views, augmenter=augmenter,
-            unproject_mode=args.unproject_mode,
+            unproject_mode=args.unproject_mode, log_every=args.log_every,
         )
         metrics = {"train": train_metrics}
         if val_loader is not None:
@@ -488,7 +525,7 @@ def main():
                 val_metrics = run_epoch(
                     model, criterion, val_loader, optimizer, scaler, device, args.mixed_precision,
                     train=False, d_optimizer=None, views=views, augmenter=None,
-                    unproject_mode=args.unproject_mode,
+                    unproject_mode=args.unproject_mode, log_every=args.log_every,
                 )
             metrics["val"] = val_metrics
 

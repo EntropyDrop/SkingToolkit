@@ -41,23 +41,58 @@ class RenderAugmenter:
         self.bg_color = bg_color
 
     def __call__(self, rendered_tensor):
+        if rendered_tensor.dim() == 4:
+            return self._call_batch(rendered_tensor)
+        return self._call_single(rendered_tensor)
+
+    def _fill_color(self, device, dtype):
+        return torch.tensor(
+            [self.bg_color[0] / 255.0, self.bg_color[1] / 255.0, self.bg_color[2] / 255.0, 0.0],
+            device=device,
+            dtype=dtype,
+        )
+
+    def _call_batch(self, rendered_tensor):
+        # rendered_tensor: (B, C, H, W)
+        B, C, H, W = rendered_tensor.shape
+        device = rendered_tensor.device
+        dtype = rendered_tensor.dtype
+        fill = self._fill_color(device, dtype)[:C].view(1, C, 1, 1)
+        img = rendered_tensor
+
+        if self.translation_scale > 0 or self.scale_range > 0:
+            dx = (torch.rand(B, device=device, dtype=dtype) - 0.5) * 2 * self.translation_scale * W
+            dy = (torch.rand(B, device=device, dtype=dtype) - 0.5) * 2 * self.translation_scale * H
+            scale = 1.0 + (torch.rand(B, device=device, dtype=dtype) - 0.5) * 2 * self.scale_range
+            inv_scale = scale.reciprocal()
+
+            theta = torch.zeros(B, 2, 3, device=device, dtype=dtype)
+            theta[:, 0, 0] = inv_scale
+            theta[:, 1, 1] = inv_scale
+            theta[:, 0, 2] = -2.0 * dx / max(W, 1)
+            theta[:, 1, 2] = -2.0 * dy / max(H, 1)
+
+            grid = F.affine_grid(theta, img.shape, align_corners=False)
+            img = F.grid_sample(
+                img - fill,
+                grid,
+                mode="bilinear",
+                padding_mode="zeros",
+                align_corners=False,
+            ) + fill
+
+        if self.perspective_scale > 0:
+            img = torch.stack([self._call_perspective_single(img[i]) for i in range(B)], dim=0)
+        return img
+
+    def _call_perspective_single(self, rendered_tensor):
         # rendered_tensor: (C, H, W) — single render view
         C, H, W = rendered_tensor.shape
         device = rendered_tensor.device
         dtype = rendered_tensor.dtype
-        fill_color = [self.bg_color[0] / 255.0, self.bg_color[1] / 255.0, self.bg_color[2] / 255.0, 0.0]
+        fill_color = self._fill_color(device, dtype)[:C].tolist()
         img = rendered_tensor.unsqueeze(0)  # (1, C, H, W)
 
-        # 1. Random translation + uniform scale (single affine call)
-        dx = int((torch.rand(1).item() - 0.5) * 2 * self.translation_scale * W)
-        dy = int((torch.rand(1).item() - 0.5) * 2 * self.translation_scale * H)
-        s = 1.0 + (torch.rand(1).item() - 0.5) * 2 * self.scale_range
-        img = TF.affine(
-            img, angle=0.0, translate=[dx, dy], scale=s, shear=[0.0, 0.0],
-            interpolation=TF.InterpolationMode.BILINEAR, fill=fill_color,
-        )
-
-        # 2. Mild perspective warp (simulates subtle viewpoint shift)
         if self.perspective_scale > 0:
             startpoints = [[0, 0], [W - 1, 0], [W - 1, H - 1], [0, H - 1]]
             endpoints = []
@@ -71,6 +106,24 @@ class RenderAugmenter:
             )
 
         return img.squeeze(0)
+
+    def _call_single(self, rendered_tensor):
+        # rendered_tensor: (C, H, W) — single render view
+        C, H, W = rendered_tensor.shape
+        dtype = rendered_tensor.dtype
+        fill_color = self._fill_color(rendered_tensor.device, dtype)[:C].tolist()
+        img = rendered_tensor.unsqueeze(0)  # (1, C, H, W)
+
+        # 1. Random translation + uniform scale (single affine call)
+        dx = int((torch.rand(1).item() - 0.5) * 2 * self.translation_scale * W)
+        dy = int((torch.rand(1).item() - 0.5) * 2 * self.translation_scale * H)
+        s = 1.0 + (torch.rand(1).item() - 0.5) * 2 * self.scale_range
+        img = TF.affine(
+            img, angle=0.0, translate=[dx, dy], scale=s, shear=[0.0, 0.0],
+            interpolation=TF.InterpolationMode.BILINEAR, fill=fill_color,
+        )
+
+        return self._call_perspective_single(img.squeeze(0))
 
 
 def parse_views(views):
@@ -143,6 +196,39 @@ def _uv_indices_from_grid(grid, mask):
     return coords[:, 1] * UV_SIZE + coords[:, 0]
 
 
+def _get_unprojection_view_cache(renderer, view, device):
+    cache = getattr(renderer, "_inverse_uv_unprojection_cache", None)
+    if cache is None:
+        cache = {}
+        setattr(renderer, "_inverse_uv_unprojection_cache", cache)
+
+    key = (view, device.type, device.index)
+    if key in cache:
+        return cache[key]
+
+    inner_mask = getattr(renderer, f"{view}_inner_mask").to(device=device).bool()
+    outer_mask = getattr(renderer, f"{view}_outer_mask").to(device=device).bool()
+    geometry_mask = inner_mask | outer_mask
+
+    layers = []
+    for layer in CONDITIONING_LAYERS:
+        mask = getattr(renderer, f"{view}_{layer}_mask").to(device=device).bool()
+        grid = getattr(renderer, f"{view}_{layer}_grid").to(device=device, dtype=torch.float32)
+        flat_uv = _uv_indices_from_grid(grid, mask)
+        counts = torch.bincount(flat_uv, minlength=UV_SIZE * UV_SIZE).reshape(1, UV_SIZE, UV_SIZE)
+        layers.append({
+            "mask": mask,
+            "flat_uv": flat_uv,
+            "counts": counts,
+        })
+
+    cache[key] = {
+        "geometry_mask": geometry_mask,
+        "layers": layers,
+    }
+    return cache[key]
+
+
 def _ensure_rgba(rendered, geometry_mask=None):
     is_batched = rendered.dim() == 4
     if is_batched:
@@ -187,27 +273,30 @@ def unproject_renders_to_uv(rendered_views, renderer, views, bg_color=(128, 128,
             )
         B = sample.shape[0]
         accum = sample.new_zeros(B, len(CONDITIONING_LAYERS), 4, UV_SIZE, UV_SIZE)
-        counts = sample.new_zeros(B, len(CONDITIONING_LAYERS), 1, UV_SIZE, UV_SIZE)
+        counts_template = sample.new_zeros(len(CONDITIONING_LAYERS), 1, UV_SIZE, UV_SIZE)
+        view_caches = [_get_unprojection_view_cache(renderer, view, device) for view in views]
 
-        for view, rendered in zip(views, rendered_views):
-            inner_mask = getattr(renderer, f"{view}_inner_mask").to(device=device).bool()
-            outer_mask = getattr(renderer, f"{view}_outer_mask").to(device=device).bool()
-            geometry_mask = inner_mask | outer_mask
-            rendered = _ensure_rgba(rendered.to(device=device, dtype=dtype), geometry_mask=geometry_mask)
+        for view_cache in view_caches:
+            for layer_index, layer_cache in enumerate(view_cache["layers"]):
+                counts_template[layer_index] += layer_cache["counts"].to(device=device, dtype=dtype)
 
-            for layer_index, layer in enumerate(CONDITIONING_LAYERS):
-                mask = getattr(renderer, f"{view}_{layer}_mask").to(device=device).bool()
-                if not bool(mask.any()):
+        for view_cache, rendered in zip(view_caches, rendered_views):
+            rendered = _ensure_rgba(
+                rendered.to(device=device, dtype=dtype),
+                geometry_mask=view_cache["geometry_mask"],
+            )
+
+            for layer_index, layer_cache in enumerate(view_cache["layers"]):
+                flat_uv = layer_cache["flat_uv"]
+                if flat_uv.numel() == 0:
                     continue
-                grid = getattr(renderer, f"{view}_{layer}_grid").to(device=device, dtype=dtype)
-                flat_uv = _uv_indices_from_grid(grid, mask)
+                mask = layer_cache["mask"]
                 values = rendered[:, :, mask]  # (B, 4, N)
 
                 accum[:, layer_index].reshape(B, 4, -1).index_add_(2, flat_uv, values)
-                ones = torch.ones((B, 1, values.shape[2]), dtype=dtype, device=device)
-                counts[:, layer_index].reshape(B, 1, -1).index_add_(2, flat_uv, ones)
 
-        known = (counts > 0).to(dtype=dtype)
+        counts = counts_template.unsqueeze(0)
+        known = (counts > 0).to(dtype=dtype).expand(B, -1, -1, -1, -1)
         aggregated = accum / counts.clamp_min(1.0)
         bg = sample.new_tensor(bg_color, dtype=dtype).view(1, 1, 3, 1, 1) / 255.0
         rgb = torch.where(known.expand(-1, -1, 3, -1, -1) > 0, aggregated[:, :, :3], bg.expand_as(aggregated[:, :, :3]))
@@ -221,25 +310,24 @@ def unproject_renders_to_uv(rendered_views, renderer, views, bg_color=(128, 128,
 
     layer_values_list = [[] for _ in CONDITIONING_LAYERS]
     layer_uv_list = [[] for _ in CONDITIONING_LAYERS]
+    view_caches = [_get_unprojection_view_cache(renderer, view, device) for view in views]
 
-    for view, rendered in zip(views, rendered_views):
-        inner_mask = getattr(renderer, f"{view}_inner_mask").to(device=device).bool()
-        outer_mask = getattr(renderer, f"{view}_outer_mask").to(device=device).bool()
-        geometry_mask = inner_mask | outer_mask
-        rendered = _ensure_rgba(rendered.to(device=device, dtype=dtype), geometry_mask=geometry_mask)
+    for view_cache, rendered in zip(view_caches, rendered_views):
+        rendered = _ensure_rgba(
+            rendered.to(device=device, dtype=dtype),
+            geometry_mask=view_cache["geometry_mask"],
+        )
 
-        for layer_index, layer in enumerate(CONDITIONING_LAYERS):
-            mask = getattr(renderer, f"{view}_{layer}_mask").to(device=device).bool()
-            if not bool(mask.any()):
+        for layer_index, layer_cache in enumerate(view_cache["layers"]):
+            flat_uv = layer_cache["flat_uv"]
+            if flat_uv.numel() == 0:
                 continue
-            grid = getattr(renderer, f"{view}_{layer}_grid").to(device=device, dtype=dtype)
-            flat_uv = _uv_indices_from_grid(grid, mask)
+            mask = layer_cache["mask"]
             values = rendered[:, mask]
 
             if unproject_mode == "mean":
                 accum[layer_index].reshape(4, -1).index_add_(1, flat_uv, values)
-                ones = torch.ones((1, values.shape[1]), dtype=dtype, device=device)
-                counts[layer_index].reshape(1, -1).index_add_(1, flat_uv, ones)
+                counts[layer_index] += layer_cache["counts"].to(device=device, dtype=dtype)
             else:
                 layer_values_list[layer_index].append(values)
                 layer_uv_list[layer_index].append(flat_uv)
@@ -257,8 +345,10 @@ def unproject_renders_to_uv(rendered_views, renderer, views, bg_color=(128, 128,
             all_values = torch.cat(layer_values_list[layer_index], dim=1)
             all_flat_uv = torch.cat(layer_uv_list[layer_index], dim=0)
 
-            ones = torch.ones((1, all_values.shape[1]), dtype=dtype, device=device)
-            counts[layer_index].reshape(1, -1).index_add_(1, all_flat_uv, ones)
+            counts[layer_index] = torch.bincount(
+                all_flat_uv,
+                minlength=UV_SIZE * UV_SIZE,
+            ).reshape(1, UV_SIZE, UV_SIZE).to(device=device, dtype=dtype)
 
             unique_uvs = torch.unique(all_flat_uv)
             flat_aggregated = aggregated[layer_index].reshape(4, -1)
@@ -326,12 +416,7 @@ def build_conditioning(
             if return_renders:
                 gt_renders[view] = rendered  # save clean renders for loss reuse
             if augmenter is not None:
-                # augmenter operates on individual unbatched views
-                if is_batched:
-                    aug_list = [augmenter(rendered[i]) for i in range(rendered.shape[0])]
-                    rendered = torch.stack(aug_list, dim=0)
-                else:
-                    rendered = augmenter(rendered)
+                rendered = augmenter(rendered)
             rendered_views.append(rendered)
     conditioning = unproject_renders_to_uv(rendered_views, renderer, views, unproject_mode=unproject_mode)
     if return_renders:

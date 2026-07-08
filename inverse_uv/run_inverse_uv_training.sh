@@ -21,21 +21,25 @@ MAPPINGS_DIR="${MAPPINGS_DIR:-../../github/differentiable_minecraft_renderer/map
 MAX_SAMPLES="${MAX_SAMPLES:-100000}"
 BATCH_SIZE="${BATCH_SIZE:-32}"
 NUM_WORKERS="${NUM_WORKERS:-16}"
+PREFETCH_FACTOR="${PREFETCH_FACTOR:-4}"
 EPOCHS="${EPOCHS:-100}"
 LR="${LR:-1e-4}"
 RESUME="${RESUME:-}"
 RESUME_LR="${RESUME_LR:-}"
 MIXED_PRECISION="${MIXED_PRECISION:-bf16}"
+MATMUL_PRECISION="${MATMUL_PRECISION:-high}"
+CUDNN_BENCHMARK="${CUDNN_BENCHMARK:-true}"
 UNPROJECT_MODE="${UNPROJECT_MODE:-mean}"
 BEST_METRIC="${BEST_METRIC:-loss_recon_total}"
 SCHEDULER="${SCHEDULER:-cosine}"
 MIN_LR="${MIN_LR:-1e-5}"
+LOG_EVERY="${LOG_EVERY:-50}"
 
 # --- Augmentation (pose robustness) ---
 AUGMENT="${AUGMENT:-true}"
 TRANSLATION_SCALE="${TRANSLATION_SCALE:-0.03}"
 SCALE_RANGE="${SCALE_RANGE:-0.03}"
-PERSPECTIVE_SCALE="${PERSPECTIVE_SCALE:-0.008}"
+PERSPECTIVE_SCALE="${PERSPECTIVE_SCALE:-0.0}"
 
 # --- PatchGAN loss ---
 LAMBDA_GAN="${LAMBDA_GAN:-0.03}"
@@ -65,6 +69,12 @@ if [[ "$AUGMENT" == "true" ]]; then
     --perspective_scale "$PERSPECTIVE_SCALE"
   )
 fi
+cudnn_args=()
+if [[ "$CUDNN_BENCHMARK" == "true" ]]; then
+  cudnn_args=(--cudnn_benchmark)
+else
+  cudnn_args=(--no_cudnn_benchmark)
+fi
 
 python train.py \
   --data_dir "$DATA_DIR" \
@@ -73,6 +83,7 @@ python train.py \
   --views walk_front_both_layer_ortho,walk_back_both_layer_ortho \
   --batch_size "$BATCH_SIZE" \
   --num_workers "$NUM_WORKERS" \
+  --prefetch_factor "$PREFETCH_FACTOR" \
   --epochs "$EPOCHS" \
   --lr "$LR" \
   --val_split 0.1 \
@@ -80,10 +91,12 @@ python train.py \
   --save_every 1 \
   --preview_every 1 \
   --mixed_precision "$MIXED_PRECISION" \
+  --matmul_precision "$MATMUL_PRECISION" \
   --unproject_mode "$UNPROJECT_MODE" \
   --best_metric "$BEST_METRIC" \
   --scheduler "$SCHEDULER" \
   --min_lr "$MIN_LR" \
+  --log_every "$LOG_EVERY" \
   --lambda_gan "$LAMBDA_GAN" \
   --lambda_rgb "$LAMBDA_RGB" \
   --lambda_alpha "$LAMBDA_ALPHA" \
@@ -91,5 +104,6 @@ python train.py \
   --lambda_render_alpha "$LAMBDA_RENDER_ALPHA" \
   --lambda_edge "$LAMBDA_EDGE" \
   ${augment_args[@]+"${augment_args[@]}"} \
+  ${cudnn_args[@]+"${cudnn_args[@]}"} \
   ${resume_lr_args[@]+"${resume_lr_args[@]}"} \
   ${resume_args[@]+"${resume_args[@]}"}

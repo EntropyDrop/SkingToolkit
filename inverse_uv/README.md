@@ -53,6 +53,9 @@ Useful knobs:
 - `--unproject_mode`: aggregation method for render pixels unprojected into 64x64 UV texels (`mean`=average, `mode`=most frequent 8-bit color, `medoid`=spatial median). Batched training currently supports `mean`; `mode`/`medoid` are for unbatched inference or debugging.
 - `--best_metric`: checkpoint selection metric. Defaults to `loss_recon_total` so `best.pt` is not dominated by GAN oscillation.
 - `--scheduler` / `--min_lr`: optional learning-rate scheduler controls. The training shell script defaults to cosine decay.
+- `--log_every`: progress-bar metric sync interval in batches. Larger values reduce GPU/CPU synchronization overhead.
+- `--prefetch_factor`: DataLoader prefetch depth when `--num_workers > 0`.
+- `--matmul_precision` / `--cudnn_benchmark`: CUDA backend throughput controls for fixed-size training.
 - `--lambda_rgb`: visible-RGB UV reconstruction weight.
 - `--lambda_alpha`: alpha reconstruction weight.
 - `--lambda_render`: differentiable render consistency weight.
@@ -66,6 +69,11 @@ Useful knobs:
 - `--covered_inner_alpha_threshold`: GT outer-layer alpha threshold used to decide covered inner texels; defaults to `0.1`.
 - `--render_size`: deprecated compatibility option; UV unprojection uses native mapping sizes.
 - `--include_alpha`: deprecated compatibility option; conditioning always uses RGBA plus masks.
+
+Performance notes:
+
+- `run_inverse_uv_training.sh` defaults `PERSPECTIVE_SCALE=0.0` so augmentation stays on the batched affine path. Re-enable perspective only when the extra pose robustness is worth the slower per-sample transform.
+- For lower console overhead on fast GPUs, raise `LOG_EVERY` (for example `LOG_EVERY=100`).
 
 ## Infer
 
