@@ -29,11 +29,13 @@ Instead of learning the render-to-sheet translation from scratch, the system uti
 * **Output Head**: Predicts a 4-channel (RGBA) flat skin in `[0, 1]` using a Sigmoid activation.
 
 ### 3. Multi-Term Loss Formulation (`InverseUVLoss`)
-To guarantee both flat UV accuracy and visual rendering consistency, training optimizes a weighted sum of four loss terms:
+To guarantee both flat UV accuracy and visual rendering consistency, training optimizes a weighted sum of reconstruction terms:
 1. **Alpha-Masked RGB L1 Loss (`loss_rgb`)**: Supervises RGB reconstruction strictly on valid skin UV regions, ignoring empty padding and inner-layer texels hidden behind opaque matching outer-layer texels.
 2. **Alpha Binary Cross-Entropy (`loss_alpha`)**: Supervises the transparency layout (sigmoidal BCE) on the same visible UV supervision mask.
-3. **Differentiable Render Consistency L1 Loss (`loss_render`)**: Passively runs the predicted 64x64 skin through the `DifferentiableRenderer` to generate 2D camera views, comparing them against the ground truth renders. This forces the network to resolve overlapping texture layers correctly.
-4. **UV-Space Edge L1 Loss (`loss_edge`)**: Computes L1 difference between the gradients (x and y directions) of predicted vs ground truth skins to enforce sharp pixel boundaries.
+3. **Alpha Dice Loss (`loss_alpha_dice`)**: Supervises the full alpha region so outlines do not become transparent and optional outer-layer alpha does not leak.
+4. **Alpha Edge L1 Loss (`loss_alpha_edge`)**: Computes alpha-gradient differences to keep silhouettes, cutouts, and outer-layer boundaries crisp.
+5. **Differentiable Render Consistency L1 Loss (`loss_render`)**: Passively runs the predicted 64x64 skin through the `DifferentiableRenderer` to generate 2D camera views, comparing them against the ground truth renders. This forces the network to resolve overlapping texture layers correctly.
+6. **UV-Space Edge L1 Loss (`loss_edge`)**: Computes RGB-gradient differences (x and y directions) between predicted and ground truth skins to enforce sharp pixel boundaries.
 
 ---
 
@@ -45,7 +47,7 @@ Recommended first-stage training is color-first and edge-heavy:
 ./run_inverse_uv_training.sh
 ```
 
-The shell script defaults to `LAMBDA_GAN=0`, `LAMBDA_RGB=2.0`, `LAMBDA_RENDER=0.2`, `LAMBDA_EDGE=1.0`, and `EPOCHS=30`. This avoids early GAN color drift while pushing visible RGB and UV pixel boundaries harder.
+The shell script defaults to `LAMBDA_GAN=0`, `LAMBDA_RGB=2.0`, `LAMBDA_ALPHA=0.8`, `LAMBDA_ALPHA_DICE=0.5`, `LAMBDA_ALPHA_EDGE=0.5`, `LAMBDA_RENDER=0.2`, `LAMBDA_RENDER_ALPHA=0.4`, `LAMBDA_EDGE=1.0`, and `EPOCHS=30`. This avoids early GAN color drift while pushing visible RGB, alpha stability, and UV pixel boundaries harder.
 
 For a short sharpening finetune after the first run, resume from the best checkpoint with a very small GAN weight:
 
@@ -74,6 +76,8 @@ Useful knobs:
 - `--matmul_precision` / `--cudnn_benchmark`: CUDA backend throughput controls for fixed-size training.
 - `--lambda_rgb`: visible-RGB UV reconstruction weight.
 - `--lambda_alpha`: alpha reconstruction weight.
+- `--lambda_alpha_dice`: alpha region consistency weight for reducing transparent holes and false alpha leaks.
+- `--lambda_alpha_edge`: alpha boundary reconstruction weight for cleaner silhouettes and outer-layer cutouts.
 - `--lambda_render`: differentiable render consistency weight.
 - `--lambda_render_alpha`: rendered alpha consistency weight for visible holes/false positives.
 - `--lambda_gan`: PatchGAN adversarial weight. Defaults to `0` for color-first reconstruction; use tiny values like `0.005` for a later sharpening finetune.

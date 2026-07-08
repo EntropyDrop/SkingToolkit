@@ -37,8 +37,8 @@ LOG_EVERY="${LOG_EVERY:-50}"
 
 # --- Augmentation (pose robustness) ---
 AUGMENT="${AUGMENT:-true}"
-TRANSLATION_SCALE="${TRANSLATION_SCALE:-0.03}"
-SCALE_RANGE="${SCALE_RANGE:-0.03}"
+TRANSLATION_SCALE="${TRANSLATION_SCALE:-0.015}"
+SCALE_RANGE="${SCALE_RANGE:-0.015}"
 PERSPECTIVE_SCALE="${PERSPECTIVE_SCALE:-0.0}"
 
 # --- PatchGAN loss ---
@@ -48,9 +48,11 @@ LAMBDA_GAN="${LAMBDA_GAN:-0.0}"
 
 # --- Loss weights ---
 LAMBDA_RGB="${LAMBDA_RGB:-2.0}"
-LAMBDA_ALPHA="${LAMBDA_ALPHA:-0.5}"
+LAMBDA_ALPHA="${LAMBDA_ALPHA:-0.8}"
+LAMBDA_ALPHA_DICE="${LAMBDA_ALPHA_DICE:-0.5}"
+LAMBDA_ALPHA_EDGE="${LAMBDA_ALPHA_EDGE:-0.5}"
 LAMBDA_RENDER="${LAMBDA_RENDER:-0.2}"
-LAMBDA_RENDER_ALPHA="${LAMBDA_RENDER_ALPHA:-0.1}"
+LAMBDA_RENDER_ALPHA="${LAMBDA_RENDER_ALPHA:-0.4}"
 LAMBDA_EDGE="${LAMBDA_EDGE:-1.0}"
 
 resume_args=()
@@ -102,6 +104,8 @@ python train.py \
   --lambda_gan "$LAMBDA_GAN" \
   --lambda_rgb "$LAMBDA_RGB" \
   --lambda_alpha "$LAMBDA_ALPHA" \
+  --lambda_alpha_dice "$LAMBDA_ALPHA_DICE" \
+  --lambda_alpha_edge "$LAMBDA_ALPHA_EDGE" \
   --lambda_render "$LAMBDA_RENDER" \
   --lambda_render_alpha "$LAMBDA_RENDER_ALPHA" \
   --lambda_edge "$LAMBDA_EDGE" \

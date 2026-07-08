@@ -50,6 +50,21 @@ def alpha_bce(pred_uv, gt_uv, uv_mask=None):
     return ((loss * uv_mask).sum(dim=(1, 2, 3)) / denom).mean()
 
 
+def alpha_dice_loss(pred_uv, gt_uv, uv_mask=None, eps=1e-4):
+    pred_alpha = pred_uv[:, 3:4].float().clamp(0.0, 1.0)
+    gt_alpha = gt_uv[:, 3:4].float()
+    if uv_mask is not None:
+        uv_mask = uv_mask.to(device=pred_alpha.device, dtype=torch.float32)
+        if uv_mask.shape != pred_alpha.shape:
+            uv_mask = uv_mask.expand_as(pred_alpha)
+        pred_alpha = pred_alpha * uv_mask
+        gt_alpha = gt_alpha * uv_mask
+
+    intersection = (pred_alpha * gt_alpha).sum(dim=(1, 2, 3))
+    denom = pred_alpha.sum(dim=(1, 2, 3)) + gt_alpha.sum(dim=(1, 2, 3))
+    return (1.0 - (2.0 * intersection + eps) / (denom + eps)).mean()
+
+
 def minecraft_layer_rects(is_slim=False):
     arm_width = 3 if is_slim else 4
     slim_shift = 1 if is_slim else 0
@@ -166,6 +181,31 @@ def edge_l1(pred_uv, gt_uv, uv_mask=None):
     return per_sample.mean()
 
 
+def alpha_edge_l1(pred_uv, gt_uv, uv_mask=None):
+    pred_alpha = pred_uv[:, 3:4].float()
+    gt_alpha = gt_uv[:, 3:4].float()
+
+    if uv_mask is not None:
+        uv_mask = uv_mask.to(device=pred_alpha.device, dtype=torch.float32)
+        if uv_mask.shape != pred_alpha.shape:
+            uv_mask = uv_mask.expand_as(pred_alpha)
+        dx_mask = uv_mask[:, :, :, 1:] * uv_mask[:, :, :, :-1]
+        dy_mask = uv_mask[:, :, 1:, :] * uv_mask[:, :, :-1, :]
+    else:
+        dx_mask = torch.ones_like(pred_alpha[:, :, :, 1:])
+        dy_mask = torch.ones_like(pred_alpha[:, :, 1:, :])
+
+    dx = (pred_alpha[:, :, :, 1:] - pred_alpha[:, :, :, :-1]) - (
+        gt_alpha[:, :, :, 1:] - gt_alpha[:, :, :, :-1]
+    )
+    dy = (pred_alpha[:, :, 1:, :] - pred_alpha[:, :, :-1, :]) - (
+        gt_alpha[:, :, 1:, :] - gt_alpha[:, :, :-1, :]
+    )
+    denom = (dx_mask.sum(dim=(1, 2, 3)) + dy_mask.sum(dim=(1, 2, 3))).clamp_min(1.0)
+    per_sample = ((dx.abs() * dx_mask).sum(dim=(1, 2, 3)) + (dy.abs() * dy_mask).sum(dim=(1, 2, 3))) / denom
+    return per_sample.mean()
+
+
 def gan_loss(discriminator, pred_uv, gt_uv, uv_mask=None):
     """PatchGAN loss: discriminator judges realism; generator tries to fool it.
 
@@ -213,9 +253,11 @@ class InverseUVLoss(nn.Module):
         views="static_front,static_back",
         bg_color=(128 / 255, 128 / 255, 128 / 255),
         lambda_rgb=2.0,
-        lambda_alpha=0.5,
+        lambda_alpha=0.8,
+        lambda_alpha_dice=0.5,
+        lambda_alpha_edge=0.5,
         lambda_render=0.2,
-        lambda_render_alpha=0.1,
+        lambda_render_alpha=0.4,
         lambda_edge=1.0,
         lambda_gan=0.0,
         render_foreground_weight=1.0,
@@ -226,6 +268,8 @@ class InverseUVLoss(nn.Module):
         super().__init__()
         self.lambda_rgb = lambda_rgb
         self.lambda_alpha = lambda_alpha
+        self.lambda_alpha_dice = lambda_alpha_dice
+        self.lambda_alpha_edge = lambda_alpha_edge
         self.lambda_render = lambda_render
         self.lambda_render_alpha = lambda_render_alpha
         self.lambda_edge = lambda_edge
@@ -311,13 +355,15 @@ class InverseUVLoss(nn.Module):
             )
             uv_mask = supervised_inner_mask if uv_mask is None else uv_mask * supervised_inner_mask
 
-        # Alpha BCE on continuous alpha — smooth gradient signal for learning
+        # Alpha BCE/Dice on continuous alpha - smooth region signal for learning.
         loss_alpha = alpha_bce(pred_uv, gt_uv, uv_mask)
+        loss_alpha_dice = alpha_dice_loss(pred_uv, gt_uv, uv_mask)
 
-        # All other losses on binarized alpha — see the sharp output
+        # All structural losses on binarized alpha - see the sharp output.
         loss_rgb = alpha_masked_rgb_l1(pred_uv_binary, gt_uv, uv_mask)
         loss_render, loss_render_alpha = self.render_losses(pred_uv_binary, gt_uv, gt_renders=gt_renders)
         loss_edge = edge_l1(pred_uv_binary, gt_uv, uv_mask)
+        loss_alpha_edge = alpha_edge_l1(pred_uv_binary, gt_uv, uv_mask)
 
         loss_gan = pred_uv_binary.new_tensor(0.0)
         loss_d = pred_uv_binary.new_tensor(0.0)
@@ -327,6 +373,8 @@ class InverseUVLoss(nn.Module):
         loss_recon_total = (
             self.lambda_rgb * loss_rgb
             + self.lambda_alpha * loss_alpha
+            + self.lambda_alpha_dice * loss_alpha_dice
+            + self.lambda_alpha_edge * loss_alpha_edge
             + self.lambda_render * loss_render
             + self.lambda_render_alpha * loss_render_alpha
             + self.lambda_edge * loss_edge
@@ -340,6 +388,8 @@ class InverseUVLoss(nn.Module):
             "loss_recon_total": loss_recon_total,
             "loss_rgb": loss_rgb,
             "loss_alpha": loss_alpha,
+            "loss_alpha_dice": loss_alpha_dice,
+            "loss_alpha_edge": loss_alpha_edge,
             "loss_render": loss_render,
             "loss_render_alpha": loss_render_alpha,
             "loss_edge": loss_edge,

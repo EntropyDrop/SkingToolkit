@@ -288,9 +288,11 @@ def build_arg_parser():
     parser.add_argument("--cudnn_benchmark", dest="cudnn_benchmark", action="store_true", default=True)
     parser.add_argument("--no_cudnn_benchmark", dest="cudnn_benchmark", action="store_false")
     parser.add_argument("--lambda_rgb", type=float, default=2.0)
-    parser.add_argument("--lambda_alpha", type=float, default=0.5)
+    parser.add_argument("--lambda_alpha", type=float, default=0.8)
+    parser.add_argument("--lambda_alpha_dice", type=float, default=0.5)
+    parser.add_argument("--lambda_alpha_edge", type=float, default=0.5)
     parser.add_argument("--lambda_render", type=float, default=0.2)
-    parser.add_argument("--lambda_render_alpha", type=float, default=0.1)
+    parser.add_argument("--lambda_render_alpha", type=float, default=0.4)
     parser.add_argument("--lambda_edge", type=float, default=1.0)
     parser.add_argument("--lambda_gan", type=float, default=0.0, help="PatchGAN adversarial loss weight.")
     parser.add_argument("--render_foreground_weight", type=float, default=1.0)
@@ -432,6 +434,8 @@ def main():
         views=args.views,
         lambda_rgb=args.lambda_rgb,
         lambda_alpha=args.lambda_alpha,
+        lambda_alpha_dice=args.lambda_alpha_dice,
+        lambda_alpha_edge=args.lambda_alpha_edge,
         lambda_render=args.lambda_render,
         lambda_render_alpha=args.lambda_render_alpha,
         lambda_edge=args.lambda_edge,
