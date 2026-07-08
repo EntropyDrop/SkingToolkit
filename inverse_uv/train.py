@@ -64,7 +64,42 @@ def format_losses(loss_sums, count):
     return {name: value / max(count, 1) for name, value in loss_sums.items()}
 
 
-def run_epoch(model, criterion, loader, optimizer, scaler, device, precision, train=True, d_optimizer=None, views=None, augmenter=None):
+def current_lr(optimizer):
+    return optimizer.param_groups[0]["lr"]
+
+
+def set_optimizer_lr(optimizer, lr):
+    for group in optimizer.param_groups:
+        group["lr"] = lr
+
+
+def build_scheduler(optimizer, args, start_epoch):
+    if args.scheduler == "none":
+        return None
+    remaining_epochs = max(args.epochs - start_epoch + 1, 1)
+    if args.scheduler == "cosine":
+        return torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=remaining_epochs,
+            eta_min=args.min_lr,
+        )
+    raise ValueError(f"Unsupported scheduler={args.scheduler!r}.")
+
+
+def run_epoch(
+    model,
+    criterion,
+    loader,
+    optimizer,
+    scaler,
+    device,
+    precision,
+    train=True,
+    d_optimizer=None,
+    views=None,
+    augmenter=None,
+    unproject_mode="mean",
+):
     model.train(train)
     if criterion.discriminator is not None:
         criterion.discriminator.train(train)
@@ -84,6 +119,7 @@ def run_epoch(model, criterion, loader, optimizer, scaler, device, precision, tr
                 criterion.renderer,
                 views,
                 augmenter=batch_augmenter,
+                unproject_mode=unproject_mode,
                 return_renders=True,
             )
             conditioning, gt_renders = result
@@ -141,12 +177,29 @@ def run_epoch(model, criterion, loader, optimizer, scaler, device, precision, tr
             loss_sums[name] = loss_sums.get(name, 0.0) + float(value.detach().cpu()) * batch_size
         if tqdm is not None:
             avg = format_losses(loss_sums, sample_count)
-            iterator.set_postfix(total=f"{avg['loss_total']:.4f}", rgb=f"{avg['loss_rgb']:.4f}")
+            iterator.set_postfix(
+                total=f"{avg['loss_total']:.4f}",
+                recon=f"{avg.get('loss_recon_total', avg['loss_total']):.4f}",
+                rgb=f"{avg['loss_rgb']:.4f}",
+            )
 
     return format_losses(loss_sums, sample_count)
 
 
-def save_checkpoint(path, model, optimizer, epoch, args, input_channels, metrics, discriminator=None, d_optimizer=None):
+def save_checkpoint(
+    path,
+    model,
+    optimizer,
+    epoch,
+    args,
+    input_channels,
+    metrics,
+    discriminator=None,
+    d_optimizer=None,
+    scheduler=None,
+    d_scheduler=None,
+    best_metric=None,
+):
     checkpoint = {
         "epoch": epoch,
         "model": model.state_dict(),
@@ -155,10 +208,16 @@ def save_checkpoint(path, model, optimizer, epoch, args, input_channels, metrics
         "input_channels": input_channels,
         "metrics": metrics,
     }
+    if best_metric is not None:
+        checkpoint["best_metric"] = best_metric
     if discriminator is not None:
         checkpoint["discriminator"] = discriminator.state_dict()
     if d_optimizer is not None:
         checkpoint["d_optimizer"] = d_optimizer.state_dict()
+    if scheduler is not None:
+        checkpoint["scheduler"] = scheduler.state_dict()
+    if d_scheduler is not None:
+        checkpoint["d_scheduler"] = d_scheduler.state_dict()
     torch.save(checkpoint, path)
 
 
@@ -204,8 +263,9 @@ def build_arg_parser():
     parser.add_argument("--lambda_rgb", type=float, default=1.0)
     parser.add_argument("--lambda_alpha", type=float, default=0.5)
     parser.add_argument("--lambda_render", type=float, default=0.1)
+    parser.add_argument("--lambda_render_alpha", type=float, default=0.1)
     parser.add_argument("--lambda_edge", type=float, default=0.25)
-    parser.add_argument("--lambda_gan", type=float, default=0.1, help="PatchGAN adversarial loss weight.")
+    parser.add_argument("--lambda_gan", type=float, default=0.03, help="PatchGAN adversarial loss weight.")
     parser.add_argument("--render_foreground_weight", type=float, default=1.0)
     parser.add_argument(
         "--supervise_covered_inner",
@@ -221,8 +281,21 @@ def build_arg_parser():
     parser.add_argument(
         "--unproject_mode",
         choices=["mode", "mean", "medoid"],
-        default="mode",
+        default="mean",
         help="Method to aggregate render pixels into 64x64 UV texels ('mode'=most frequent color, 'mean'=average, 'medoid'=spatial median).",
+    )
+    parser.add_argument(
+        "--best_metric",
+        default="loss_recon_total",
+        help="Metric key used to select best.pt. Defaults to reconstruction loss without GAN.",
+    )
+    parser.add_argument("--scheduler", choices=["none", "cosine"], default="none")
+    parser.add_argument("--min_lr", type=float, default=1e-5)
+    parser.add_argument(
+        "--resume_lr",
+        type=float,
+        default=None,
+        help="Override optimizer learning rates after loading a resumed checkpoint.",
     )
     parser.add_argument("--save_every", type=int, default=1)
     parser.add_argument("--preview_every", type=int, default=1)
@@ -327,6 +400,7 @@ def main():
         lambda_rgb=args.lambda_rgb,
         lambda_alpha=args.lambda_alpha,
         lambda_render=args.lambda_render,
+        lambda_render_alpha=args.lambda_render_alpha,
         lambda_edge=args.lambda_edge,
         lambda_gan=args.lambda_gan,
         render_foreground_weight=args.render_foreground_weight,
@@ -338,6 +412,8 @@ def main():
     scaler = build_grad_scaler(device, args.mixed_precision)
 
     start_epoch = 1
+    best_metric = float("inf")
+    checkpoint = None
     if args.resume:
         checkpoint = torch.load(args.resume, map_location=device)
         model.load_state_dict(checkpoint["model"])
@@ -347,6 +423,28 @@ def main():
         if d_optimizer is not None and "d_optimizer" in checkpoint:
             d_optimizer.load_state_dict(checkpoint["d_optimizer"])
         start_epoch = checkpoint.get("epoch", 0) + 1
+        best_metric = checkpoint.get("best_metric", best_metric)
+        if args.resume_lr is not None:
+            set_optimizer_lr(optimizer, args.resume_lr)
+            if d_optimizer is not None:
+                set_optimizer_lr(d_optimizer, args.resume_lr)
+
+    scheduler = build_scheduler(optimizer, args, start_epoch)
+    d_scheduler = build_scheduler(d_optimizer, args, start_epoch) if d_optimizer is not None else None
+    if (
+        scheduler is not None
+        and checkpoint is not None
+        and "scheduler" in checkpoint
+        and args.resume_lr is None
+    ):
+        scheduler.load_state_dict(checkpoint["scheduler"])
+    if (
+        d_scheduler is not None
+        and checkpoint is not None
+        and "d_scheduler" in checkpoint
+        and args.resume_lr is None
+    ):
+        d_scheduler.load_state_dict(checkpoint["d_scheduler"])
 
     metadata = {
         "num_samples": len(dataset),
@@ -355,6 +453,9 @@ def main():
         "input_channels": input_channels,
         "conditioning_mode": "uv_unproject_inpaint",
         "unproject_mode": args.unproject_mode,
+        "best_metric": args.best_metric,
+        "scheduler": args.scheduler,
+        "min_lr": args.min_lr,
         "parameters": count_parameters(model),
         "views": dataset.views,
         "device": str(device),
@@ -375,11 +476,11 @@ def main():
             bg_color=dataset.bg_color,
         )
 
-    best_metric = float("inf")
     for epoch in range(start_epoch, args.epochs + 1):
         train_metrics = run_epoch(
             model, criterion, train_loader, optimizer, scaler, device, args.mixed_precision,
             train=True, d_optimizer=d_optimizer, views=views, augmenter=augmenter,
+            unproject_mode=args.unproject_mode,
         )
         metrics = {"train": train_metrics}
         if val_loader is not None:
@@ -387,10 +488,24 @@ def main():
                 val_metrics = run_epoch(
                     model, criterion, val_loader, optimizer, scaler, device, args.mixed_precision,
                     train=False, d_optimizer=None, views=views, augmenter=None,
+                    unproject_mode=args.unproject_mode,
                 )
             metrics["val"] = val_metrics
 
-        metric = metrics.get("val", metrics["train"])["loss_total"]
+        metric_source = metrics.get("val", metrics["train"])
+        if args.best_metric not in metric_source:
+            raise KeyError(
+                f"best_metric={args.best_metric!r} was not logged. "
+                f"Available metrics: {', '.join(sorted(metric_source))}"
+            )
+        metric = metric_source[args.best_metric]
+        if scheduler is not None:
+            scheduler.step()
+        if d_scheduler is not None:
+            d_scheduler.step()
+        metrics["lr"] = current_lr(optimizer)
+        if d_optimizer is not None:
+            metrics["d_lr"] = current_lr(d_optimizer)
         print(f"epoch={epoch} metrics={json.dumps(metrics, sort_keys=True)}")
 
         if epoch % args.preview_every == 0:
@@ -398,18 +513,27 @@ def main():
             preview_batch = move_batch(next(iter(val_loader or train_loader)), device)
             with torch.no_grad():
                 preview_cond = build_conditioning(
-                    preview_batch["uv"], criterion.renderer, views, augmenter=None,
+                    preview_batch["uv"],
+                    criterion.renderer,
+                    views,
+                    augmenter=None,
+                    unproject_mode=args.unproject_mode,
                 )
                 pred_uv = model(preview_cond)
             save_preview(pred_uv, preview_batch["uv"], output_dir / "previews" / f"epoch_{epoch:04d}.png")
 
+        is_best = metric < best_metric
+        if is_best:
+            best_metric = metric
+
         if epoch % args.save_every == 0:
             save_checkpoint(output_dir / "latest.pt", model, optimizer, epoch, args, input_channels, metrics,
-                            discriminator=discriminator, d_optimizer=d_optimizer)
-        if metric < best_metric:
-            best_metric = metric
+                            discriminator=discriminator, d_optimizer=d_optimizer, scheduler=scheduler, d_scheduler=d_scheduler,
+                            best_metric=best_metric)
+        if is_best:
             save_checkpoint(output_dir / "best.pt", model, optimizer, epoch, args, input_channels, metrics,
-                            discriminator=discriminator, d_optimizer=d_optimizer)
+                            discriminator=discriminator, d_optimizer=d_optimizer, scheduler=scheduler, d_scheduler=d_scheduler,
+                            best_metric=best_metric)
 
 
 if __name__ == "__main__":

@@ -167,7 +167,7 @@ def _ensure_rgba(rendered, geometry_mask=None):
         return torch.cat([rendered, alpha], dim=0)
 
 
-def unproject_renders_to_uv(rendered_views, renderer, views, bg_color=(128, 128, 128), unproject_mode="mode"):
+def unproject_renders_to_uv(rendered_views, renderer, views, bg_color=(128, 128, 128), unproject_mode="mean"):
     views = parse_views(views)
     if len(rendered_views) != len(views):
         raise ValueError(f"Expected {len(views)} rendered views, got {len(rendered_views)}.")
@@ -179,8 +179,12 @@ def unproject_renders_to_uv(rendered_views, renderer, views, bg_color=(128, 128,
     device = sample.device
     dtype = sample.dtype
 
-    # Batched GPU path: uses mean aggregation only (fast, no Python loops)
     if is_batched:
+        if unproject_mode != "mean":
+            raise ValueError(
+                "Batched UV unprojection currently supports only unproject_mode='mean'. "
+                "Use UNPROJECT_MODE=mean for training, or run unbatched inference for mode/medoid aggregation."
+            )
         B = sample.shape[0]
         accum = sample.new_zeros(B, len(CONDITIONING_LAYERS), 4, UV_SIZE, UV_SIZE)
         counts = sample.new_zeros(B, len(CONDITIONING_LAYERS), 1, UV_SIZE, UV_SIZE)
@@ -290,7 +294,7 @@ def unproject_renders_to_uv(rendered_views, renderer, views, bg_color=(128, 128,
 
     bg = sample.new_tensor(bg_color, dtype=dtype).view(1, 3, 1, 1) / 255.0
     rgb = torch.where(known.expand(-1, 3, -1, -1) > 0, aggregated[:, :3], bg.expand_as(aggregated[:, :3]))
-    alpha = torch.where(known > 0, aggregated[:, 3:4], torch.zeros_like(averaged if 'averaged' in locals() else aggregated)[:, 3:4])
+    alpha = torch.where(known > 0, aggregated[:, 3:4], torch.zeros_like(aggregated[:, 3:4]))
     layers = torch.cat([rgb, alpha, known], dim=1)
     return layers.reshape(-1, UV_SIZE, UV_SIZE).clamp(0.0, 1.0)
 
@@ -301,7 +305,7 @@ def build_conditioning(
     views,
     image_size=256,
     include_alpha=False,
-    unproject_mode="mode",
+    unproject_mode="mean",
     augmenter=None,
     return_renders=False,
 ):
@@ -346,7 +350,7 @@ class InverseUVDataset(Dataset):
         bg_color=(128, 128, 128),
         max_samples=None,
         normalize_model=True,
-        unproject_mode="mode",
+        unproject_mode="mean",
         augment=False,
         translation_scale=0.03,
         scale_range=0.03,

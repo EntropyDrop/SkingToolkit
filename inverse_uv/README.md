@@ -50,10 +50,14 @@ python SkingToolkit/inverse_uv/train.py \
 
 Useful knobs:
 
-- `--unproject_mode`: aggregation method for render pixels unprojected into 64x64 UV texels (`mode`=most frequent 8-bit color, `mean`=average, `medoid`=spatial median). Defaults to `mode` to prevent color averaging at block boundaries.
+- `--unproject_mode`: aggregation method for render pixels unprojected into 64x64 UV texels (`mean`=average, `mode`=most frequent 8-bit color, `medoid`=spatial median). Batched training currently supports `mean`; `mode`/`medoid` are for unbatched inference or debugging.
+- `--best_metric`: checkpoint selection metric. Defaults to `loss_recon_total` so `best.pt` is not dominated by GAN oscillation.
+- `--scheduler` / `--min_lr`: optional learning-rate scheduler controls. The training shell script defaults to cosine decay.
 - `--lambda_rgb`: visible-RGB UV reconstruction weight.
 - `--lambda_alpha`: alpha reconstruction weight.
 - `--lambda_render`: differentiable render consistency weight.
+- `--lambda_render_alpha`: rendered alpha consistency weight for visible holes/false positives.
+- `--lambda_gan`: PatchGAN adversarial weight. Keep this low so GAN remains an auxiliary texture prior.
 - `--lambda_edge`: UV-space edge reconstruction weight for sharper pixel boundaries.
 - `--coordconv` / `--no-coordconv`: append normalized x/y coordinates inside `InverseUVNet` so the model sees absolute UV position.
 - `--bottleneck_attention` / `--no-bottleneck-attention`: enable or disable lightweight bottleneck self-attention.

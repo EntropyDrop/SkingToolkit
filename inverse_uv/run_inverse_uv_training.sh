@@ -16,15 +16,20 @@ if [[ -z "${RUN_NAME:-}" ]]; then
   RUN_NAME="inverse_uv_${MODEL}_v${v}"
 fi
 DATA_DIR="${DATA_DIR:-../skins}"
-MAPPINGS_DIR="${MAPPINGS_DIR:-../../github/differentiable_minecraft_renderer/mappings_256x512}"
+MAPPINGS_SIZE="${MAPPINGS_SIZE:-256x512}"
+MAPPINGS_DIR="${MAPPINGS_DIR:-../../github/differentiable_minecraft_renderer/mappings_${MAPPINGS_SIZE}}"
 MAX_SAMPLES="${MAX_SAMPLES:-100000}"
 BATCH_SIZE="${BATCH_SIZE:-32}"
 NUM_WORKERS="${NUM_WORKERS:-16}"
 EPOCHS="${EPOCHS:-100}"
 LR="${LR:-1e-4}"
 RESUME="${RESUME:-}"
+RESUME_LR="${RESUME_LR:-}"
 MIXED_PRECISION="${MIXED_PRECISION:-bf16}"
-UNPROJECT_MODE="${UNPROJECT_MODE:-mode}"
+UNPROJECT_MODE="${UNPROJECT_MODE:-mean}"
+BEST_METRIC="${BEST_METRIC:-loss_recon_total}"
+SCHEDULER="${SCHEDULER:-cosine}"
+MIN_LR="${MIN_LR:-1e-5}"
 
 # --- Augmentation (pose robustness) ---
 AUGMENT="${AUGMENT:-true}"
@@ -33,17 +38,22 @@ SCALE_RANGE="${SCALE_RANGE:-0.03}"
 PERSPECTIVE_SCALE="${PERSPECTIVE_SCALE:-0.008}"
 
 # --- PatchGAN loss ---
-LAMBDA_GAN="${LAMBDA_GAN:-0.1}"
+LAMBDA_GAN="${LAMBDA_GAN:-0.03}"
 
 # --- Loss weights ---
 LAMBDA_RGB="${LAMBDA_RGB:-1.0}"
 LAMBDA_ALPHA="${LAMBDA_ALPHA:-0.5}"
 LAMBDA_RENDER="${LAMBDA_RENDER:-0.1}"
+LAMBDA_RENDER_ALPHA="${LAMBDA_RENDER_ALPHA:-0.1}"
 LAMBDA_EDGE="${LAMBDA_EDGE:-0.25}"
 
 resume_args=()
 if [[ -n "$RESUME" ]]; then
   resume_args=(--resume "$RESUME")
+fi
+resume_lr_args=()
+if [[ -n "$RESUME_LR" ]]; then
+  resume_lr_args=(--resume_lr "$RESUME_LR")
 fi
 
 augment_args=()
@@ -71,10 +81,15 @@ python train.py \
   --preview_every 1 \
   --mixed_precision "$MIXED_PRECISION" \
   --unproject_mode "$UNPROJECT_MODE" \
+  --best_metric "$BEST_METRIC" \
+  --scheduler "$SCHEDULER" \
+  --min_lr "$MIN_LR" \
   --lambda_gan "$LAMBDA_GAN" \
   --lambda_rgb "$LAMBDA_RGB" \
   --lambda_alpha "$LAMBDA_ALPHA" \
   --lambda_render "$LAMBDA_RENDER" \
+  --lambda_render_alpha "$LAMBDA_RENDER_ALPHA" \
   --lambda_edge "$LAMBDA_EDGE" \
   ${augment_args[@]+"${augment_args[@]}"} \
+  ${resume_lr_args[@]+"${resume_lr_args[@]}"} \
   ${resume_args[@]+"${resume_args[@]}"}

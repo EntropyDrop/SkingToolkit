@@ -215,8 +215,9 @@ class InverseUVLoss(nn.Module):
         lambda_rgb=1.0,
         lambda_alpha=0.5,
         lambda_render=0.1,
+        lambda_render_alpha=0.1,
         lambda_edge=0.25,
-        lambda_gan=0.1,
+        lambda_gan=0.03,
         render_foreground_weight=1.0,
         ignore_covered_inner=True,
         covered_inner_alpha_threshold=0.1,
@@ -226,6 +227,7 @@ class InverseUVLoss(nn.Module):
         self.lambda_rgb = lambda_rgb
         self.lambda_alpha = lambda_alpha
         self.lambda_render = lambda_render
+        self.lambda_render_alpha = lambda_render_alpha
         self.lambda_edge = lambda_edge
         self.lambda_gan = lambda_gan
         self.render_foreground_weight = render_foreground_weight
@@ -257,11 +259,13 @@ class InverseUVLoss(nn.Module):
             print("WARNING: UV masks not found, falling back to full UV loss.")
             self.uv_mask = None
 
-    def render_loss(self, pred_uv, gt_uv, gt_renders=None):
-        if self.lambda_render <= 0:
-            return pred_uv.new_tensor(0.0)
+    def render_losses(self, pred_uv, gt_uv, gt_renders=None):
+        if self.lambda_render <= 0 and self.lambda_render_alpha <= 0:
+            zero = pred_uv.new_tensor(0.0)
+            return zero, zero
 
-        total = pred_uv.new_tensor(0.0)
+        rgb_total = pred_uv.new_tensor(0.0)
+        alpha_total = pred_uv.new_tensor(0.0)
         for view in self.views:
             pred_render = self.renderer.forward_view(pred_uv, view)
             if gt_renders is not None and view in gt_renders:
@@ -270,13 +274,19 @@ class InverseUVLoss(nn.Module):
                 with torch.no_grad():
                     gt_render = self.renderer.forward_view(gt_uv, view)
             fg_mask = torch.maximum(pred_render[:, 3:4], gt_render[:, 3:4]).detach()
-            if self.render_foreground_weight > 0:
-                denom = (fg_mask.sum(dim=(1, 2, 3)) * 3.0).clamp_min(1.0)
-                per_sample = ((pred_render[:, :3] - gt_render[:, :3]).abs() * fg_mask).sum(dim=(1, 2, 3)) / denom
-                total = total + per_sample.mean() * self.render_foreground_weight
-            else:
-                total = total + F.l1_loss(pred_render[:, :3], gt_render[:, :3])
-        return total / max(len(self.views), 1)
+            if self.lambda_render > 0:
+                if self.render_foreground_weight > 0:
+                    denom = (fg_mask.sum(dim=(1, 2, 3)) * 3.0).clamp_min(1.0)
+                    per_sample = ((pred_render[:, :3] - gt_render[:, :3]).abs() * fg_mask).sum(dim=(1, 2, 3)) / denom
+                    rgb_total = rgb_total + per_sample.mean() * self.render_foreground_weight
+                else:
+                    rgb_total = rgb_total + F.l1_loss(pred_render[:, :3], gt_render[:, :3])
+            if self.lambda_render_alpha > 0:
+                denom = fg_mask.sum(dim=(1, 2, 3)).clamp_min(1.0)
+                per_sample = ((pred_render[:, 3:4] - gt_render[:, 3:4]).abs() * fg_mask).sum(dim=(1, 2, 3)) / denom
+                alpha_total = alpha_total + per_sample.mean()
+        view_count = max(len(self.views), 1)
+        return rgb_total / view_count, alpha_total / view_count
 
     def forward(self, pred_uv, gt_uv, gt_renders=None):
         pred_uv = pred_uv.float()
@@ -306,7 +316,7 @@ class InverseUVLoss(nn.Module):
 
         # All other losses on binarized alpha — see the sharp output
         loss_rgb = alpha_masked_rgb_l1(pred_uv_binary, gt_uv, uv_mask)
-        loss_render = self.render_loss(pred_uv_binary, gt_uv, gt_renders=gt_renders)
+        loss_render, loss_render_alpha = self.render_losses(pred_uv_binary, gt_uv, gt_renders=gt_renders)
         loss_edge = edge_l1(pred_uv_binary, gt_uv, uv_mask)
 
         loss_gan = pred_uv_binary.new_tensor(0.0)
@@ -314,18 +324,24 @@ class InverseUVLoss(nn.Module):
         if self.discriminator is not None and self.lambda_gan > 0:
             loss_d, loss_gan = gan_loss(self.discriminator, pred_uv_binary, gt_uv, uv_mask)
 
-        loss_total = (
+        loss_recon_total = (
             self.lambda_rgb * loss_rgb
             + self.lambda_alpha * loss_alpha
             + self.lambda_render * loss_render
+            + self.lambda_render_alpha * loss_render_alpha
             + self.lambda_edge * loss_edge
+        )
+        loss_total = (
+            loss_recon_total
             + self.lambda_gan * loss_gan
         )
         return {
             "loss_total": loss_total,
+            "loss_recon_total": loss_recon_total,
             "loss_rgb": loss_rgb,
             "loss_alpha": loss_alpha,
             "loss_render": loss_render,
+            "loss_render_alpha": loss_render_alpha,
             "loss_edge": loss_edge,
             "loss_gan": loss_gan,
             "loss_d": loss_d,
