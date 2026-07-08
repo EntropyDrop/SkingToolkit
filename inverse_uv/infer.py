@@ -174,6 +174,8 @@ def main():
     conditioning = load_conditioning(args, checkpoint_args, input_channels).to(device)
     with torch.no_grad():
         pred_uv = apply_uv_mask(model(conditioning)[0])
+        # Binarize alpha channel (threshold at 0.5)
+        pred_uv[3:4] = (pred_uv[3:4] > 0.5).to(dtype=pred_uv.dtype)
 
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)

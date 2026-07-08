@@ -51,7 +51,10 @@ def move_batch(batch, device):
 
 def save_preview(pred_uv, gt_uv, output_path, max_items=4):
     count = min(max_items, pred_uv.shape[0])
-    pred = apply_uv_mask(pred_uv[:count].detach().cpu())
+    pred = pred_uv[:count].clone()
+    # Binarize alpha channel (threshold at 0.5)
+    pred[:, 3:4] = (pred[:, 3:4] > 0.5).to(dtype=pred.dtype)
+    pred = apply_uv_mask(pred.detach().cpu())
     gt = apply_uv_mask(gt_uv[:count].detach().cpu())
     preview = torch.cat([pred, gt], dim=0)
     save_image(preview.clamp(0.0, 1.0), output_path, nrow=count)
