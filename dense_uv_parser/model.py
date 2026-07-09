@@ -49,8 +49,18 @@ class UpBlock(nn.Module):
 class DenseUVParserNet(nn.Module):
     """Predict dense Minecraft UV routing for each render pixel."""
 
-    def __init__(self, input_channels=4, base_channels=32, part_classes=6, face_classes=6, layer_classes=2):
+    def __init__(
+        self,
+        input_channels=4,
+        base_channels=32,
+        part_classes=6,
+        face_classes=6,
+        layer_classes=2,
+        uv_size=64,
+        uv_classification=True,
+    ):
         super().__init__()
+        self.uv_classification = uv_classification
         c = base_channels
         self.stem = ConvBlock(input_channels, c)
         self.down1 = DownBlock(c, c * 2)
@@ -69,6 +79,9 @@ class DenseUVParserNet(nn.Module):
         self.part = nn.Conv2d(c, part_classes, kernel_size=1)
         self.face = nn.Conv2d(c, face_classes, kernel_size=1)
         self.uv = nn.Conv2d(c, 2, kernel_size=1)
+        if uv_classification:
+            self.uv_x = nn.Conv2d(c, uv_size, kernel_size=1)
+            self.uv_y = nn.Conv2d(c, uv_size, kernel_size=1)
 
     def forward(self, x):
         s0 = self.stem(x)
@@ -80,15 +93,18 @@ class DenseUVParserNet(nn.Module):
         x = self.up1(x, s1)
         x = self.up0(x, s0)
         x = self.features(x)
-        return {
+        outputs = {
             "foreground": self.foreground(x),
             "layer": self.layer(x),
             "part": self.part(x),
             "face": self.face(x),
             "uv": torch.sigmoid(self.uv(x)),
         }
+        if self.uv_classification:
+            outputs["uv_x"] = self.uv_x(x)
+            outputs["uv_y"] = self.uv_y(x)
+        return outputs
 
 
 def count_parameters(model):
     return sum(param.numel() for param in model.parameters() if param.requires_grad)
-

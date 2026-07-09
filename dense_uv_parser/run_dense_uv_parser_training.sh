@@ -19,6 +19,7 @@ MAPPINGS_SIZE="${MAPPINGS_SIZE:-256x512}"
 MAPPINGS_DIR="${MAPPINGS_DIR:-../../github/differentiable_minecraft_renderer/mappings_${MAPPINGS_SIZE}}"
 VIEWS="${VIEWS:-walk_front_both_layer_ortho,walk_back_both_layer_ortho}"
 MAX_SAMPLES="${MAX_SAMPLES:-30000}"
+BASE_CHANNELS="${BASE_CHANNELS:-32}"
 BATCH_SIZE="${BATCH_SIZE:-8}"
 NUM_WORKERS="${NUM_WORKERS:-8}"
 PREFETCH_FACTOR="${PREFETCH_FACTOR:-4}"
@@ -29,7 +30,7 @@ MATMUL_PRECISION="${MATMUL_PRECISION:-high}"
 CUDNN_BENCHMARK="${CUDNN_BENCHMARK:-true}"
 LOG_EVERY="${LOG_EVERY:-50}"
 
-AUGMENT="${AUGMENT:-true}"
+AUGMENT="${AUGMENT:-false}"
 TRANSLATION_SCALE="${TRANSLATION_SCALE:-0.035}"
 SCALE_RANGE="${SCALE_RANGE:-0.035}"
 
@@ -37,7 +38,9 @@ LAMBDA_FOREGROUND="${LAMBDA_FOREGROUND:-1.0}"
 LAMBDA_LAYER="${LAMBDA_LAYER:-1.0}"
 LAMBDA_PART="${LAMBDA_PART:-0.5}"
 LAMBDA_FACE="${LAMBDA_FACE:-0.5}"
-LAMBDA_UV="${LAMBDA_UV:-5.0}"
+LAMBDA_UV="${LAMBDA_UV:-0.25}"
+LAMBDA_UV_CLASS="${LAMBDA_UV_CLASS:-1.0}"
+UV_CLASSIFICATION="${UV_CLASSIFICATION:-true}"
 
 augment_args=()
 if [[ "$AUGMENT" == "true" ]]; then
@@ -46,6 +49,12 @@ if [[ "$AUGMENT" == "true" ]]; then
     --translation_scale "$TRANSLATION_SCALE"
     --scale_range "$SCALE_RANGE"
   )
+fi
+uv_class_args=()
+if [[ "$UV_CLASSIFICATION" == "true" ]]; then
+  uv_class_args=(--uv_classification)
+else
+  uv_class_args=(--no_uv_classification)
 fi
 cudnn_args=()
 if [[ "$CUDNN_BENCHMARK" == "true" ]]; then
@@ -60,6 +69,7 @@ python train.py \
   --mappings_dir "$MAPPINGS_DIR" \
   --views "$VIEWS" \
   --max_samples "$MAX_SAMPLES" \
+  --base_channels "$BASE_CHANNELS" \
   --batch_size "$BATCH_SIZE" \
   --num_workers "$NUM_WORKERS" \
   --prefetch_factor "$PREFETCH_FACTOR" \
@@ -73,6 +83,7 @@ python train.py \
   --lambda_part "$LAMBDA_PART" \
   --lambda_face "$LAMBDA_FACE" \
   --lambda_uv "$LAMBDA_UV" \
+  --lambda_uv_class "$LAMBDA_UV_CLASS" \
   "${augment_args[@]}" \
+  "${uv_class_args[@]}" \
   "${cudnn_args[@]}"
-

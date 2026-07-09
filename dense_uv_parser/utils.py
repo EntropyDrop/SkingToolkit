@@ -214,9 +214,50 @@ def splat_predictions_to_uv_conditioning(
     bg_color=(128, 128, 128),
 ):
     """Splat parser predictions back to the 10-channel inverse_uv conditioning layout."""
+    fg = torch.sigmoid(outputs["foreground"])[:, 0] > fg_threshold
+    fg = fg & (rendered[:, 3] > 1e-4)
+    layer = outputs["layer"].argmax(dim=1)
+    flat_uv = prediction_flat_uv(outputs)
+
+    return splat_to_uv_conditioning(rendered, fg, layer, flat_uv, group_size=group_size, bg_color=bg_color)
+
+
+def prediction_flat_uv(outputs):
+    if "uv_x" in outputs and "uv_y" in outputs:
+        x = outputs["uv_x"].argmax(dim=1).clamp(0, UV_SIZE - 1)
+        y = outputs["uv_y"].argmax(dim=1).clamp(0, UV_SIZE - 1)
+    else:
+        uv = outputs["uv"].clamp(0.0, 1.0)
+        x = (uv[:, 0] * (UV_SIZE - 1)).round().long().clamp(0, UV_SIZE - 1)
+        y = (uv[:, 1] * (UV_SIZE - 1)).round().long().clamp(0, UV_SIZE - 1)
+    return y * UV_SIZE + x
+
+
+def prediction_uv01(outputs):
+    if "uv_x" in outputs and "uv_y" in outputs:
+        x = outputs["uv_x"].argmax(dim=1).to(dtype=outputs["uv"].dtype) / (UV_SIZE - 1)
+        y = outputs["uv_y"].argmax(dim=1).to(dtype=outputs["uv"].dtype) / (UV_SIZE - 1)
+        return torch.stack([x, y], dim=1)
+    return outputs["uv"].clamp(0.0, 1.0)
+
+
+def splat_targets_to_uv_conditioning(rendered, targets, group_size=1, bg_color=(128, 128, 128)):
     if rendered.dim() != 4:
         raise ValueError(f"Expected rendered tensor as NCHW, got {tuple(rendered.shape)}.")
-    N, _, H, W = rendered.shape
+    layer = targets["layer"]
+    fg = (targets["foreground"][:, 0] > 0.5) & (layer != IGNORE_INDEX) & (rendered[:, 3] > 1e-4)
+    uv = targets["uv"].clamp(0.0, 1.0)
+    x = (uv[:, 0] * (UV_SIZE - 1)).round().long().clamp(0, UV_SIZE - 1)
+    y = (uv[:, 1] * (UV_SIZE - 1)).round().long().clamp(0, UV_SIZE - 1)
+    flat_uv = y * UV_SIZE + x
+    safe_layer = torch.where(layer == IGNORE_INDEX, torch.zeros_like(layer), layer)
+    return splat_to_uv_conditioning(rendered, fg, safe_layer, flat_uv, group_size=group_size, bg_color=bg_color)
+
+
+def splat_to_uv_conditioning(rendered, fg, layer, flat_uv, group_size=1, bg_color=(128, 128, 128)):
+    if rendered.dim() != 4:
+        raise ValueError(f"Expected rendered tensor as NCHW, got {tuple(rendered.shape)}.")
+    N, _, _, _ = rendered.shape
     if N % group_size != 0:
         raise ValueError(f"N={N} must be divisible by group_size={group_size}.")
 
@@ -225,14 +266,6 @@ def splat_predictions_to_uv_conditioning(
     dtype = rendered.dtype
     accum = rendered.new_zeros(groups, LAYER_CLASSES, 4, UV_SIZE * UV_SIZE)
     counts = rendered.new_zeros(groups, LAYER_CLASSES, 1, UV_SIZE * UV_SIZE)
-
-    fg = torch.sigmoid(outputs["foreground"])[:, 0] > fg_threshold
-    fg = fg & (rendered[:, 3] > 1e-4)
-    layer = outputs["layer"].argmax(dim=1)
-    uv = outputs["uv"].clamp(0.0, 1.0)
-    x = (uv[:, 0] * (UV_SIZE - 1)).round().long().clamp(0, UV_SIZE - 1)
-    y = (uv[:, 1] * (UV_SIZE - 1)).round().long().clamp(0, UV_SIZE - 1)
-    flat_uv = y * UV_SIZE + x
 
     for item in range(N):
         group = item // group_size
@@ -266,4 +299,3 @@ def splat_predictions_to_uv_conditioning(
     alpha = torch.where(known > 0, aggregated[:, :, 3:4], torch.zeros_like(aggregated[:, :, 3:4]))
     layers = torch.cat([rgb, alpha, known], dim=2).reshape(groups, -1, UV_SIZE, UV_SIZE)
     return layers.clamp(0.0, 1.0)
-

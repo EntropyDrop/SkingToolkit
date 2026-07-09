@@ -37,10 +37,15 @@ def load_parser(checkpoint_path, device):
     checkpoint = torch.load(checkpoint_path, map_location=device)
     checkpoint_args = checkpoint.get("args", {})
     model_config = checkpoint.get("model_config", {})
+    state_dict = checkpoint["model"]
+    has_uv_classification = any(key.startswith("uv_x.") or key.startswith("uv_y.") for key in state_dict)
+    uv_classification = model_config.get("uv_classification", has_uv_classification)
     model = DenseUVParserNet(
         base_channels=model_config.get("base_channels", checkpoint_args.get("base_channels", 32)),
+        uv_size=model_config.get("uv_size", 64),
+        uv_classification=uv_classification,
     ).to(device)
-    model.load_state_dict(checkpoint["model"])
+    model.load_state_dict(state_dict)
     model.eval()
     return model, checkpoint_args
 
@@ -156,4 +161,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

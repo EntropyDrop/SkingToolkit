@@ -17,10 +17,14 @@ if str(WORKSPACE_ROOT) not in sys.path:
 from SkingToolkit.dense_uv_parser.losses import DenseUVParserLoss  # noqa: E402
 from SkingToolkit.dense_uv_parser.model import DenseUVParserNet, count_parameters  # noqa: E402
 from SkingToolkit.dense_uv_parser.utils import (  # noqa: E402
+    IGNORE_INDEX,
+    UV_SIZE,
     augment_dense_batch,
     build_dense_parser_batch,
     parse_views,
+    prediction_uv01,
     splat_predictions_to_uv_conditioning,
+    splat_targets_to_uv_conditioning,
 )
 from SkingToolkit.inverse_uv.dataset import InverseUVDataset  # noqa: E402
 from SkingToolkit.inverse_uv.train import get_device  # noqa: E402
@@ -150,35 +154,128 @@ def run_epoch(model, criterion, renderer, loader, optimizer, scaler, device, pre
             avg = format_metrics(metric_sums, sample_count)
             iterator.set_postfix(
                 total=f"{avg['loss_total']:.4f}",
-                uv=f"{avg['loss_uv']:.4f}",
-                fg=f"{avg['acc_foreground']:.3f}",
+                uv=f"{avg.get('loss_uv_l1_px', avg['loss_uv']):.2f}px",
+                uv1=f"{avg.get('acc_uv_within1', 0.0):.3f}",
+                fg=f"{avg.get('recall_foreground', avg['acc_foreground']):.3f}",
             )
 
     return format_metrics(metric_sums, sample_count)
+
+
+PART_PALETTE = (
+    (239, 83, 80),
+    (255, 202, 40),
+    (102, 187, 106),
+    (38, 166, 154),
+    (66, 165, 245),
+    (171, 71, 188),
+)
+LAYER_PALETTE = (
+    (72, 169, 166),
+    (255, 179, 71),
+)
+
+
+def bg_tensor(args, reference):
+    return reference.new_tensor(args.bg_color).view(1, 3, 1, 1) / 255.0
+
+
+def colorize_labels(labels, palette, args, reference):
+    N, H, W = labels.shape
+    bg = bg_tensor(args, reference).expand(N, 3, H, W).clone()
+    valid = labels != IGNORE_INDEX
+    if not valid.any():
+        return bg
+    palette_tensor = reference.new_tensor(palette, dtype=reference.dtype) / 255.0
+    safe_labels = labels.clamp(0, len(palette) - 1)
+    out = bg.permute(0, 2, 3, 1)
+    out[valid] = palette_tensor[safe_labels[valid]]
+    return bg
+
+
+def colorize_foreground(mask, args, reference):
+    N, H, W = mask.shape
+    bg = bg_tensor(args, reference).expand(N, 3, H, W)
+    fg = reference.new_ones(N, 3, H, W)
+    return torch.where(mask.unsqueeze(1), fg, bg)
+
+
+def colorize_uv(uv, mask, args):
+    N, _, H, W = uv.shape
+    bg = bg_tensor(args, uv).expand(N, 3, H, W)
+    zeros = uv.new_zeros(N, 1, H, W)
+    uv_rgb = torch.cat([uv[:, 0:1], uv[:, 1:2], zeros], dim=1)
+    return torch.where(mask.unsqueeze(1), uv_rgb, bg)
 
 
 def save_preview(model, renderer, loader, device, args, output_path, max_items=2):
     model.eval()
     views = parse_views(args.views)
     batch = move_batch(next(iter(loader)), device)
-    rendered, _, view_count = build_parser_inputs(batch["uv"], renderer, views, train=False, args=args)
+    rendered, targets, view_count = build_parser_inputs(batch["uv"], renderer, views, train=False, args=args)
     with torch.no_grad():
         outputs = model(rendered)
-        conditioning = splat_predictions_to_uv_conditioning(
+        pred_conditioning = splat_predictions_to_uv_conditioning(
             rendered,
             outputs,
             group_size=view_count,
             fg_threshold=args.splat_fg_threshold,
             bg_color=args.bg_color,
         )
+        gt_conditioning = splat_targets_to_uv_conditioning(
+            rendered,
+            targets,
+            group_size=view_count,
+            bg_color=args.bg_color,
+        )
 
-    count = min(max_items, conditioning.shape[0])
-    conditioning = conditioning[:count].detach().cpu()
-    # Show inner/outer RGB layers from the 10-channel conditioning.
-    inner_rgb = conditioning[:, 0:3]
-    outer_rgb = conditioning[:, 5:8]
-    preview = torch.cat([inner_rgb, outer_rgb], dim=0)
+    count = min(max_items, pred_conditioning.shape[0])
+    pred_conditioning = pred_conditioning[:count].detach().cpu()
+    gt_conditioning = gt_conditioning[:count].detach().cpu()
+    preview = torch.cat(
+        [
+            pred_conditioning[:, 0:3],
+            pred_conditioning[:, 5:8],
+            gt_conditioning[:, 0:3],
+            gt_conditioning[:, 5:8],
+        ],
+        dim=0,
+    )
     save_image(preview.clamp(0.0, 1.0), output_path, nrow=count)
+
+    debug_count = min(count * view_count, rendered.shape[0])
+    debug_outputs = {key: value[:debug_count] for key, value in outputs.items()}
+    rendered_debug = rendered[:debug_count]
+    targets_debug = {key: value[:debug_count] for key, value in targets.items()}
+    pred_fg = torch.sigmoid(debug_outputs["foreground"])[:, 0] > args.splat_fg_threshold
+    gt_fg = targets_debug["foreground"][:, 0] > 0.5
+    pred_part = torch.where(
+        pred_fg,
+        debug_outputs["part"].argmax(dim=1),
+        torch.full_like(debug_outputs["part"].argmax(dim=1), IGNORE_INDEX),
+    )
+    pred_layer = torch.where(
+        pred_fg,
+        debug_outputs["layer"].argmax(dim=1),
+        torch.full_like(debug_outputs["layer"].argmax(dim=1), IGNORE_INDEX),
+    )
+    pred_uv = prediction_uv01(debug_outputs)
+    debug_preview = torch.cat(
+        [
+            rendered_debug[:, :3],
+            colorize_foreground(pred_fg, args, rendered_debug),
+            colorize_foreground(gt_fg, args, rendered_debug),
+            colorize_labels(pred_part, PART_PALETTE, args, rendered_debug),
+            colorize_labels(targets_debug["part"], PART_PALETTE, args, rendered_debug),
+            colorize_labels(pred_layer, LAYER_PALETTE, args, rendered_debug),
+            colorize_labels(targets_debug["layer"], LAYER_PALETTE, args, rendered_debug),
+            colorize_uv(pred_uv, pred_fg, args),
+            colorize_uv(targets_debug["uv"], gt_fg, args),
+        ],
+        dim=0,
+    )
+    debug_path = output_path.with_name(f"{output_path.stem}_debug{output_path.suffix}")
+    save_image(debug_preview.clamp(0.0, 1.0).detach().cpu(), debug_path, nrow=view_count)
 
 
 def save_checkpoint(path, model, optimizer, epoch, args, metrics, best_metric=None):
@@ -192,6 +289,8 @@ def save_checkpoint(path, model, optimizer, epoch, args, metrics, best_metric=No
         "model_config": {
             "input_channels": 4,
             "base_channels": args.base_channels,
+            "uv_size": UV_SIZE,
+            "uv_classification": args.uv_classification,
         },
     }
     torch.save(checkpoint, path)
@@ -227,7 +326,10 @@ def build_arg_parser():
     parser.add_argument("--lambda_layer", type=float, default=1.0)
     parser.add_argument("--lambda_part", type=float, default=0.5)
     parser.add_argument("--lambda_face", type=float, default=0.5)
-    parser.add_argument("--lambda_uv", type=float, default=5.0)
+    parser.add_argument("--lambda_uv", type=float, default=0.25)
+    parser.add_argument("--lambda_uv_class", type=float, default=1.0)
+    parser.add_argument("--uv_classification", dest="uv_classification", action="store_true", default=True)
+    parser.add_argument("--no_uv_classification", dest="uv_classification", action="store_false")
     parser.add_argument("--grad_clip", type=float, default=1.0)
     parser.add_argument("--log_every", type=int, default=50)
     parser.add_argument("--save_every", type=int, default=1)
@@ -278,13 +380,19 @@ def main():
     if missing_views:
         raise ValueError(f"Unknown renderer views {missing_views}. Available views: {', '.join(renderer.views)}")
 
-    model = DenseUVParserNet(base_channels=args.base_channels).to(device)
+    model = DenseUVParserNet(
+        base_channels=args.base_channels,
+        uv_size=UV_SIZE,
+        uv_classification=args.uv_classification,
+    ).to(device)
     criterion = DenseUVParserLoss(
         lambda_foreground=args.lambda_foreground,
         lambda_layer=args.lambda_layer,
         lambda_part=args.lambda_part,
         lambda_face=args.lambda_face,
         lambda_uv=args.lambda_uv,
+        lambda_uv_class=args.lambda_uv_class,
+        uv_size=UV_SIZE,
     ).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scaler = build_grad_scaler(device, args.mixed_precision)
@@ -296,6 +404,7 @@ def main():
         "views": parse_views(args.views),
         "parameters": count_parameters(model),
         "device": str(device),
+        "uv_classification": args.uv_classification,
     }
     with open(output_dir / "config.json", "w", encoding="utf-8") as handle:
         json.dump({"args": vars(args), "metadata": metadata}, handle, indent=2)
@@ -333,4 +442,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

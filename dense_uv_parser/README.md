@@ -28,12 +28,20 @@ The trainer derives supervision from renderer mappings, so no manual labels are 
 - body part: head/body/arms/legs
 - face index within the part
 - continuous UV coordinate in the 64x64 Minecraft skin
+- discrete UV x/y texel classes, used for sharper splatting
 
-Parser training defaults to mild render-space translation/scale augmentation so it can handle slightly deformed or misaligned inputs:
+Parser training defaults to no augmentation so the model first learns the exact canonical mapping. After the clean parser preview is stable, enable mild render-space translation/scale augmentation for a second run if you need slightly deformed or misaligned inputs:
 
 ```bash
 AUGMENT=true TRANSLATION_SCALE=0.035 SCALE_RANGE=0.035 ./run_dense_uv_parser_training.sh
 ```
+
+Training previews are saved under `runs/<run>/previews`:
+
+- `epoch_XXXX.png`: predicted inner/outer RGB rows, followed by GT inner/outer RGB rows.
+- `epoch_XXXX_debug.png`: rendered input, predicted/GT foreground, predicted/GT part, predicted/GT layer, and predicted/GT UV color maps.
+
+For good parser splatting, watch `acc_uv_exact`, `acc_uv_within1`, and `loss_uv_l1_px`. High part/layer accuracy alone can still produce fragmented RGB if UV is off by a few texels.
 
 ## Infer With Inpaint
 
@@ -57,4 +65,3 @@ python infer.py \
 ```
 
 The conditioning preview shows the predicted inner-layer RGB row and outer-layer RGB row.
-
