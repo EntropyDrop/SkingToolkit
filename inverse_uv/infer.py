@@ -13,7 +13,7 @@ if str(WORKSPACE_ROOT) not in sys.path:
     sys.path.insert(0, str(WORKSPACE_ROOT))
 
 from SkingToolkit.inverse_uv.dataset import (  # noqa: E402
-    apply_uv_mask,
+    finalize_minecraft_alpha,
     parse_views,
     tensor_to_rgba_image,
     unproject_renders_to_uv,
@@ -137,8 +137,14 @@ def build_arg_parser():
     parser.add_argument("--output", required=True, help="Output RGBA UV PNG path.")
     parser.add_argument("--front", default=None, help="Front render image.")
     parser.add_argument("--back", default=None, help="Back render image.")
-    parser.add_argument("--combined", default=None, help="Combined side-by-side front/back image.")
+    parser.add_argument("--combined", default=None, help="Combined side-by-side image matching checkpoint view order.")
     parser.add_argument("--view_images", nargs="*", default=None, help="Images matching checkpoint view order.")
+    parser.add_argument("--alpha_threshold", type=float, default=0.5, help="Threshold used to binarize predicted alpha.")
+    parser.add_argument(
+        "--no_enforce_base_alpha",
+        action="store_true",
+        help="Do not force the Minecraft base layer alpha to opaque in the saved PNG.",
+    )
     parser.add_argument("--mappings_dir", default=None, help="Override renderer mappings directory from checkpoint.")
     parser.add_argument(
         "--unproject_mode",
@@ -173,9 +179,11 @@ def main():
 
     conditioning = load_conditioning(args, checkpoint_args, input_channels).to(device)
     with torch.no_grad():
-        pred_uv = apply_uv_mask(model(conditioning)[0])
-        # Binarize alpha channel (threshold at 0.5)
-        pred_uv[3:4] = (pred_uv[3:4] > 0.5).to(dtype=pred_uv.dtype)
+        pred_uv = finalize_minecraft_alpha(
+            model(conditioning)[0],
+            alpha_threshold=args.alpha_threshold,
+            enforce_base_alpha=not args.no_enforce_base_alpha,
+        )
 
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)

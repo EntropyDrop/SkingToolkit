@@ -15,7 +15,7 @@ WORKSPACE_ROOT = TOOLKIT_ROOT.parent
 if str(WORKSPACE_ROOT) not in sys.path:
     sys.path.insert(0, str(WORKSPACE_ROOT))
 
-from SkingToolkit.inverse_uv.dataset import InverseUVDataset, apply_uv_mask, build_conditioning, RenderAugmenter, parse_views  # noqa: E402
+from SkingToolkit.inverse_uv.dataset import InverseUVDataset, build_conditioning, finalize_minecraft_alpha, RenderAugmenter, parse_views  # noqa: E402
 from SkingToolkit.inverse_uv.losses import InverseUVLoss  # noqa: E402
 from SkingToolkit.inverse_uv.model import InverseUVNet, PatchGANDiscriminator, count_parameters  # noqa: E402
 
@@ -58,11 +58,8 @@ def move_batch(batch, device):
 
 def save_preview(pred_uv, gt_uv, output_path, max_items=4):
     count = min(max_items, pred_uv.shape[0])
-    pred = pred_uv[:count].clone()
-    # Binarize alpha channel (threshold at 0.5)
-    pred[:, 3:4] = (pred[:, 3:4] > 0.5).to(dtype=pred.dtype)
-    pred = apply_uv_mask(pred.detach().cpu())
-    gt = apply_uv_mask(gt_uv[:count].detach().cpu())
+    pred = finalize_minecraft_alpha(pred_uv[:count].detach().cpu())
+    gt = finalize_minecraft_alpha(gt_uv[:count].detach().cpu())
     preview = torch.cat([pred, gt], dim=0)
     save_image(preview.clamp(0.0, 1.0), output_path, nrow=count)
 

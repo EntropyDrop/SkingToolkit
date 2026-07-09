@@ -150,6 +150,14 @@ def load_skin(path, bg_color=(128, 128, 128), normalize_model=True):
 
 
 def load_uv_mask():
+    masks = load_uv_masks()
+    if masks is None:
+        return None
+    base_mask, decor_mask = masks
+    return torch.maximum(base_mask, decor_mask)
+
+
+def load_uv_masks():
     mask_path = Path(__file__).resolve().parent / "skin-mask.png"
     decor_mask_path = Path(__file__).resolve().parent / "skin-decor-mask.png"
     if not mask_path.exists() or not decor_mask_path.exists():
@@ -157,8 +165,9 @@ def load_uv_mask():
 
     skin_mask = np.array(Image.open(mask_path).convert("RGBA"))
     skin_decor_mask = np.array(Image.open(decor_mask_path).convert("RGBA"))
-    valid_mask = (skin_mask[:, :, 3] > 0) | (skin_decor_mask[:, :, 3] > 0)
-    return torch.from_numpy(valid_mask).float().unsqueeze(0)
+    base_mask = torch.from_numpy(skin_mask[:, :, 3] > 0).float().unsqueeze(0)
+    decor_mask = torch.from_numpy(skin_decor_mask[:, :, 3] > 0).float().unsqueeze(0)
+    return base_mask, decor_mask
 
 
 def apply_uv_mask(tensor):
@@ -180,6 +189,41 @@ def apply_uv_mask(tensor):
         out = tensor.clone()
         out[:3] = out[:3] * uv_mask
         out[3:4] = out[3:4] * uv_mask
+        return out
+    raise ValueError(f"Expected CHW or NCHW tensor, got shape {tuple(tensor.shape)}.")
+
+
+def finalize_minecraft_alpha(tensor, alpha_threshold=0.5, enforce_base_alpha=True):
+    if tensor.shape[-3] != 4:
+        raise ValueError(f"Expected RGBA tensor with 4 channels, got shape {tuple(tensor.shape)}.")
+
+    masks = load_uv_masks()
+    if masks is None:
+        out = tensor.clone()
+        out[..., 3:4, :, :] = (out[..., 3:4, :, :] > alpha_threshold).to(dtype=out.dtype)
+        return out
+
+    base_mask, decor_mask = masks
+    valid_mask = torch.maximum(base_mask, decor_mask)
+    base_mask = base_mask.to(device=tensor.device, dtype=tensor.dtype)
+    valid_mask = valid_mask.to(device=tensor.device, dtype=tensor.dtype)
+
+    out = tensor.clone()
+    if tensor.dim() == 4:
+        base_mask = base_mask.unsqueeze(0)
+        valid_mask = valid_mask.unsqueeze(0)
+        alpha = (out[:, 3:4] > alpha_threshold).to(dtype=out.dtype)
+        if enforce_base_alpha:
+            alpha = torch.where(base_mask > 0, torch.ones_like(alpha), alpha)
+        out[:, :3] = out[:, :3] * valid_mask
+        out[:, 3:4] = alpha * valid_mask
+        return out
+    if tensor.dim() == 3:
+        alpha = (out[3:4] > alpha_threshold).to(dtype=out.dtype)
+        if enforce_base_alpha:
+            alpha = torch.where(base_mask > 0, torch.ones_like(alpha), alpha)
+        out[:3] = out[:3] * valid_mask
+        out[3:4] = alpha * valid_mask
         return out
     raise ValueError(f"Expected CHW or NCHW tensor, got shape {tuple(tensor.shape)}.")
 

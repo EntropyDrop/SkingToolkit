@@ -18,6 +18,7 @@ fi
 DATA_DIR="${DATA_DIR:-../skins}"
 MAPPINGS_SIZE="${MAPPINGS_SIZE:-256x512}"
 MAPPINGS_DIR="${MAPPINGS_DIR:-../../github/differentiable_minecraft_renderer/mappings_${MAPPINGS_SIZE}}"
+VIEWS="${VIEWS:-walk_front_both_layer_ortho,walk_back_both_layer_ortho}"
 MAX_SAMPLES="${MAX_SAMPLES:-30000}"
 BATCH_SIZE="${BATCH_SIZE:-32}"
 NUM_WORKERS="${NUM_WORKERS:-16}"
@@ -36,7 +37,7 @@ MIN_LR="${MIN_LR:-1e-5}"
 LOG_EVERY="${LOG_EVERY:-50}"
 
 # --- Augmentation (pose robustness) ---
-AUGMENT="${AUGMENT:-true}"
+AUGMENT="${AUGMENT:-false}"
 TRANSLATION_SCALE="${TRANSLATION_SCALE:-0.015}"
 SCALE_RANGE="${SCALE_RANGE:-0.015}"
 PERSPECTIVE_SCALE="${PERSPECTIVE_SCALE:-0.0}"
@@ -84,7 +85,7 @@ python train.py \
   --data_dir "$DATA_DIR" \
   --max_samples "$MAX_SAMPLES" \
   --output_dir "runs/$RUN_NAME" \
-  --views walk_front_both_layer_ortho,walk_back_both_layer_ortho \
+  --views "$VIEWS" \
   --batch_size "$BATCH_SIZE" \
   --num_workers "$NUM_WORKERS" \
   --prefetch_factor "$PREFETCH_FACTOR" \

@@ -47,7 +47,13 @@ Recommended first-stage training is color-first and edge-heavy:
 ./run_inverse_uv_training.sh
 ```
 
-The shell script defaults to `LAMBDA_GAN=0`, `LAMBDA_RGB=2.0`, `LAMBDA_ALPHA=0.8`, `LAMBDA_ALPHA_DICE=0.5`, `LAMBDA_ALPHA_EDGE=0.5`, `LAMBDA_RENDER=0.2`, `LAMBDA_RENDER_ALPHA=0.4`, `LAMBDA_EDGE=1.0`, and `EPOCHS=30`. This avoids early GAN color drift while pushing visible RGB, alpha stability, and UV pixel boundaries harder.
+The shell script defaults to the original two fixed `view_images`:
+
+```text
+walk_front_both_layer_ortho,walk_back_both_layer_ortho
+```
+
+It also defaults to `AUGMENT=false`, `LAMBDA_GAN=0`, `LAMBDA_RGB=2.0`, `LAMBDA_ALPHA=0.8`, `LAMBDA_ALPHA_DICE=0.5`, `LAMBDA_ALPHA_EDGE=0.5`, `LAMBDA_RENDER=0.2`, `LAMBDA_RENDER_ALPHA=0.4`, `LAMBDA_EDGE=1.0`, and `EPOCHS=30`. This avoids early GAN color drift, keeps fixed-view edges crisp, and pushes visible RGB, alpha stability, and UV pixel boundaries harder without changing the inference input contract.
 
 For a short sharpening finetune after the first run, resume from the best checkpoint with a very small GAN weight:
 
@@ -92,7 +98,8 @@ Useful knobs:
 
 Performance notes:
 
-- `run_inverse_uv_training.sh` defaults `PERSPECTIVE_SCALE=0.0` so augmentation stays on the batched affine path. Re-enable perspective only when the extra pose robustness is worth the slower per-sample transform.
+- `run_inverse_uv_training.sh` defaults `AUGMENT=false` for the sharpest fixed-view reconstruction. Set `AUGMENT=true` only when inference inputs are expected to be misaligned or pose-jittered.
+- If augmentation is enabled, `PERSPECTIVE_SCALE=0.0` keeps it on the batched affine path. Re-enable perspective only when the extra pose robustness is worth the slower per-sample transform.
 - For lower console overhead on fast GPUs, raise `LOG_EVERY` (for example `LOG_EVERY=100`).
 
 ## Infer
@@ -100,7 +107,7 @@ Performance notes:
 ```bash
 python SkingToolkit/inverse_uv/infer.py \
   --checkpoint runs/inverse_uv_static/best.pt \
-  --view_images /path/to/static_front.png /path/to/static_back.png /path/to/top_front_45.png /path/to/top_back_45.png \
+  --view_images /path/to/walk_front_both.png /path/to/walk_back_both.png \
   --output /path/to/pred_uv.png
 ```
 
@@ -112,6 +119,8 @@ python SkingToolkit/inverse_uv/infer.py \
   --combined /path/to/combined_views.png \
   --output /path/to/pred_uv.png
 ```
+
+Inference binarizes alpha and, by default, forces the Minecraft base layer to opaque before saving. This prevents small alpha errors from creating transparent holes in the core body layer. Use `--no_enforce_base_alpha` only for nonstandard skins where the base layer is intentionally transparent.
 
 ## Generate Render Pairs
 
