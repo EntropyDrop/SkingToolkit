@@ -15,7 +15,7 @@ WORKSPACE_ROOT = TOOLKIT_ROOT.parent
 if str(WORKSPACE_ROOT) not in sys.path:
     sys.path.insert(0, str(WORKSPACE_ROOT))
 
-from SkingToolkit.inverse_uv.dataset import InverseUVDataset, build_conditioning, finalize_minecraft_alpha, RenderAugmenter, parse_views  # noqa: E402
+from SkingToolkit.inverse_uv.dataset import InverseUVDataset, finalize_minecraft_alpha, RenderAugmenter, parse_views  # noqa: E402
 from SkingToolkit.inverse_uv.losses import InverseUVLoss  # noqa: E402
 from SkingToolkit.inverse_uv.model import InverseUVNet, PatchGANDiscriminator, count_parameters  # noqa: E402
 from SkingToolkit.dense_uv_parser.model import DenseUVParserNet  # noqa: E402
@@ -164,37 +164,24 @@ def build_training_conditioning(
     skin,
     renderer,
     views,
-    conditioning_source,
-    dense_parser=None,
+    dense_parser,
     augmenter=None,
-    unproject_mode="mean",
     parser_splat_fg_threshold=0.5,
     bg_color=(128, 128, 128),
     return_renders=False,
 ):
-    if conditioning_source == "uv_unproject":
-        return build_conditioning(
-            skin,
-            renderer,
-            views,
-            augmenter=augmenter,
-            unproject_mode=unproject_mode,
-            return_renders=return_renders,
-        )
-    if conditioning_source == "dense_parser":
-        if dense_parser is None:
-            raise ValueError("conditioning_source='dense_parser' requires --parser_checkpoint.")
-        return build_dense_parser_conditioning(
-            skin,
-            renderer,
-            views,
-            dense_parser,
-            augmenter=augmenter,
-            fg_threshold=parser_splat_fg_threshold,
-            bg_color=bg_color,
-            return_renders=return_renders,
-        )
-    raise ValueError(f"Unsupported conditioning_source={conditioning_source!r}.")
+    if dense_parser is None:
+        raise ValueError("Dense parser conditioning requires --parser_checkpoint.")
+    return build_dense_parser_conditioning(
+        skin,
+        renderer,
+        views,
+        dense_parser,
+        augmenter=augmenter,
+        fg_threshold=parser_splat_fg_threshold,
+        bg_color=bg_color,
+        return_renders=return_renders,
+    )
 
 
 def run_epoch(
@@ -209,8 +196,6 @@ def run_epoch(
     d_optimizer=None,
     views=None,
     augmenter=None,
-    unproject_mode="mean",
-    conditioning_source="uv_unproject",
     dense_parser=None,
     parser_splat_fg_threshold=0.5,
     bg_color=(128, 128, 128),
@@ -237,10 +222,8 @@ def run_epoch(
                 batch["uv"],
                 criterion.renderer,
                 views,
-                conditioning_source,
                 dense_parser=dense_parser,
                 augmenter=batch_augmenter,
-                unproject_mode=unproject_mode,
                 parser_splat_fg_threshold=parser_splat_fg_threshold,
                 bg_color=bg_color,
                 return_renders=True,
@@ -414,21 +397,9 @@ def build_arg_parser():
         help="GT outer-layer alpha threshold used to ignore matching covered inner-layer UV texels.",
     )
     parser.add_argument(
-        "--unproject_mode",
-        choices=["mode", "mean", "medoid"],
-        default="mean",
-        help="Method to aggregate render pixels into 64x64 UV texels ('mode'=most frequent color, 'mean'=average, 'medoid'=spatial median).",
-    )
-    parser.add_argument(
-        "--conditioning_source",
-        choices=["uv_unproject", "dense_parser"],
-        default="uv_unproject",
-        help="Conditioning generator. Use dense_parser to train inpaint on parser+splat conditioning.",
-    )
-    parser.add_argument(
         "--parser_checkpoint",
         default=None,
-        help="Dense UV parser checkpoint required when --conditioning_source=dense_parser.",
+        help="Dense UV parser checkpoint used to generate inpaint conditioning.",
     )
     parser.add_argument(
         "--parser_splat_fg_threshold",
@@ -476,7 +447,7 @@ class Logger(object):
 
 def main():
     args = build_arg_parser().parse_args()
-    args.conditioning_mode = "dense_parser_inpaint" if args.conditioning_source == "dense_parser" else "uv_unproject_inpaint"
+    args.conditioning_mode = "dense_parser_inpaint"
     torch.manual_seed(args.seed)
 
     output_dir = Path(args.output_dir)
@@ -489,18 +460,15 @@ def main():
 
     device = get_device(args.device)
     configure_torch(args, device)
-    dense_parser = None
-    parser_checkpoint_args = None
-    if args.conditioning_source == "dense_parser":
-        if not args.parser_checkpoint:
-            raise ValueError("--parser_checkpoint is required when --conditioning_source=dense_parser.")
-        dense_parser, parser_checkpoint_args = load_dense_parser(args.parser_checkpoint, device)
-        parser_views = parse_views(parser_checkpoint_args.get("views", ""))
-        if parser_views and parser_views != parse_views(args.views):
-            raise ValueError(
-                "Parser checkpoint views do not match inverse_uv training views: "
-                f"parser={parser_views}, inverse_uv={parse_views(args.views)}"
-            )
+    if not args.parser_checkpoint:
+        raise ValueError("--parser_checkpoint is required for inverse UV training.")
+    dense_parser, parser_checkpoint_args = load_dense_parser(args.parser_checkpoint, device)
+    parser_views = parse_views(parser_checkpoint_args.get("views", ""))
+    if parser_views and parser_views != parse_views(args.views):
+        raise ValueError(
+            "Parser checkpoint views do not match inverse_uv training views: "
+            f"parser={parser_views}, inverse_uv={parse_views(args.views)}"
+        )
 
     dataset = InverseUVDataset(
         data_dir=args.data_dir,
@@ -509,7 +477,6 @@ def main():
         image_size=args.render_size,
         include_alpha=args.include_alpha,
         max_samples=args.max_samples,
-        unproject_mode=args.unproject_mode,
         augment=args.augment,
         translation_scale=args.translation_scale,
         scale_range=args.scale_range,
@@ -625,11 +592,10 @@ def main():
         "val_samples": len(val_dataset) if val_dataset is not None else 0,
         "input_channels": input_channels,
         "conditioning_mode": args.conditioning_mode,
-        "conditioning_source": args.conditioning_source,
+        "conditioning_source": "dense_parser",
         "parser_checkpoint": args.parser_checkpoint,
         "parser_splat_fg_threshold": args.parser_splat_fg_threshold,
         "parser_checkpoint_views": parse_views(parser_checkpoint_args.get("views", "")) if parser_checkpoint_args else None,
-        "unproject_mode": args.unproject_mode,
         "best_metric": args.best_metric,
         "scheduler": args.scheduler,
         "min_lr": args.min_lr,
@@ -661,7 +627,6 @@ def main():
         train_metrics = run_epoch(
             model, criterion, train_loader, optimizer, scaler, device, args.mixed_precision,
             train=True, d_optimizer=d_optimizer, views=views, augmenter=augmenter,
-            unproject_mode=args.unproject_mode, conditioning_source=args.conditioning_source,
             dense_parser=dense_parser, parser_splat_fg_threshold=args.parser_splat_fg_threshold,
             bg_color=dataset.bg_color, log_every=args.log_every,
         )
@@ -671,7 +636,6 @@ def main():
                 val_metrics = run_epoch(
                     model, criterion, val_loader, optimizer, scaler, device, args.mixed_precision,
                     train=False, d_optimizer=None, views=views, augmenter=None,
-                    unproject_mode=args.unproject_mode, conditioning_source=args.conditioning_source,
                     dense_parser=dense_parser, parser_splat_fg_threshold=args.parser_splat_fg_threshold,
                     bg_color=dataset.bg_color, log_every=args.log_every,
                 )
@@ -701,10 +665,8 @@ def main():
                     preview_batch["uv"],
                     criterion.renderer,
                     views,
-                    args.conditioning_source,
                     dense_parser=dense_parser,
                     augmenter=None,
-                    unproject_mode=args.unproject_mode,
                     parser_splat_fg_threshold=args.parser_splat_fg_threshold,
                     bg_color=dataset.bg_color,
                 )

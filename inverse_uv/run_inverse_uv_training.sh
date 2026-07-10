@@ -58,8 +58,6 @@ RESUME_LR="${RESUME_LR:-}"
 MIXED_PRECISION="${MIXED_PRECISION:-bf16}"
 MATMUL_PRECISION="${MATMUL_PRECISION:-high}"
 CUDNN_BENCHMARK="${CUDNN_BENCHMARK:-true}"
-UNPROJECT_MODE="${UNPROJECT_MODE:-mean}"
-CONDITIONING_SOURCE="${CONDITIONING_SOURCE:-uv_unproject}"
 BEST_METRIC="${BEST_METRIC:-loss_recon_total}"
 SCHEDULER="${SCHEDULER:-cosine}"
 MIN_LR="${MIN_LR:-1e-5}"
@@ -100,21 +98,18 @@ resume_lr_args=()
 if [[ -n "$RESUME_LR" ]]; then
   resume_lr_args=(--resume_lr "$RESUME_LR")
 fi
-conditioning_args=(--conditioning_source "$CONDITIONING_SOURCE")
-if [[ "$CONDITIONING_SOURCE" == "dense_parser" ]]; then
-  if [[ -z "$PARSER_CHECKPOINT" ]]; then
-    PARSER_CHECKPOINT="$(find_latest_checkpoint "$PARSER_RUNS_DIR" "$PARSER_RUN_PREFIX" "$PARSER_CHECKPOINT_NAME")"
-  fi
-  if [[ -z "$PARSER_CHECKPOINT" ]]; then
-    echo "No parser checkpoint found under ${PARSER_RUNS_DIR}/${PARSER_RUN_PREFIX}*/${PARSER_CHECKPOINT_NAME}." >&2
-    echo "Train one in ../dense_uv_parser first or set PARSER_CHECKPOINT=/path/to/best.pt." >&2
-    exit 1
-  fi
-  conditioning_args+=(
-    --parser_checkpoint "$PARSER_CHECKPOINT"
-    --parser_splat_fg_threshold "$PARSER_SPLAT_FG_THRESHOLD"
-  )
+if [[ -z "$PARSER_CHECKPOINT" ]]; then
+  PARSER_CHECKPOINT="$(find_latest_checkpoint "$PARSER_RUNS_DIR" "$PARSER_RUN_PREFIX" "$PARSER_CHECKPOINT_NAME")"
 fi
+if [[ -z "$PARSER_CHECKPOINT" ]]; then
+  echo "No parser checkpoint found under ${PARSER_RUNS_DIR}/${PARSER_RUN_PREFIX}*/${PARSER_CHECKPOINT_NAME}." >&2
+  echo "Train one in ../dense_uv_parser first or set PARSER_CHECKPOINT=/path/to/best.pt." >&2
+  exit 1
+fi
+conditioning_args=(
+  --parser_checkpoint "$PARSER_CHECKPOINT"
+  --parser_splat_fg_threshold "$PARSER_SPLAT_FG_THRESHOLD"
+)
 
 augment_args=()
 if [[ "$AUGMENT" == "true" ]]; then
@@ -148,7 +143,6 @@ python train.py \
   --preview_every 1 \
   --mixed_precision "$MIXED_PRECISION" \
   --matmul_precision "$MATMUL_PRECISION" \
-  --unproject_mode "$UNPROJECT_MODE" \
   ${conditioning_args[@]+"${conditioning_args[@]}"} \
   --best_metric "$BEST_METRIC" \
   --scheduler "$SCHEDULER" \

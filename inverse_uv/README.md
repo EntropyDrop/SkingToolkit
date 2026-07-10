@@ -67,6 +67,7 @@ Use the actual run folder name in `RESUME`. Avoid jumping straight back to `LAMB
 python SkingToolkit/inverse_uv/train.py \
   --data_dir /path/to/gt_skins \
   --output_dir runs/inverse_uv_static \
+  --parser_checkpoint ../dense_uv_parser/runs/dense_uv_parser_v1/best.pt \
   --views static_front,static_back,top_front_45,top_back_45 \
   --batch_size 16 \
   --epochs 20
@@ -74,7 +75,6 @@ python SkingToolkit/inverse_uv/train.py \
 
 Useful knobs:
 
-- `--unproject_mode`: aggregation method for render pixels unprojected into 64x64 UV texels (`mean`=average, `mode`=most frequent 8-bit color, `medoid`=spatial median). Batched training currently supports `mean`; `mode`/`medoid` are for unbatched inference or debugging.
 - `--best_metric`: checkpoint selection metric. Defaults to `loss_recon_total` so `best.pt` is not dominated by GAN oscillation.
 - `--scheduler` / `--min_lr`: optional learning-rate scheduler controls. The training shell script defaults to cosine decay.
 - `--log_every`: progress-bar metric sync interval in batches. Larger values reduce GPU/CPU synchronization overhead.
@@ -104,16 +104,15 @@ Performance notes:
 
 ### Train Inpaint From Dense Parser Conditioning
 
-If inference uses `dense_uv_parser/infer.py`, train or finetune the inpaint model on parser-generated conditioning so the training and inference distributions match:
+Inverse UV training always uses parser-generated conditioning, matching `dense_uv_parser/infer.py` at inference time:
 
 ```bash
-CONDITIONING_SOURCE=dense_parser ./run_inverse_uv_training.sh
+./run_inverse_uv_training.sh
 ```
 
 This automatically finds the newest `../dense_uv_parser/runs/dense_uv_parser_v*/best.pt`. To finetune from an existing inverse_uv checkpoint:
 
 ```bash
-CONDITIONING_SOURCE=dense_parser \
 RESUME=runs/inverse_uv_full_v34/best.pt \
 RESUME_LR=5e-5 \
 EPOCHS=15 \
@@ -124,7 +123,6 @@ Override parser selection with:
 
 ```bash
 PARSER_CHECKPOINT=../dense_uv_parser/runs/dense_uv_parser_v3/best.pt \
-CONDITIONING_SOURCE=dense_parser \
 ./run_inverse_uv_training.sh
 ```
 
