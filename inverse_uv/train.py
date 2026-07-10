@@ -18,6 +18,8 @@ if str(WORKSPACE_ROOT) not in sys.path:
 from SkingToolkit.inverse_uv.dataset import InverseUVDataset, build_conditioning, finalize_minecraft_alpha, RenderAugmenter, parse_views  # noqa: E402
 from SkingToolkit.inverse_uv.losses import InverseUVLoss  # noqa: E402
 from SkingToolkit.inverse_uv.model import InverseUVNet, PatchGANDiscriminator, count_parameters  # noqa: E402
+from SkingToolkit.dense_uv_parser.model import DenseUVParserNet  # noqa: E402
+from SkingToolkit.dense_uv_parser.utils import splat_predictions_to_uv_conditioning  # noqa: E402
 
 try:
     from tqdm import tqdm
@@ -96,6 +98,105 @@ def build_scheduler(optimizer, args, start_epoch):
     raise ValueError(f"Unsupported scheduler={args.scheduler!r}.")
 
 
+def load_dense_parser(checkpoint_path, device):
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    checkpoint_args = checkpoint.get("args", {})
+    model_config = checkpoint.get("model_config", {})
+    state_dict = checkpoint["model"]
+    has_uv_classification = any(key.startswith("uv_x.") or key.startswith("uv_y.") for key in state_dict)
+    uv_classification = model_config.get("uv_classification", has_uv_classification)
+    model = DenseUVParserNet(
+        base_channels=model_config.get("base_channels", checkpoint_args.get("base_channels", 32)),
+        uv_size=model_config.get("uv_size", 64),
+        uv_classification=uv_classification,
+    ).to(device)
+    model.load_state_dict(state_dict)
+    model.eval()
+    for param in model.parameters():
+        param.requires_grad_(False)
+    return model, checkpoint_args
+
+
+def build_dense_parser_conditioning(
+    skin,
+    renderer,
+    views,
+    dense_parser,
+    augmenter=None,
+    fg_threshold=0.5,
+    bg_color=(128, 128, 128),
+    return_renders=False,
+):
+    """Build inverse_uv conditioning through the same parser+splat path used at inference."""
+    is_batched = skin.dim() == 4
+    skin_batch = skin if is_batched else skin.unsqueeze(0)
+
+    rendered_by_view = []
+    gt_renders = {} if return_renders else None
+    with torch.no_grad():
+        for view in views:
+            clean_render = renderer.forward_view(skin_batch, view)
+            if return_renders:
+                gt_renders[view] = clean_render if is_batched else clean_render.squeeze(0)
+            parser_render = augmenter(clean_render) if augmenter is not None else clean_render
+            rendered_by_view.append(parser_render)
+
+        rendered = torch.stack(rendered_by_view, dim=1)
+        B, V, C, H, W = rendered.shape
+        rendered = rendered.reshape(B * V, C, H, W)
+        outputs = dense_parser(rendered)
+        conditioning = splat_predictions_to_uv_conditioning(
+            rendered,
+            outputs,
+            group_size=V,
+            fg_threshold=fg_threshold,
+            bg_color=bg_color,
+        )
+
+    if not is_batched:
+        conditioning = conditioning.squeeze(0)
+    if return_renders:
+        return conditioning, gt_renders
+    return conditioning
+
+
+def build_training_conditioning(
+    skin,
+    renderer,
+    views,
+    conditioning_source,
+    dense_parser=None,
+    augmenter=None,
+    unproject_mode="mean",
+    parser_splat_fg_threshold=0.5,
+    bg_color=(128, 128, 128),
+    return_renders=False,
+):
+    if conditioning_source == "uv_unproject":
+        return build_conditioning(
+            skin,
+            renderer,
+            views,
+            augmenter=augmenter,
+            unproject_mode=unproject_mode,
+            return_renders=return_renders,
+        )
+    if conditioning_source == "dense_parser":
+        if dense_parser is None:
+            raise ValueError("conditioning_source='dense_parser' requires --parser_checkpoint.")
+        return build_dense_parser_conditioning(
+            skin,
+            renderer,
+            views,
+            dense_parser,
+            augmenter=augmenter,
+            fg_threshold=parser_splat_fg_threshold,
+            bg_color=bg_color,
+            return_renders=return_renders,
+        )
+    raise ValueError(f"Unsupported conditioning_source={conditioning_source!r}.")
+
+
 def run_epoch(
     model,
     criterion,
@@ -109,6 +210,10 @@ def run_epoch(
     views=None,
     augmenter=None,
     unproject_mode="mean",
+    conditioning_source="uv_unproject",
+    dense_parser=None,
+    parser_splat_fg_threshold=0.5,
+    bg_color=(128, 128, 128),
     log_every=50,
 ):
     model.train(train)
@@ -128,12 +233,16 @@ def run_epoch(
         # Build conditioning on GPU (fast grid_sample vs CPU in DataLoader workers)
         with torch.no_grad():
             batch_augmenter = augmenter if train else None
-            result = build_conditioning(
+            result = build_training_conditioning(
                 batch["uv"],
                 criterion.renderer,
                 views,
+                conditioning_source,
+                dense_parser=dense_parser,
                 augmenter=batch_augmenter,
                 unproject_mode=unproject_mode,
+                parser_splat_fg_threshold=parser_splat_fg_threshold,
+                bg_color=bg_color,
                 return_renders=True,
             )
             conditioning, gt_renders = result
@@ -311,6 +420,23 @@ def build_arg_parser():
         help="Method to aggregate render pixels into 64x64 UV texels ('mode'=most frequent color, 'mean'=average, 'medoid'=spatial median).",
     )
     parser.add_argument(
+        "--conditioning_source",
+        choices=["uv_unproject", "dense_parser"],
+        default="uv_unproject",
+        help="Conditioning generator. Use dense_parser to train inpaint on parser+splat conditioning.",
+    )
+    parser.add_argument(
+        "--parser_checkpoint",
+        default=None,
+        help="Dense UV parser checkpoint required when --conditioning_source=dense_parser.",
+    )
+    parser.add_argument(
+        "--parser_splat_fg_threshold",
+        type=float,
+        default=0.5,
+        help="Foreground threshold used when splatting dense parser predictions.",
+    )
+    parser.add_argument(
         "--best_metric",
         default="loss_recon_total",
         help="Metric key used to select best.pt. Defaults to reconstruction loss without GAN.",
@@ -350,7 +476,7 @@ class Logger(object):
 
 def main():
     args = build_arg_parser().parse_args()
-    args.conditioning_mode = "uv_unproject_inpaint"
+    args.conditioning_mode = "dense_parser_inpaint" if args.conditioning_source == "dense_parser" else "uv_unproject_inpaint"
     torch.manual_seed(args.seed)
 
     output_dir = Path(args.output_dir)
@@ -363,6 +489,19 @@ def main():
 
     device = get_device(args.device)
     configure_torch(args, device)
+    dense_parser = None
+    parser_checkpoint_args = None
+    if args.conditioning_source == "dense_parser":
+        if not args.parser_checkpoint:
+            raise ValueError("--parser_checkpoint is required when --conditioning_source=dense_parser.")
+        dense_parser, parser_checkpoint_args = load_dense_parser(args.parser_checkpoint, device)
+        parser_views = parse_views(parser_checkpoint_args.get("views", ""))
+        if parser_views and parser_views != parse_views(args.views):
+            raise ValueError(
+                "Parser checkpoint views do not match inverse_uv training views: "
+                f"parser={parser_views}, inverse_uv={parse_views(args.views)}"
+            )
+
     dataset = InverseUVDataset(
         data_dir=args.data_dir,
         mappings_dir=args.mappings_dir,
@@ -485,7 +624,11 @@ def main():
         "train_samples": len(train_dataset),
         "val_samples": len(val_dataset) if val_dataset is not None else 0,
         "input_channels": input_channels,
-        "conditioning_mode": "uv_unproject_inpaint",
+        "conditioning_mode": args.conditioning_mode,
+        "conditioning_source": args.conditioning_source,
+        "parser_checkpoint": args.parser_checkpoint,
+        "parser_splat_fg_threshold": args.parser_splat_fg_threshold,
+        "parser_checkpoint_views": parse_views(parser_checkpoint_args.get("views", "")) if parser_checkpoint_args else None,
         "unproject_mode": args.unproject_mode,
         "best_metric": args.best_metric,
         "scheduler": args.scheduler,
@@ -518,7 +661,9 @@ def main():
         train_metrics = run_epoch(
             model, criterion, train_loader, optimizer, scaler, device, args.mixed_precision,
             train=True, d_optimizer=d_optimizer, views=views, augmenter=augmenter,
-            unproject_mode=args.unproject_mode, log_every=args.log_every,
+            unproject_mode=args.unproject_mode, conditioning_source=args.conditioning_source,
+            dense_parser=dense_parser, parser_splat_fg_threshold=args.parser_splat_fg_threshold,
+            bg_color=dataset.bg_color, log_every=args.log_every,
         )
         metrics = {"train": train_metrics}
         if val_loader is not None:
@@ -526,7 +671,9 @@ def main():
                 val_metrics = run_epoch(
                     model, criterion, val_loader, optimizer, scaler, device, args.mixed_precision,
                     train=False, d_optimizer=None, views=views, augmenter=None,
-                    unproject_mode=args.unproject_mode, log_every=args.log_every,
+                    unproject_mode=args.unproject_mode, conditioning_source=args.conditioning_source,
+                    dense_parser=dense_parser, parser_splat_fg_threshold=args.parser_splat_fg_threshold,
+                    bg_color=dataset.bg_color, log_every=args.log_every,
                 )
             metrics["val"] = val_metrics
 
@@ -550,12 +697,16 @@ def main():
             model.eval()
             preview_batch = move_batch(next(iter(val_loader or train_loader)), device)
             with torch.no_grad():
-                preview_cond = build_conditioning(
+                preview_cond = build_training_conditioning(
                     preview_batch["uv"],
                     criterion.renderer,
                     views,
+                    args.conditioning_source,
+                    dense_parser=dense_parser,
                     augmenter=None,
                     unproject_mode=args.unproject_mode,
+                    parser_splat_fg_threshold=args.parser_splat_fg_threshold,
+                    bg_color=dataset.bg_color,
                 )
                 pred_uv = model(preview_cond)
             save_preview(pred_uv, preview_batch["uv"], output_dir / "previews" / f"epoch_{epoch:04d}.png")

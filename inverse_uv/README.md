@@ -102,6 +102,32 @@ Performance notes:
 - If augmentation is enabled, `PERSPECTIVE_SCALE=0.0` keeps it on the batched affine path. Re-enable perspective only when the extra pose robustness is worth the slower per-sample transform.
 - For lower console overhead on fast GPUs, raise `LOG_EVERY` (for example `LOG_EVERY=100`).
 
+### Train Inpaint From Dense Parser Conditioning
+
+If inference uses `dense_uv_parser/infer.py`, train or finetune the inpaint model on parser-generated conditioning so the training and inference distributions match:
+
+```bash
+CONDITIONING_SOURCE=dense_parser ./run_inverse_uv_training.sh
+```
+
+This automatically finds the newest `../dense_uv_parser/runs/dense_uv_parser_v*/best.pt`. To finetune from an existing inverse_uv checkpoint:
+
+```bash
+CONDITIONING_SOURCE=dense_parser \
+RESUME=runs/inverse_uv_full_v34/best.pt \
+RESUME_LR=5e-5 \
+EPOCHS=15 \
+./run_inverse_uv_training.sh
+```
+
+Override parser selection with:
+
+```bash
+PARSER_CHECKPOINT=../dense_uv_parser/runs/dense_uv_parser_v3/best.pt \
+CONDITIONING_SOURCE=dense_parser \
+./run_inverse_uv_training.sh
+```
+
 ## Infer
 
 ```bash
