@@ -20,10 +20,13 @@ from SkingToolkit.dense_uv_parser.utils import (  # noqa: E402
     PART_PALETTE,
     colorize_foreground,
     colorize_labels,
+    colorize_surface,
     colorize_uv,
+    flat_uv_to_uv01,
     parse_views,
     prediction_uv01,
-    splat_predictions_to_uv_conditioning,
+    splat_parser_predictions_to_uv_conditioning,
+    surface_class_count,
 )
 from SkingToolkit.inverse_uv.dataset import finalize_minecraft_alpha, tensor_to_rgba_image, view_native_size  # noqa: E402
 from SkingToolkit.inverse_uv.model import InverseUVNet  # noqa: E402
@@ -59,11 +62,22 @@ def load_parser(checkpoint_path, device):
     state_dict = checkpoint["model"]
     has_uv_classification = any(key.startswith("uv_x.") or key.startswith("uv_y.") for key in state_dict)
     uv_classification = model_config.get("uv_classification", has_uv_classification)
+    parser_mode = model_config.get("parser_mode", checkpoint_args.get("parser_mode", "dense"))
+    predict_affine = model_config.get("predict_affine", parser_mode == "global_affine")
     model = DenseUVParserNet(
         base_channels=model_config.get("base_channels", checkpoint_args.get("base_channels", 32)),
         uv_size=model_config.get("uv_size", 64),
         uv_classification=uv_classification,
         view_classes=model_config.get("view_classes", 0),
+        predict_affine=predict_affine,
+        affine_translation_scale=model_config.get(
+            "affine_translation_scale", checkpoint_args.get("translation_scale", 0.03)
+        ),
+        affine_scale_range=model_config.get("affine_scale_range", checkpoint_args.get("scale_range", 0.03)),
+        surface_classes=model_config.get(
+            "surface_classes",
+            checkpoint_args.get("surface_classes", 2 if predict_affine else 0),
+        ),
     ).to(device)
     model.load_state_dict(state_dict)
     model.eval()
@@ -123,30 +137,48 @@ def save_conditioning_preview(conditioning, output_path):
     save_image(preview.clamp(0.0, 1.0), output_path, nrow=conditioning.shape[0])
 
 
-def save_debug_preview(rendered, outputs, view_count, output_path, fg_threshold, bg_color=(128, 128, 128)):
-    pred_fg = torch.sigmoid(outputs["foreground"])[:, 0] > fg_threshold
+def save_debug_preview(
+    rendered,
+    outputs,
+    view_count,
+    output_path,
+    fg_threshold,
+    bg_color=(128, 128, 128),
+    routing=None,
+):
+    pred_fg = routing["foreground"] if routing is not None else torch.sigmoid(outputs["foreground"])[:, 0] > fg_threshold
     pred_part = torch.where(
         pred_fg,
         outputs["part"].argmax(dim=1),
         torch.full_like(outputs["part"].argmax(dim=1), IGNORE_INDEX),
     )
+    pred_layer_values = routing["layer"] if routing is not None else outputs["layer"].argmax(dim=1)
     pred_layer = torch.where(
         pred_fg,
-        outputs["layer"].argmax(dim=1),
+        pred_layer_values,
         torch.full_like(outputs["layer"].argmax(dim=1), IGNORE_INDEX),
     )
-    pred_uv = prediction_uv01(outputs)
-
-    debug_preview = torch.cat(
-        [
-            rendered[:, :3],
-            colorize_foreground(pred_fg, bg_color, rendered),
-            colorize_labels(pred_part, PART_PALETTE, bg_color, rendered),
-            colorize_labels(pred_layer, LAYER_PALETTE, bg_color, rendered),
-            colorize_uv(pred_uv, pred_fg, bg_color),
-        ],
-        dim=0,
+    pred_uv = (
+        flat_uv_to_uv01(routing["flat_uv"], rendered.dtype)
+        if routing is not None
+        else prediction_uv01(outputs)
     )
+
+    debug_images = [
+        rendered[:, :3],
+        colorize_foreground(pred_fg, bg_color, rendered),
+        colorize_labels(pred_part, PART_PALETTE, bg_color, rendered),
+        colorize_labels(pred_layer, LAYER_PALETTE, bg_color, rendered),
+    ]
+    if routing is not None:
+        pred_surface = torch.where(
+            pred_fg,
+            routing["surface"],
+            torch.full_like(routing["surface"], IGNORE_INDEX),
+        )
+        debug_images.append(colorize_surface(pred_surface, bg_color, rendered))
+    debug_images.append(colorize_uv(pred_uv, pred_fg, bg_color))
+    debug_preview = torch.cat(debug_images, dim=0)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     save_image(debug_preview.clamp(0.0, 1.0).detach().cpu(), output_path, nrow=view_count)
 
@@ -164,6 +196,7 @@ def build_arg_parser():
     parser.add_argument("--view_images", nargs="*", default=None)
     parser.add_argument("--mappings_dir", default=None)
     parser.add_argument("--fg_threshold", type=float, default=0.5)
+    parser.add_argument("--no_semantic_gate", dest="semantic_gate", action="store_false", default=None)
     parser.add_argument("--alpha_threshold", type=float, default=0.5)
     parser.add_argument("--no_enforce_base_alpha", action="store_true")
     parser.add_argument("--device", default="auto")
@@ -189,28 +222,41 @@ def main():
     missing_views = [view for view in views if view not in renderer.views]
     if missing_views:
         raise ValueError(f"Unknown renderer views {missing_views}. Available views: {', '.join(renderer.views)}")
+    if parser_model.predict_affine:
+        mapping_surface_classes = surface_class_count(renderer, views)
+        if parser_model.surface_classes != mapping_surface_classes:
+            raise ValueError(
+                "Parser/mapping surface-slot mismatch: "
+                f"checkpoint={parser_model.surface_classes}, mappings={mapping_surface_classes}."
+            )
 
     bg_color = parser_args.get("bg_color", (128, 128, 128))
+    semantic_gate = parser_args.get("semantic_gate", True) if args.semantic_gate is None else args.semantic_gate
     rendered = load_view_images(args, views, renderer, bg_color=bg_color).to(device)
     view_ids = torch.arange(len(views), device=device)
     with torch.no_grad():
         outputs = parser_model(rendered, view_ids=view_ids)
-        conditioning = splat_predictions_to_uv_conditioning(
+        conditioning, routing_details = splat_parser_predictions_to_uv_conditioning(
             rendered,
             outputs,
+            renderer=renderer,
+            views=views,
             group_size=len(views),
             fg_threshold=args.fg_threshold,
             bg_color=bg_color,
+            semantic_gate=semantic_gate,
+            return_details=True,
         )
 
     if args.debug_output:
         save_debug_preview(
-            rendered,
-            outputs,
+            routing_details["rendered"],
+            routing_details["outputs"],
             len(views),
             Path(args.debug_output),
             args.fg_threshold,
             bg_color=bg_color,
+            routing=routing_details["routing"],
         )
 
     if args.conditioning_output:

@@ -72,6 +72,7 @@ FRONT="${FRONT:-../test_imgs/front_rgba.png}"
 BACK="${BACK:-../test_imgs/back_rgba.png}"
 MAPPINGS_DIR="${MAPPINGS_DIR:-}"
 FG_THRESHOLD="${FG_THRESHOLD:-0.5}"
+SEMANTIC_GATE="${SEMANTIC_GATE:-true}"
 ALPHA_THRESHOLD="${ALPHA_THRESHOLD:-0.5}"
 DEVICE="${DEVICE:-auto}"
 NO_ENFORCE_BASE_ALPHA="${NO_ENFORCE_BASE_ALPHA:-false}"
@@ -86,6 +87,9 @@ args=(
 
 if [[ -n "$MAPPINGS_DIR" ]]; then
   args+=(--mappings_dir "$MAPPINGS_DIR")
+fi
+if [[ "$SEMANTIC_GATE" != "true" ]]; then
+  args+=(--no_semantic_gate)
 fi
 
 if [[ -n "$COMBINED" ]]; then

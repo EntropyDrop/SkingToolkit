@@ -18,6 +18,7 @@ DATA_DIR="${DATA_DIR:-../skins}"
 MAPPINGS_SIZE="${MAPPINGS_SIZE:-256x512}"
 MAPPINGS_DIR="${MAPPINGS_DIR:-../../github/differentiable_minecraft_renderer/mappings_${MAPPINGS_SIZE}}"
 VIEWS="${VIEWS:-walk_front_both_layer_ortho,walk_back_both_layer_ortho}"
+PARSER_MODE="${PARSER_MODE:-global_affine}"
 MAX_SAMPLES="${MAX_SAMPLES:-30000}"
 BASE_CHANNELS="${BASE_CHANNELS:-32}"
 BATCH_SIZE="${BATCH_SIZE:-8}"
@@ -36,6 +37,7 @@ TRANSLATION_SCALE="${TRANSLATION_SCALE:-0.03}"
 SCALE_RANGE="${SCALE_RANGE:-0.03}"
 BACKGROUND_AUGMENT="${BACKGROUND_AUGMENT:-true}"
 BACKGROUND_AUGMENT_PROB="${BACKGROUND_AUGMENT_PROB:-0.9}"
+SEMANTIC_GATE="${SEMANTIC_GATE:-true}"
 
 LAMBDA_FOREGROUND="${LAMBDA_FOREGROUND:-1.0}"
 LAMBDA_LAYER="${LAMBDA_LAYER:-1.0}"
@@ -43,7 +45,9 @@ LAMBDA_PART="${LAMBDA_PART:-0.5}"
 LAMBDA_FACE="${LAMBDA_FACE:-0.5}"
 LAMBDA_UV="${LAMBDA_UV:-0.25}"
 LAMBDA_UV_CLASS="${LAMBDA_UV_CLASS:-1.0}"
-UV_CLASSIFICATION="${UV_CLASSIFICATION:-true}"
+LAMBDA_AFFINE="${LAMBDA_AFFINE:-1.0}"
+LAMBDA_SURFACE="${LAMBDA_SURFACE:-1.0}"
+UV_CLASSIFICATION="${UV_CLASSIFICATION:-false}"
 
 augment_args=()
 if [[ "$AUGMENT" == "true" ]]; then
@@ -75,6 +79,12 @@ if [[ "$BACKGROUND_AUGMENT" == "true" ]]; then
 else
   background_args=(--no_background_augment)
 fi
+semantic_gate_args=()
+if [[ "$SEMANTIC_GATE" == "true" ]]; then
+  semantic_gate_args=(--semantic_gate)
+else
+  semantic_gate_args=(--no_semantic_gate)
+fi
 cudnn_args=()
 if [[ "$CUDNN_BENCHMARK" == "true" ]]; then
   cudnn_args=(--cudnn_benchmark)
@@ -87,6 +97,7 @@ python train.py \
   --output_dir "runs/$RUN_NAME" \
   --mappings_dir "$MAPPINGS_DIR" \
   --views "$VIEWS" \
+  --parser_mode "$PARSER_MODE" \
   --max_samples "$MAX_SAMPLES" \
   --base_channels "$BASE_CHANNELS" \
   --batch_size "$BATCH_SIZE" \
@@ -103,7 +114,10 @@ python train.py \
   --lambda_face "$LAMBDA_FACE" \
   --lambda_uv "$LAMBDA_UV" \
   --lambda_uv_class "$LAMBDA_UV_CLASS" \
+  --lambda_affine "$LAMBDA_AFFINE" \
+  --lambda_surface "$LAMBDA_SURFACE" \
   "${augment_args[@]}" \
   "${background_args[@]}" \
+  "${semantic_gate_args[@]}" \
   "${uv_class_args[@]}" \
   "${cudnn_args[@]}"

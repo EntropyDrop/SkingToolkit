@@ -69,6 +69,7 @@ PARSER_RUN_PREFIX="${PARSER_RUN_PREFIX:-dense_uv_parser_v}"
 PARSER_CHECKPOINT_NAME="${PARSER_CHECKPOINT_NAME:-best.pt}"
 PARSER_CHECKPOINT="${PARSER_CHECKPOINT:-}"
 PARSER_SPLAT_FG_THRESHOLD="${PARSER_SPLAT_FG_THRESHOLD:-0.5}"
+PARSER_SEMANTIC_GATE="${PARSER_SEMANTIC_GATE:-true}"
 PARSER_BACKGROUND_AUGMENT="${PARSER_BACKGROUND_AUGMENT:-true}"
 PARSER_BACKGROUND_AUGMENT_PROB="${PARSER_BACKGROUND_AUGMENT_PROB:-0.9}"
 
@@ -113,6 +114,11 @@ conditioning_args=(
   --parser_checkpoint "$PARSER_CHECKPOINT"
   --parser_splat_fg_threshold "$PARSER_SPLAT_FG_THRESHOLD"
 )
+if [[ "$PARSER_SEMANTIC_GATE" == "true" ]]; then
+  conditioning_args+=(--parser_semantic_gate)
+else
+  conditioning_args+=(--no_parser_semantic_gate)
+fi
 parser_background_args=()
 if [[ "$PARSER_BACKGROUND_AUGMENT" == "true" ]]; then
   parser_background_args=(

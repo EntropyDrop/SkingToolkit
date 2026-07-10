@@ -1,3 +1,5 @@
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -59,10 +61,18 @@ class DenseUVParserNet(nn.Module):
         uv_size=64,
         uv_classification=True,
         view_classes=0,
+        predict_affine=False,
+        affine_translation_scale=0.03,
+        affine_scale_range=0.03,
+        surface_classes=0,
     ):
         super().__init__()
         self.uv_classification = uv_classification
         self.view_classes = int(view_classes)
+        self.predict_affine = bool(predict_affine)
+        self.affine_translation_scale = float(affine_translation_scale)
+        self.affine_scale_range = float(affine_scale_range)
+        self.surface_classes = int(surface_classes)
         c = base_channels
         self.stem = ConvBlock(input_channels + self.view_classes, c)
         self.down1 = DownBlock(c, c * 2)
@@ -84,6 +94,27 @@ class DenseUVParserNet(nn.Module):
         if uv_classification:
             self.uv_x = nn.Conv2d(c, uv_size, kernel_size=1)
             self.uv_y = nn.Conv2d(c, uv_size, kernel_size=1)
+        if self.predict_affine:
+            if self.surface_classes < 2:
+                raise ValueError("Global-affine routing requires at least two static surface classes.")
+            self.surface = nn.Conv2d(c, self.surface_classes, kernel_size=1)
+            hidden = max(c * 4, 32)
+            self.affine_head = nn.Sequential(
+                nn.AdaptiveAvgPool2d(1),
+                nn.Flatten(),
+                nn.Linear(c * 8, hidden),
+                nn.SiLU(inplace=True),
+                nn.Linear(hidden, 3),
+            )
+            # Start from the canonical pose; the residual head learns only the
+            # small global transform introduced by the configured augmentation.
+            nn.init.zeros_(self.affine_head[-1].weight)
+            nn.init.zeros_(self.affine_head[-1].bias)
+
+            self.affine_translation_limit = 2.0 * self.affine_translation_scale
+            lower_log_scale = math.log(max(1.0 - self.affine_scale_range, 1e-6))
+            upper_log_scale = math.log1p(self.affine_scale_range)
+            self.affine_log_scale_limit = max(abs(lower_log_scale), abs(upper_log_scale))
 
     def forward(self, x, view_ids=None):
         if self.view_classes > 0:
@@ -102,6 +133,17 @@ class DenseUVParserNet(nn.Module):
         s2 = self.down2(s1)
         s3 = self.down3(s2)
         x = self.mid(s3)
+        affine = None
+        if self.predict_affine:
+            raw_affine = torch.tanh(self.affine_head(x))
+            affine = torch.stack(
+                [
+                    raw_affine[:, 0] * self.affine_translation_limit,
+                    raw_affine[:, 1] * self.affine_translation_limit,
+                    raw_affine[:, 2] * self.affine_log_scale_limit,
+                ],
+                dim=1,
+            )
         x = self.up2(x, s2)
         x = self.up1(x, s1)
         x = self.up0(x, s0)
@@ -116,6 +158,10 @@ class DenseUVParserNet(nn.Module):
         if self.uv_classification:
             outputs["uv_x"] = self.uv_x(x)
             outputs["uv_y"] = self.uv_y(x)
+        if affine is not None:
+            # [tx, ty, log_scale]. tx/ty are affine_grid normalized coordinates.
+            outputs["affine"] = affine
+            outputs["surface"] = self.surface(x)
         return outputs
 
 

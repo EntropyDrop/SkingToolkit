@@ -19,7 +19,11 @@ from SkingToolkit.inverse_uv.dataset import InverseUVDataset, finalize_minecraft
 from SkingToolkit.inverse_uv.losses import InverseUVLoss  # noqa: E402
 from SkingToolkit.inverse_uv.model import InverseUVNet, PatchGANDiscriminator, count_parameters  # noqa: E402
 from SkingToolkit.dense_uv_parser.model import DenseUVParserNet  # noqa: E402
-from SkingToolkit.dense_uv_parser.utils import randomize_render_background, splat_predictions_to_uv_conditioning  # noqa: E402
+from SkingToolkit.dense_uv_parser.utils import (  # noqa: E402
+    randomize_render_background,
+    splat_parser_predictions_to_uv_conditioning,
+    surface_class_count,
+)
 
 try:
     from tqdm import tqdm
@@ -105,11 +109,22 @@ def load_dense_parser(checkpoint_path, device):
     state_dict = checkpoint["model"]
     has_uv_classification = any(key.startswith("uv_x.") or key.startswith("uv_y.") for key in state_dict)
     uv_classification = model_config.get("uv_classification", has_uv_classification)
+    parser_mode = model_config.get("parser_mode", checkpoint_args.get("parser_mode", "dense"))
+    predict_affine = model_config.get("predict_affine", parser_mode == "global_affine")
     model = DenseUVParserNet(
         base_channels=model_config.get("base_channels", checkpoint_args.get("base_channels", 32)),
         uv_size=model_config.get("uv_size", 64),
         uv_classification=uv_classification,
         view_classes=model_config.get("view_classes", 0),
+        predict_affine=predict_affine,
+        affine_translation_scale=model_config.get(
+            "affine_translation_scale", checkpoint_args.get("translation_scale", 0.03)
+        ),
+        affine_scale_range=model_config.get("affine_scale_range", checkpoint_args.get("scale_range", 0.03)),
+        surface_classes=model_config.get(
+            "surface_classes",
+            checkpoint_args.get("surface_classes", 2 if predict_affine else 0),
+        ),
     ).to(device)
     model.load_state_dict(state_dict)
     model.eval()
@@ -127,6 +142,7 @@ def build_dense_parser_conditioning(
     parser_background_augment=False,
     parser_background_augment_prob=0.9,
     fg_threshold=0.5,
+    semantic_gate=True,
     bg_color=(128, 128, 128),
     return_renders=False,
 ):
@@ -154,12 +170,15 @@ def build_dense_parser_conditioning(
         rendered = rendered.reshape(B * V, C, H, W)
         view_ids = torch.arange(V, device=rendered.device).view(1, V).expand(B, -1).reshape(B * V)
         outputs = dense_parser(rendered, view_ids=view_ids)
-        conditioning = splat_predictions_to_uv_conditioning(
+        conditioning = splat_parser_predictions_to_uv_conditioning(
             rendered,
             outputs,
+            renderer=renderer,
+            views=views,
             group_size=V,
             fg_threshold=fg_threshold,
             bg_color=bg_color,
+            semantic_gate=semantic_gate,
         )
 
     if not is_batched:
@@ -178,6 +197,7 @@ def build_training_conditioning(
     parser_background_augment=False,
     parser_background_augment_prob=0.9,
     parser_splat_fg_threshold=0.5,
+    parser_semantic_gate=True,
     bg_color=(128, 128, 128),
     return_renders=False,
 ):
@@ -192,6 +212,7 @@ def build_training_conditioning(
         parser_background_augment=parser_background_augment,
         parser_background_augment_prob=parser_background_augment_prob,
         fg_threshold=parser_splat_fg_threshold,
+        semantic_gate=parser_semantic_gate,
         bg_color=bg_color,
         return_renders=return_renders,
     )
@@ -213,6 +234,7 @@ def run_epoch(
     parser_background_augment=False,
     parser_background_augment_prob=0.9,
     parser_splat_fg_threshold=0.5,
+    parser_semantic_gate=True,
     bg_color=(128, 128, 128),
     log_every=50,
 ):
@@ -242,6 +264,7 @@ def run_epoch(
                 parser_background_augment=train and parser_background_augment,
                 parser_background_augment_prob=parser_background_augment_prob,
                 parser_splat_fg_threshold=parser_splat_fg_threshold,
+                parser_semantic_gate=parser_semantic_gate,
                 bg_color=bg_color,
                 return_renders=True,
             )
@@ -427,6 +450,8 @@ def build_arg_parser():
         default=0.5,
         help="Foreground threshold used when splatting dense parser predictions.",
     )
+    parser.add_argument("--parser_semantic_gate", dest="parser_semantic_gate", action="store_true", default=None)
+    parser.add_argument("--no_parser_semantic_gate", dest="parser_semantic_gate", action="store_false")
     parser.add_argument("--parser_background_augment", dest="parser_background_augment", action="store_true", default=True)
     parser.add_argument("--no_parser_background_augment", dest="parser_background_augment", action="store_false")
     parser.add_argument("--parser_background_augment_prob", type=float, default=0.9)
@@ -486,6 +511,8 @@ def main():
     if not args.parser_checkpoint:
         raise ValueError("--parser_checkpoint is required for inverse UV training.")
     dense_parser, parser_checkpoint_args = load_dense_parser(args.parser_checkpoint, device)
+    if args.parser_semantic_gate is None:
+        args.parser_semantic_gate = parser_checkpoint_args.get("semantic_gate", True)
     parser_views = parse_views(parser_checkpoint_args.get("views", ""))
     if parser_views and parser_views != parse_views(args.views):
         raise ValueError(
@@ -571,6 +598,13 @@ def main():
         covered_inner_alpha_threshold=args.covered_inner_alpha_threshold,
         discriminator=discriminator,
     ).to(device)
+    if dense_parser.predict_affine:
+        mapping_surface_classes = surface_class_count(criterion.renderer, parse_views(args.views))
+        if dense_parser.surface_classes != mapping_surface_classes:
+            raise ValueError(
+                "Parser/mapping surface-slot mismatch: "
+                f"checkpoint={dense_parser.surface_classes}, mappings={mapping_surface_classes}."
+            )
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scaler = build_grad_scaler(device, args.mixed_precision)
 
@@ -618,6 +652,7 @@ def main():
         "conditioning_source": "dense_parser",
         "parser_checkpoint": args.parser_checkpoint,
         "parser_splat_fg_threshold": args.parser_splat_fg_threshold,
+        "parser_semantic_gate": args.parser_semantic_gate,
         "parser_checkpoint_views": parse_views(parser_checkpoint_args.get("views", "")) if parser_checkpoint_args else None,
         "best_metric": args.best_metric,
         "scheduler": args.scheduler,
@@ -655,6 +690,7 @@ def main():
             parser_background_augment=args.parser_background_augment,
             parser_background_augment_prob=args.parser_background_augment_prob,
             dense_parser=dense_parser, parser_splat_fg_threshold=args.parser_splat_fg_threshold,
+            parser_semantic_gate=args.parser_semantic_gate,
             bg_color=dataset.bg_color, log_every=args.log_every,
         )
         metrics = {"train": train_metrics}
@@ -675,6 +711,7 @@ def main():
                     model, criterion, val_loader, optimizer, scaler, device, args.mixed_precision,
                     train=False, d_optimizer=None, views=views, augmenter=val_augmenter,
                     dense_parser=dense_parser, parser_splat_fg_threshold=args.parser_splat_fg_threshold,
+                    parser_semantic_gate=args.parser_semantic_gate,
                     bg_color=dataset.bg_color, log_every=args.log_every,
                 )
             metrics["val"] = val_metrics

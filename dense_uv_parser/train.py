@@ -23,14 +23,20 @@ from SkingToolkit.dense_uv_parser.utils import (  # noqa: E402
     UV_SIZE,
     augment_dense_batch,
     build_dense_parser_batch,
+    canonicalize_dense_targets,
     colorize_foreground,
     colorize_labels,
+    colorize_surface,
     colorize_uv,
+    flat_uv_to_uv01,
     parse_views,
     prediction_uv01,
     randomize_render_background,
+    splat_deterministic_targets_to_uv_conditioning,
+    splat_parser_predictions_to_uv_conditioning,
     splat_predictions_to_uv_conditioning,
     splat_targets_to_uv_conditioning,
+    surface_class_count,
 )
 from SkingToolkit.inverse_uv.dataset import InverseUVDataset  # noqa: E402
 from SkingToolkit.inverse_uv.train import get_device  # noqa: E402
@@ -86,6 +92,9 @@ def stack_view_targets(targets_by_view):
         elif stacked.dim() == 4:
             B, V, H, W = stacked.shape
             result[key] = stacked.reshape(B * V, H, W)
+        elif stacked.dim() == 3:
+            B, V, C = stacked.shape
+            result[key] = stacked.reshape(B * V, C)
         else:
             raise ValueError(f"Unexpected target shape for {key}: {tuple(stacked.shape)}")
     return result
@@ -103,15 +112,14 @@ def build_parser_inputs(batch_uv, renderer, views, train, args, apply_augment=No
                 alpha_threshold=args.target_alpha_threshold,
             )
             should_augment = train and args.augment if apply_augment is None else apply_augment
-            if should_augment:
-                rendered, targets = augment_dense_batch(
-                    rendered,
-                    targets,
-                    translation_scale=args.translation_scale,
-                    scale_range=args.scale_range,
-                    bg_color=args.bg_color,
-                    generator=augment_generator,
-                )
+            rendered, targets = augment_dense_batch(
+                rendered,
+                targets,
+                translation_scale=args.translation_scale if should_augment else 0.0,
+                scale_range=args.scale_range if should_augment else 0.0,
+                bg_color=args.bg_color,
+                generator=augment_generator,
+            )
             background_probability = args.background_augment_prob if train and args.background_augment else 0.0
             rendered = randomize_render_background(
                 rendered,
@@ -181,11 +189,19 @@ def run_epoch(model, criterion, renderer, loader, optimizer, scaler, device, pre
 
         if tqdm is not None and args.log_every > 0 and sample_count % (args.log_every * parser_samples) == 0:
             avg = format_metrics(metric_sums, sample_count)
+            postfix = {
+                "total": f"{avg['loss_total']:.4f}",
+                "fg": f"{avg.get('recall_foreground', avg['acc_foreground']):.3f}",
+            }
+            if args.parser_mode == "global_affine":
+                postfix["align"] = f"{avg.get('err_affine_translation_px', 0.0):.2f}px"
+                postfix["scale"] = f"{avg.get('err_affine_scale_pct', 0.0):.2f}%"
+                postfix["surface"] = f"{avg.get('acc_surface', 0.0):.3f}"
+            else:
+                postfix["uv"] = f"{avg.get('loss_uv_l1_px', avg['loss_uv']):.2f}px"
+                postfix["uv1"] = f"{avg.get('acc_uv_within1', 0.0):.3f}"
             iterator.set_postfix(
-                total=f"{avg['loss_total']:.4f}",
-                uv=f"{avg.get('loss_uv_l1_px', avg['loss_uv']):.2f}px",
-                uv1=f"{avg.get('acc_uv_within1', 0.0):.3f}",
-                fg=f"{avg.get('recall_foreground', avg['acc_foreground']):.3f}",
+                **postfix,
             )
 
     return format_metrics(metric_sums, sample_count)
@@ -203,19 +219,41 @@ def save_preview(model, renderer, loader, device, args, output_path, max_items=2
     )
     with torch.no_grad():
         outputs = model(rendered, view_ids=view_ids)
-        pred_conditioning = splat_predictions_to_uv_conditioning(
-            rendered,
-            outputs,
-            group_size=view_count,
-            fg_threshold=args.splat_fg_threshold,
-            bg_color=args.bg_color,
-        )
-        gt_conditioning = splat_targets_to_uv_conditioning(
-            rendered,
-            targets,
-            group_size=view_count,
-            bg_color=args.bg_color,
-        )
+        if "affine" in outputs:
+            pred_conditioning, routing_details = splat_parser_predictions_to_uv_conditioning(
+                rendered,
+                outputs,
+                renderer=renderer,
+                views=views,
+                group_size=view_count,
+                fg_threshold=args.splat_fg_threshold,
+                bg_color=args.bg_color,
+                semantic_gate=args.semantic_gate,
+                return_details=True,
+            )
+            gt_conditioning = splat_deterministic_targets_to_uv_conditioning(
+                rendered,
+                targets,
+                renderer=renderer,
+                views=views,
+                group_size=view_count,
+                bg_color=args.bg_color,
+            )
+        else:
+            routing_details = None
+            pred_conditioning = splat_predictions_to_uv_conditioning(
+                rendered,
+                outputs,
+                group_size=view_count,
+                fg_threshold=args.splat_fg_threshold,
+                bg_color=args.bg_color,
+            )
+            gt_conditioning = splat_targets_to_uv_conditioning(
+                rendered,
+                targets,
+                group_size=view_count,
+                bg_color=args.bg_color,
+            )
 
     count = min(max_items, pred_conditioning.shape[0])
     pred_conditioning = pred_conditioning[:count].detach().cpu()
@@ -232,10 +270,27 @@ def save_preview(model, renderer, loader, device, args, output_path, max_items=2
     save_image(preview.clamp(0.0, 1.0), output_path, nrow=count)
 
     debug_count = min(count * view_count, rendered.shape[0])
-    debug_outputs = {key: value[:debug_count] for key, value in outputs.items()}
-    rendered_debug = rendered[:debug_count]
-    targets_debug = {key: value[:debug_count] for key, value in targets.items()}
-    pred_fg = torch.sigmoid(debug_outputs["foreground"])[:, 0] > args.splat_fg_threshold
+    if routing_details is not None:
+        debug_outputs = {key: value[:debug_count] for key, value in routing_details["outputs"].items()}
+        rendered_debug = routing_details["rendered"][:debug_count]
+        targets_debug = {
+            key: value[:debug_count]
+            for key, value in canonicalize_dense_targets(targets).items()
+        }
+        routing_debug = {
+            key: value[:debug_count]
+            for key, value in routing_details["routing"].items()
+        }
+        pred_fg = routing_debug["foreground"]
+        pred_layer_values = routing_debug["layer"]
+        pred_uv = flat_uv_to_uv01(routing_debug["flat_uv"], rendered_debug.dtype)
+    else:
+        debug_outputs = {key: value[:debug_count] for key, value in outputs.items()}
+        rendered_debug = rendered[:debug_count]
+        targets_debug = {key: value[:debug_count] for key, value in targets.items()}
+        pred_fg = torch.sigmoid(debug_outputs["foreground"])[:, 0] > args.splat_fg_threshold
+        pred_layer_values = debug_outputs["layer"].argmax(dim=1)
+        pred_uv = prediction_uv01(debug_outputs)
     gt_fg = targets_debug["foreground"][:, 0] > 0.5
     pred_part = torch.where(
         pred_fg,
@@ -244,24 +299,37 @@ def save_preview(model, renderer, loader, device, args, output_path, max_items=2
     )
     pred_layer = torch.where(
         pred_fg,
-        debug_outputs["layer"].argmax(dim=1),
+        pred_layer_values,
         torch.full_like(debug_outputs["layer"].argmax(dim=1), IGNORE_INDEX),
     )
-    pred_uv = prediction_uv01(debug_outputs)
-    debug_preview = torch.cat(
+    debug_images = [
+        rendered_debug[:, :3],
+        colorize_foreground(pred_fg, args.bg_color, rendered_debug),
+        colorize_foreground(gt_fg, args.bg_color, rendered_debug),
+        colorize_labels(pred_part, PART_PALETTE, args.bg_color, rendered_debug),
+        colorize_labels(targets_debug["part"], PART_PALETTE, args.bg_color, rendered_debug),
+        colorize_labels(pred_layer, LAYER_PALETTE, args.bg_color, rendered_debug),
+        colorize_labels(targets_debug["layer"], LAYER_PALETTE, args.bg_color, rendered_debug),
+    ]
+    if routing_details is not None:
+        pred_surface = torch.where(
+            pred_fg,
+            routing_debug["surface"],
+            torch.full_like(routing_debug["surface"], IGNORE_INDEX),
+        )
+        debug_images.extend(
+            [
+                colorize_surface(pred_surface, args.bg_color, rendered_debug),
+                colorize_surface(targets_debug["surface"], args.bg_color, rendered_debug),
+            ]
+        )
+    debug_images.extend(
         [
-            rendered_debug[:, :3],
-            colorize_foreground(pred_fg, args.bg_color, rendered_debug),
-            colorize_foreground(gt_fg, args.bg_color, rendered_debug),
-            colorize_labels(pred_part, PART_PALETTE, args.bg_color, rendered_debug),
-            colorize_labels(targets_debug["part"], PART_PALETTE, args.bg_color, rendered_debug),
-            colorize_labels(pred_layer, LAYER_PALETTE, args.bg_color, rendered_debug),
-            colorize_labels(targets_debug["layer"], LAYER_PALETTE, args.bg_color, rendered_debug),
             colorize_uv(pred_uv, pred_fg, args.bg_color),
             colorize_uv(targets_debug["uv"], gt_fg, args.bg_color),
-        ],
-        dim=0,
+        ]
     )
+    debug_preview = torch.cat(debug_images, dim=0)
     debug_path = output_path.with_name(f"{output_path.stem}_debug{output_path.suffix}")
     save_image(debug_preview.clamp(0.0, 1.0).detach().cpu(), debug_path, nrow=view_count)
 
@@ -278,8 +346,13 @@ def save_checkpoint(path, model, optimizer, epoch, args, metrics, best_metric=No
             "input_channels": 4,
             "base_channels": args.base_channels,
             "uv_size": UV_SIZE,
-            "uv_classification": args.uv_classification,
+            "uv_classification": model.uv_classification,
             "view_classes": len(parse_views(args.views)),
+            "parser_mode": args.parser_mode,
+            "predict_affine": model.predict_affine,
+            "affine_translation_scale": model.affine_translation_scale,
+            "affine_scale_range": model.affine_scale_range,
+            "surface_classes": model.surface_classes,
         },
     }
     torch.save(checkpoint, path)
@@ -291,6 +364,12 @@ def build_arg_parser():
     parser.add_argument("--output_dir", default="runs/dense_uv_parser")
     parser.add_argument("--mappings_dir", default=None)
     parser.add_argument("--views", default="walk_front_both_layer_ortho,walk_back_both_layer_ortho")
+    parser.add_argument(
+        "--parser_mode",
+        choices=["global_affine", "dense"],
+        default="global_affine",
+        help="global_affine aligns the render then uses fixed renderer UV mappings; dense preserves the legacy UV head.",
+    )
     parser.add_argument("--max_samples", type=int, default=None)
     parser.add_argument("--val_split", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=1234)
@@ -317,12 +396,16 @@ def build_arg_parser():
     parser.add_argument("--background_augment", dest="background_augment", action="store_true", default=True)
     parser.add_argument("--no_background_augment", dest="background_augment", action="store_false")
     parser.add_argument("--background_augment_prob", type=float, default=0.9)
+    parser.add_argument("--semantic_gate", dest="semantic_gate", action="store_true", default=True)
+    parser.add_argument("--no_semantic_gate", dest="semantic_gate", action="store_false")
     parser.add_argument("--lambda_foreground", type=float, default=1.0)
     parser.add_argument("--lambda_layer", type=float, default=1.0)
     parser.add_argument("--lambda_part", type=float, default=0.5)
     parser.add_argument("--lambda_face", type=float, default=0.5)
     parser.add_argument("--lambda_uv", type=float, default=0.25)
     parser.add_argument("--lambda_uv_class", type=float, default=1.0)
+    parser.add_argument("--lambda_affine", type=float, default=1.0)
+    parser.add_argument("--lambda_surface", type=float, default=1.0)
     parser.add_argument("--uv_classification", dest="uv_classification", action="store_true", default=True)
     parser.add_argument("--no_uv_classification", dest="uv_classification", action="store_false")
     parser.add_argument("--grad_clip", type=float, default=1.0)
@@ -335,6 +418,8 @@ def build_arg_parser():
 def main():
     args = build_arg_parser().parse_args()
     args.bg_color = (128, 128, 128)
+    if args.scale_range < 0 or args.scale_range >= 1:
+        raise ValueError("--scale_range must be in [0, 1).")
     device = get_device(args.device)
     configure_torch(args, device)
 
@@ -375,11 +460,17 @@ def main():
     if missing_views:
         raise ValueError(f"Unknown renderer views {missing_views}. Available views: {', '.join(renderer.views)}")
 
+    global_affine_mode = args.parser_mode == "global_affine"
+    surface_classes = surface_class_count(renderer, parse_views(args.views)) if global_affine_mode else 0
     model = DenseUVParserNet(
         base_channels=args.base_channels,
         uv_size=UV_SIZE,
-        uv_classification=args.uv_classification,
+        uv_classification=args.uv_classification and not global_affine_mode,
         view_classes=len(parse_views(args.views)),
+        predict_affine=global_affine_mode,
+        affine_translation_scale=args.translation_scale,
+        affine_scale_range=args.scale_range,
+        surface_classes=surface_classes,
     ).to(device)
     criterion = DenseUVParserLoss(
         lambda_foreground=args.lambda_foreground,
@@ -388,7 +479,12 @@ def main():
         lambda_face=args.lambda_face,
         lambda_uv=args.lambda_uv,
         lambda_uv_class=args.lambda_uv_class,
+        lambda_affine=args.lambda_affine,
+        lambda_surface=args.lambda_surface,
         uv_size=UV_SIZE,
+        use_uv=not global_affine_mode,
+        affine_translation_limit=model.affine_translation_limit if global_affine_mode else 1.0,
+        affine_log_scale_limit=model.affine_log_scale_limit if global_affine_mode else 1.0,
     ).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scaler = build_grad_scaler(device, args.mixed_precision)
@@ -400,12 +496,15 @@ def main():
         "views": parse_views(args.views),
         "parameters": count_parameters(model),
         "device": str(device),
-        "uv_classification": args.uv_classification,
+        "parser_mode": args.parser_mode,
+        "uv_classification": model.uv_classification,
         "view_classes": len(parse_views(args.views)),
+        "surface_classes": surface_classes,
         "augment": args.augment,
         "augment_validation": args.augment_validation,
         "background_augment": args.background_augment,
         "background_augment_prob": args.background_augment_prob,
+        "semantic_gate": args.semantic_gate,
     }
     with open(output_dir / "config.json", "w", encoding="utf-8") as handle:
         json.dump({"args": vars(args), "metadata": metadata}, handle, indent=2)
