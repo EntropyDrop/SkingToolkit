@@ -20,6 +20,7 @@ from SkingToolkit.inverse_uv.losses import InverseUVLoss  # noqa: E402
 from SkingToolkit.inverse_uv.model import InverseUVNet, PatchGANDiscriminator, count_parameters  # noqa: E402
 from SkingToolkit.dense_uv_parser.model import DenseUVParserNet  # noqa: E402
 from SkingToolkit.dense_uv_parser.utils import (  # noqa: E402
+    SPLAT_COLOR_AGGREGATIONS,
     randomize_render_background,
     splat_parser_predictions_to_uv_conditioning,
     surface_class_count,
@@ -143,6 +144,9 @@ def build_dense_parser_conditioning(
     parser_background_augment_prob=0.9,
     fg_threshold=0.5,
     semantic_gate=True,
+    color_aggregation="quantized_mode",
+    color_mode_bits=5,
+    color_mode_confidence_ratio=0.85,
     bg_color=(128, 128, 128),
     return_renders=False,
 ):
@@ -179,6 +183,9 @@ def build_dense_parser_conditioning(
             fg_threshold=fg_threshold,
             bg_color=bg_color,
             semantic_gate=semantic_gate,
+            color_aggregation=color_aggregation,
+            color_mode_bits=color_mode_bits,
+            color_mode_confidence_ratio=color_mode_confidence_ratio,
         )
 
     if not is_batched:
@@ -198,6 +205,9 @@ def build_training_conditioning(
     parser_background_augment_prob=0.9,
     parser_splat_fg_threshold=0.5,
     parser_semantic_gate=True,
+    parser_splat_color_aggregation="quantized_mode",
+    parser_splat_color_mode_bits=5,
+    parser_splat_color_mode_confidence_ratio=0.85,
     bg_color=(128, 128, 128),
     return_renders=False,
 ):
@@ -213,6 +223,9 @@ def build_training_conditioning(
         parser_background_augment_prob=parser_background_augment_prob,
         fg_threshold=parser_splat_fg_threshold,
         semantic_gate=parser_semantic_gate,
+        color_aggregation=parser_splat_color_aggregation,
+        color_mode_bits=parser_splat_color_mode_bits,
+        color_mode_confidence_ratio=parser_splat_color_mode_confidence_ratio,
         bg_color=bg_color,
         return_renders=return_renders,
     )
@@ -235,6 +248,9 @@ def run_epoch(
     parser_background_augment_prob=0.9,
     parser_splat_fg_threshold=0.5,
     parser_semantic_gate=True,
+    parser_splat_color_aggregation="quantized_mode",
+    parser_splat_color_mode_bits=5,
+    parser_splat_color_mode_confidence_ratio=0.85,
     bg_color=(128, 128, 128),
     log_every=50,
 ):
@@ -265,6 +281,9 @@ def run_epoch(
                 parser_background_augment_prob=parser_background_augment_prob,
                 parser_splat_fg_threshold=parser_splat_fg_threshold,
                 parser_semantic_gate=parser_semantic_gate,
+                parser_splat_color_aggregation=parser_splat_color_aggregation,
+                parser_splat_color_mode_bits=parser_splat_color_mode_bits,
+                parser_splat_color_mode_confidence_ratio=parser_splat_color_mode_confidence_ratio,
                 bg_color=bg_color,
                 return_renders=True,
             )
@@ -452,6 +471,9 @@ def build_arg_parser():
     )
     parser.add_argument("--parser_semantic_gate", dest="parser_semantic_gate", action="store_true", default=None)
     parser.add_argument("--no_parser_semantic_gate", dest="parser_semantic_gate", action="store_false")
+    parser.add_argument("--parser_splat_color_aggregation", choices=SPLAT_COLOR_AGGREGATIONS, default=None)
+    parser.add_argument("--parser_splat_color_mode_bits", type=int, default=None)
+    parser.add_argument("--parser_splat_color_mode_confidence_ratio", type=float, default=None)
     parser.add_argument("--parser_background_augment", dest="parser_background_augment", action="store_true", default=True)
     parser.add_argument("--no_parser_background_augment", dest="parser_background_augment", action="store_false")
     parser.add_argument("--parser_background_augment_prob", type=float, default=0.9)
@@ -513,6 +535,14 @@ def main():
     dense_parser, parser_checkpoint_args = load_dense_parser(args.parser_checkpoint, device)
     if args.parser_semantic_gate is None:
         args.parser_semantic_gate = parser_checkpoint_args.get("semantic_gate", True)
+    if args.parser_splat_color_aggregation is None:
+        args.parser_splat_color_aggregation = parser_checkpoint_args.get("splat_color_aggregation") or "quantized_mode"
+    if args.parser_splat_color_mode_bits is None:
+        args.parser_splat_color_mode_bits = parser_checkpoint_args.get("splat_color_mode_bits") or 5
+    if args.parser_splat_color_mode_confidence_ratio is None:
+        args.parser_splat_color_mode_confidence_ratio = (
+            parser_checkpoint_args.get("splat_color_mode_confidence_ratio") or 0.85
+        )
     parser_views = parse_views(parser_checkpoint_args.get("views", ""))
     if parser_views and parser_views != parse_views(args.views):
         raise ValueError(
@@ -653,6 +683,9 @@ def main():
         "parser_checkpoint": args.parser_checkpoint,
         "parser_splat_fg_threshold": args.parser_splat_fg_threshold,
         "parser_semantic_gate": args.parser_semantic_gate,
+        "parser_splat_color_aggregation": args.parser_splat_color_aggregation,
+        "parser_splat_color_mode_bits": args.parser_splat_color_mode_bits,
+        "parser_splat_color_mode_confidence_ratio": args.parser_splat_color_mode_confidence_ratio,
         "parser_checkpoint_views": parse_views(parser_checkpoint_args.get("views", "")) if parser_checkpoint_args else None,
         "best_metric": args.best_metric,
         "scheduler": args.scheduler,
@@ -691,6 +724,9 @@ def main():
             parser_background_augment_prob=args.parser_background_augment_prob,
             dense_parser=dense_parser, parser_splat_fg_threshold=args.parser_splat_fg_threshold,
             parser_semantic_gate=args.parser_semantic_gate,
+            parser_splat_color_aggregation=args.parser_splat_color_aggregation,
+            parser_splat_color_mode_bits=args.parser_splat_color_mode_bits,
+            parser_splat_color_mode_confidence_ratio=args.parser_splat_color_mode_confidence_ratio,
             bg_color=dataset.bg_color, log_every=args.log_every,
         )
         metrics = {"train": train_metrics}
@@ -712,6 +748,9 @@ def main():
                     train=False, d_optimizer=None, views=views, augmenter=val_augmenter,
                     dense_parser=dense_parser, parser_splat_fg_threshold=args.parser_splat_fg_threshold,
                     parser_semantic_gate=args.parser_semantic_gate,
+                    parser_splat_color_aggregation=args.parser_splat_color_aggregation,
+                    parser_splat_color_mode_bits=args.parser_splat_color_mode_bits,
+                    parser_splat_color_mode_confidence_ratio=args.parser_splat_color_mode_confidence_ratio,
                     bg_color=dataset.bg_color, log_every=args.log_every,
                 )
             metrics["val"] = val_metrics
@@ -743,6 +782,10 @@ def main():
                     dense_parser=dense_parser,
                     augmenter=None,
                     parser_splat_fg_threshold=args.parser_splat_fg_threshold,
+                    parser_semantic_gate=args.parser_semantic_gate,
+                    parser_splat_color_aggregation=args.parser_splat_color_aggregation,
+                    parser_splat_color_mode_bits=args.parser_splat_color_mode_bits,
+                    parser_splat_color_mode_confidence_ratio=args.parser_splat_color_mode_confidence_ratio,
                     bg_color=dataset.bg_color,
                 )
                 pred_uv = model(preview_cond)

@@ -11,6 +11,7 @@ from SkingToolkit.dense_uv_parser.utils import (
     canonicalize_tensor,
     splat_deterministic_targets_to_uv_conditioning,
     splat_parser_predictions_to_uv_conditioning,
+    splat_to_uv_conditioning,
 )
 
 
@@ -97,6 +98,56 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         sharp_fractional = (sharp[interior] - sharp[interior].round()).abs().mean()
         smooth_fractional = (smooth[interior] - smooth[interior].round()).abs().mean()
         self.assertLess(sharp_fractional, smooth_fractional)
+
+    def test_quantized_mode_selects_the_dominant_color_family(self):
+        rendered = torch.zeros(1, 4, 1, 4)
+        rendered[0, :, 0, 0] = torch.tensor([0.0, 0.0, 1.0, 1.0])
+        rendered[0, :, 0, 1:] = torch.tensor([1.0, 0.0, 0.0, 1.0]).view(4, 1)
+        fg = torch.ones(1, 1, 4, dtype=torch.bool)
+        layer = torch.zeros(1, 1, 4, dtype=torch.long)
+        flat_uv = torch.zeros(1, 1, 4, dtype=torch.long)
+        confidence = torch.tensor([[[1.0, 0.95, 0.95, 0.95]]])
+
+        best = splat_to_uv_conditioning(
+            rendered,
+            fg,
+            layer,
+            flat_uv,
+            confidence=confidence,
+            color_aggregation="best",
+        )
+        mode = splat_to_uv_conditioning(
+            rendered,
+            fg,
+            layer,
+            flat_uv,
+            confidence=confidence,
+            color_aggregation="quantized_mode",
+            color_mode_bits=5,
+            color_mode_confidence_ratio=0.9,
+        )
+        self.assertTrue(torch.allclose(best[0, :3, 0, 0], torch.tensor([0.0, 0.0, 1.0])))
+        self.assertTrue(torch.allclose(mode[0, :3, 0, 0], torch.tensor([1.0, 0.0, 0.0])))
+
+    def test_quantized_mode_keeps_one_real_representative(self):
+        rendered = torch.zeros(1, 4, 1, 2)
+        rendered[0, :, 0, 0] = torch.tensor([1.0, 0.0, 0.0, 1.0])
+        rendered[0, :, 0, 1] = torch.tensor([0.99, 0.01, 0.0, 1.0])
+        fg = torch.ones(1, 1, 2, dtype=torch.bool)
+        layer = torch.zeros(1, 1, 2, dtype=torch.long)
+        flat_uv = torch.zeros(1, 1, 2, dtype=torch.long)
+
+        mode = splat_to_uv_conditioning(
+            rendered,
+            fg,
+            layer,
+            flat_uv,
+            confidence=torch.ones(1, 1, 2),
+            color_aggregation="quantized_mode",
+            color_mode_bits=5,
+        )
+
+        self.assertTrue(torch.allclose(mode[0, :3, 0, 0], rendered[0, :3, 0, 0]))
 
     def test_mapping_mask_rejects_background_false_positives(self):
         renderer = FakeRenderer(valid_pixels=1)
