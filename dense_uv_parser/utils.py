@@ -475,10 +475,11 @@ def canonicalize_parser_outputs(outputs):
     return canonical
 
 
-def canonicalize_parser_render(rendered, outputs):
+def canonicalize_parser_render(rendered, outputs, mode="nearest"):
+    """Undo the global transform for colors without blending Minecraft texels."""
     if "affine" not in outputs:
         return rendered
-    return canonicalize_tensor(rendered, outputs["affine"], mode="bilinear")
+    return canonicalize_tensor(rendered, outputs["affine"], mode=mode)
 
 
 def _routing_from_affine_outputs(renderer, views, outputs, fg_threshold=0.5, semantic_gate=True):
@@ -600,7 +601,7 @@ def splat_parser_predictions_to_uv_conditioning(
     if group_size != len(views):
         raise ValueError(f"group_size={group_size} must equal the number of views ({len(views)}).")
 
-    canonical_rendered = canonicalize_parser_render(rendered, outputs)
+    canonical_rendered = canonicalize_parser_render(rendered, outputs, mode="nearest")
     canonical_outputs = canonicalize_parser_outputs(outputs)
     routing = _routing_from_affine_outputs(
         renderer,
@@ -639,7 +640,7 @@ def splat_deterministic_targets_to_uv_conditioning(
     views = parse_views(views)
     if group_size != len(views):
         raise ValueError(f"group_size={group_size} must equal the number of views ({len(views)}).")
-    canonical_rendered = canonicalize_tensor(rendered, targets["affine"], mode="bilinear")
+    canonical_rendered = canonicalize_tensor(rendered, targets["affine"], mode="nearest")
     canonical_targets = canonicalize_dense_targets(targets)
     requested_surface = canonical_targets["surface"]
     N, H, W = requested_surface.shape

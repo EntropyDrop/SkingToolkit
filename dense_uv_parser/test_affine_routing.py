@@ -7,6 +7,7 @@ from SkingToolkit.dense_uv_parser.losses import DenseUVParserLoss
 from SkingToolkit.dense_uv_parser.model import DenseUVParserNet
 from SkingToolkit.dense_uv_parser.utils import (
     augment_dense_batch,
+    canonicalize_parser_render,
     canonicalize_tensor,
     splat_deterministic_targets_to_uv_conditioning,
     splat_parser_predictions_to_uv_conditioning,
@@ -76,6 +77,26 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         )
         recovered = canonicalize_tensor(augmented, targets["affine"])
         self.assertLess((recovered[:, :3] - rendered[:, :3]).abs().mean().item(), 0.03)
+
+    def test_color_canonicalization_uses_nearest_texels(self):
+        height = width = 64
+        rendered = torch.zeros(1, 4, height, width)
+        rendered[:, 3] = 1.0
+        rendered[:, :3, :, ::2] = 1.0
+        augmented, targets = augment_dense_batch(
+            rendered,
+            dense_targets(1, height, width),
+            translation_scale=0.03,
+            scale_range=0.03,
+            generator=torch.Generator().manual_seed(7),
+        )
+        sharp = canonicalize_parser_render(augmented, {"affine": targets["affine"]})[:, :3]
+        smooth = canonicalize_tensor(augmented, targets["affine"], mode="bilinear")[:, :3]
+        self.assertTrue(torch.allclose(sharp, canonicalize_tensor(augmented, targets["affine"], mode="nearest")[:, :3]))
+        interior = (slice(None), slice(None), slice(4, -4), slice(4, -4))
+        sharp_fractional = (sharp[interior] - sharp[interior].round()).abs().mean()
+        smooth_fractional = (smooth[interior] - smooth[interior].round()).abs().mean()
+        self.assertLess(sharp_fractional, smooth_fractional)
 
     def test_mapping_mask_rejects_background_false_positives(self):
         renderer = FakeRenderer(valid_pixels=1)
