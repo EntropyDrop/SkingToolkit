@@ -64,6 +64,7 @@ if [[ ${OUTPUT+x} ]]; then
 fi
 OUTPUT="${OUTPUT-outputs/pred_uv.png}"
 CONDITIONING_OUTPUT="${CONDITIONING_OUTPUT-outputs/parser_conditioning.png}"
+DEBUG_OUTPUT="${DEBUG_OUTPUT-outputs/parser_debug.png}"
 
 COMBINED="${COMBINED:-}"
 VIEW_IMAGES="${VIEW_IMAGES:-}"
@@ -100,6 +101,10 @@ if [[ -n "$CONDITIONING_OUTPUT" ]]; then
   args+=(--conditioning_output "$CONDITIONING_OUTPUT")
 fi
 
+if [[ -n "$DEBUG_OUTPUT" ]]; then
+  args+=(--debug_output "$DEBUG_OUTPUT")
+fi
+
 if [[ -n "$OUTPUT" ]]; then
   if [[ -n "$INPAINT_CHECKPOINT" ]]; then
     args+=(--inpaint_checkpoint "$INPAINT_CHECKPOINT" --output "$OUTPUT")
@@ -112,8 +117,8 @@ if [[ -n "$OUTPUT" ]]; then
   fi
 fi
 
-if [[ -z "$CONDITIONING_OUTPUT" && ( -z "$OUTPUT" || -z "$INPAINT_CHECKPOINT" ) ]]; then
-  echo "Nothing to write. Set CONDITIONING_OUTPUT and/or OUTPUT with a valid INPAINT_CHECKPOINT." >&2
+if [[ -z "$CONDITIONING_OUTPUT" && -z "$DEBUG_OUTPUT" && ( -z "$OUTPUT" || -z "$INPAINT_CHECKPOINT" ) ]]; then
+  echo "Nothing to write. Set CONDITIONING_OUTPUT, DEBUG_OUTPUT and/or OUTPUT with a valid INPAINT_CHECKPOINT." >&2
   exit 1
 fi
 
@@ -127,6 +132,9 @@ if [[ -n "$INPAINT_CHECKPOINT" ]]; then
 fi
 if [[ -n "$CONDITIONING_OUTPUT" ]]; then
   echo "Conditioning output: $CONDITIONING_OUTPUT"
+fi
+if [[ -n "$DEBUG_OUTPUT" ]]; then
+  echo "Debug output: $DEBUG_OUTPUT"
 fi
 if [[ -n "$OUTPUT" && -n "$INPAINT_CHECKPOINT" ]]; then
   echo "Final output: $OUTPUT"

@@ -14,15 +14,33 @@ if str(WORKSPACE_ROOT) not in sys.path:
     sys.path.insert(0, str(WORKSPACE_ROOT))
 
 from SkingToolkit.dense_uv_parser.model import DenseUVParserNet  # noqa: E402
-from SkingToolkit.dense_uv_parser.utils import parse_views, splat_predictions_to_uv_conditioning  # noqa: E402
+from SkingToolkit.dense_uv_parser.utils import (  # noqa: E402
+    IGNORE_INDEX,
+    LAYER_PALETTE,
+    PART_PALETTE,
+    colorize_foreground,
+    colorize_labels,
+    colorize_uv,
+    parse_views,
+    prediction_uv01,
+    splat_predictions_to_uv_conditioning,
+)
 from SkingToolkit.inverse_uv.dataset import finalize_minecraft_alpha, tensor_to_rgba_image, view_native_size  # noqa: E402
 from SkingToolkit.inverse_uv.model import InverseUVNet  # noqa: E402
 from SkingToolkit.inverse_uv.train import get_device  # noqa: E402
 from SkingToolkit.renderer import DifferentiableRenderer  # noqa: E402
 
 
-def image_to_render_tensor(image, view_size):
-    tensor = TF.to_tensor(image.convert("RGB"))
+def image_to_render_tensor(image, view_size, bg_color=(128, 128, 128)):
+    if image.mode in ("RGBA", "LA") or (image.mode == "P" and "transparency" in image.info):
+        rgba = image.convert("RGBA")
+        alpha = TF.to_tensor(rgba)[3:4]
+        rgb = TF.to_tensor(rgba.convert("RGB"))
+        bg = rgb.new_tensor(bg_color).view(3, 1, 1) / 255.0
+        tensor = alpha * rgb + (1.0 - alpha) * bg
+    else:
+        tensor = TF.to_tensor(image.convert("RGB"))
+
     if tuple(tensor.shape[-2:]) != tuple(view_size):
         tensor = F.interpolate(
             tensor.unsqueeze(0),
@@ -70,7 +88,7 @@ def checkpoint_run_id(path):
     return f"{path.parent.name}/{path.name}"
 
 
-def load_view_images(args, views, renderer):
+def load_view_images(args, views, renderer, bg_color=(128, 128, 128)):
     images = []
     if args.combined:
         combined = Image.open(args.combined)
@@ -91,7 +109,7 @@ def load_view_images(args, views, renderer):
         raise ValueError("Provide --combined, --view_images, or both --front and --back.")
 
     tensors = [
-        image_to_render_tensor(image, view_native_size(renderer, view))
+        image_to_render_tensor(image, view_native_size(renderer, view), bg_color=bg_color)
         for image, view in zip(images, views)
     ]
     return torch.stack(tensors, dim=0)
@@ -105,12 +123,41 @@ def save_conditioning_preview(conditioning, output_path):
     save_image(preview.clamp(0.0, 1.0), output_path, nrow=conditioning.shape[0])
 
 
+def save_debug_preview(rendered, outputs, view_count, output_path, fg_threshold, bg_color=(128, 128, 128)):
+    pred_fg = torch.sigmoid(outputs["foreground"])[:, 0] > fg_threshold
+    pred_part = torch.where(
+        pred_fg,
+        outputs["part"].argmax(dim=1),
+        torch.full_like(outputs["part"].argmax(dim=1), IGNORE_INDEX),
+    )
+    pred_layer = torch.where(
+        pred_fg,
+        outputs["layer"].argmax(dim=1),
+        torch.full_like(outputs["layer"].argmax(dim=1), IGNORE_INDEX),
+    )
+    pred_uv = prediction_uv01(outputs)
+
+    debug_preview = torch.cat(
+        [
+            rendered[:, :3],
+            colorize_foreground(pred_fg, bg_color, rendered),
+            colorize_labels(pred_part, PART_PALETTE, bg_color, rendered),
+            colorize_labels(pred_layer, LAYER_PALETTE, bg_color, rendered),
+            colorize_uv(pred_uv, pred_fg, bg_color),
+        ],
+        dim=0,
+    )
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    save_image(debug_preview.clamp(0.0, 1.0).detach().cpu(), output_path, nrow=view_count)
+
+
 def build_arg_parser():
     parser = argparse.ArgumentParser(description="Infer UV conditioning with a dense UV parser.")
     parser.add_argument("--parser_checkpoint", required=True)
     parser.add_argument("--inpaint_checkpoint", default=None, help="Optional inverse_uv checkpoint used to inpaint final skin.")
     parser.add_argument("--output", default=None, help="Final RGBA UV PNG path; requires --inpaint_checkpoint.")
     parser.add_argument("--conditioning_output", default=None, help="Optional preview image for parser-splatted conditioning.")
+    parser.add_argument("--debug_output", default=None, help="Optional path to write a debug preview grid of predictions.")
     parser.add_argument("--front", default=None)
     parser.add_argument("--back", default=None)
     parser.add_argument("--combined", default=None)
@@ -127,8 +174,8 @@ def main():
     args = build_arg_parser().parse_args()
     if args.output and not args.inpaint_checkpoint:
         raise ValueError("--output requires --inpaint_checkpoint.")
-    if not args.output and not args.conditioning_output:
-        raise ValueError("Provide --output and/or --conditioning_output.")
+    if not args.output and not args.conditioning_output and not args.debug_output:
+        raise ValueError("Provide --output, --conditioning_output, and/or --debug_output.")
 
     device = get_device(args.device)
     parser_model, parser_args = load_parser(args.parser_checkpoint, device)
@@ -143,7 +190,8 @@ def main():
     if missing_views:
         raise ValueError(f"Unknown renderer views {missing_views}. Available views: {', '.join(renderer.views)}")
 
-    rendered = load_view_images(args, views, renderer).to(device)
+    bg_color = parser_args.get("bg_color", (128, 128, 128))
+    rendered = load_view_images(args, views, renderer, bg_color=bg_color).to(device)
     view_ids = torch.arange(len(views), device=device)
     with torch.no_grad():
         outputs = parser_model(rendered, view_ids=view_ids)
@@ -152,6 +200,17 @@ def main():
             outputs,
             group_size=len(views),
             fg_threshold=args.fg_threshold,
+            bg_color=bg_color,
+        )
+
+    if args.debug_output:
+        save_debug_preview(
+            rendered,
+            outputs,
+            len(views),
+            Path(args.debug_output),
+            args.fg_threshold,
+            bg_color=bg_color,
         )
 
     if args.conditioning_output:

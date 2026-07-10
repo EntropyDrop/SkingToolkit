@@ -18,9 +18,14 @@ from SkingToolkit.dense_uv_parser.losses import DenseUVParserLoss  # noqa: E402
 from SkingToolkit.dense_uv_parser.model import DenseUVParserNet, count_parameters  # noqa: E402
 from SkingToolkit.dense_uv_parser.utils import (  # noqa: E402
     IGNORE_INDEX,
+    LAYER_PALETTE,
+    PART_PALETTE,
     UV_SIZE,
     augment_dense_batch,
     build_dense_parser_batch,
+    colorize_foreground,
+    colorize_labels,
+    colorize_uv,
     parse_views,
     prediction_uv01,
     randomize_render_background,
@@ -186,50 +191,7 @@ def run_epoch(model, criterion, renderer, loader, optimizer, scaler, device, pre
     return format_metrics(metric_sums, sample_count)
 
 
-PART_PALETTE = (
-    (239, 83, 80),
-    (255, 202, 40),
-    (102, 187, 106),
-    (38, 166, 154),
-    (66, 165, 245),
-    (171, 71, 188),
-)
-LAYER_PALETTE = (
-    (72, 169, 166),
-    (255, 179, 71),
-)
 
-
-def bg_tensor(args, reference):
-    return reference.new_tensor(args.bg_color).view(1, 3, 1, 1) / 255.0
-
-
-def colorize_labels(labels, palette, args, reference):
-    N, H, W = labels.shape
-    bg = bg_tensor(args, reference).expand(N, 3, H, W).clone()
-    valid = labels != IGNORE_INDEX
-    if not valid.any():
-        return bg
-    palette_tensor = reference.new_tensor(palette, dtype=reference.dtype) / 255.0
-    safe_labels = labels.clamp(0, len(palette) - 1)
-    out = bg.permute(0, 2, 3, 1)
-    out[valid] = palette_tensor[safe_labels[valid]]
-    return bg
-
-
-def colorize_foreground(mask, args, reference):
-    N, H, W = mask.shape
-    bg = bg_tensor(args, reference).expand(N, 3, H, W)
-    fg = reference.new_ones(N, 3, H, W)
-    return torch.where(mask.unsqueeze(1), fg, bg)
-
-
-def colorize_uv(uv, mask, args):
-    N, _, H, W = uv.shape
-    bg = bg_tensor(args, uv).expand(N, 3, H, W)
-    zeros = uv.new_zeros(N, 1, H, W)
-    uv_rgb = torch.cat([uv[:, 0:1], uv[:, 1:2], zeros], dim=1)
-    return torch.where(mask.unsqueeze(1), uv_rgb, bg)
 
 
 def save_preview(model, renderer, loader, device, args, output_path, max_items=2):
@@ -289,14 +251,14 @@ def save_preview(model, renderer, loader, device, args, output_path, max_items=2
     debug_preview = torch.cat(
         [
             rendered_debug[:, :3],
-            colorize_foreground(pred_fg, args, rendered_debug),
-            colorize_foreground(gt_fg, args, rendered_debug),
-            colorize_labels(pred_part, PART_PALETTE, args, rendered_debug),
-            colorize_labels(targets_debug["part"], PART_PALETTE, args, rendered_debug),
-            colorize_labels(pred_layer, LAYER_PALETTE, args, rendered_debug),
-            colorize_labels(targets_debug["layer"], LAYER_PALETTE, args, rendered_debug),
-            colorize_uv(pred_uv, pred_fg, args),
-            colorize_uv(targets_debug["uv"], gt_fg, args),
+            colorize_foreground(pred_fg, args.bg_color, rendered_debug),
+            colorize_foreground(gt_fg, args.bg_color, rendered_debug),
+            colorize_labels(pred_part, PART_PALETTE, args.bg_color, rendered_debug),
+            colorize_labels(targets_debug["part"], PART_PALETTE, args.bg_color, rendered_debug),
+            colorize_labels(pred_layer, LAYER_PALETTE, args.bg_color, rendered_debug),
+            colorize_labels(targets_debug["layer"], LAYER_PALETTE, args.bg_color, rendered_debug),
+            colorize_uv(pred_uv, pred_fg, args.bg_color),
+            colorize_uv(targets_debug["uv"], gt_fg, args.bg_color),
         ],
         dim=0,
     )
@@ -336,7 +298,7 @@ def build_arg_parser():
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--num_workers", type=int, default=8)
     parser.add_argument("--prefetch_factor", type=int, default=4)
-    parser.add_argument("--epochs", type=int, default=30)
+    parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--weight_decay", type=float, default=1e-4)
     parser.add_argument("--device", default="auto")

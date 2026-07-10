@@ -376,3 +376,50 @@ def splat_to_uv_conditioning(
     alpha = torch.where(known > 0, aggregated[:, :, 3:4], torch.zeros_like(aggregated[:, :, 3:4]))
     layers = torch.cat([rgb, alpha, known], dim=2).reshape(groups, -1, UV_SIZE, UV_SIZE)
     return layers.clamp(0.0, 1.0)
+
+
+PART_PALETTE = (
+    (239, 83, 80),
+    (255, 202, 40),
+    (102, 187, 106),
+    (38, 166, 154),
+    (66, 165, 245),
+    (171, 71, 188),
+)
+LAYER_PALETTE = (
+    (72, 169, 166),
+    (255, 179, 71),
+)
+
+
+def bg_tensor(bg_color, reference):
+    return reference.new_tensor(bg_color).view(1, 3, 1, 1) / 255.0
+
+
+def colorize_labels(labels, palette, bg_color, reference):
+    N, H, W = labels.shape
+    bg = bg_tensor(bg_color, reference).expand(N, 3, H, W).clone()
+    valid = labels != IGNORE_INDEX
+    if not valid.any():
+        return bg
+    palette_tensor = reference.new_tensor(palette, dtype=reference.dtype) / 255.0
+    safe_labels = labels.clamp(0, len(palette) - 1)
+    out = bg.permute(0, 2, 3, 1)
+    out[valid] = palette_tensor[safe_labels[valid]]
+    return bg
+
+
+def colorize_foreground(mask, bg_color, reference):
+    N, H, W = mask.shape
+    bg = bg_tensor(bg_color, reference).expand(N, 3, H, W)
+    fg = reference.new_ones(N, 3, H, W)
+    return torch.where(mask.unsqueeze(1), fg, bg)
+
+
+def colorize_uv(uv, mask, bg_color):
+    N, _, H, W = uv.shape
+    bg = bg_tensor(bg_color, uv).expand(N, 3, H, W)
+    zeros = uv.new_zeros(N, 1, H, W)
+    uv_rgb = torch.cat([uv[:, 0:1], uv[:, 1:2], zeros], dim=1)
+    return torch.where(mask.unsqueeze(1), uv_rgb, bg)
+
