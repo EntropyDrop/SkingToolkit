@@ -198,6 +198,7 @@ def build_arg_parser():
     parser.add_argument("--mappings_dir", default=None)
     parser.add_argument("--fg_threshold", type=float, default=0.5)
     parser.add_argument("--no_semantic_gate", dest="semantic_gate", action="store_false", default=None)
+    parser.add_argument("--semantic_gate_radius", type=int, default=None)
     parser.add_argument("--splat_color_aggregation", choices=SPLAT_COLOR_AGGREGATIONS, default=None)
     parser.add_argument("--splat_color_mode_bits", type=int, default=None)
     parser.add_argument("--splat_color_mode_confidence_ratio", type=float, default=None)
@@ -236,6 +237,12 @@ def main():
 
     bg_color = parser_args.get("bg_color", (128, 128, 128))
     semantic_gate = parser_args.get("semantic_gate", True) if args.semantic_gate is None else args.semantic_gate
+    checkpoint_gate_radius = parser_args.get("semantic_gate_radius")
+    semantic_gate_radius = (
+        args.semantic_gate_radius
+        if args.semantic_gate_radius is not None
+        else 1 if checkpoint_gate_radius is None else checkpoint_gate_radius
+    )
     color_aggregation = args.splat_color_aggregation or parser_args.get("splat_color_aggregation") or "quantized_mode"
     color_mode_bits = (
         args.splat_color_mode_bits
@@ -260,6 +267,18 @@ def main():
             raise ValueError(
                 "The inverse_uv checkpoint was trained with a different parser: "
                 f"expected {checkpoint_run_id(expected_parser)}, got {checkpoint_run_id(args.parser_checkpoint)}."
+            )
+        expected_semantic_gate = inpaint_args.get("parser_semantic_gate")
+        if expected_semantic_gate is not None and bool(expected_semantic_gate) != semantic_gate:
+            raise ValueError(
+                "Parser semantic-gate setting does not match the inverse_uv checkpoint: "
+                f"checkpoint={expected_semantic_gate}, requested={semantic_gate}."
+            )
+        expected_gate_radius = inpaint_args.get("parser_semantic_gate_radius")
+        if expected_gate_radius is not None and int(expected_gate_radius) != semantic_gate_radius:
+            raise ValueError(
+                "Parser semantic-gate radius does not match the inverse_uv checkpoint: "
+                f"checkpoint={expected_gate_radius}, requested={semantic_gate_radius}."
             )
         expected_aggregation = inpaint_args.get("parser_splat_color_aggregation", "best")
         if expected_aggregation != color_aggregation:
@@ -291,6 +310,7 @@ def main():
             fg_threshold=args.fg_threshold,
             bg_color=bg_color,
             semantic_gate=semantic_gate,
+            semantic_gate_radius=semantic_gate_radius,
             color_aggregation=color_aggregation,
             color_mode_bits=color_mode_bits,
             color_mode_confidence_ratio=color_mode_confidence_ratio,

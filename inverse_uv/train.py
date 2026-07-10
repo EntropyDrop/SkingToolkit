@@ -144,6 +144,7 @@ def build_dense_parser_conditioning(
     parser_background_augment_prob=0.9,
     fg_threshold=0.5,
     semantic_gate=True,
+    semantic_gate_radius=1,
     color_aggregation="quantized_mode",
     color_mode_bits=5,
     color_mode_confidence_ratio=0.85,
@@ -183,6 +184,7 @@ def build_dense_parser_conditioning(
             fg_threshold=fg_threshold,
             bg_color=bg_color,
             semantic_gate=semantic_gate,
+            semantic_gate_radius=semantic_gate_radius,
             color_aggregation=color_aggregation,
             color_mode_bits=color_mode_bits,
             color_mode_confidence_ratio=color_mode_confidence_ratio,
@@ -205,6 +207,7 @@ def build_training_conditioning(
     parser_background_augment_prob=0.9,
     parser_splat_fg_threshold=0.5,
     parser_semantic_gate=True,
+    parser_semantic_gate_radius=1,
     parser_splat_color_aggregation="quantized_mode",
     parser_splat_color_mode_bits=5,
     parser_splat_color_mode_confidence_ratio=0.85,
@@ -223,6 +226,7 @@ def build_training_conditioning(
         parser_background_augment_prob=parser_background_augment_prob,
         fg_threshold=parser_splat_fg_threshold,
         semantic_gate=parser_semantic_gate,
+        semantic_gate_radius=parser_semantic_gate_radius,
         color_aggregation=parser_splat_color_aggregation,
         color_mode_bits=parser_splat_color_mode_bits,
         color_mode_confidence_ratio=parser_splat_color_mode_confidence_ratio,
@@ -248,6 +252,7 @@ def run_epoch(
     parser_background_augment_prob=0.9,
     parser_splat_fg_threshold=0.5,
     parser_semantic_gate=True,
+    parser_semantic_gate_radius=1,
     parser_splat_color_aggregation="quantized_mode",
     parser_splat_color_mode_bits=5,
     parser_splat_color_mode_confidence_ratio=0.85,
@@ -281,6 +286,7 @@ def run_epoch(
                 parser_background_augment_prob=parser_background_augment_prob,
                 parser_splat_fg_threshold=parser_splat_fg_threshold,
                 parser_semantic_gate=parser_semantic_gate,
+                parser_semantic_gate_radius=parser_semantic_gate_radius,
                 parser_splat_color_aggregation=parser_splat_color_aggregation,
                 parser_splat_color_mode_bits=parser_splat_color_mode_bits,
                 parser_splat_color_mode_confidence_ratio=parser_splat_color_mode_confidence_ratio,
@@ -471,6 +477,7 @@ def build_arg_parser():
     )
     parser.add_argument("--parser_semantic_gate", dest="parser_semantic_gate", action="store_true", default=None)
     parser.add_argument("--no_parser_semantic_gate", dest="parser_semantic_gate", action="store_false")
+    parser.add_argument("--parser_semantic_gate_radius", type=int, default=None)
     parser.add_argument("--parser_splat_color_aggregation", choices=SPLAT_COLOR_AGGREGATIONS, default=None)
     parser.add_argument("--parser_splat_color_mode_bits", type=int, default=None)
     parser.add_argument("--parser_splat_color_mode_confidence_ratio", type=float, default=None)
@@ -535,6 +542,9 @@ def main():
     dense_parser, parser_checkpoint_args = load_dense_parser(args.parser_checkpoint, device)
     if args.parser_semantic_gate is None:
         args.parser_semantic_gate = parser_checkpoint_args.get("semantic_gate", True)
+    if args.parser_semantic_gate_radius is None:
+        checkpoint_gate_radius = parser_checkpoint_args.get("semantic_gate_radius")
+        args.parser_semantic_gate_radius = 1 if checkpoint_gate_radius is None else checkpoint_gate_radius
     if args.parser_splat_color_aggregation is None:
         args.parser_splat_color_aggregation = parser_checkpoint_args.get("splat_color_aggregation") or "quantized_mode"
     if args.parser_splat_color_mode_bits is None:
@@ -683,6 +693,7 @@ def main():
         "parser_checkpoint": args.parser_checkpoint,
         "parser_splat_fg_threshold": args.parser_splat_fg_threshold,
         "parser_semantic_gate": args.parser_semantic_gate,
+        "parser_semantic_gate_radius": args.parser_semantic_gate_radius,
         "parser_splat_color_aggregation": args.parser_splat_color_aggregation,
         "parser_splat_color_mode_bits": args.parser_splat_color_mode_bits,
         "parser_splat_color_mode_confidence_ratio": args.parser_splat_color_mode_confidence_ratio,
@@ -724,6 +735,7 @@ def main():
             parser_background_augment_prob=args.parser_background_augment_prob,
             dense_parser=dense_parser, parser_splat_fg_threshold=args.parser_splat_fg_threshold,
             parser_semantic_gate=args.parser_semantic_gate,
+            parser_semantic_gate_radius=args.parser_semantic_gate_radius,
             parser_splat_color_aggregation=args.parser_splat_color_aggregation,
             parser_splat_color_mode_bits=args.parser_splat_color_mode_bits,
             parser_splat_color_mode_confidence_ratio=args.parser_splat_color_mode_confidence_ratio,
@@ -748,6 +760,7 @@ def main():
                     train=False, d_optimizer=None, views=views, augmenter=val_augmenter,
                     dense_parser=dense_parser, parser_splat_fg_threshold=args.parser_splat_fg_threshold,
                     parser_semantic_gate=args.parser_semantic_gate,
+                    parser_semantic_gate_radius=args.parser_semantic_gate_radius,
                     parser_splat_color_aggregation=args.parser_splat_color_aggregation,
                     parser_splat_color_mode_bits=args.parser_splat_color_mode_bits,
                     parser_splat_color_mode_confidence_ratio=args.parser_splat_color_mode_confidence_ratio,
@@ -783,6 +796,7 @@ def main():
                     augmenter=None,
                     parser_splat_fg_threshold=args.parser_splat_fg_threshold,
                     parser_semantic_gate=args.parser_semantic_gate,
+                    parser_semantic_gate_radius=args.parser_semantic_gate_radius,
                     parser_splat_color_aggregation=args.parser_splat_color_aggregation,
                     parser_splat_color_mode_bits=args.parser_splat_color_mode_bits,
                     parser_splat_color_mode_confidence_ratio=args.parser_splat_color_mode_confidence_ratio,

@@ -230,6 +230,7 @@ def save_preview(model, renderer, loader, device, args, output_path, max_items=2
                 fg_threshold=args.splat_fg_threshold,
                 bg_color=args.bg_color,
                 semantic_gate=args.semantic_gate,
+                semantic_gate_radius=args.semantic_gate_radius,
                 color_aggregation=args.splat_color_aggregation,
                 color_mode_bits=args.splat_color_mode_bits,
                 color_mode_confidence_ratio=args.splat_color_mode_confidence_ratio,
@@ -414,6 +415,7 @@ def build_arg_parser():
     parser.add_argument("--background_augment_prob", type=float, default=0.9)
     parser.add_argument("--semantic_gate", dest="semantic_gate", action="store_true", default=True)
     parser.add_argument("--no_semantic_gate", dest="semantic_gate", action="store_false")
+    parser.add_argument("--semantic_gate_radius", type=int, default=1)
     parser.add_argument("--lambda_foreground", type=float, default=1.0)
     parser.add_argument("--lambda_layer", type=float, default=1.0)
     parser.add_argument("--lambda_part", type=float, default=0.5)
@@ -521,6 +523,7 @@ def main():
         "background_augment": args.background_augment,
         "background_augment_prob": args.background_augment_prob,
         "semantic_gate": args.semantic_gate,
+        "semantic_gate_radius": args.semantic_gate_radius,
         "splat_color_aggregation": args.splat_color_aggregation,
         "splat_color_mode_bits": args.splat_color_mode_bits,
         "splat_color_mode_confidence_ratio": args.splat_color_mode_confidence_ratio,

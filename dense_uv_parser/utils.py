@@ -483,7 +483,39 @@ def canonicalize_parser_render(rendered, outputs, mode="nearest"):
     return canonicalize_tensor(rendered, outputs["affine"], mode=mode)
 
 
-def _routing_from_affine_outputs(renderer, views, outputs, fg_threshold=0.5, semantic_gate=True):
+def _semantic_boundary_mask(labels, radius):
+    """Mark static-label boundaries where a one-pixel classifier offset is expected."""
+    radius = int(radius)
+    if radius < 0:
+        raise ValueError(f"semantic_gate_radius must be non-negative, got {radius}.")
+    if radius == 0:
+        return torch.zeros_like(labels, dtype=torch.bool)
+
+    valid = labels != IGNORE_INDEX
+    boundary = torch.zeros_like(valid)
+    vertical_change = labels[:, 1:, :] != labels[:, :-1, :]
+    horizontal_change = labels[:, :, 1:] != labels[:, :, :-1]
+    boundary[:, 1:, :] |= vertical_change & valid[:, 1:, :]
+    boundary[:, :-1, :] |= vertical_change & valid[:, :-1, :]
+    boundary[:, :, 1:] |= horizontal_change & valid[:, :, 1:]
+    boundary[:, :, :-1] |= horizontal_change & valid[:, :, :-1]
+    boundary = F.max_pool2d(
+        boundary.unsqueeze(1).to(dtype=torch.float32),
+        kernel_size=radius * 2 + 1,
+        stride=1,
+        padding=radius,
+    ).squeeze(1) > 0
+    return boundary & valid
+
+
+def _routing_from_affine_outputs(
+    renderer,
+    views,
+    outputs,
+    fg_threshold=0.5,
+    semantic_gate=True,
+    semantic_gate_radius=1,
+):
     views = parse_views(views)
     if not views:
         raise ValueError("At least one renderer view is required for deterministic UV routing.")
@@ -491,28 +523,36 @@ def _routing_from_affine_outputs(renderer, views, outputs, fg_threshold=0.5, sem
         raise ValueError("Affine parser outputs must include the static surface classifier.")
     foreground_prob = torch.sigmoid(outputs["foreground"])[:, 0]
     surface_prob = torch.softmax(outputs["surface"], dim=1)
-    requested_surface = surface_prob.argmax(dim=1)
-    layer_prob = torch.softmax(outputs["layer"], dim=1)
-    N, H, W = requested_surface.shape
+    N, surface_classes, H, W = surface_prob.shape
     if N % len(views) != 0:
         raise ValueError(f"N={N} must be divisible by {len(views)} renderer views.")
 
     fg = torch.zeros_like(foreground_prob, dtype=torch.bool)
-    layer = torch.zeros_like(requested_surface)
-    flat_uv = torch.zeros_like(requested_surface)
-    surface = torch.full_like(requested_surface, IGNORE_INDEX)
+    layer = torch.zeros((N, H, W), dtype=torch.long, device=foreground_prob.device)
+    flat_uv = torch.zeros_like(layer)
+    surface = torch.full_like(layer, IGNORE_INDEX)
     confidence = torch.zeros_like(foreground_prob)
-    expected_part = torch.full_like(requested_surface, IGNORE_INDEX)
-    expected_face = torch.full_like(requested_surface, IGNORE_INDEX)
+    expected_part = torch.full_like(layer, IGNORE_INDEX)
+    expected_face = torch.full_like(layer, IGNORE_INDEX)
 
     for view_index, view in enumerate(views):
         selection = slice(view_index, N, len(views))
-        static = build_static_surface_routing(renderer, view, requested_surface.device)
+        static = build_static_surface_routing(renderer, view, surface_prob.device)
         if static["masks"].shape[-2:] != (H, W):
             raise ValueError(
                 f"View {view!r} mapping shape {tuple(static['masks'].shape[-2:])} does not match parser shape {(H, W)}."
             )
-        selected_surface = requested_surface[selection]
+        if static["masks"].shape[0] != surface_classes:
+            raise ValueError(
+                f"View {view!r} has {static['masks'].shape[0]} static surfaces, "
+                f"but the parser predicts {surface_classes} surface classes."
+            )
+
+        # A surface class without a mapping at this render pixel can never be
+        # correct. Constrain the argmax before routing instead of turning it
+        # into a background hole after the fact.
+        valid_surface_prob = surface_prob[selection].masked_fill(~static["masks"].unsqueeze(0), -1.0)
+        selected_surface = valid_surface_prob.argmax(dim=1)
         routed = _select_static_surface(static, selected_surface)
         selected_layer = routed["layer"]
         selected_part = routed["part"]
@@ -534,8 +574,9 @@ def _routing_from_affine_outputs(renderer, views, outputs, fg_threshold=0.5, sem
                 torch.ones_like(expected_probability),
             )
             if semantic_gate:
+                boundary = _semantic_boundary_mask(expected, semantic_gate_radius)
                 semantic_valid = semantic_valid & (
-                    ~known_semantic | (probabilities.argmax(dim=1) == expected_safe)
+                    ~known_semantic | boundary | (probabilities.argmax(dim=1) == expected_safe)
                 )
 
         routed_fg = (
@@ -581,6 +622,7 @@ def splat_parser_predictions_to_uv_conditioning(
     fg_threshold=0.5,
     bg_color=(128, 128, 128),
     semantic_gate=True,
+    semantic_gate_radius=1,
     color_aggregation="quantized_mode",
     color_mode_bits=5,
     color_mode_confidence_ratio=0.85,
@@ -616,6 +658,7 @@ def splat_parser_predictions_to_uv_conditioning(
         canonical_outputs,
         fg_threshold=fg_threshold,
         semantic_gate=semantic_gate,
+        semantic_gate_radius=semantic_gate_radius,
     )
     conditioning = splat_to_uv_conditioning(
         canonical_rendered,

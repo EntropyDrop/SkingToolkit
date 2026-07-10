@@ -6,6 +6,7 @@ import torch.nn as nn
 from SkingToolkit.dense_uv_parser.losses import DenseUVParserLoss
 from SkingToolkit.dense_uv_parser.model import DenseUVParserNet
 from SkingToolkit.dense_uv_parser.utils import (
+    _semantic_boundary_mask,
     augment_dense_batch,
     canonicalize_parser_render,
     canonicalize_tensor,
@@ -194,6 +195,42 @@ class GlobalAffineRoutingTest(unittest.TestCase):
             group_size=1,
         )
         self.assertEqual(int(target_conditioning[:, 4:5].sum()), 1)
+
+    def test_surface_routing_selects_a_valid_mapping_candidate(self):
+        renderer = FakeRenderer(valid_pixels=1)
+        rendered = torch.rand(1, 4, 8, 8)
+        rendered[:, 3] = 1.0
+        outputs = {
+            "foreground": torch.full((1, 1, 8, 8), 10.0),
+            "surface": torch.cat(
+                [torch.full((1, 1, 8, 8), 1.0), torch.full((1, 1, 8, 8), 10.0)],
+                dim=1,
+            ),
+            "affine": torch.zeros(1, 3),
+        }
+
+        _, details = splat_parser_predictions_to_uv_conditioning(
+            rendered,
+            outputs,
+            renderer=renderer,
+            views=["front"],
+            group_size=1,
+            semantic_gate=False,
+            return_details=True,
+        )
+        routing = details["routing"]
+        self.assertTrue(routing["foreground"][0, 0, 0])
+        self.assertEqual(int(routing["surface"][0, 0, 0]), 0)
+
+    def test_semantic_boundary_tolerance_marks_only_nearby_pixels(self):
+        labels = torch.tensor([[[0, 0, 1, 1, 1]]])
+        strict = _semantic_boundary_mask(labels, radius=0)
+        tolerant = _semantic_boundary_mask(labels, radius=1)
+
+        self.assertFalse(strict.any())
+        self.assertTrue(tolerant[0, 0, 1])
+        self.assertTrue(tolerant[0, 0, 2])
+        self.assertFalse(tolerant[0, 0, 4])
 
 
 if __name__ == "__main__":
