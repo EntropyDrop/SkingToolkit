@@ -20,7 +20,6 @@ from SkingToolkit.dense_uv_parser.utils import (  # noqa: E402
     IGNORE_INDEX,
     LAYER_PALETTE,
     PART_PALETTE,
-    SPLAT_COLOR_AGGREGATIONS,
     UV_SIZE,
     augment_dense_batch,
     build_dense_parser_batch,
@@ -230,10 +229,6 @@ def save_preview(model, renderer, loader, device, args, output_path, max_items=2
                 fg_threshold=args.splat_fg_threshold,
                 bg_color=args.bg_color,
                 semantic_gate=args.semantic_gate,
-                semantic_gate_radius=args.semantic_gate_radius,
-                color_aggregation=args.splat_color_aggregation,
-                color_mode_bits=args.splat_color_mode_bits,
-                color_mode_confidence_ratio=args.splat_color_mode_confidence_ratio,
                 return_details=True,
             )
             gt_conditioning = splat_deterministic_targets_to_uv_conditioning(
@@ -243,9 +238,6 @@ def save_preview(model, renderer, loader, device, args, output_path, max_items=2
                 views=views,
                 group_size=view_count,
                 bg_color=args.bg_color,
-                color_aggregation=args.splat_color_aggregation,
-                color_mode_bits=args.splat_color_mode_bits,
-                color_mode_confidence_ratio=args.splat_color_mode_confidence_ratio,
             )
         else:
             routing_details = None
@@ -255,18 +247,12 @@ def save_preview(model, renderer, loader, device, args, output_path, max_items=2
                 group_size=view_count,
                 fg_threshold=args.splat_fg_threshold,
                 bg_color=args.bg_color,
-                color_aggregation=args.splat_color_aggregation,
-                color_mode_bits=args.splat_color_mode_bits,
-                color_mode_confidence_ratio=args.splat_color_mode_confidence_ratio,
             )
             gt_conditioning = splat_targets_to_uv_conditioning(
                 rendered,
                 targets,
                 group_size=view_count,
                 bg_color=args.bg_color,
-                color_aggregation=args.splat_color_aggregation,
-                color_mode_bits=args.splat_color_mode_bits,
-                color_mode_confidence_ratio=args.splat_color_mode_confidence_ratio,
             )
 
     count = min(max_items, pred_conditioning.shape[0])
@@ -401,9 +387,6 @@ def build_arg_parser():
     parser.add_argument("--no_cudnn_benchmark", dest="cudnn_benchmark", action="store_false")
     parser.add_argument("--target_alpha_threshold", type=float, default=0.5)
     parser.add_argument("--splat_fg_threshold", type=float, default=0.5)
-    parser.add_argument("--splat_color_aggregation", choices=SPLAT_COLOR_AGGREGATIONS, default="quantized_mode")
-    parser.add_argument("--splat_color_mode_bits", type=int, default=5)
-    parser.add_argument("--splat_color_mode_confidence_ratio", type=float, default=0.85)
     parser.add_argument("--augment", dest="augment", action="store_true", default=True)
     parser.add_argument("--no_augment", dest="augment", action="store_false")
     parser.add_argument("--augment_validation", dest="augment_validation", action="store_true", default=True)
@@ -415,7 +398,6 @@ def build_arg_parser():
     parser.add_argument("--background_augment_prob", type=float, default=0.9)
     parser.add_argument("--semantic_gate", dest="semantic_gate", action="store_true", default=True)
     parser.add_argument("--no_semantic_gate", dest="semantic_gate", action="store_false")
-    parser.add_argument("--semantic_gate_radius", type=int, default=1)
     parser.add_argument("--lambda_foreground", type=float, default=1.0)
     parser.add_argument("--lambda_layer", type=float, default=1.0)
     parser.add_argument("--lambda_part", type=float, default=0.5)
@@ -523,10 +505,6 @@ def main():
         "background_augment": args.background_augment,
         "background_augment_prob": args.background_augment_prob,
         "semantic_gate": args.semantic_gate,
-        "semantic_gate_radius": args.semantic_gate_radius,
-        "splat_color_aggregation": args.splat_color_aggregation,
-        "splat_color_mode_bits": args.splat_color_mode_bits,
-        "splat_color_mode_confidence_ratio": args.splat_color_mode_confidence_ratio,
     }
     with open(output_dir / "config.json", "w", encoding="utf-8") as handle:
         json.dump({"args": vars(args), "metadata": metadata}, handle, indent=2)

@@ -6,13 +6,11 @@ import torch.nn as nn
 from SkingToolkit.dense_uv_parser.losses import DenseUVParserLoss
 from SkingToolkit.dense_uv_parser.model import DenseUVParserNet
 from SkingToolkit.dense_uv_parser.utils import (
-    _semantic_boundary_mask,
     augment_dense_batch,
     canonicalize_parser_render,
     canonicalize_tensor,
     splat_deterministic_targets_to_uv_conditioning,
     splat_parser_predictions_to_uv_conditioning,
-    splat_to_uv_conditioning,
 )
 
 
@@ -100,56 +98,6 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         smooth_fractional = (smooth[interior] - smooth[interior].round()).abs().mean()
         self.assertLess(sharp_fractional, smooth_fractional)
 
-    def test_quantized_mode_selects_the_dominant_color_family(self):
-        rendered = torch.zeros(1, 4, 1, 4)
-        rendered[0, :, 0, 0] = torch.tensor([0.0, 0.0, 1.0, 1.0])
-        rendered[0, :, 0, 1:] = torch.tensor([1.0, 0.0, 0.0, 1.0]).view(4, 1)
-        fg = torch.ones(1, 1, 4, dtype=torch.bool)
-        layer = torch.zeros(1, 1, 4, dtype=torch.long)
-        flat_uv = torch.zeros(1, 1, 4, dtype=torch.long)
-        confidence = torch.tensor([[[1.0, 0.95, 0.95, 0.95]]])
-
-        best = splat_to_uv_conditioning(
-            rendered,
-            fg,
-            layer,
-            flat_uv,
-            confidence=confidence,
-            color_aggregation="best",
-        )
-        mode = splat_to_uv_conditioning(
-            rendered,
-            fg,
-            layer,
-            flat_uv,
-            confidence=confidence,
-            color_aggregation="quantized_mode",
-            color_mode_bits=5,
-            color_mode_confidence_ratio=0.9,
-        )
-        self.assertTrue(torch.allclose(best[0, :3, 0, 0], torch.tensor([0.0, 0.0, 1.0])))
-        self.assertTrue(torch.allclose(mode[0, :3, 0, 0], torch.tensor([1.0, 0.0, 0.0])))
-
-    def test_quantized_mode_keeps_one_real_representative(self):
-        rendered = torch.zeros(1, 4, 1, 2)
-        rendered[0, :, 0, 0] = torch.tensor([1.0, 0.0, 0.0, 1.0])
-        rendered[0, :, 0, 1] = torch.tensor([0.99, 0.01, 0.0, 1.0])
-        fg = torch.ones(1, 1, 2, dtype=torch.bool)
-        layer = torch.zeros(1, 1, 2, dtype=torch.long)
-        flat_uv = torch.zeros(1, 1, 2, dtype=torch.long)
-
-        mode = splat_to_uv_conditioning(
-            rendered,
-            fg,
-            layer,
-            flat_uv,
-            confidence=torch.ones(1, 1, 2),
-            color_aggregation="quantized_mode",
-            color_mode_bits=5,
-        )
-
-        self.assertTrue(torch.allclose(mode[0, :3, 0, 0], rendered[0, :3, 0, 0]))
-
     def test_mapping_mask_rejects_background_false_positives(self):
         renderer = FakeRenderer(valid_pixels=1)
         rendered = torch.rand(1, 4, 8, 8)
@@ -195,42 +143,6 @@ class GlobalAffineRoutingTest(unittest.TestCase):
             group_size=1,
         )
         self.assertEqual(int(target_conditioning[:, 4:5].sum()), 1)
-
-    def test_surface_routing_selects_a_valid_mapping_candidate(self):
-        renderer = FakeRenderer(valid_pixels=1)
-        rendered = torch.rand(1, 4, 8, 8)
-        rendered[:, 3] = 1.0
-        outputs = {
-            "foreground": torch.full((1, 1, 8, 8), 10.0),
-            "surface": torch.cat(
-                [torch.full((1, 1, 8, 8), 1.0), torch.full((1, 1, 8, 8), 10.0)],
-                dim=1,
-            ),
-            "affine": torch.zeros(1, 3),
-        }
-
-        _, details = splat_parser_predictions_to_uv_conditioning(
-            rendered,
-            outputs,
-            renderer=renderer,
-            views=["front"],
-            group_size=1,
-            semantic_gate=False,
-            return_details=True,
-        )
-        routing = details["routing"]
-        self.assertTrue(routing["foreground"][0, 0, 0])
-        self.assertEqual(int(routing["surface"][0, 0, 0]), 0)
-
-    def test_semantic_boundary_tolerance_marks_only_nearby_pixels(self):
-        labels = torch.tensor([[[0, 0, 1, 1, 1]]])
-        strict = _semantic_boundary_mask(labels, radius=0)
-        tolerant = _semantic_boundary_mask(labels, radius=1)
-
-        self.assertFalse(strict.any())
-        self.assertTrue(tolerant[0, 0, 1])
-        self.assertTrue(tolerant[0, 0, 2])
-        self.assertFalse(tolerant[0, 0, 4])
 
 
 if __name__ == "__main__":

@@ -18,7 +18,6 @@ from SkingToolkit.dense_uv_parser.utils import (  # noqa: E402
     IGNORE_INDEX,
     LAYER_PALETTE,
     PART_PALETTE,
-    SPLAT_COLOR_AGGREGATIONS,
     colorize_foreground,
     colorize_labels,
     colorize_surface,
@@ -198,10 +197,6 @@ def build_arg_parser():
     parser.add_argument("--mappings_dir", default=None)
     parser.add_argument("--fg_threshold", type=float, default=0.5)
     parser.add_argument("--no_semantic_gate", dest="semantic_gate", action="store_false", default=None)
-    parser.add_argument("--semantic_gate_radius", type=int, default=None)
-    parser.add_argument("--splat_color_aggregation", choices=SPLAT_COLOR_AGGREGATIONS, default=None)
-    parser.add_argument("--splat_color_mode_bits", type=int, default=None)
-    parser.add_argument("--splat_color_mode_confidence_ratio", type=float, default=None)
     parser.add_argument("--alpha_threshold", type=float, default=0.5)
     parser.add_argument("--no_enforce_base_alpha", action="store_true")
     parser.add_argument("--device", default="auto")
@@ -237,66 +232,6 @@ def main():
 
     bg_color = parser_args.get("bg_color", (128, 128, 128))
     semantic_gate = parser_args.get("semantic_gate", True) if args.semantic_gate is None else args.semantic_gate
-    checkpoint_gate_radius = parser_args.get("semantic_gate_radius")
-    semantic_gate_radius = (
-        args.semantic_gate_radius
-        if args.semantic_gate_radius is not None
-        else 1 if checkpoint_gate_radius is None else checkpoint_gate_radius
-    )
-    color_aggregation = args.splat_color_aggregation or parser_args.get("splat_color_aggregation") or "quantized_mode"
-    color_mode_bits = (
-        args.splat_color_mode_bits
-        if args.splat_color_mode_bits is not None
-        else parser_args.get("splat_color_mode_bits") or 5
-    )
-    color_mode_confidence_ratio = (
-        args.splat_color_mode_confidence_ratio
-        if args.splat_color_mode_confidence_ratio is not None
-        else parser_args.get("splat_color_mode_confidence_ratio") or 0.85
-    )
-
-    inpaint_model = None
-    inpaint_args = None
-    if args.output:
-        inpaint_model, inpaint_args = load_inpaint(args.inpaint_checkpoint, device)
-        inpaint_views = parse_views(inpaint_args.get("views", ""))
-        if inpaint_views and inpaint_views != views:
-            raise ValueError(f"Parser/inpaint view mismatch: parser={views}, inpaint={inpaint_views}")
-        expected_parser = inpaint_args.get("parser_checkpoint")
-        if expected_parser and checkpoint_run_id(expected_parser) != checkpoint_run_id(args.parser_checkpoint):
-            raise ValueError(
-                "The inverse_uv checkpoint was trained with a different parser: "
-                f"expected {checkpoint_run_id(expected_parser)}, got {checkpoint_run_id(args.parser_checkpoint)}."
-            )
-        expected_semantic_gate = inpaint_args.get("parser_semantic_gate")
-        if expected_semantic_gate is not None and bool(expected_semantic_gate) != semantic_gate:
-            raise ValueError(
-                "Parser semantic-gate setting does not match the inverse_uv checkpoint: "
-                f"checkpoint={expected_semantic_gate}, requested={semantic_gate}."
-            )
-        expected_gate_radius = inpaint_args.get("parser_semantic_gate_radius")
-        if expected_gate_radius is not None and int(expected_gate_radius) != semantic_gate_radius:
-            raise ValueError(
-                "Parser semantic-gate radius does not match the inverse_uv checkpoint: "
-                f"checkpoint={expected_gate_radius}, requested={semantic_gate_radius}."
-            )
-        expected_aggregation = inpaint_args.get("parser_splat_color_aggregation", "best")
-        if expected_aggregation != color_aggregation:
-            raise ValueError(
-                "Parser conditioning color aggregation does not match the inverse_uv checkpoint: "
-                f"checkpoint={expected_aggregation}, requested={color_aggregation}. "
-                "Use the checkpoint's mode for a legacy comparison, or retrain inverse_uv with quantized_mode."
-            )
-        if expected_aggregation == "quantized_mode":
-            expected_bits = int(inpaint_args.get("parser_splat_color_mode_bits", 5))
-            expected_ratio = float(inpaint_args.get("parser_splat_color_mode_confidence_ratio", 0.85))
-            if expected_bits != color_mode_bits or abs(expected_ratio - color_mode_confidence_ratio) > 1e-9:
-                raise ValueError(
-                    "Parser conditioning color-mode settings do not match the inverse_uv checkpoint: "
-                    f"checkpoint=bits:{expected_bits}, ratio:{expected_ratio}; "
-                    f"requested=bits:{color_mode_bits}, ratio:{color_mode_confidence_ratio}."
-                )
-
     rendered = load_view_images(args, views, renderer, bg_color=bg_color).to(device)
     view_ids = torch.arange(len(views), device=device)
     with torch.no_grad():
@@ -310,10 +245,6 @@ def main():
             fg_threshold=args.fg_threshold,
             bg_color=bg_color,
             semantic_gate=semantic_gate,
-            semantic_gate_radius=semantic_gate_radius,
-            color_aggregation=color_aggregation,
-            color_mode_bits=color_mode_bits,
-            color_mode_confidence_ratio=color_mode_confidence_ratio,
             return_details=True,
         )
 
@@ -332,6 +263,16 @@ def main():
         save_conditioning_preview(conditioning.detach().cpu(), Path(args.conditioning_output))
 
     if args.output:
+        inpaint_model, inpaint_args = load_inpaint(args.inpaint_checkpoint, device)
+        inpaint_views = parse_views(inpaint_args.get("views", ""))
+        if inpaint_views and inpaint_views != views:
+            raise ValueError(f"Parser/inpaint view mismatch: parser={views}, inpaint={inpaint_views}")
+        expected_parser = inpaint_args.get("parser_checkpoint")
+        if expected_parser and checkpoint_run_id(expected_parser) != checkpoint_run_id(args.parser_checkpoint):
+            raise ValueError(
+                "The inverse_uv checkpoint was trained with a different parser: "
+                f"expected {checkpoint_run_id(expected_parser)}, got {checkpoint_run_id(args.parser_checkpoint)}."
+            )
         with torch.no_grad():
             pred_uv = finalize_minecraft_alpha(
                 inpaint_model(conditioning)[0],

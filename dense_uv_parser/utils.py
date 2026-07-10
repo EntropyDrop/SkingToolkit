@@ -16,7 +16,6 @@ PART_CLASSES = 6
 FACE_CLASSES = 6
 LAYER_CLASSES = 2
 UV_SIZE = 64
-SPLAT_COLOR_AGGREGATIONS = ("best", "quantized_mode")
 
 
 def parse_views(views):
@@ -483,39 +482,7 @@ def canonicalize_parser_render(rendered, outputs, mode="nearest"):
     return canonicalize_tensor(rendered, outputs["affine"], mode=mode)
 
 
-def _semantic_boundary_mask(labels, radius):
-    """Mark static-label boundaries where a one-pixel classifier offset is expected."""
-    radius = int(radius)
-    if radius < 0:
-        raise ValueError(f"semantic_gate_radius must be non-negative, got {radius}.")
-    if radius == 0:
-        return torch.zeros_like(labels, dtype=torch.bool)
-
-    valid = labels != IGNORE_INDEX
-    boundary = torch.zeros_like(valid)
-    vertical_change = labels[:, 1:, :] != labels[:, :-1, :]
-    horizontal_change = labels[:, :, 1:] != labels[:, :, :-1]
-    boundary[:, 1:, :] |= vertical_change & valid[:, 1:, :]
-    boundary[:, :-1, :] |= vertical_change & valid[:, :-1, :]
-    boundary[:, :, 1:] |= horizontal_change & valid[:, :, 1:]
-    boundary[:, :, :-1] |= horizontal_change & valid[:, :, :-1]
-    boundary = F.max_pool2d(
-        boundary.unsqueeze(1).to(dtype=torch.float32),
-        kernel_size=radius * 2 + 1,
-        stride=1,
-        padding=radius,
-    ).squeeze(1) > 0
-    return boundary & valid
-
-
-def _routing_from_affine_outputs(
-    renderer,
-    views,
-    outputs,
-    fg_threshold=0.5,
-    semantic_gate=True,
-    semantic_gate_radius=1,
-):
+def _routing_from_affine_outputs(renderer, views, outputs, fg_threshold=0.5, semantic_gate=True):
     views = parse_views(views)
     if not views:
         raise ValueError("At least one renderer view is required for deterministic UV routing.")
@@ -523,36 +490,28 @@ def _routing_from_affine_outputs(
         raise ValueError("Affine parser outputs must include the static surface classifier.")
     foreground_prob = torch.sigmoid(outputs["foreground"])[:, 0]
     surface_prob = torch.softmax(outputs["surface"], dim=1)
-    N, surface_classes, H, W = surface_prob.shape
+    requested_surface = surface_prob.argmax(dim=1)
+    layer_prob = torch.softmax(outputs["layer"], dim=1)
+    N, H, W = requested_surface.shape
     if N % len(views) != 0:
         raise ValueError(f"N={N} must be divisible by {len(views)} renderer views.")
 
     fg = torch.zeros_like(foreground_prob, dtype=torch.bool)
-    layer = torch.zeros((N, H, W), dtype=torch.long, device=foreground_prob.device)
-    flat_uv = torch.zeros_like(layer)
-    surface = torch.full_like(layer, IGNORE_INDEX)
+    layer = torch.zeros_like(requested_surface)
+    flat_uv = torch.zeros_like(requested_surface)
+    surface = torch.full_like(requested_surface, IGNORE_INDEX)
     confidence = torch.zeros_like(foreground_prob)
-    expected_part = torch.full_like(layer, IGNORE_INDEX)
-    expected_face = torch.full_like(layer, IGNORE_INDEX)
+    expected_part = torch.full_like(requested_surface, IGNORE_INDEX)
+    expected_face = torch.full_like(requested_surface, IGNORE_INDEX)
 
     for view_index, view in enumerate(views):
         selection = slice(view_index, N, len(views))
-        static = build_static_surface_routing(renderer, view, surface_prob.device)
+        static = build_static_surface_routing(renderer, view, requested_surface.device)
         if static["masks"].shape[-2:] != (H, W):
             raise ValueError(
                 f"View {view!r} mapping shape {tuple(static['masks'].shape[-2:])} does not match parser shape {(H, W)}."
             )
-        if static["masks"].shape[0] != surface_classes:
-            raise ValueError(
-                f"View {view!r} has {static['masks'].shape[0]} static surfaces, "
-                f"but the parser predicts {surface_classes} surface classes."
-            )
-
-        # A surface class without a mapping at this render pixel can never be
-        # correct. Constrain the argmax before routing instead of turning it
-        # into a background hole after the fact.
-        valid_surface_prob = surface_prob[selection].masked_fill(~static["masks"].unsqueeze(0), -1.0)
-        selected_surface = valid_surface_prob.argmax(dim=1)
+        selected_surface = requested_surface[selection]
         routed = _select_static_surface(static, selected_surface)
         selected_layer = routed["layer"]
         selected_part = routed["part"]
@@ -574,9 +533,8 @@ def _routing_from_affine_outputs(
                 torch.ones_like(expected_probability),
             )
             if semantic_gate:
-                boundary = _semantic_boundary_mask(expected, semantic_gate_radius)
                 semantic_valid = semantic_valid & (
-                    ~known_semantic | boundary | (probabilities.argmax(dim=1) == expected_safe)
+                    ~known_semantic | (probabilities.argmax(dim=1) == expected_safe)
                 )
 
         routed_fg = (
@@ -622,10 +580,6 @@ def splat_parser_predictions_to_uv_conditioning(
     fg_threshold=0.5,
     bg_color=(128, 128, 128),
     semantic_gate=True,
-    semantic_gate_radius=1,
-    color_aggregation="quantized_mode",
-    color_mode_bits=5,
-    color_mode_confidence_ratio=0.85,
     return_details=False,
 ):
     """Route parser outputs to UV, using static mappings for affine-parser checkpoints."""
@@ -636,9 +590,6 @@ def splat_parser_predictions_to_uv_conditioning(
             group_size=group_size,
             fg_threshold=fg_threshold,
             bg_color=bg_color,
-            color_aggregation=color_aggregation,
-            color_mode_bits=color_mode_bits,
-            color_mode_confidence_ratio=color_mode_confidence_ratio,
         )
         if return_details:
             return conditioning, {"rendered": rendered, "outputs": outputs, "routing": None}
@@ -658,7 +609,6 @@ def splat_parser_predictions_to_uv_conditioning(
         canonical_outputs,
         fg_threshold=fg_threshold,
         semantic_gate=semantic_gate,
-        semantic_gate_radius=semantic_gate_radius,
     )
     conditioning = splat_to_uv_conditioning(
         canonical_rendered,
@@ -668,9 +618,6 @@ def splat_parser_predictions_to_uv_conditioning(
         group_size=group_size,
         bg_color=bg_color,
         confidence=routing["confidence"],
-        color_aggregation=color_aggregation,
-        color_mode_bits=color_mode_bits,
-        color_mode_confidence_ratio=color_mode_confidence_ratio,
     )
     if return_details:
         return conditioning, {
@@ -688,9 +635,6 @@ def splat_deterministic_targets_to_uv_conditioning(
     views,
     group_size=1,
     bg_color=(128, 128, 128),
-    color_aggregation="quantized_mode",
-    color_mode_bits=5,
-    color_mode_confidence_ratio=0.85,
 ):
     """Splat ground-truth labels through the same fixed mapping used by affine mode."""
     views = parse_views(views)
@@ -727,9 +671,6 @@ def splat_deterministic_targets_to_uv_conditioning(
         flat_uv,
         group_size=group_size,
         bg_color=bg_color,
-        color_aggregation=color_aggregation,
-        color_mode_bits=color_mode_bits,
-        color_mode_confidence_ratio=color_mode_confidence_ratio,
     )
 
 
@@ -739,9 +680,6 @@ def splat_predictions_to_uv_conditioning(
     group_size=1,
     fg_threshold=0.5,
     bg_color=(128, 128, 128),
-    color_aggregation="best",
-    color_mode_bits=5,
-    color_mode_confidence_ratio=0.85,
 ):
     """Splat parser predictions back to the 10-channel inverse_uv conditioning layout."""
     foreground_prob = torch.sigmoid(outputs["foreground"])[:, 0]
@@ -764,9 +702,6 @@ def splat_predictions_to_uv_conditioning(
         group_size=group_size,
         bg_color=bg_color,
         confidence=confidence,
-        color_aggregation=color_aggregation,
-        color_mode_bits=color_mode_bits,
-        color_mode_confidence_ratio=color_mode_confidence_ratio,
     )
 
 
@@ -789,15 +724,7 @@ def prediction_uv01(outputs):
     return outputs["uv"].clamp(0.0, 1.0)
 
 
-def splat_targets_to_uv_conditioning(
-    rendered,
-    targets,
-    group_size=1,
-    bg_color=(128, 128, 128),
-    color_aggregation="best",
-    color_mode_bits=5,
-    color_mode_confidence_ratio=0.85,
-):
+def splat_targets_to_uv_conditioning(rendered, targets, group_size=1, bg_color=(128, 128, 128)):
     if rendered.dim() != 4:
         raise ValueError(f"Expected rendered tensor as NCHW, got {tuple(rendered.shape)}.")
     layer = targets["layer"]
@@ -807,85 +734,7 @@ def splat_targets_to_uv_conditioning(
     y = (uv[:, 1] * (UV_SIZE - 1)).round().long().clamp(0, UV_SIZE - 1)
     flat_uv = y * UV_SIZE + x
     safe_layer = torch.where(layer == IGNORE_INDEX, torch.zeros_like(layer), layer)
-    return splat_to_uv_conditioning(
-        rendered,
-        fg,
-        safe_layer,
-        flat_uv,
-        group_size=group_size,
-        bg_color=bg_color,
-        color_aggregation=color_aggregation,
-        color_mode_bits=color_mode_bits,
-        color_mode_confidence_ratio=color_mode_confidence_ratio,
-    )
-
-
-def _select_quantized_mode_candidates(
-    values,
-    target_uv,
-    scores,
-    color_mode_bits,
-    color_mode_confidence_ratio,
-):
-    """Keep one high-confidence representative from the dominant quantized RGB bin per UV texel."""
-    if values.shape[1] == 0:
-        return values, target_uv
-    if not 1 <= color_mode_bits <= 6:
-        raise ValueError(f"color_mode_bits must be in [1, 6], got {color_mode_bits}.")
-    if not 0.0 < color_mode_confidence_ratio <= 1.0:
-        raise ValueError(
-            "color_mode_confidence_ratio must be in (0, 1], "
-            f"got {color_mode_confidence_ratio}."
-        )
-
-    scores = scores.float().clamp_min(1e-8)
-    best_candidate_scores = scores.new_full((UV_SIZE * UV_SIZE,), -torch.inf)
-    best_candidate_scores.scatter_reduce_(0, target_uv, scores, reduce="amax", include_self=True)
-    eligible = scores >= best_candidate_scores[target_uv] * color_mode_confidence_ratio
-    values = values[:, eligible]
-    target_uv = target_uv[eligible]
-    scores = scores[eligible]
-
-    levels = 1 << color_mode_bits
-    color_bins = levels ** 3
-    quantized = (values[:3].clamp(0.0, 1.0) * (levels - 1)).round().long()
-    color_code = quantized[0] + levels * quantized[1] + (levels * levels) * quantized[2]
-    combined_key = target_uv.long() * color_bins + color_code
-    unique_keys, inverse = torch.unique(combined_key, sorted=False, return_inverse=True)
-    votes = scores.new_zeros(unique_keys.shape[0])
-    votes.index_add_(0, inverse, torch.ones_like(scores))
-
-    unique_uv = unique_keys.div(color_bins, rounding_mode="floor")
-    unique_color = unique_keys.remainder(color_bins)
-    best_votes = votes.new_full((UV_SIZE * UV_SIZE,), -torch.inf)
-    best_votes.scatter_reduce_(0, unique_uv, votes, reduce="amax", include_self=True)
-    is_tied_winner = votes >= (best_votes[unique_uv] - 1e-7)
-    candidate_color = torch.where(is_tied_winner, unique_color, torch.full_like(unique_color, color_bins))
-    winning_color = torch.full((UV_SIZE * UV_SIZE,), color_bins, dtype=torch.long, device=values.device)
-    winning_color.scatter_reduce_(0, unique_uv, candidate_color, reduce="amin", include_self=True)
-
-    in_winning_bin = color_code == winning_color[target_uv]
-    values = values[:, in_winning_bin]
-    target_uv = target_uv[in_winning_bin]
-    scores = scores[in_winning_bin]
-
-    # The mode selects the color family; confidence then picks one real pixel
-    # from that family, so the conditioning never averages source colors.
-    best_representative_scores = scores.new_full((UV_SIZE * UV_SIZE,), -torch.inf)
-    best_representative_scores.scatter_reduce_(0, target_uv, scores, reduce="amax", include_self=True)
-    tied_representatives = scores >= (best_representative_scores[target_uv] - 1e-7)
-    positions = torch.arange(target_uv.numel(), device=target_uv.device)
-    no_position = target_uv.numel()
-    candidate_positions = torch.where(tied_representatives, positions, torch.full_like(positions, no_position))
-    selected_positions = torch.full(
-        (UV_SIZE * UV_SIZE,),
-        no_position,
-        dtype=positions.dtype,
-        device=positions.device,
-    )
-    selected_positions.scatter_reduce_(0, target_uv, candidate_positions, reduce="amin", include_self=True)
-    representative = positions == selected_positions[target_uv]
-    return values[:, representative], target_uv[representative]
+    return splat_to_uv_conditioning(rendered, fg, safe_layer, flat_uv, group_size=group_size, bg_color=bg_color)
 
 
 def splat_to_uv_conditioning(
@@ -896,20 +745,12 @@ def splat_to_uv_conditioning(
     group_size=1,
     bg_color=(128, 128, 128),
     confidence=None,
-    color_aggregation="best",
-    color_mode_bits=5,
-    color_mode_confidence_ratio=0.85,
 ):
     if rendered.dim() != 4:
         raise ValueError(f"Expected rendered tensor as NCHW, got {tuple(rendered.shape)}.")
     N, _, _, _ = rendered.shape
     if N % group_size != 0:
         raise ValueError(f"N={N} must be divisible by group_size={group_size}.")
-    if color_aggregation not in SPLAT_COLOR_AGGREGATIONS:
-        raise ValueError(
-            f"Unsupported color_aggregation={color_aggregation!r}. "
-            f"Choose one of {', '.join(SPLAT_COLOR_AGGREGATIONS)}."
-        )
 
     groups = N // group_size
     device = rendered.device
@@ -943,15 +784,7 @@ def splat_to_uv_conditioning(
             values = torch.cat(candidate_values, dim=1)
             target_uv = torch.cat(candidate_uv, dim=0)
             scores = torch.cat(candidate_confidence, dim=0).float()
-            if color_aggregation == "quantized_mode":
-                values, target_uv = _select_quantized_mode_candidates(
-                    values,
-                    target_uv,
-                    scores,
-                    color_mode_bits=color_mode_bits,
-                    color_mode_confidence_ratio=color_mode_confidence_ratio,
-                )
-            elif select_highest_confidence:
+            if select_highest_confidence:
                 best_scores = scores.new_full((UV_SIZE * UV_SIZE,), -torch.inf)
                 best_scores.scatter_reduce_(0, target_uv, scores, reduce="amax", include_self=True)
                 keep = scores >= (best_scores[target_uv] - 1e-7)
