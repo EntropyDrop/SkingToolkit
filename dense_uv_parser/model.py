@@ -58,11 +58,13 @@ class DenseUVParserNet(nn.Module):
         layer_classes=2,
         uv_size=64,
         uv_classification=True,
+        view_classes=0,
     ):
         super().__init__()
         self.uv_classification = uv_classification
+        self.view_classes = int(view_classes)
         c = base_channels
-        self.stem = ConvBlock(input_channels, c)
+        self.stem = ConvBlock(input_channels + self.view_classes, c)
         self.down1 = DownBlock(c, c * 2)
         self.down2 = DownBlock(c * 2, c * 4)
         self.down3 = DownBlock(c * 4, c * 8)
@@ -83,7 +85,18 @@ class DenseUVParserNet(nn.Module):
             self.uv_x = nn.Conv2d(c, uv_size, kernel_size=1)
             self.uv_y = nn.Conv2d(c, uv_size, kernel_size=1)
 
-    def forward(self, x):
+    def forward(self, x, view_ids=None):
+        if self.view_classes > 0:
+            if view_ids is None:
+                raise ValueError("view_ids are required for a view-conditioned dense UV parser.")
+            if view_ids.shape != (x.shape[0],):
+                raise ValueError(f"Expected view_ids shape {(x.shape[0],)}, got {tuple(view_ids.shape)}.")
+            if view_ids.min() < 0 or view_ids.max() >= self.view_classes:
+                raise ValueError(f"view_ids must be in [0, {self.view_classes - 1}].")
+            view_one_hot = F.one_hot(view_ids.long(), num_classes=self.view_classes).to(dtype=x.dtype)
+            view_one_hot = view_one_hot.view(x.shape[0], self.view_classes, 1, 1)
+            x = torch.cat([x, view_one_hot.expand(-1, -1, x.shape[2], x.shape[3])], dim=1)
+
         s0 = self.stem(x)
         s1 = self.down1(s0)
         s2 = self.down2(s1)

@@ -34,11 +34,19 @@ class RenderAugmenter:
     model to be robust to imperfect conditioning.
     """
 
-    def __init__(self, translation_scale=0.03, scale_range=0.03, perspective_scale=0.008, bg_color=(128, 128, 128)):
+    def __init__(
+        self,
+        translation_scale=0.03,
+        scale_range=0.03,
+        perspective_scale=0.0,
+        bg_color=(128, 128, 128),
+        generator=None,
+    ):
         self.translation_scale = translation_scale
         self.scale_range = scale_range
         self.perspective_scale = perspective_scale
         self.bg_color = bg_color
+        self.generator = generator
 
     def __call__(self, rendered_tensor):
         if rendered_tensor.dim() == 4:
@@ -61,9 +69,9 @@ class RenderAugmenter:
         img = rendered_tensor
 
         if self.translation_scale > 0 or self.scale_range > 0:
-            dx = (torch.rand(B, device=device, dtype=dtype) - 0.5) * 2 * self.translation_scale * W
-            dy = (torch.rand(B, device=device, dtype=dtype) - 0.5) * 2 * self.translation_scale * H
-            scale = 1.0 + (torch.rand(B, device=device, dtype=dtype) - 0.5) * 2 * self.scale_range
+            dx = (torch.rand(B, device=device, dtype=dtype, generator=self.generator) - 0.5) * 2 * self.translation_scale * W
+            dy = (torch.rand(B, device=device, dtype=dtype, generator=self.generator) - 0.5) * 2 * self.translation_scale * H
+            scale = 1.0 + (torch.rand(B, device=device, dtype=dtype, generator=self.generator) - 0.5) * 2 * self.scale_range
             inv_scale = scale.reciprocal()
 
             theta = torch.zeros(B, 2, 3, device=device, dtype=dtype)
@@ -483,7 +491,7 @@ class InverseUVDataset(Dataset):
         augment=False,
         translation_scale=0.03,
         scale_range=0.03,
-        perspective_scale=0.008,
+        perspective_scale=0.0,
     ):
         self.data_dir = data_dir
         self.views = parse_views(views)

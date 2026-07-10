@@ -30,11 +30,21 @@ The trainer derives supervision from renderer mappings, so no manual labels are 
 - continuous UV coordinate in the 64x64 Minecraft skin
 - discrete UV x/y texel classes, used for sharper splatting
 
-Parser training defaults to no augmentation so the model first learns the exact canonical mapping. After the clean parser preview is stable, enable mild render-space translation/scale augmentation for a second run if you need slightly deformed or misaligned inputs:
+The parser is explicitly conditioned on the configured view index, so front and back renders cannot become ambiguous for plain or symmetric skins. Inference must preserve the checkpoint's view order.
+
+Parser training uses solid-color background randomization by default. Parser inputs are always treated as RGB, so transparent alpha is ignored and ordinary PNG/JPEG input has the same format. This lets inference accept arbitrary solid backgrounds without treating the fixed gray training canvas as part of the skin.
+
+The input still needs an unobstructed Minecraft render in the configured camera/pose; arbitrary background does not mean arbitrary photo composition or a character hidden behind other objects.
+
+Render-space augmentation is enabled by default. It applies one affine transform to the whole character with translation and uniform scale sampled up to `+/-3%`, matching nearly fixed views with mild global placement/size drift. It does not move individual limbs independently.
 
 ```bash
-AUGMENT=true TRANSLATION_SCALE=0.035 SCALE_RANGE=0.035 ./run_dense_uv_parser_training.sh
+./run_dense_uv_parser_training.sh
 ```
+
+The validation set uses the same `+/-3%` range with a fixed random seed, so `best.pt` is selected on repeatable perturbed inputs. Set `AUGMENT=false` and `AUGMENT_VALIDATION=false` only for canonical-view experiments.
+
+Set `BACKGROUND_AUGMENT=false` to use a fixed gray RGB background; the input still remains RGB with alpha fixed to one internally.
 
 Training previews are saved under `runs/<run>/previews`:
 
@@ -42,6 +52,8 @@ Training previews are saved under `runs/<run>/previews`:
 - `epoch_XXXX_debug.png`: rendered input, predicted/GT foreground, predicted/GT part, predicted/GT layer, and predicted/GT UV color maps.
 
 For good parser splatting, watch `acc_uv_exact`, `acc_uv_within1`, and `loss_uv_l1_px`. High part/layer accuracy alone can still produce fragmented RGB if UV is off by a few texels.
+
+Predicted splatting keeps the highest-confidence render sample for each layer/UV texel instead of averaging all candidates, reducing color mixing at pixel boundaries.
 
 ## Infer With Inpaint
 

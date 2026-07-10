@@ -96,6 +96,7 @@ class InverseUVNet(nn.Module):
         if x.shape[-1] != 64 or x.shape[-2] != 64:
             x = F.interpolate(x, size=(64, 64), mode="bilinear", align_corners=False)
 
+        conditioning = x
         s0 = self.stem(x)
         s1 = self.down1(s0)
         s1 = self.attn32(s1)   # long-range at 32×32 (symmetry, blind-spot structure)
@@ -106,7 +107,17 @@ class InverseUVNet(nn.Module):
         x = self.up2(x, s2)
         x = self.up1(x, s1)
         x = self.up0(x, s0)
-        return torch.sigmoid(self.head(x))
+        pred = torch.sigmoid(self.head(x))
+        if conditioning.shape[1] == 10:
+            inner_rgba = conditioning[:, 0:4]
+            inner_known = conditioning[:, 4:5].clamp(0.0, 1.0)
+            outer_rgba = conditioning[:, 5:9]
+            outer_known = conditioning[:, 9:10].clamp(0.0, 1.0)
+            known_sum = inner_known + outer_known
+            known = known_sum.clamp(0.0, 1.0)
+            observed = (inner_rgba * inner_known + outer_rgba * outer_known) / known_sum.clamp_min(1.0)
+            pred = pred * (1.0 - known) + observed * known
+        return pred
 
 
 class PatchGANDiscriminator(nn.Module):

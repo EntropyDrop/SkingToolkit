@@ -19,7 +19,7 @@ from SkingToolkit.inverse_uv.dataset import InverseUVDataset, finalize_minecraft
 from SkingToolkit.inverse_uv.losses import InverseUVLoss  # noqa: E402
 from SkingToolkit.inverse_uv.model import InverseUVNet, PatchGANDiscriminator, count_parameters  # noqa: E402
 from SkingToolkit.dense_uv_parser.model import DenseUVParserNet  # noqa: E402
-from SkingToolkit.dense_uv_parser.utils import splat_predictions_to_uv_conditioning  # noqa: E402
+from SkingToolkit.dense_uv_parser.utils import randomize_render_background, splat_predictions_to_uv_conditioning  # noqa: E402
 
 try:
     from tqdm import tqdm
@@ -109,6 +109,7 @@ def load_dense_parser(checkpoint_path, device):
         base_channels=model_config.get("base_channels", checkpoint_args.get("base_channels", 32)),
         uv_size=model_config.get("uv_size", 64),
         uv_classification=uv_classification,
+        view_classes=model_config.get("view_classes", 0),
     ).to(device)
     model.load_state_dict(state_dict)
     model.eval()
@@ -123,6 +124,8 @@ def build_dense_parser_conditioning(
     views,
     dense_parser,
     augmenter=None,
+    parser_background_augment=False,
+    parser_background_augment_prob=0.9,
     fg_threshold=0.5,
     bg_color=(128, 128, 128),
     return_renders=False,
@@ -139,12 +142,18 @@ def build_dense_parser_conditioning(
             if return_renders:
                 gt_renders[view] = clean_render if is_batched else clean_render.squeeze(0)
             parser_render = augmenter(clean_render) if augmenter is not None else clean_render
+            parser_render = randomize_render_background(
+                parser_render,
+                probability=parser_background_augment_prob if parser_background_augment else 0.0,
+                bg_color=bg_color,
+            )
             rendered_by_view.append(parser_render)
 
         rendered = torch.stack(rendered_by_view, dim=1)
         B, V, C, H, W = rendered.shape
         rendered = rendered.reshape(B * V, C, H, W)
-        outputs = dense_parser(rendered)
+        view_ids = torch.arange(V, device=rendered.device).view(1, V).expand(B, -1).reshape(B * V)
+        outputs = dense_parser(rendered, view_ids=view_ids)
         conditioning = splat_predictions_to_uv_conditioning(
             rendered,
             outputs,
@@ -166,6 +175,8 @@ def build_training_conditioning(
     views,
     dense_parser,
     augmenter=None,
+    parser_background_augment=False,
+    parser_background_augment_prob=0.9,
     parser_splat_fg_threshold=0.5,
     bg_color=(128, 128, 128),
     return_renders=False,
@@ -178,6 +189,8 @@ def build_training_conditioning(
         views,
         dense_parser,
         augmenter=augmenter,
+        parser_background_augment=parser_background_augment,
+        parser_background_augment_prob=parser_background_augment_prob,
         fg_threshold=parser_splat_fg_threshold,
         bg_color=bg_color,
         return_renders=return_renders,
@@ -197,6 +210,8 @@ def run_epoch(
     views=None,
     augmenter=None,
     dense_parser=None,
+    parser_background_augment=False,
+    parser_background_augment_prob=0.9,
     parser_splat_fg_threshold=0.5,
     bg_color=(128, 128, 128),
     log_every=50,
@@ -217,13 +232,15 @@ def run_epoch(
 
         # Build conditioning on GPU (fast grid_sample vs CPU in DataLoader workers)
         with torch.no_grad():
-            batch_augmenter = augmenter if train else None
+            batch_augmenter = augmenter
             result = build_training_conditioning(
                 batch["uv"],
                 criterion.renderer,
                 views,
                 dense_parser=dense_parser,
                 augmenter=batch_augmenter,
+                parser_background_augment=train and parser_background_augment,
+                parser_background_augment_prob=parser_background_augment_prob,
                 parser_splat_fg_threshold=parser_splat_fg_threshold,
                 bg_color=bg_color,
                 return_renders=True,
@@ -358,10 +375,13 @@ def build_arg_parser():
         help="Deprecated compatibility option; UV unprojection always builds RGBA plus mask conditioning.",
     )
     parser.add_argument("--base_channels", type=int, default=64, help="Base channel width for InverseUVNet.")
-    parser.add_argument("--augment", action="store_true", help="Enable render-space data augmentation for pose robustness.")
+    parser.add_argument("--augment", dest="augment", action="store_true", default=True, help="Enable render-space data augmentation for pose robustness.")
+    parser.add_argument("--no_augment", dest="augment", action="store_false")
+    parser.add_argument("--augment_validation", dest="augment_validation", action="store_true", default=True)
+    parser.add_argument("--no_augment_validation", dest="augment_validation", action="store_false")
     parser.add_argument("--translation_scale", type=float, default=0.03, help="Render-space translation scale for augmentation.")
     parser.add_argument("--scale_range", type=float, default=0.03, help="Render-space uniform scale range for augmentation.")
-    parser.add_argument("--perspective_scale", type=float, default=0.008, help="Render-space perspective warp scale for augmentation.")
+    parser.add_argument("--perspective_scale", type=float, default=0.0, help="Render-space perspective warp scale for augmentation.")
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--lr", type=float, default=1e-4)
@@ -407,6 +427,9 @@ def build_arg_parser():
         default=0.5,
         help="Foreground threshold used when splatting dense parser predictions.",
     )
+    parser.add_argument("--parser_background_augment", dest="parser_background_augment", action="store_true", default=True)
+    parser.add_argument("--no_parser_background_augment", dest="parser_background_augment", action="store_false")
+    parser.add_argument("--parser_background_augment_prob", type=float, default=0.9)
     parser.add_argument(
         "--best_metric",
         default="loss_recon_total",
@@ -603,6 +626,8 @@ def main():
         "prefetch_factor": args.prefetch_factor,
         "matmul_precision": args.matmul_precision,
         "cudnn_benchmark": args.cudnn_benchmark,
+        "augment": args.augment,
+        "augment_validation": args.augment_validation,
         "parameters": count_parameters(model),
         "views": dataset.views,
         "device": str(device),
@@ -627,15 +652,28 @@ def main():
         train_metrics = run_epoch(
             model, criterion, train_loader, optimizer, scaler, device, args.mixed_precision,
             train=True, d_optimizer=d_optimizer, views=views, augmenter=augmenter,
+            parser_background_augment=args.parser_background_augment,
+            parser_background_augment_prob=args.parser_background_augment_prob,
             dense_parser=dense_parser, parser_splat_fg_threshold=args.parser_splat_fg_threshold,
             bg_color=dataset.bg_color, log_every=args.log_every,
         )
         metrics = {"train": train_metrics}
         if val_loader is not None:
             with torch.no_grad():
+                val_augmenter = None
+                if args.augment_validation:
+                    val_generator = torch.Generator(device=device)
+                    val_generator.manual_seed(args.seed + 1009)
+                    val_augmenter = RenderAugmenter(
+                        translation_scale=args.translation_scale,
+                        scale_range=args.scale_range,
+                        perspective_scale=args.perspective_scale,
+                        bg_color=dataset.bg_color,
+                        generator=val_generator,
+                    )
                 val_metrics = run_epoch(
                     model, criterion, val_loader, optimizer, scaler, device, args.mixed_precision,
-                    train=False, d_optimizer=None, views=views, augmenter=None,
+                    train=False, d_optimizer=None, views=views, augmenter=val_augmenter,
                     dense_parser=dense_parser, parser_splat_fg_threshold=args.parser_splat_fg_threshold,
                     bg_color=dataset.bg_color, log_every=args.log_every,
                 )

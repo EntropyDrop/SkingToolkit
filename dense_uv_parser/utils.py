@@ -145,7 +145,14 @@ def _sample_index_target(target, grid):
     return sampled
 
 
-def augment_dense_batch(rendered, targets, translation_scale=0.03, scale_range=0.03, bg_color=(128, 128, 128)):
+def augment_dense_batch(
+    rendered,
+    targets,
+    translation_scale=0.03,
+    scale_range=0.03,
+    bg_color=(128, 128, 128),
+    generator=None,
+):
     if translation_scale <= 0 and scale_range <= 0:
         return rendered, targets
 
@@ -153,9 +160,9 @@ def augment_dense_batch(rendered, targets, translation_scale=0.03, scale_range=0
     device = rendered.device
     dtype = rendered.dtype
 
-    dx = (torch.rand(B, device=device, dtype=dtype) - 0.5) * 2 * translation_scale * W
-    dy = (torch.rand(B, device=device, dtype=dtype) - 0.5) * 2 * translation_scale * H
-    scale = 1.0 + (torch.rand(B, device=device, dtype=dtype) - 0.5) * 2 * scale_range
+    dx = (torch.rand(B, device=device, dtype=dtype, generator=generator) - 0.5) * 2 * translation_scale * W
+    dy = (torch.rand(B, device=device, dtype=dtype, generator=generator) - 0.5) * 2 * translation_scale * H
+    scale = 1.0 + (torch.rand(B, device=device, dtype=dtype, generator=generator) - 0.5) * 2 * scale_range
     inv_scale = scale.reciprocal()
 
     theta = torch.zeros(B, 2, 3, device=device, dtype=dtype)
@@ -206,6 +213,34 @@ def augment_dense_batch(rendered, targets, translation_scale=0.03, scale_range=0
     }
 
 
+def randomize_render_background(rendered, probability=0.9, bg_color=(128, 128, 128)):
+    """Replace rendered backgrounds while preserving the skin pixels and parser targets.
+
+    The renderer produces RGBA images composited over a fixed gray background. The
+    parser always receives RGB-style inputs (alpha fixed to one), with a random
+    solid-color background for the requested fraction of samples.
+    """
+    if rendered.dim() != 4 or rendered.shape[1] != 4:
+        raise ValueError(f"Expected RGBA render tensor as NCHW, got {tuple(rendered.shape)}.")
+
+    B, _, H, W = rendered.shape
+    device = rendered.device
+    dtype = rendered.dtype
+    alpha = rendered[:, 3:4].clamp(0.0, 1.0)
+    source_bg = rendered.new_tensor(bg_color).view(1, 3, 1, 1) / 255.0
+    probability = max(0.0, min(float(probability), 1.0))
+    if probability > 0:
+        active = torch.rand(B, device=device) < probability
+        random_background = torch.rand(B, 3, 1, 1, device=device, dtype=dtype).expand(-1, -1, H, W)
+        background = torch.where(active.view(B, 1, 1, 1), random_background, source_bg.expand(B, -1, H, W))
+    else:
+        background = source_bg.expand(B, -1, H, W)
+    foreground_rgb = (rendered[:, :3] - (1.0 - alpha) * source_bg) / alpha.clamp_min(1e-4)
+    composited_rgb = (alpha * foreground_rgb + (1.0 - alpha) * background).clamp(0.0, 1.0)
+
+    return torch.cat([composited_rgb, torch.ones_like(alpha)], dim=1)
+
+
 def splat_predictions_to_uv_conditioning(
     rendered,
     outputs,
@@ -214,12 +249,27 @@ def splat_predictions_to_uv_conditioning(
     bg_color=(128, 128, 128),
 ):
     """Splat parser predictions back to the 10-channel inverse_uv conditioning layout."""
-    fg = torch.sigmoid(outputs["foreground"])[:, 0] > fg_threshold
+    foreground_prob = torch.sigmoid(outputs["foreground"])[:, 0]
+    fg = foreground_prob > fg_threshold
     fg = fg & (rendered[:, 3] > 1e-4)
-    layer = outputs["layer"].argmax(dim=1)
+    layer_prob = torch.softmax(outputs["layer"], dim=1)
+    layer_confidence, layer = layer_prob.max(dim=1)
     flat_uv = prediction_flat_uv(outputs)
+    confidence = foreground_prob * layer_confidence
+    if "uv_x" in outputs and "uv_y" in outputs:
+        uv_x_confidence = torch.softmax(outputs["uv_x"], dim=1).amax(dim=1)
+        uv_y_confidence = torch.softmax(outputs["uv_y"], dim=1).amax(dim=1)
+        confidence = confidence * torch.sqrt((uv_x_confidence * uv_y_confidence).clamp_min(1e-8))
 
-    return splat_to_uv_conditioning(rendered, fg, layer, flat_uv, group_size=group_size, bg_color=bg_color)
+    return splat_to_uv_conditioning(
+        rendered,
+        fg,
+        layer,
+        flat_uv,
+        group_size=group_size,
+        bg_color=bg_color,
+        confidence=confidence,
+    )
 
 
 def prediction_flat_uv(outputs):
@@ -254,7 +304,15 @@ def splat_targets_to_uv_conditioning(rendered, targets, group_size=1, bg_color=(
     return splat_to_uv_conditioning(rendered, fg, safe_layer, flat_uv, group_size=group_size, bg_color=bg_color)
 
 
-def splat_to_uv_conditioning(rendered, fg, layer, flat_uv, group_size=1, bg_color=(128, 128, 128)):
+def splat_to_uv_conditioning(
+    rendered,
+    fg,
+    layer,
+    flat_uv,
+    group_size=1,
+    bg_color=(128, 128, 128),
+    confidence=None,
+):
     if rendered.dim() != 4:
         raise ValueError(f"Expected rendered tensor as NCHW, got {tuple(rendered.shape)}.")
     N, _, _, _ = rendered.shape
@@ -267,21 +325,40 @@ def splat_to_uv_conditioning(rendered, fg, layer, flat_uv, group_size=1, bg_colo
     accum = rendered.new_zeros(groups, LAYER_CLASSES, 4, UV_SIZE * UV_SIZE)
     counts = rendered.new_zeros(groups, LAYER_CLASSES, 1, UV_SIZE * UV_SIZE)
 
-    for item in range(N):
-        group = item // group_size
-        item_mask = fg[item]
-        if not item_mask.any():
-            continue
-        values = rendered[item, :, item_mask]
-        item_layers = layer[item, item_mask]
-        item_uv = flat_uv[item, item_mask]
+    if confidence is None:
+        confidence = rendered.new_ones(fg.shape)
+        select_highest_confidence = False
+    else:
+        select_highest_confidence = True
 
+    for group in range(groups):
+        group_start = group * group_size
+        group_end = group_start + group_size
         for layer_index in range(LAYER_CLASSES):
-            layer_mask = item_layers == layer_index
-            if not layer_mask.any():
+            candidate_values = []
+            candidate_uv = []
+            candidate_confidence = []
+            for item in range(group_start, group_end):
+                item_mask = fg[item] & (layer[item] == layer_index)
+                if not item_mask.any():
+                    continue
+                candidate_values.append(rendered[item, :, item_mask])
+                candidate_uv.append(flat_uv[item, item_mask])
+                candidate_confidence.append(confidence[item, item_mask])
+            if not candidate_uv:
                 continue
-            target_uv = item_uv[layer_mask]
-            accum[group, layer_index].index_add_(1, target_uv, values[:, layer_mask])
+
+            values = torch.cat(candidate_values, dim=1)
+            target_uv = torch.cat(candidate_uv, dim=0)
+            scores = torch.cat(candidate_confidence, dim=0).float()
+            if select_highest_confidence:
+                best_scores = scores.new_full((UV_SIZE * UV_SIZE,), -torch.inf)
+                best_scores.scatter_reduce_(0, target_uv, scores, reduce="amax", include_self=True)
+                keep = scores >= (best_scores[target_uv] - 1e-7)
+                values = values[:, keep]
+                target_uv = target_uv[keep]
+
+            accum[group, layer_index].index_add_(1, target_uv, values)
             counts[group, layer_index, 0].index_add_(
                 0,
                 target_uv,

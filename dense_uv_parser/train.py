@@ -23,6 +23,7 @@ from SkingToolkit.dense_uv_parser.utils import (  # noqa: E402
     build_dense_parser_batch,
     parse_views,
     prediction_uv01,
+    randomize_render_background,
     splat_predictions_to_uv_conditioning,
     splat_targets_to_uv_conditioning,
 )
@@ -85,7 +86,7 @@ def stack_view_targets(targets_by_view):
     return result
 
 
-def build_parser_inputs(batch_uv, renderer, views, train, args):
+def build_parser_inputs(batch_uv, renderer, views, train, args, apply_augment=None, augment_generator=None):
     rendered_by_view = []
     targets_by_view = []
     with torch.no_grad():
@@ -96,22 +97,31 @@ def build_parser_inputs(batch_uv, renderer, views, train, args):
                 view,
                 alpha_threshold=args.target_alpha_threshold,
             )
-            if train and args.augment:
+            should_augment = train and args.augment if apply_augment is None else apply_augment
+            if should_augment:
                 rendered, targets = augment_dense_batch(
                     rendered,
                     targets,
                     translation_scale=args.translation_scale,
                     scale_range=args.scale_range,
                     bg_color=args.bg_color,
+                    generator=augment_generator,
                 )
+            background_probability = args.background_augment_prob if train and args.background_augment else 0.0
+            rendered = randomize_render_background(
+                rendered,
+                probability=background_probability,
+                bg_color=args.bg_color,
+            )
             rendered_by_view.append(rendered)
             targets_by_view.append(targets)
 
     rendered = torch.stack(rendered_by_view, dim=1)
     B, V, C, H, W = rendered.shape
     rendered = rendered.reshape(B * V, C, H, W)
+    view_ids = torch.arange(V, device=rendered.device).view(1, V).expand(B, -1).reshape(B * V)
     targets = stack_view_targets(targets_by_view)
-    return rendered, targets, V
+    return rendered, targets, V, view_ids
 
 
 def run_epoch(model, criterion, renderer, loader, optimizer, scaler, device, precision, args, train=True):
@@ -120,15 +130,29 @@ def run_epoch(model, criterion, renderer, loader, optimizer, scaler, device, pre
     metric_sums = {}
     sample_count = 0
     iterator = tqdm(loader, leave=False, file=sys.__stderr__ or sys.stderr) if tqdm is not None else loader
+    val_generator = None
+    apply_augment = train and args.augment
+    if not train and args.augment_validation:
+        val_generator = torch.Generator(device=device)
+        val_generator.manual_seed(args.seed + 1009)
+        apply_augment = True
 
     for batch in iterator:
         batch = move_batch(batch, device)
-        rendered, targets, _ = build_parser_inputs(batch["uv"], renderer, views, train=train, args=args)
+        rendered, targets, _, view_ids = build_parser_inputs(
+            batch["uv"],
+            renderer,
+            views,
+            train=train,
+            args=args,
+            apply_augment=apply_augment,
+            augment_generator=val_generator,
+        )
         parser_samples = rendered.shape[0]
 
         with torch.set_grad_enabled(train):
             with autocast_context(device, precision):
-                outputs = model(rendered)
+                outputs = model(rendered, view_ids=view_ids)
                 losses = criterion(outputs, targets)
                 loss = losses["loss_total"]
 
@@ -212,9 +236,11 @@ def save_preview(model, renderer, loader, device, args, output_path, max_items=2
     model.eval()
     views = parse_views(args.views)
     batch = move_batch(next(iter(loader)), device)
-    rendered, targets, view_count = build_parser_inputs(batch["uv"], renderer, views, train=False, args=args)
+    rendered, targets, view_count, view_ids = build_parser_inputs(
+        batch["uv"], renderer, views, train=False, args=args, apply_augment=False
+    )
     with torch.no_grad():
-        outputs = model(rendered)
+        outputs = model(rendered, view_ids=view_ids)
         pred_conditioning = splat_predictions_to_uv_conditioning(
             rendered,
             outputs,
@@ -291,6 +317,7 @@ def save_checkpoint(path, model, optimizer, epoch, args, metrics, best_metric=No
             "base_channels": args.base_channels,
             "uv_size": UV_SIZE,
             "uv_classification": args.uv_classification,
+            "view_classes": len(parse_views(args.views)),
         },
     }
     torch.save(checkpoint, path)
@@ -319,9 +346,15 @@ def build_arg_parser():
     parser.add_argument("--no_cudnn_benchmark", dest="cudnn_benchmark", action="store_false")
     parser.add_argument("--target_alpha_threshold", type=float, default=0.5)
     parser.add_argument("--splat_fg_threshold", type=float, default=0.5)
-    parser.add_argument("--augment", action="store_true")
-    parser.add_argument("--translation_scale", type=float, default=0.035)
-    parser.add_argument("--scale_range", type=float, default=0.035)
+    parser.add_argument("--augment", dest="augment", action="store_true", default=True)
+    parser.add_argument("--no_augment", dest="augment", action="store_false")
+    parser.add_argument("--augment_validation", dest="augment_validation", action="store_true", default=True)
+    parser.add_argument("--no_augment_validation", dest="augment_validation", action="store_false")
+    parser.add_argument("--translation_scale", type=float, default=0.03)
+    parser.add_argument("--scale_range", type=float, default=0.03)
+    parser.add_argument("--background_augment", dest="background_augment", action="store_true", default=True)
+    parser.add_argument("--no_background_augment", dest="background_augment", action="store_false")
+    parser.add_argument("--background_augment_prob", type=float, default=0.9)
     parser.add_argument("--lambda_foreground", type=float, default=1.0)
     parser.add_argument("--lambda_layer", type=float, default=1.0)
     parser.add_argument("--lambda_part", type=float, default=0.5)
@@ -384,6 +417,7 @@ def main():
         base_channels=args.base_channels,
         uv_size=UV_SIZE,
         uv_classification=args.uv_classification,
+        view_classes=len(parse_views(args.views)),
     ).to(device)
     criterion = DenseUVParserLoss(
         lambda_foreground=args.lambda_foreground,
@@ -405,6 +439,11 @@ def main():
         "parameters": count_parameters(model),
         "device": str(device),
         "uv_classification": args.uv_classification,
+        "view_classes": len(parse_views(args.views)),
+        "augment": args.augment,
+        "augment_validation": args.augment_validation,
+        "background_augment": args.background_augment,
+        "background_augment_prob": args.background_augment_prob,
     }
     with open(output_dir / "config.json", "w", encoding="utf-8") as handle:
         json.dump({"args": vars(args), "metadata": metadata}, handle, indent=2)

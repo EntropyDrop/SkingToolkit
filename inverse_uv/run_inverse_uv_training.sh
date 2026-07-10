@@ -69,11 +69,14 @@ PARSER_RUN_PREFIX="${PARSER_RUN_PREFIX:-dense_uv_parser_v}"
 PARSER_CHECKPOINT_NAME="${PARSER_CHECKPOINT_NAME:-best.pt}"
 PARSER_CHECKPOINT="${PARSER_CHECKPOINT:-}"
 PARSER_SPLAT_FG_THRESHOLD="${PARSER_SPLAT_FG_THRESHOLD:-0.5}"
+PARSER_BACKGROUND_AUGMENT="${PARSER_BACKGROUND_AUGMENT:-true}"
+PARSER_BACKGROUND_AUGMENT_PROB="${PARSER_BACKGROUND_AUGMENT_PROB:-0.9}"
 
 # --- Augmentation (pose robustness) ---
-AUGMENT="${AUGMENT:-false}"
-TRANSLATION_SCALE="${TRANSLATION_SCALE:-0.015}"
-SCALE_RANGE="${SCALE_RANGE:-0.015}"
+AUGMENT="${AUGMENT:-true}"
+AUGMENT_VALIDATION="${AUGMENT_VALIDATION:-true}"
+TRANSLATION_SCALE="${TRANSLATION_SCALE:-0.03}"
+SCALE_RANGE="${SCALE_RANGE:-0.03}"
 PERSPECTIVE_SCALE="${PERSPECTIVE_SCALE:-0.0}"
 
 # --- PatchGAN loss ---
@@ -110,6 +113,15 @@ conditioning_args=(
   --parser_checkpoint "$PARSER_CHECKPOINT"
   --parser_splat_fg_threshold "$PARSER_SPLAT_FG_THRESHOLD"
 )
+parser_background_args=()
+if [[ "$PARSER_BACKGROUND_AUGMENT" == "true" ]]; then
+  parser_background_args=(
+    --parser_background_augment
+    --parser_background_augment_prob "$PARSER_BACKGROUND_AUGMENT_PROB"
+  )
+else
+  parser_background_args=(--no_parser_background_augment)
+fi
 
 augment_args=()
 if [[ "$AUGMENT" == "true" ]]; then
@@ -119,6 +131,13 @@ if [[ "$AUGMENT" == "true" ]]; then
     --scale_range "$SCALE_RANGE"
     --perspective_scale "$PERSPECTIVE_SCALE"
   )
+else
+  augment_args=(--no_augment)
+fi
+if [[ "$AUGMENT_VALIDATION" == "true" ]]; then
+  augment_args+=(--augment_validation)
+else
+  augment_args+=(--no_augment_validation)
 fi
 cudnn_args=()
 if [[ "$CUDNN_BENCHMARK" == "true" ]]; then
@@ -144,6 +163,7 @@ python train.py \
   --mixed_precision "$MIXED_PRECISION" \
   --matmul_precision "$MATMUL_PRECISION" \
   ${conditioning_args[@]+"${conditioning_args[@]}"} \
+  ${parser_background_args[@]+"${parser_background_args[@]}"} \
   --best_metric "$BEST_METRIC" \
   --scheduler "$SCHEDULER" \
   --min_lr "$MIN_LR" \

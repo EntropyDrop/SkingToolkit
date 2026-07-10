@@ -53,7 +53,7 @@ The shell script defaults to the original two fixed `view_images`:
 walk_front_both_layer_ortho,walk_back_both_layer_ortho
 ```
 
-It also defaults to `AUGMENT=false`, `LAMBDA_GAN=0`, `LAMBDA_RGB=2.0`, `LAMBDA_ALPHA=0.8`, `LAMBDA_ALPHA_DICE=0.5`, `LAMBDA_ALPHA_EDGE=0.5`, `LAMBDA_RENDER=0.2`, `LAMBDA_RENDER_ALPHA=0.4`, `LAMBDA_EDGE=1.0`, and `EPOCHS=30`. This avoids early GAN color drift, keeps fixed-view edges crisp, and pushes visible RGB, alpha stability, and UV pixel boundaries harder without changing the inference input contract.
+It also defaults to global `+/-3%` translation/scale augmentation, repeatable perturbed validation, `LAMBDA_GAN=0`, `LAMBDA_RGB=2.0`, `LAMBDA_ALPHA=0.8`, `LAMBDA_ALPHA_DICE=0.5`, `LAMBDA_ALPHA_EDGE=0.5`, `LAMBDA_RENDER=0.2`, `LAMBDA_RENDER_ALPHA=0.4`, `LAMBDA_EDGE=1.0`, and `EPOCHS=30`.
 
 For a short sharpening finetune after the first run, resume from the best checkpoint with a very small GAN weight:
 
@@ -98,8 +98,8 @@ Useful knobs:
 
 Performance notes:
 
-- `run_inverse_uv_training.sh` defaults `AUGMENT=false` for the sharpest fixed-view reconstruction. Set `AUGMENT=true` only when inference inputs are expected to be misaligned or pose-jittered.
-- If augmentation is enabled, `PERSPECTIVE_SCALE=0.0` keeps it on the batched affine path. Re-enable perspective only when the extra pose robustness is worth the slower per-sample transform.
+- `run_inverse_uv_training.sh` defaults to one whole-character affine transform with `TRANSLATION_SCALE=0.03`, `SCALE_RANGE=0.03`, and `PERSPECTIVE_SCALE=0.0`. It does not independently transform limbs.
+- Validation uses the same affine range with a fixed seed, keeping checkpoint comparisons repeatable.
 - For lower console overhead on fast GPUs, raise `LOG_EVERY` (for example `LOG_EVERY=100`).
 
 ### Train Inpaint From Dense Parser Conditioning
@@ -110,7 +110,9 @@ Inverse UV training always uses parser-generated conditioning, matching `dense_u
 ./run_inverse_uv_training.sh
 ```
 
-This automatically finds the newest `../dense_uv_parser/runs/dense_uv_parser_v*/best.pt`. To finetune from an existing inverse_uv checkpoint:
+This automatically finds the newest `../dense_uv_parser/runs/dense_uv_parser_v*/best.pt`. Its frozen parser also sees the same randomized solid-color RGB backgrounds used for parser training, so inverse UV learns to inpaint parser conditioning from arbitrary-solid-background inputs. To finetune from an existing inverse_uv checkpoint:
+
+Visible UV texels recovered by the parser are copied directly into the final output; the inpaint network only determines unknown texels. This prevents already observed colors from being blurred by reconstruction.
 
 ```bash
 RESUME=runs/inverse_uv_full_v34/best.pt \

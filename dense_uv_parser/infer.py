@@ -22,7 +22,7 @@ from SkingToolkit.renderer import DifferentiableRenderer  # noqa: E402
 
 
 def image_to_render_tensor(image, view_size):
-    tensor = TF.to_tensor(image.convert("RGBA"))
+    tensor = TF.to_tensor(image.convert("RGB"))
     if tuple(tensor.shape[-2:]) != tuple(view_size):
         tensor = F.interpolate(
             tensor.unsqueeze(0),
@@ -30,7 +30,8 @@ def image_to_render_tensor(image, view_size):
             mode="bilinear",
             align_corners=False,
         ).squeeze(0)
-    return tensor.clamp(0.0, 1.0)
+    tensor = tensor.clamp(0.0, 1.0)
+    return torch.cat([tensor, torch.ones_like(tensor[:1])], dim=0)
 
 
 def load_parser(checkpoint_path, device):
@@ -44,6 +45,7 @@ def load_parser(checkpoint_path, device):
         base_channels=model_config.get("base_channels", checkpoint_args.get("base_channels", 32)),
         uv_size=model_config.get("uv_size", 64),
         uv_classification=uv_classification,
+        view_classes=model_config.get("view_classes", 0),
     ).to(device)
     model.load_state_dict(state_dict)
     model.eval()
@@ -60,7 +62,12 @@ def load_inpaint(checkpoint_path, device):
     ).to(device)
     model.load_state_dict(checkpoint["model"])
     model.eval()
-    return model
+    return model, checkpoint_args
+
+
+def checkpoint_run_id(path):
+    path = Path(path)
+    return f"{path.parent.name}/{path.name}"
 
 
 def load_view_images(args, views, renderer):
@@ -126,6 +133,10 @@ def main():
     device = get_device(args.device)
     parser_model, parser_args = load_parser(args.parser_checkpoint, device)
     views = parse_views(parser_args.get("views", "walk_front_both_layer_ortho,walk_back_both_layer_ortho"))
+    if parser_model.view_classes not in (0, len(views)):
+        raise ValueError(
+            f"Parser checkpoint expects {parser_model.view_classes} views, but its metadata lists {len(views)}: {views}"
+        )
     mappings_dir = args.mappings_dir or parser_args.get("mappings_dir")
     renderer = DifferentiableRenderer(mappings_dir=mappings_dir)
     missing_views = [view for view in views if view not in renderer.views]
@@ -133,8 +144,9 @@ def main():
         raise ValueError(f"Unknown renderer views {missing_views}. Available views: {', '.join(renderer.views)}")
 
     rendered = load_view_images(args, views, renderer).to(device)
+    view_ids = torch.arange(len(views), device=device)
     with torch.no_grad():
-        outputs = parser_model(rendered)
+        outputs = parser_model(rendered, view_ids=view_ids)
         conditioning = splat_predictions_to_uv_conditioning(
             rendered,
             outputs,
@@ -146,7 +158,16 @@ def main():
         save_conditioning_preview(conditioning.detach().cpu(), Path(args.conditioning_output))
 
     if args.output:
-        inpaint_model = load_inpaint(args.inpaint_checkpoint, device)
+        inpaint_model, inpaint_args = load_inpaint(args.inpaint_checkpoint, device)
+        inpaint_views = parse_views(inpaint_args.get("views", ""))
+        if inpaint_views and inpaint_views != views:
+            raise ValueError(f"Parser/inpaint view mismatch: parser={views}, inpaint={inpaint_views}")
+        expected_parser = inpaint_args.get("parser_checkpoint")
+        if expected_parser and checkpoint_run_id(expected_parser) != checkpoint_run_id(args.parser_checkpoint):
+            raise ValueError(
+                "The inverse_uv checkpoint was trained with a different parser: "
+                f"expected {checkpoint_run_id(expected_parser)}, got {checkpoint_run_id(args.parser_checkpoint)}."
+            )
         with torch.no_grad():
             pred_uv = finalize_minecraft_alpha(
                 inpaint_model(conditioning)[0],

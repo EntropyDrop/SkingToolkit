@@ -30,9 +30,12 @@ MATMUL_PRECISION="${MATMUL_PRECISION:-high}"
 CUDNN_BENCHMARK="${CUDNN_BENCHMARK:-true}"
 LOG_EVERY="${LOG_EVERY:-50}"
 
-AUGMENT="${AUGMENT:-false}"
-TRANSLATION_SCALE="${TRANSLATION_SCALE:-0.035}"
-SCALE_RANGE="${SCALE_RANGE:-0.035}"
+AUGMENT="${AUGMENT:-true}"
+AUGMENT_VALIDATION="${AUGMENT_VALIDATION:-true}"
+TRANSLATION_SCALE="${TRANSLATION_SCALE:-0.03}"
+SCALE_RANGE="${SCALE_RANGE:-0.03}"
+BACKGROUND_AUGMENT="${BACKGROUND_AUGMENT:-true}"
+BACKGROUND_AUGMENT_PROB="${BACKGROUND_AUGMENT_PROB:-0.9}"
 
 LAMBDA_FOREGROUND="${LAMBDA_FOREGROUND:-1.0}"
 LAMBDA_LAYER="${LAMBDA_LAYER:-1.0}"
@@ -49,12 +52,28 @@ if [[ "$AUGMENT" == "true" ]]; then
     --translation_scale "$TRANSLATION_SCALE"
     --scale_range "$SCALE_RANGE"
   )
+else
+  augment_args=(--no_augment)
+fi
+if [[ "$AUGMENT_VALIDATION" == "true" ]]; then
+  augment_args+=(--augment_validation)
+else
+  augment_args+=(--no_augment_validation)
 fi
 uv_class_args=()
 if [[ "$UV_CLASSIFICATION" == "true" ]]; then
   uv_class_args=(--uv_classification)
 else
   uv_class_args=(--no_uv_classification)
+fi
+background_args=()
+if [[ "$BACKGROUND_AUGMENT" == "true" ]]; then
+  background_args=(
+    --background_augment
+    --background_augment_prob "$BACKGROUND_AUGMENT_PROB"
+  )
+else
+  background_args=(--no_background_augment)
 fi
 cudnn_args=()
 if [[ "$CUDNN_BENCHMARK" == "true" ]]; then
@@ -85,5 +104,6 @@ python train.py \
   --lambda_uv "$LAMBDA_UV" \
   --lambda_uv_class "$LAMBDA_UV_CLASS" \
   "${augment_args[@]}" \
+  "${background_args[@]}" \
   "${uv_class_args[@]}" \
   "${cudnn_args[@]}"
