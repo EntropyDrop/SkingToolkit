@@ -45,6 +45,27 @@ For good parser splatting, watch `acc_uv_exact`, `acc_uv_within1`, and `loss_uv_
 
 ## Infer With Inpaint
 
+Use the latest parser checkpoint automatically:
+
+```bash
+./run_infer.sh
+```
+
+By default it looks for the highest `runs/dense_uv_parser_v*/best.pt`, then looks for the highest `../inverse_uv/runs/inverse_uv_full_v*/best.pt`. It writes:
+
+- `outputs/parser_conditioning.png`
+- `outputs/pred_uv.png` when an inverse_uv inpaint checkpoint is found
+
+Common overrides:
+
+```bash
+FRONT=/path/to/front.png BACK=/path/to/back.png ./run_infer.sh
+COMBINED=/path/to/combined.png ./run_infer.sh
+PARSER_CHECKPOINT=runs/dense_uv_parser_v3/best.pt ./run_infer.sh
+INPAINT_CHECKPOINT=../inverse_uv/runs/inverse_uv_full_v34/best.pt ./run_infer.sh
+OUTPUT= CONDITIONING_OUTPUT=outputs/parser_conditioning.png ./run_infer.sh
+```
+
 Use a trained parser checkpoint plus an existing `inverse_uv` inpaint checkpoint:
 
 ```bash
