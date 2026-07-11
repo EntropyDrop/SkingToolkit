@@ -3,7 +3,7 @@ import unittest
 import torch
 import torch.nn as nn
 
-from SkingToolkit.dense_uv_parser.losses import DenseUVParserLoss
+from SkingToolkit.dense_uv_parser.losses import DenseUVParserLoss, _balanced_cross_entropy
 from SkingToolkit.dense_uv_parser.model import DenseUVParserNet
 from SkingToolkit.dense_uv_parser.utils import (
     augment_dense_batch,
@@ -47,6 +47,13 @@ def dense_targets(batch, height, width):
 
 
 class GlobalAffineRoutingTest(unittest.TestCase):
+    def test_balanced_cross_entropy_supports_bfloat16_logits(self):
+        logits = torch.randn(2, 12, 8, 8, dtype=torch.bfloat16)
+        target = torch.randint(0, 12, (2, 8, 8))
+        loss = _balanced_cross_entropy(logits, target)
+        self.assertTrue(torch.isfinite(loss))
+        self.assertEqual(loss.dtype, torch.float32)
+
     def test_global_model_emits_surface_and_affine_losses(self):
         rendered = torch.rand(1, 4, 32, 32)
         rendered[:, 3] = 1.0

@@ -10,13 +10,12 @@ def _balanced_cross_entropy(logits, target, max_weight=4.0):
     valid = target != IGNORE_INDEX
     if not valid.any():
         return logits.new_tensor(0.0)
-    counts = torch.bincount(target[valid], minlength=logits.shape[1]).to(logits.dtype)
+    counts = torch.bincount(target[valid], minlength=logits.shape[1]).float()
     active = counts > 0
-    weights = torch.zeros_like(counts)
-    weights[active] = counts[active].rsqrt()
+    weights = torch.where(active, counts.clamp_min(1.0).rsqrt(), torch.zeros_like(counts))
     weights[active] /= weights[active].mean().clamp_min(1e-6)
     weights.clamp_(max=max_weight)
-    return F.cross_entropy(logits, target, weight=weights, ignore_index=IGNORE_INDEX)
+    return F.cross_entropy(logits.float(), target, weight=weights, ignore_index=IGNORE_INDEX)
 
 
 class DenseUVParserLoss(nn.Module):
