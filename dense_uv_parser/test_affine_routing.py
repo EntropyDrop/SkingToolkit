@@ -29,8 +29,8 @@ class FakeRenderer(nn.Module):
             mask.view(-1)[:valid_pixels] = 1.0
         else:
             mask = mask.float().clone()
-        self.register_buffer("front_inner_grid", grid)
-        self.register_buffer("front_outer_grid", grid)
+        self.register_buffer("front_inner_grid", grid.clone())
+        self.register_buffer("front_outer_grid", grid.clone())
         self.register_buffer("front_inner_mask", mask)
         self.register_buffer("front_outer_mask", torch.zeros_like(mask))
 
@@ -68,6 +68,30 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         self.assertEqual(tuple(outputs["affine"].shape), (1, 3))
         losses = DenseUVParserLoss(use_uv=False)(outputs, targets)
         self.assertTrue(torch.isfinite(losses["loss_total"]))
+
+    def test_global_model_can_train_discrete_uv_routing_auxiliary(self):
+        rendered = torch.rand(1, 4, 32, 32)
+        rendered[:, 3] = 1.0
+        _, targets = augment_dense_batch(
+            rendered,
+            dense_targets(1, 32, 32),
+            translation_scale=0.0,
+            scale_range=0.0,
+        )
+        model = DenseUVParserNet(
+            base_channels=8,
+            uv_classification=True,
+            view_classes=1,
+            predict_affine=True,
+            surface_classes=4,
+        )
+
+        outputs = model(rendered, view_ids=torch.zeros(1, dtype=torch.long))
+        losses = DenseUVParserLoss(use_uv=True)(outputs, targets)
+
+        self.assertEqual(tuple(outputs["uv_x"].shape), (1, 64, 32, 32))
+        self.assertEqual(tuple(outputs["uv_y"].shape), (1, 64, 32, 32))
+        self.assertTrue(torch.isfinite(losses["loss_routing"]))
 
     def test_affine_target_undoes_augmentation(self):
         height = width = 64
@@ -253,6 +277,43 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         )
 
         self.assertTrue(torch.equal(conditioning[0, :3, 0, 0], torch.tensor([1.0, 0.0, 0.0])))
+
+    def test_uv_classification_reranks_ambiguous_surface_candidates(self):
+        renderer = FakeRenderer(valid_pixels=1)
+        renderer.front_outer_mask.copy_(renderer.front_inner_mask)
+        renderer.front_outer_grid[0, 0, 0] = (1.0 / 63.0) * 2.0 - 1.0
+        rendered = torch.rand(1, 4, 8, 8)
+        rendered[:, 3] = 1.0
+        uv_x = torch.full((1, 64, 8, 8), -10.0)
+        uv_y = torch.full((1, 64, 8, 8), -10.0)
+        uv_x[:, 0] = 10.0
+        uv_y[:, 0] = 10.0
+        outputs = {
+            "foreground": torch.full((1, 1, 8, 8), 10.0),
+            "layer": torch.zeros(1, 2, 8, 8),
+            "part": torch.zeros(1, 6, 8, 8),
+            "face": torch.zeros(1, 6, 8, 8),
+            "surface": torch.cat(
+                [torch.zeros(1, 1, 8, 8), torch.full((1, 1, 8, 8), 2.0)],
+                dim=1,
+            ),
+            "uv_x": uv_x,
+            "uv_y": uv_y,
+            "affine": torch.zeros(1, 3),
+        }
+
+        _, details = splat_parser_predictions_to_uv_conditioning(
+            rendered,
+            outputs,
+            renderer=renderer,
+            views=["front"],
+            group_size=1,
+            semantic_gate=False,
+            affine_refine=False,
+            return_details=True,
+        )
+
+        self.assertEqual(int(details["routing"]["surface"][0, 0, 0]), 0)
 
 
 if __name__ == "__main__":

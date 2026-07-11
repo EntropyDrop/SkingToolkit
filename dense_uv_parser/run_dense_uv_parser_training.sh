@@ -30,6 +30,7 @@ MIXED_PRECISION="${MIXED_PRECISION:-bf16}"
 MATMUL_PRECISION="${MATMUL_PRECISION:-high}"
 CUDNN_BENCHMARK="${CUDNN_BENCHMARK:-true}"
 LOG_EVERY="${LOG_EVERY:-50}"
+BEST_METRIC="${BEST_METRIC:-loss_routing}"
 
 AUGMENT="${AUGMENT:-true}"
 AUGMENT_VALIDATION="${AUGMENT_VALIDATION:-true}"
@@ -50,7 +51,7 @@ LAMBDA_UV="${LAMBDA_UV:-0.25}"
 LAMBDA_UV_CLASS="${LAMBDA_UV_CLASS:-1.0}"
 LAMBDA_AFFINE="${LAMBDA_AFFINE:-1.0}"
 LAMBDA_SURFACE="${LAMBDA_SURFACE:-1.0}"
-UV_CLASSIFICATION="${UV_CLASSIFICATION:-false}"
+UV_CLASSIFICATION="${UV_CLASSIFICATION:-true}"
 
 augment_args=()
 if [[ "$AUGMENT" == "true" ]]; then
@@ -117,6 +118,7 @@ python train.py \
   --mixed_precision "$MIXED_PRECISION" \
   --matmul_precision "$MATMUL_PRECISION" \
   --log_every "$LOG_EVERY" \
+  --best_metric "$BEST_METRIC" \
   --lambda_foreground "$LAMBDA_FOREGROUND" \
   --lambda_layer "$LAMBDA_LAYER" \
   --lambda_part "$LAMBDA_PART" \

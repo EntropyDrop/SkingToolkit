@@ -110,6 +110,8 @@ class DenseUVParserLoss(nn.Module):
             loss_surface = outputs["foreground"].new_tensor(0.0)
             acc_surface = outputs["foreground"].new_tensor(0.0)
 
+        loss_routing = loss_surface + loss_uv_class
+
         loss_total = (
             self.lambda_foreground * loss_foreground
             + self.lambda_layer * loss_layer
@@ -140,6 +142,7 @@ class DenseUVParserLoss(nn.Module):
             "err_affine_translation_px": err_affine_translation_px,
             "err_affine_scale_pct": err_affine_scale_pct,
             "loss_surface": loss_surface,
+            "loss_routing": loss_routing,
             "acc_surface": acc_surface,
         }
         metrics.update(classification_metrics(outputs, targets, self.uv_size, use_uv=use_uv))

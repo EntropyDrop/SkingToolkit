@@ -419,6 +419,11 @@ def build_arg_parser():
     parser.add_argument("--log_every", type=int, default=50)
     parser.add_argument("--save_every", type=int, default=1)
     parser.add_argument("--preview_every", type=int, default=1)
+    parser.add_argument(
+        "--best_metric",
+        choices=["loss_total", "loss_routing", "loss_surface", "loss_uv_class"],
+        default="loss_total",
+    )
     return parser
 
 
@@ -472,7 +477,7 @@ def main():
     model = DenseUVParserNet(
         base_channels=args.base_channels,
         uv_size=UV_SIZE,
-        uv_classification=args.uv_classification and not global_affine_mode,
+        uv_classification=args.uv_classification,
         view_classes=len(parse_views(args.views)),
         predict_affine=global_affine_mode,
         affine_translation_scale=args.translation_scale,
@@ -489,7 +494,7 @@ def main():
         lambda_affine=args.lambda_affine,
         lambda_surface=args.lambda_surface,
         uv_size=UV_SIZE,
-        use_uv=not global_affine_mode,
+        use_uv=(not global_affine_mode) or args.uv_classification,
         affine_translation_limit=model.affine_translation_limit if global_affine_mode else 1.0,
         affine_log_scale_limit=model.affine_log_scale_limit if global_affine_mode else 1.0,
     ).to(device)
@@ -507,6 +512,7 @@ def main():
         "uv_classification": model.uv_classification,
         "view_classes": len(parse_views(args.views)),
         "surface_classes": surface_classes,
+        "best_metric": args.best_metric,
         "augment": args.augment,
         "augment_validation": args.augment_validation,
         "background_augment": args.background_augment,
@@ -535,7 +541,9 @@ def main():
             metrics["val"] = val_metrics
             metric_source = val_metrics
 
-        metric = metric_source["loss_total"]
+        if args.best_metric not in metric_source:
+            raise ValueError(f"Best metric {args.best_metric!r} is not available in epoch metrics.")
+        metric = metric_source[args.best_metric]
         print(f"epoch={epoch} metrics={json.dumps(metrics, sort_keys=True)}")
 
         if epoch % args.preview_every == 0:

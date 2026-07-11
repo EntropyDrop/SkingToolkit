@@ -469,7 +469,7 @@ def canonicalize_parser_outputs(outputs):
     affine = outputs["affine"]
     canonical = {}
     for name, value in outputs.items():
-        if name in {"affine", "uv", "uv_x", "uv_y"} or not torch.is_tensor(value) or value.dim() != 4:
+        if name == "affine" or not torch.is_tensor(value) or value.dim() != 4:
             canonical[name] = value
         else:
             canonical[name] = canonicalize_tensor(value, affine, mode="bilinear")
@@ -662,6 +662,22 @@ def _routing_from_affine_outputs(renderer, views, outputs, fg_threshold=0.5, sem
                 )
 
         candidate_score = candidate_score * semantic_score.clamp_min(1e-12).sqrt()
+        if "uv_x" in outputs and "uv_y" in outputs:
+            uv_x_prob = torch.softmax(outputs["uv_x"][selection], dim=1)
+            uv_y_prob = torch.softmax(outputs["uv_y"][selection], dim=1)
+            candidate_x = static["flat_uv"].remainder(UV_SIZE)
+            candidate_y = static["flat_uv"].div(UV_SIZE, rounding_mode="floor")
+            candidate_x_prob = uv_x_prob.gather(
+                1,
+                candidate_x.unsqueeze(0).expand(view_batch, -1, -1, -1),
+            )
+            candidate_y_prob = uv_y_prob.gather(
+                1,
+                candidate_y.unsqueeze(0).expand(view_batch, -1, -1, -1),
+            )
+            candidate_score = candidate_score * (
+                candidate_x_prob * candidate_y_prob
+            ).clamp_min(1e-12).sqrt()
         candidate_score = candidate_score.masked_fill(~candidate_valid, -1.0)
         best_score, selected_surface = candidate_score.max(dim=1)
         if surface_count > 1:
