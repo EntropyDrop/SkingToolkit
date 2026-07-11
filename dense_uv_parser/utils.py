@@ -655,7 +655,11 @@ def _routing_from_affine_outputs(renderer, views, outputs, fg_threshold=0.5, sem
                 expected_probability,
                 torch.ones_like(expected_probability),
             )
-            if semantic_gate:
+            # Layer evidence stays soft: a marginal inner/outer argmax must not
+            # discard a surface strongly supported by the surface and UV heads.
+            # Part/face remain hard gates because crossing those boundaries maps
+            # to an unrelated body region.
+            if semantic_gate and name != "layer":
                 candidate_valid = candidate_valid & (
                     ~known_semantic.unsqueeze(0)
                     | (probabilities.argmax(dim=1).unsqueeze(1) == expected_safe.unsqueeze(0))

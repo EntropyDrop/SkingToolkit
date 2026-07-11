@@ -278,7 +278,7 @@ class GlobalAffineRoutingTest(unittest.TestCase):
 
         self.assertTrue(torch.equal(conditioning[0, :3, 0, 0], torch.tensor([1.0, 0.0, 0.0])))
 
-    def test_uv_classification_reranks_ambiguous_surface_candidates(self):
+    def test_uv_evidence_can_correct_soft_layer_argmax(self):
         renderer = FakeRenderer(valid_pixels=1)
         renderer.front_outer_mask.copy_(renderer.front_inner_mask)
         renderer.front_outer_grid[0, 0, 0] = (1.0 / 63.0) * 2.0 - 1.0
@@ -290,7 +290,12 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         uv_y[:, 0] = 10.0
         outputs = {
             "foreground": torch.full((1, 1, 8, 8), 10.0),
-            "layer": torch.zeros(1, 2, 8, 8),
+            # The layer head narrowly prefers outer, while surface/UV evidence
+            # strongly identifies the inner candidate.
+            "layer": torch.cat(
+                [torch.zeros(1, 1, 8, 8), torch.full((1, 1, 8, 8), 0.25)],
+                dim=1,
+            ),
             "part": torch.zeros(1, 6, 8, 8),
             "face": torch.zeros(1, 6, 8, 8),
             "surface": torch.cat(
@@ -308,7 +313,7 @@ class GlobalAffineRoutingTest(unittest.TestCase):
             renderer=renderer,
             views=["front"],
             group_size=1,
-            semantic_gate=False,
+            semantic_gate=True,
             affine_refine=False,
             return_details=True,
         )
