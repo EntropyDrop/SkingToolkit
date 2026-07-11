@@ -16,9 +16,12 @@ if str(WORKSPACE_ROOT) not in sys.path:
 
 from SkingToolkit.dense_uv_parser.model import DenseUVParserNet  # noqa: E402
 from SkingToolkit.dense_uv_parser.utils import (  # noqa: E402
+    FACE_PALETTE,
     IGNORE_INDEX,
+    LAYER_FACE_PALETTE,
     LAYER_PALETTE,
     PART_PALETTE,
+    combine_layer_face,
     colorize_foreground,
     colorize_labels,
     colorize_surface,
@@ -151,6 +154,8 @@ def save_debug_preview(
     overlay_alpha=0.45,
     inner_cutout_output=None,
     outer_cutout_output=None,
+    face_output=None,
+    layer_face_output=None,
 ):
     if not 0.0 <= overlay_alpha <= 1.0:
         raise ValueError(f"overlay_alpha must be in [0, 1], got {overlay_alpha}.")
@@ -166,6 +171,13 @@ def save_debug_preview(
         pred_layer_values,
         torch.full_like(outputs["layer"].argmax(dim=1), IGNORE_INDEX),
     )
+    pred_face_values = routing["face"] if routing is not None else outputs["face"].argmax(dim=1)
+    pred_face = torch.where(
+        pred_fg,
+        pred_face_values,
+        torch.full_like(outputs["face"].argmax(dim=1), IGNORE_INDEX),
+    )
+    pred_layer_face = combine_layer_face(pred_layer, pred_face)
     pred_uv = (
         flat_uv_to_uv01(routing["flat_uv"], rendered.dtype)
         if routing is not None
@@ -174,7 +186,16 @@ def save_debug_preview(
 
     part_color = colorize_labels(pred_part, PART_PALETTE, bg_color, rendered)
     layer_color = colorize_labels(pred_layer, LAYER_PALETTE, bg_color, rendered)
-    debug_images = [rendered[:, :3], colorize_foreground(pred_fg, bg_color, rendered), part_color, layer_color]
+    face_color = colorize_labels(pred_face, FACE_PALETTE, bg_color, rendered)
+    layer_face_color = colorize_labels(pred_layer_face, LAYER_FACE_PALETTE, bg_color, rendered)
+    debug_images = [
+        rendered[:, :3],
+        colorize_foreground(pred_fg, bg_color, rendered),
+        part_color,
+        layer_color,
+        face_color,
+        layer_face_color,
+    ]
     surface_color = None
     if routing is not None:
         pred_surface = torch.where(
@@ -189,6 +210,11 @@ def save_debug_preview(
         debug_preview = torch.cat(debug_images, dim=0)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         save_image(debug_preview.clamp(0.0, 1.0).detach().cpu(), output_path, nrow=view_count)
+
+    for colorized, path in ((face_color, face_output), (layer_face_color, layer_face_output)):
+        if path is not None:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            save_image(colorized.clamp(0.0, 1.0).detach().cpu(), path, nrow=view_count)
 
     if overlay_output is not None or inner_cutout_output is not None or outer_cutout_output is not None:
         rgb = rendered[:, :3]
@@ -221,6 +247,8 @@ def save_debug_preview(
                 outer_cutout,
                 overlay(part_color),
                 overlay(layer_color),
+                overlay(face_color),
+                overlay(layer_face_color),
             ]
             if surface_color is not None:
                 overlay_images.append(overlay(surface_color))
@@ -240,6 +268,8 @@ def build_arg_parser():
     parser.add_argument("--overlay_alpha", type=float, default=0.45)
     parser.add_argument("--inner_cutout_output", default=None, help="Original-color cutout for routed inner-layer pixels.")
     parser.add_argument("--outer_cutout_output", default=None, help="Original-color cutout for routed outer/decor pixels.")
+    parser.add_argument("--face_output", default=None, help="Six-class routed cube-face visualization.")
+    parser.add_argument("--layer_face_output", default=None, help="Twelve-class inner/outer-by-face visualization.")
     parser.add_argument("--front", default=None)
     parser.add_argument("--back", default=None)
     parser.add_argument("--combined", default=None)
@@ -269,6 +299,8 @@ def main():
             args.overlay_output,
             args.inner_cutout_output,
             args.outer_cutout_output,
+            args.face_output,
+            args.layer_face_output,
         )
     ):
         raise ValueError(
@@ -354,7 +386,16 @@ def main():
                 )
             )
 
-    if args.debug_output or args.overlay_output or args.inner_cutout_output or args.outer_cutout_output:
+    if any(
+        (
+            args.debug_output,
+            args.overlay_output,
+            args.inner_cutout_output,
+            args.outer_cutout_output,
+            args.face_output,
+            args.layer_face_output,
+        )
+    ):
         save_debug_preview(
             routing_details["rendered"],
             routing_details["outputs"],
@@ -367,6 +408,8 @@ def main():
             overlay_alpha=args.overlay_alpha,
             inner_cutout_output=Path(args.inner_cutout_output) if args.inner_cutout_output else None,
             outer_cutout_output=Path(args.outer_cutout_output) if args.outer_cutout_output else None,
+            face_output=Path(args.face_output) if args.face_output else None,
+            layer_face_output=Path(args.layer_face_output) if args.layer_face_output else None,
         )
 
     if args.conditioning_output:

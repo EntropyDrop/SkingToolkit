@@ -1028,6 +1028,37 @@ LAYER_PALETTE = (
     (72, 169, 166),
     (255, 179, 71),
 )
+FACE_NAMES = ("front", "back", "left", "right", "top", "bottom")
+FACE_PALETTE = (
+    (239, 83, 80),
+    (171, 71, 188),
+    (66, 165, 245),
+    (38, 166, 154),
+    (255, 202, 40),
+    (117, 117, 117),
+)
+LAYER_FACE_PALETTE = (
+    (183, 28, 28),
+    (106, 27, 154),
+    (21, 101, 192),
+    (0, 121, 107),
+    (245, 166, 35),
+    (84, 84, 84),
+    (255, 128, 125),
+    (218, 112, 232),
+    (126, 208, 255),
+    (102, 221, 203),
+    (255, 224, 130),
+    (210, 210, 210),
+)
+
+
+def combine_layer_face(layer, face):
+    """Encode inner/outer x six cube faces as 12 visualization classes."""
+    valid = (layer != IGNORE_INDEX) & (face != IGNORE_INDEX)
+    combined = torch.full_like(layer, IGNORE_INDEX)
+    combined[valid] = layer[valid] * FACE_CLASSES + face[valid]
+    return combined
 
 
 def bg_tensor(bg_color, reference):

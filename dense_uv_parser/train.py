@@ -17,7 +17,9 @@ if str(WORKSPACE_ROOT) not in sys.path:
 from SkingToolkit.dense_uv_parser.losses import DenseUVParserLoss  # noqa: E402
 from SkingToolkit.dense_uv_parser.model import DenseUVParserNet, count_parameters  # noqa: E402
 from SkingToolkit.dense_uv_parser.utils import (  # noqa: E402
+    FACE_PALETTE,
     IGNORE_INDEX,
+    LAYER_FACE_PALETTE,
     LAYER_PALETTE,
     PART_PALETTE,
     UV_SIZE,
@@ -28,6 +30,7 @@ from SkingToolkit.dense_uv_parser.utils import (  # noqa: E402
     colorize_labels,
     colorize_surface,
     colorize_uv,
+    combine_layer_face,
     flat_uv_to_uv01,
     parse_views,
     prediction_uv01,
@@ -305,6 +308,17 @@ def save_preview(model, renderer, loader, device, args, output_path, max_items=2
         pred_layer_values,
         torch.full_like(debug_outputs["layer"].argmax(dim=1), IGNORE_INDEX),
     )
+    pred_face_values = routing_debug["face"] if routing_details is not None else debug_outputs["face"].argmax(dim=1)
+    pred_face = torch.where(
+        pred_fg,
+        pred_face_values,
+        torch.full_like(debug_outputs["face"].argmax(dim=1), IGNORE_INDEX),
+    )
+    gt_face = torch.where(
+        gt_fg,
+        targets_debug["face"],
+        torch.full_like(targets_debug["face"], IGNORE_INDEX),
+    )
     debug_images = [
         rendered_debug[:, :3],
         colorize_foreground(pred_fg, args.bg_color, rendered_debug),
@@ -313,6 +327,20 @@ def save_preview(model, renderer, loader, device, args, output_path, max_items=2
         colorize_labels(targets_debug["part"], PART_PALETTE, args.bg_color, rendered_debug),
         colorize_labels(pred_layer, LAYER_PALETTE, args.bg_color, rendered_debug),
         colorize_labels(targets_debug["layer"], LAYER_PALETTE, args.bg_color, rendered_debug),
+        colorize_labels(pred_face, FACE_PALETTE, args.bg_color, rendered_debug),
+        colorize_labels(gt_face, FACE_PALETTE, args.bg_color, rendered_debug),
+        colorize_labels(
+            combine_layer_face(pred_layer, pred_face),
+            LAYER_FACE_PALETTE,
+            args.bg_color,
+            rendered_debug,
+        ),
+        colorize_labels(
+            combine_layer_face(targets_debug["layer"], gt_face),
+            LAYER_FACE_PALETTE,
+            args.bg_color,
+            rendered_debug,
+        ),
     ]
     if routing_details is not None:
         pred_surface = torch.where(
