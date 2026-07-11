@@ -12,6 +12,7 @@ from SkingToolkit.dense_uv_parser.utils import (
     refine_parser_affine,
     splat_deterministic_targets_to_uv_conditioning,
     splat_parser_predictions_to_uv_conditioning,
+    splat_to_uv_conditioning,
 )
 
 
@@ -196,6 +197,62 @@ class GlobalAffineRoutingTest(unittest.TestCase):
             group_size=1,
         )
         self.assertEqual(int(target_conditioning[:, 4:5].sum()), 1)
+
+    def test_routing_reranks_surface_classes_that_are_invalid_at_pixel(self):
+        renderer = FakeRenderer(valid_pixels=1)
+        rendered = torch.rand(1, 4, 8, 8)
+        rendered[:, 3] = 1.0
+        outputs = {
+            "foreground": torch.full((1, 1, 8, 8), 10.0),
+            "layer": torch.cat(
+                [torch.full((1, 1, 8, 8), 10.0), torch.full((1, 1, 8, 8), -10.0)],
+                dim=1,
+            ),
+            "part": torch.zeros(1, 6, 8, 8),
+            "face": torch.zeros(1, 6, 8, 8),
+            # Surface 1 wins the global argmax but has no valid mapping pixels.
+            "surface": torch.cat(
+                [torch.full((1, 1, 8, 8), 5.0), torch.full((1, 1, 8, 8), 10.0)],
+                dim=1,
+            ),
+            "affine": torch.zeros(1, 3),
+        }
+
+        conditioning, details = splat_parser_predictions_to_uv_conditioning(
+            rendered,
+            outputs,
+            renderer=renderer,
+            views=["front"],
+            group_size=1,
+            semantic_gate=False,
+            affine_refine=False,
+            return_details=True,
+        )
+
+        self.assertEqual(int(details["routing"]["foreground"].sum()), 1)
+        self.assertEqual(int(details["routing"]["surface"][0, 0, 0]), 0)
+        self.assertEqual(int(conditioning[:, 4:5].sum()), 1)
+
+    def test_confidence_splat_uses_one_source_pixel_for_ties(self):
+        rendered = torch.zeros(2, 4, 1, 1)
+        rendered[0, 0, 0, 0] = 1.0
+        rendered[1, 2, 0, 0] = 1.0
+        rendered[:, 3, 0, 0] = 1.0
+        fg = torch.ones(2, 1, 1, dtype=torch.bool)
+        layer = torch.zeros(2, 1, 1, dtype=torch.long)
+        flat_uv = torch.zeros(2, 1, 1, dtype=torch.long)
+        confidence = torch.ones(2, 1, 1)
+
+        conditioning = splat_to_uv_conditioning(
+            rendered,
+            fg,
+            layer,
+            flat_uv,
+            group_size=2,
+            confidence=confidence,
+        )
+
+        self.assertTrue(torch.equal(conditioning[0, :3, 0, 0], torch.tensor([1.0, 0.0, 0.0])))
 
 
 if __name__ == "__main__":

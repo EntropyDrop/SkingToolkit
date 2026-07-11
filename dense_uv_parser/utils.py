@@ -603,63 +603,93 @@ def _routing_from_affine_outputs(renderer, views, outputs, fg_threshold=0.5, sem
         raise ValueError("Affine parser outputs must include the static surface classifier.")
     foreground_prob = torch.sigmoid(outputs["foreground"])[:, 0]
     surface_prob = torch.softmax(outputs["surface"], dim=1)
-    requested_surface = surface_prob.argmax(dim=1)
     layer_prob = torch.softmax(outputs["layer"], dim=1)
-    N, H, W = requested_surface.shape
+    N, _, H, W = surface_prob.shape
     if N % len(views) != 0:
         raise ValueError(f"N={N} must be divisible by {len(views)} renderer views.")
 
     fg = torch.zeros_like(foreground_prob, dtype=torch.bool)
-    layer = torch.zeros_like(requested_surface)
-    flat_uv = torch.zeros_like(requested_surface)
-    surface = torch.full_like(requested_surface, IGNORE_INDEX)
+    layer = torch.zeros((N, H, W), dtype=torch.long, device=surface_prob.device)
+    flat_uv = torch.zeros_like(layer)
+    surface = torch.full_like(layer, IGNORE_INDEX)
     confidence = torch.zeros_like(foreground_prob)
-    expected_part = torch.full_like(requested_surface, IGNORE_INDEX)
-    expected_face = torch.full_like(requested_surface, IGNORE_INDEX)
+    confidence_margin = torch.zeros_like(foreground_prob)
+    expected_part = torch.full_like(layer, IGNORE_INDEX)
+    expected_face = torch.full_like(layer, IGNORE_INDEX)
 
     for view_index, view in enumerate(views):
         selection = slice(view_index, N, len(views))
-        static = build_static_surface_routing(renderer, view, requested_surface.device)
+        static = build_static_surface_routing(renderer, view, surface_prob.device)
         if static["masks"].shape[-2:] != (H, W):
             raise ValueError(
                 f"View {view!r} mapping shape {tuple(static['masks'].shape[-2:])} does not match parser shape {(H, W)}."
             )
-        selected_surface = requested_surface[selection]
-        routed = _select_static_surface(static, selected_surface)
-        selected_layer = routed["layer"]
-        selected_part = routed["part"]
-        selected_face = routed["face"]
-        surface_score = surface_prob[selection].gather(1, selected_surface.unsqueeze(1)).squeeze(1)
-        semantic_valid = torch.ones_like(routed["valid"], dtype=torch.bool)
-        semantic_score = torch.ones_like(surface_score)
+        view_surface_prob = surface_prob[selection]
+        view_batch = view_surface_prob.shape[0]
+        surface_count = static["masks"].shape[0]
+        if view_surface_prob.shape[1] < surface_count:
+            raise ValueError(
+                f"Parser has {view_surface_prob.shape[1]} surface classes, but view {view!r} requires {surface_count}."
+            )
 
-        for name, expected in (("layer", selected_layer), ("part", selected_part), ("face", selected_face)):
+        candidate_score = view_surface_prob[:, :surface_count]
+        candidate_valid = static["masks"].unsqueeze(0).expand(view_batch, -1, -1, -1).clone()
+        semantic_score = torch.ones_like(candidate_score)
+
+        # Re-rank only surfaces that physically exist at this screen pixel. This
+        # converts the semantic heads from a rejection gate into useful routing
+        # evidence and avoids holes caused by a globally invalid surface argmax.
+        for name in ("layer", "part", "face"):
             if name not in outputs:
                 continue
             probabilities = torch.softmax(outputs[name][selection], dim=1)
+            expected = static[name]
             known_semantic = expected != IGNORE_INDEX
             expected_safe = expected.clamp(0, probabilities.shape[1] - 1)
-            expected_probability = probabilities.gather(1, expected_safe.unsqueeze(1)).squeeze(1)
+            expected_probability = probabilities.gather(
+                1,
+                expected_safe.unsqueeze(0).expand(view_batch, -1, -1, -1),
+            )
             semantic_score = semantic_score * torch.where(
-                known_semantic,
+                known_semantic.unsqueeze(0),
                 expected_probability,
                 torch.ones_like(expected_probability),
             )
             if semantic_gate:
-                semantic_valid = semantic_valid & (
-                    ~known_semantic | (probabilities.argmax(dim=1) == expected_safe)
+                candidate_valid = candidate_valid & (
+                    ~known_semantic.unsqueeze(0)
+                    | (probabilities.argmax(dim=1).unsqueeze(1) == expected_safe.unsqueeze(0))
                 )
 
+        candidate_score = candidate_score * semantic_score.clamp_min(1e-12).sqrt()
+        candidate_score = candidate_score.masked_fill(~candidate_valid, -1.0)
+        best_score, selected_surface = candidate_score.max(dim=1)
+        if surface_count > 1:
+            top_scores = candidate_score.topk(k=2, dim=1).values
+            route_margin = (top_scores[:, 0] - top_scores[:, 1]).clamp_min(0.0)
+        else:
+            route_margin = best_score.clamp_min(0.0)
+
+        routed = _select_static_surface(static, selected_surface)
+        selected_layer = routed["layer"]
+        selected_part = routed["part"]
+        selected_face = routed["face"]
+        has_candidate = best_score >= 0.0
         routed_fg = (
             (foreground_prob[selection] > fg_threshold)
+            & has_candidate
             & routed["valid"]
-            & semantic_valid
         )
         fg[selection] = routed_fg
         layer[selection] = selected_layer
         flat_uv[selection] = routed["flat_uv"]
-        surface[selection] = selected_surface
-        confidence[selection] = foreground_prob[selection] * surface_score * semantic_score.sqrt()
+        surface[selection] = torch.where(
+            has_candidate,
+            selected_surface,
+            torch.full_like(selected_surface, IGNORE_INDEX),
+        )
+        confidence[selection] = foreground_prob[selection] * best_score.clamp_min(0.0)
+        confidence_margin[selection] = route_margin
         expected_part[selection] = selected_part
         expected_face[selection] = selected_face
 
@@ -669,6 +699,7 @@ def _routing_from_affine_outputs(renderer, views, outputs, fg_threshold=0.5, sem
         "flat_uv": flat_uv,
         "surface": surface,
         "confidence": confidence,
+        "confidence_margin": confidence_margin,
         "part": expected_part,
         "face": expected_face,
     }
@@ -917,9 +948,24 @@ def splat_to_uv_conditioning(
             if select_highest_confidence:
                 best_scores = scores.new_full((UV_SIZE * UV_SIZE,), -torch.inf)
                 best_scores.scatter_reduce_(0, target_uv, scores, reduce="amax", include_self=True)
-                keep = scores >= (best_scores[target_uv] - 1e-7)
-                values = values[:, keep]
-                target_uv = target_uv[keep]
+                is_best = scores >= (best_scores[target_uv] - 1e-7)
+                candidate_indices = torch.arange(target_uv.shape[0], device=device)
+                first_best = torch.full(
+                    (UV_SIZE * UV_SIZE,),
+                    target_uv.shape[0],
+                    dtype=torch.long,
+                    device=device,
+                )
+                first_best.scatter_reduce_(
+                    0,
+                    target_uv[is_best],
+                    candidate_indices[is_best],
+                    reduce="amin",
+                    include_self=True,
+                )
+                selected_indices = first_best[first_best < target_uv.shape[0]]
+                values = values[:, selected_indices]
+                target_uv = target_uv[selected_indices]
 
             accum[group, layer_index].index_add_(1, target_uv, values)
             counts[group, layer_index, 0].index_add_(
