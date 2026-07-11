@@ -65,9 +65,11 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         )
         outputs = model(rendered, view_ids=torch.zeros(1, dtype=torch.long))
         self.assertEqual(tuple(outputs["surface"].shape), (1, 4, 32, 32))
+        self.assertEqual(tuple(outputs["layer_face"].shape), (1, 12, 32, 32))
         self.assertEqual(tuple(outputs["affine"].shape), (1, 3))
         losses = DenseUVParserLoss(use_uv=False)(outputs, targets)
         self.assertTrue(torch.isfinite(losses["loss_total"]))
+        self.assertTrue(torch.isfinite(losses["loss_layer_face"]))
 
     def test_global_model_can_train_discrete_uv_routing_auxiliary(self):
         rendered = torch.rand(1, 4, 32, 32)
@@ -348,6 +350,39 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         )
 
         self.assertEqual(int(details["routing"]["surface"][0, 0, 0]), 0)
+
+    def test_joint_layer_face_reranks_inner_outer_top_surfaces(self):
+        renderer = FakeRenderer(valid_pixels=1)
+        renderer.front_outer_mask.copy_(renderer.front_inner_mask)
+        renderer.front_inner_grid[0, 0, 0] = (8.0 / 63.0) * 2.0 - 1.0
+        renderer.front_outer_grid[0, 0, 0] = (40.0 / 63.0) * 2.0 - 1.0
+        rendered = torch.rand(1, 4, 8, 8)
+        rendered[:, 3] = 1.0
+        layer_face = torch.full((1, 12, 8, 8), -10.0)
+        layer_face[:, 4] = -2.0
+        layer_face[:, 10] = 10.0
+        outputs = {
+            "foreground": torch.full((1, 1, 8, 8), 10.0),
+            "layer": torch.zeros(1, 2, 8, 8),
+            "part": torch.zeros(1, 6, 8, 8),
+            "face": torch.zeros(1, 6, 8, 8),
+            "layer_face": layer_face,
+            "surface": torch.zeros(1, 2, 8, 8),
+            "affine": torch.zeros(1, 3),
+        }
+
+        _, details = splat_parser_predictions_to_uv_conditioning(
+            rendered,
+            outputs,
+            renderer=renderer,
+            views=["front"],
+            group_size=1,
+            semantic_gate=False,
+            affine_refine=False,
+            return_details=True,
+        )
+
+        self.assertEqual(int(details["routing"]["surface"][0, 0, 0]), 1)
 
 
 if __name__ == "__main__":

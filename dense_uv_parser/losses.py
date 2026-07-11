@@ -2,7 +2,21 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from SkingToolkit.dense_uv_parser.utils import IGNORE_INDEX
+from SkingToolkit.dense_uv_parser.utils import IGNORE_INDEX, combine_layer_face
+
+
+def _balanced_cross_entropy(logits, target, max_weight=4.0):
+    """Give small projected faces useful gradient without letting them dominate."""
+    valid = target != IGNORE_INDEX
+    if not valid.any():
+        return logits.new_tensor(0.0)
+    counts = torch.bincount(target[valid], minlength=logits.shape[1]).to(logits.dtype)
+    active = counts > 0
+    weights = torch.zeros_like(counts)
+    weights[active] = counts[active].rsqrt()
+    weights[active] /= weights[active].mean().clamp_min(1e-6)
+    weights.clamp_(max=max_weight)
+    return F.cross_entropy(logits, target, weight=weights, ignore_index=IGNORE_INDEX)
 
 
 class DenseUVParserLoss(nn.Module):
@@ -12,6 +26,7 @@ class DenseUVParserLoss(nn.Module):
         lambda_layer=1.0,
         lambda_part=0.5,
         lambda_face=0.5,
+        lambda_layer_face=1.0,
         lambda_uv=0.25,
         lambda_uv_class=1.0,
         lambda_affine=1.0,
@@ -27,6 +42,7 @@ class DenseUVParserLoss(nn.Module):
         self.lambda_layer = lambda_layer
         self.lambda_part = lambda_part
         self.lambda_face = lambda_face
+        self.lambda_layer_face = lambda_layer_face
         self.lambda_uv = lambda_uv
         self.lambda_uv_class = lambda_uv_class
         self.lambda_affine = lambda_affine
@@ -55,6 +71,11 @@ class DenseUVParserLoss(nn.Module):
         loss_layer = F.cross_entropy(outputs["layer"], targets["layer"], ignore_index=IGNORE_INDEX)
         loss_part = F.cross_entropy(outputs["part"], targets["part"], ignore_index=IGNORE_INDEX)
         loss_face = F.cross_entropy(outputs["face"], targets["face"], ignore_index=IGNORE_INDEX)
+        layer_face_target = combine_layer_face(targets["layer"], targets["face"])
+        if "layer_face" in outputs:
+            loss_layer_face = _balanced_cross_entropy(outputs["layer_face"], layer_face_target)
+        else:
+            loss_layer_face = outputs["foreground"].new_tensor(0.0)
 
         fg_mask = targets["layer"] != IGNORE_INDEX
         use_uv = self.use_uv and "uv" in outputs
@@ -110,13 +131,14 @@ class DenseUVParserLoss(nn.Module):
             loss_surface = outputs["foreground"].new_tensor(0.0)
             acc_surface = outputs["foreground"].new_tensor(0.0)
 
-        loss_routing = loss_surface + loss_uv_class
+        loss_routing = loss_surface + loss_uv_class + loss_layer_face
 
         loss_total = (
             self.lambda_foreground * loss_foreground
             + self.lambda_layer * loss_layer
             + self.lambda_part * loss_part
             + self.lambda_face * loss_face
+            + self.lambda_layer_face * loss_layer_face
             + self.lambda_uv * loss_uv
             + self.lambda_uv_class * loss_uv_class
             + self.lambda_affine * loss_affine
@@ -131,6 +153,7 @@ class DenseUVParserLoss(nn.Module):
             "loss_layer": loss_layer,
             "loss_part": loss_part,
             "loss_face": loss_face,
+            "loss_layer_face": loss_layer_face,
             "loss_uv": loss_uv,
             "loss_uv_l1_px": loss_uv_l1_px,
             "loss_uv_class": loss_uv_class,
@@ -185,6 +208,11 @@ def classification_metrics(outputs, targets, uv_size, use_uv=True):
         "acc_part": _masked_accuracy(outputs["part"], targets["part"]),
         "acc_face": _masked_accuracy(outputs["face"], targets["face"]),
     }
+    if "layer_face" in outputs:
+        metrics["acc_layer_face"] = _masked_accuracy(
+            outputs["layer_face"],
+            combine_layer_face(targets["layer"], targets["face"]),
+        )
     if use_uv and "uv_x" in outputs and "uv_y" in outputs:
         target_x, target_y = uv_class_targets(targets["uv"], targets["layer"], uv_size)
         valid = target_x != IGNORE_INDEX

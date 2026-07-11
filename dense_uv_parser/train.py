@@ -308,7 +308,7 @@ def save_preview(model, renderer, loader, device, args, output_path, max_items=2
         pred_layer_values,
         torch.full_like(debug_outputs["layer"].argmax(dim=1), IGNORE_INDEX),
     )
-    pred_face_values = routing_debug["face"] if routing_details is not None else debug_outputs["face"].argmax(dim=1)
+    pred_face_values = debug_outputs["face"].argmax(dim=1)
     pred_face = torch.where(
         pred_fg,
         pred_face_values,
@@ -330,7 +330,15 @@ def save_preview(model, renderer, loader, device, args, output_path, max_items=2
         colorize_labels(pred_face, FACE_PALETTE, args.bg_color, rendered_debug),
         colorize_labels(gt_face, FACE_PALETTE, args.bg_color, rendered_debug),
         colorize_labels(
-            combine_layer_face(pred_layer, pred_face),
+            (
+                torch.where(
+                    pred_fg,
+                    debug_outputs["layer_face"].argmax(dim=1),
+                    torch.full_like(debug_outputs["layer_face"].argmax(dim=1), IGNORE_INDEX),
+                )
+                if "layer_face" in debug_outputs
+                else combine_layer_face(pred_layer, pred_face)
+            ),
             LAYER_FACE_PALETTE,
             args.bg_color,
             rendered_debug,
@@ -385,6 +393,7 @@ def save_checkpoint(path, model, optimizer, scaler, epoch, args, metrics, best_m
             "affine_translation_scale": model.affine_translation_scale,
             "affine_scale_range": model.affine_scale_range,
             "surface_classes": model.surface_classes,
+            "layer_face_classes": 12,
         },
     }
     torch.save(checkpoint, path)
@@ -439,6 +448,7 @@ def build_arg_parser():
     parser.add_argument("--lambda_layer", type=float, default=1.0)
     parser.add_argument("--lambda_part", type=float, default=0.5)
     parser.add_argument("--lambda_face", type=float, default=0.5)
+    parser.add_argument("--lambda_layer_face", type=float, default=1.0)
     parser.add_argument("--lambda_uv", type=float, default=0.25)
     parser.add_argument("--lambda_uv_class", type=float, default=1.0)
     parser.add_argument("--lambda_affine", type=float, default=1.0)
@@ -519,6 +529,7 @@ def main():
         lambda_layer=args.lambda_layer,
         lambda_part=args.lambda_part,
         lambda_face=args.lambda_face,
+        lambda_layer_face=args.lambda_layer_face,
         lambda_uv=args.lambda_uv,
         lambda_uv_class=args.lambda_uv_class,
         lambda_affine=args.lambda_affine,
@@ -535,6 +546,11 @@ def main():
     best_metric = float("inf")
     if args.resume:
         checkpoint = torch.load(args.resume, map_location=device)
+        if not any(key.startswith("layer_face.") for key in checkpoint["model"]):
+            raise ValueError(
+                "This checkpoint predates the joint layer-face head. Start a new run without RESUME "
+                "so all 12 inner/outer face classes are trained together."
+            )
         model.load_state_dict(checkpoint["model"])
         optimizer.load_state_dict(checkpoint["optimizer"])
         for param_group in optimizer.param_groups:

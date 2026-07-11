@@ -16,6 +16,7 @@ IGNORE_INDEX = 255
 PART_CLASSES = 6
 FACE_CLASSES = 6
 LAYER_CLASSES = 2
+LAYER_FACE_CLASSES = LAYER_CLASSES * FACE_CLASSES
 UV_SIZE = 64
 
 
@@ -145,6 +146,7 @@ def build_static_surface_routing(renderer, view, device):
     surface_masks = torch.stack(masks, dim=0)
     surface_is_outer = torch.stack(is_outer, dim=0)
     metadata = _surface_metadata(surface_grids, surface_is_outer, lookups)
+    metadata["layer_face"] = combine_layer_face(metadata["layer"], metadata["face"])
     static = {
         "grids": surface_grids,
         "masks": surface_masks,
@@ -152,6 +154,7 @@ def build_static_surface_routing(renderer, view, device):
         "layer": metadata["layer"],
         "part": metadata["part"],
         "face": metadata["face"],
+        "layer_face": metadata["layer_face"],
         "direct_count": 2,
         "composite_count": composite_count,
         "geometry_count": geometry_count,
@@ -641,7 +644,12 @@ def _routing_from_affine_outputs(renderer, views, outputs, fg_threshold=0.5, sem
         # Re-rank only surfaces that physically exist at this screen pixel. This
         # converts the semantic heads from a rejection gate into useful routing
         # evidence and avoids holes caused by a globally invalid surface argmax.
-        for name in ("layer", "part", "face"):
+        semantic_names = (
+            ("part", "layer_face")
+            if "layer_face" in outputs
+            else ("layer", "part", "face")
+        )
+        for name in semantic_names:
             if name not in outputs:
                 continue
             probabilities = torch.softmax(outputs[name][selection], dim=1)

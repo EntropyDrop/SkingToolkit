@@ -58,6 +58,7 @@ class DenseUVParserNet(nn.Module):
         part_classes=6,
         face_classes=6,
         layer_classes=2,
+        layer_face_classes=12,
         uv_size=64,
         uv_classification=True,
         view_classes=0,
@@ -90,6 +91,11 @@ class DenseUVParserNet(nn.Module):
         self.layer = nn.Conv2d(c, layer_classes, kernel_size=1)
         self.part = nn.Conv2d(c, part_classes, kernel_size=1)
         self.face = nn.Conv2d(c, face_classes, kernel_size=1)
+        self.layer_face = (
+            nn.Conv2d(c, layer_face_classes, kernel_size=1)
+            if layer_face_classes > 0
+            else None
+        )
         self.uv = nn.Conv2d(c, 2, kernel_size=1)
         if uv_classification:
             self.uv_x = nn.Conv2d(c, uv_size, kernel_size=1)
@@ -155,6 +161,8 @@ class DenseUVParserNet(nn.Module):
             "face": self.face(x),
             "uv": torch.sigmoid(self.uv(x)),
         }
+        if self.layer_face is not None:
+            outputs["layer_face"] = self.layer_face(x)
         if self.uv_classification:
             outputs["uv_x"] = self.uv_x(x)
             outputs["uv_y"] = self.uv_y(x)

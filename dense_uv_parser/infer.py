@@ -65,6 +65,7 @@ def load_parser(checkpoint_path, device):
     model_config = checkpoint.get("model_config", {})
     state_dict = checkpoint["model"]
     has_uv_classification = any(key.startswith("uv_x.") or key.startswith("uv_y.") for key in state_dict)
+    has_layer_face = any(key.startswith("layer_face.") for key in state_dict)
     uv_classification = model_config.get("uv_classification", has_uv_classification)
     parser_mode = model_config.get("parser_mode", checkpoint_args.get("parser_mode", "dense"))
     predict_affine = model_config.get("predict_affine", parser_mode == "global_affine")
@@ -72,6 +73,7 @@ def load_parser(checkpoint_path, device):
         base_channels=model_config.get("base_channels", checkpoint_args.get("base_channels", 32)),
         uv_size=model_config.get("uv_size", 64),
         uv_classification=uv_classification,
+        layer_face_classes=model_config.get("layer_face_classes", 12 if has_layer_face else 0),
         view_classes=model_config.get("view_classes", 0),
         predict_affine=predict_affine,
         affine_translation_scale=model_config.get(
@@ -171,13 +173,21 @@ def save_debug_preview(
         pred_layer_values,
         torch.full_like(outputs["layer"].argmax(dim=1), IGNORE_INDEX),
     )
-    pred_face_values = routing["face"] if routing is not None else outputs["face"].argmax(dim=1)
+    pred_face_values = outputs["face"].argmax(dim=1)
     pred_face = torch.where(
         pred_fg,
         pred_face_values,
         torch.full_like(outputs["face"].argmax(dim=1), IGNORE_INDEX),
     )
-    pred_layer_face = combine_layer_face(pred_layer, pred_face)
+    if "layer_face" in outputs:
+        pred_layer_face_values = outputs["layer_face"].argmax(dim=1)
+        pred_layer_face = torch.where(
+            pred_fg,
+            pred_layer_face_values,
+            torch.full_like(pred_layer_face_values, IGNORE_INDEX),
+        )
+    else:
+        pred_layer_face = combine_layer_face(pred_layer, pred_face)
     pred_uv = (
         flat_uv_to_uv01(routing["flat_uv"], rendered.dtype)
         if routing is not None
