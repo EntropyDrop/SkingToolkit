@@ -6,12 +6,53 @@ cd "$(dirname "$0")"
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-16}"
 export MKL_NUM_THREADS="${MKL_NUM_THREADS:-16}"
 
-if [[ -z "${RUN_NAME:-}" ]]; then
+find_latest_checkpoint() {
+  local best_v=-1
+  local best_checkpoint=""
+  local dir base suffix v
+
+  shopt -s nullglob
+  for dir in runs/dense_uv_parser_v*; do
+    [[ -d "$dir" && -f "$dir/latest.pt" ]] || continue
+    base="$(basename "$dir")"
+    suffix="${base#dense_uv_parser_v}"
+    [[ "$suffix" =~ ^[0-9]+$ ]] || continue
+    v=$((10#$suffix))
+    if (( v > best_v )); then
+      best_v="$v"
+      best_checkpoint="$dir/latest.pt"
+    fi
+  done
+  shopt -u nullglob
+
+  printf '%s\n' "$best_checkpoint"
+}
+
+RESUME="${RESUME:-}"
+if [[ "$RESUME" == "latest" ]]; then
+  RESUME="$(find_latest_checkpoint)"
+  if [[ -z "$RESUME" ]]; then
+    echo "No runs/dense_uv_parser_v*/latest.pt checkpoint found to resume." >&2
+    exit 1
+  fi
+fi
+if [[ -n "$RESUME" && ! -f "$RESUME" ]]; then
+  echo "Resume checkpoint not found: $RESUME" >&2
+  exit 1
+fi
+
+if [[ -n "$RESUME" && -z "${RUN_NAME:-}" ]]; then
+  OUTPUT_DIR="$(dirname "$RESUME")"
+  RUN_NAME="$(basename "$OUTPUT_DIR")"
+elif [[ -z "${RUN_NAME:-}" ]]; then
   v=1
   while [[ -d "runs/dense_uv_parser_v${v}" ]]; do
     ((v++))
   done
   RUN_NAME="dense_uv_parser_v${v}"
+  OUTPUT_DIR="runs/$RUN_NAME"
+else
+  OUTPUT_DIR="runs/$RUN_NAME"
 fi
 
 DATA_DIR="${DATA_DIR:-../skins}"
@@ -101,10 +142,14 @@ if [[ "$CUDNN_BENCHMARK" == "true" ]]; then
 else
   cudnn_args=(--no_cudnn_benchmark)
 fi
+resume_args=()
+if [[ -n "$RESUME" ]]; then
+  resume_args=(--resume "$RESUME")
+fi
 
 python train.py \
   --data_dir "$DATA_DIR" \
-  --output_dir "runs/$RUN_NAME" \
+  --output_dir "$OUTPUT_DIR" \
   --mappings_dir "$MAPPINGS_DIR" \
   --views "$VIEWS" \
   --parser_mode "$PARSER_MODE" \
@@ -134,4 +179,5 @@ python train.py \
   "${semantic_gate_args[@]}" \
   "${affine_refine_args[@]}" \
   "${uv_class_args[@]}" \
-  "${cudnn_args[@]}"
+  "${cudnn_args[@]}" \
+  "${resume_args[@]}"

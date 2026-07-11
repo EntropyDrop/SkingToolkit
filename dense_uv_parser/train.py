@@ -337,11 +337,12 @@ def save_preview(model, renderer, loader, device, args, output_path, max_items=2
     save_image(debug_preview.clamp(0.0, 1.0).detach().cpu(), debug_path, nrow=view_count)
 
 
-def save_checkpoint(path, model, optimizer, epoch, args, metrics, best_metric=None):
+def save_checkpoint(path, model, optimizer, scaler, epoch, args, metrics, best_metric=None):
     checkpoint = {
         "epoch": epoch,
         "model": model.state_dict(),
         "optimizer": optimizer.state_dict(),
+        "scaler": scaler.state_dict() if scaler is not None else None,
         "args": vars(args),
         "metrics": metrics,
         "best_metric": best_metric,
@@ -365,6 +366,7 @@ def build_arg_parser():
     parser = argparse.ArgumentParser(description="Train a dense render-pixel to Minecraft UV parser.")
     parser.add_argument("--data_dir", default="../skins")
     parser.add_argument("--output_dir", default="runs/dense_uv_parser")
+    parser.add_argument("--resume", default=None, help="Checkpoint to resume; --epochs remains the final epoch number.")
     parser.add_argument("--mappings_dir", default=None)
     parser.add_argument("--views", default="walk_front_both_layer_ortho,walk_back_both_layer_ortho")
     parser.add_argument(
@@ -501,6 +503,47 @@ def main():
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scaler = build_grad_scaler(device, args.mixed_precision)
 
+    start_epoch = 1
+    best_metric = float("inf")
+    if args.resume:
+        checkpoint = torch.load(args.resume, map_location=device)
+        model.load_state_dict(checkpoint["model"])
+        optimizer.load_state_dict(checkpoint["optimizer"])
+        for param_group in optimizer.param_groups:
+            param_group["lr"] = args.lr
+            param_group["weight_decay"] = args.weight_decay
+        if scaler is not None and checkpoint.get("scaler") is not None:
+            scaler.load_state_dict(checkpoint["scaler"])
+
+        checkpoint_epoch = int(checkpoint.get("epoch", 0))
+        start_epoch = checkpoint_epoch + 1
+        checkpoint_args = checkpoint.get("args", {})
+        checkpoint_best_metric = checkpoint_args.get("best_metric", "loss_total")
+        if checkpoint_best_metric != args.best_metric:
+            raise ValueError(
+                "Cannot resume with a different best metric: "
+                f"checkpoint={checkpoint_best_metric!r}, requested={args.best_metric!r}."
+            )
+        best_metric = float(checkpoint.get("best_metric", float("inf")))
+        if start_epoch > args.epochs:
+            raise ValueError(
+                f"Checkpoint is already at epoch {checkpoint_epoch}; set --epochs above {checkpoint_epoch}."
+            )
+        print(
+            json.dumps(
+                {
+                    "resume": str(args.resume),
+                    "checkpoint_epoch": checkpoint_epoch,
+                    "start_epoch": start_epoch,
+                    "target_epoch": args.epochs,
+                    "lr": args.lr,
+                    "best_metric": args.best_metric,
+                    "best_metric_value": best_metric,
+                },
+                indent=2,
+            )
+        )
+
     metadata = {
         "num_samples": len(dataset),
         "train_samples": len(train_dataset),
@@ -526,8 +569,7 @@ def main():
         json.dump({"args": vars(args), "metadata": metadata}, handle, indent=2)
     print(json.dumps(metadata, indent=2))
 
-    best_metric = float("inf")
-    for epoch in range(1, args.epochs + 1):
+    for epoch in range(start_epoch, args.epochs + 1):
         train_metrics = run_epoch(
             model, criterion, renderer, train_loader, optimizer, scaler, device, args.mixed_precision, args, train=True
         )
@@ -553,9 +595,13 @@ def main():
         if is_best:
             best_metric = metric
         if epoch % args.save_every == 0:
-            save_checkpoint(output_dir / "latest.pt", model, optimizer, epoch, args, metrics, best_metric=best_metric)
+            save_checkpoint(
+                output_dir / "latest.pt", model, optimizer, scaler, epoch, args, metrics, best_metric=best_metric
+            )
         if is_best:
-            save_checkpoint(output_dir / "best.pt", model, optimizer, epoch, args, metrics, best_metric=best_metric)
+            save_checkpoint(
+                output_dir / "best.pt", model, optimizer, scaler, epoch, args, metrics, best_metric=best_metric
+            )
 
 
 if __name__ == "__main__":
