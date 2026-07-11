@@ -222,6 +222,40 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         )
         self.assertEqual(int(target_conditioning[:, 4:5].sum()), 1)
 
+    def test_base_silhouette_recovers_foreground_and_semantic_gate_holes(self):
+        renderer = FakeRenderer(valid_pixels=1)
+        rendered = torch.rand(1, 4, 8, 8)
+        rendered[:, 3] = 1.0
+        outputs = {
+            "foreground": torch.full((1, 1, 8, 8), -10.0),
+            "layer": torch.cat(
+                [torch.full((1, 1, 8, 8), -10.0), torch.full((1, 1, 8, 8), 10.0)],
+                dim=1,
+            ),
+            "part": torch.zeros(1, 6, 8, 8),
+            "face": torch.zeros(1, 6, 8, 8),
+            "surface": torch.cat(
+                [torch.full((1, 1, 8, 8), 10.0), torch.full((1, 1, 8, 8), -10.0)],
+                dim=1,
+            ),
+            "affine": torch.zeros(1, 3),
+        }
+
+        conditioning, details = splat_parser_predictions_to_uv_conditioning(
+            rendered,
+            outputs,
+            renderer=renderer,
+            views=["front"],
+            group_size=1,
+            semantic_gate=True,
+            affine_refine=False,
+            return_details=True,
+        )
+
+        self.assertEqual(int(details["routing"]["foreground"].sum()), 1)
+        self.assertTrue(details["routing"]["semantic_fallback"][0, 0, 0])
+        self.assertEqual(int(conditioning[:, 4:5].sum()), 1)
+
     def test_routing_reranks_surface_classes_that_are_invalid_at_pixel(self):
         renderer = FakeRenderer(valid_pixels=1)
         rendered = torch.rand(1, 4, 8, 8)

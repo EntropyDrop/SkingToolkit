@@ -614,6 +614,7 @@ def _routing_from_affine_outputs(renderer, views, outputs, fg_threshold=0.5, sem
     surface = torch.full_like(layer, IGNORE_INDEX)
     confidence = torch.zeros_like(foreground_prob)
     confidence_margin = torch.zeros_like(foreground_prob)
+    semantic_fallback = torch.zeros_like(foreground_prob, dtype=torch.bool)
     expected_part = torch.full_like(layer, IGNORE_INDEX)
     expected_face = torch.full_like(layer, IGNORE_INDEX)
 
@@ -633,7 +634,8 @@ def _routing_from_affine_outputs(renderer, views, outputs, fg_threshold=0.5, sem
             )
 
         candidate_score = view_surface_prob[:, :surface_count]
-        candidate_valid = static["masks"].unsqueeze(0).expand(view_batch, -1, -1, -1).clone()
+        physical_valid = static["masks"].unsqueeze(0).expand(view_batch, -1, -1, -1)
+        candidate_valid = physical_valid.clone()
         semantic_score = torch.ones_like(candidate_score)
 
         # Re-rank only surfaces that physically exist at this screen pixel. This
@@ -678,7 +680,16 @@ def _routing_from_affine_outputs(renderer, views, outputs, fg_threshold=0.5, sem
             candidate_score = candidate_score * (
                 candidate_x_prob * candidate_y_prob
             ).clamp_min(1e-12).sqrt()
-        candidate_score = candidate_score.masked_fill(~candidate_valid, -1.0)
+        gated_score = candidate_score.masked_fill(~candidate_valid, -1.0)
+        has_gated_candidate = candidate_valid.any(dim=1, keepdim=True)
+        if semantic_gate:
+            fallback_score = candidate_score.masked_fill(~physical_valid, -1.0)
+            candidate_score = torch.where(has_gated_candidate, gated_score, fallback_score)
+            semantic_fallback[selection] = (
+                ~has_gated_candidate.squeeze(1) & physical_valid.any(dim=1)
+            )
+        else:
+            candidate_score = gated_score
         best_score, selected_surface = candidate_score.max(dim=1)
         if surface_count > 1:
             top_scores = candidate_score.topk(k=2, dim=1).values
@@ -691,8 +702,9 @@ def _routing_from_affine_outputs(renderer, views, outputs, fg_threshold=0.5, sem
         selected_part = routed["part"]
         selected_face = routed["face"]
         has_candidate = best_score >= 0.0
+        base_silhouette = static["masks"][0].unsqueeze(0).expand(view_batch, -1, -1)
         routed_fg = (
-            (foreground_prob[selection] > fg_threshold)
+            ((foreground_prob[selection] > fg_threshold) | base_silhouette)
             & has_candidate
             & routed["valid"]
         )
@@ -716,6 +728,7 @@ def _routing_from_affine_outputs(renderer, views, outputs, fg_threshold=0.5, sem
         "surface": surface,
         "confidence": confidence,
         "confidence_margin": confidence_margin,
+        "semantic_fallback": semantic_fallback,
         "part": expected_part,
         "face": expected_face,
     }
