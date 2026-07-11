@@ -143,6 +143,9 @@ def build_dense_parser_conditioning(
     parser_background_augment_prob=0.9,
     fg_threshold=0.5,
     semantic_gate=True,
+    affine_refine=True,
+    affine_refine_translation_px=2.0,
+    affine_refine_scale=0.0,
     bg_color=(128, 128, 128),
     return_renders=False,
 ):
@@ -179,6 +182,9 @@ def build_dense_parser_conditioning(
             fg_threshold=fg_threshold,
             bg_color=bg_color,
             semantic_gate=semantic_gate,
+            affine_refine=affine_refine,
+            affine_refine_translation_px=affine_refine_translation_px,
+            affine_refine_scale=affine_refine_scale,
         )
 
     if not is_batched:
@@ -198,6 +204,9 @@ def build_training_conditioning(
     parser_background_augment_prob=0.9,
     parser_splat_fg_threshold=0.5,
     parser_semantic_gate=True,
+    parser_affine_refine=True,
+    parser_affine_refine_translation_px=2.0,
+    parser_affine_refine_scale=0.0,
     bg_color=(128, 128, 128),
     return_renders=False,
 ):
@@ -213,6 +222,9 @@ def build_training_conditioning(
         parser_background_augment_prob=parser_background_augment_prob,
         fg_threshold=parser_splat_fg_threshold,
         semantic_gate=parser_semantic_gate,
+        affine_refine=parser_affine_refine,
+        affine_refine_translation_px=parser_affine_refine_translation_px,
+        affine_refine_scale=parser_affine_refine_scale,
         bg_color=bg_color,
         return_renders=return_renders,
     )
@@ -235,6 +247,9 @@ def run_epoch(
     parser_background_augment_prob=0.9,
     parser_splat_fg_threshold=0.5,
     parser_semantic_gate=True,
+    parser_affine_refine=True,
+    parser_affine_refine_translation_px=2.0,
+    parser_affine_refine_scale=0.0,
     bg_color=(128, 128, 128),
     log_every=50,
 ):
@@ -265,6 +280,9 @@ def run_epoch(
                 parser_background_augment_prob=parser_background_augment_prob,
                 parser_splat_fg_threshold=parser_splat_fg_threshold,
                 parser_semantic_gate=parser_semantic_gate,
+                parser_affine_refine=parser_affine_refine,
+                parser_affine_refine_translation_px=parser_affine_refine_translation_px,
+                parser_affine_refine_scale=parser_affine_refine_scale,
                 bg_color=bg_color,
                 return_renders=True,
             )
@@ -452,6 +470,10 @@ def build_arg_parser():
     )
     parser.add_argument("--parser_semantic_gate", dest="parser_semantic_gate", action="store_true", default=None)
     parser.add_argument("--no_parser_semantic_gate", dest="parser_semantic_gate", action="store_false")
+    parser.add_argument("--parser_affine_refine", dest="parser_affine_refine", action="store_true", default=None)
+    parser.add_argument("--no_parser_affine_refine", dest="parser_affine_refine", action="store_false")
+    parser.add_argument("--parser_affine_refine_translation_px", type=float, default=None)
+    parser.add_argument("--parser_affine_refine_scale", type=float, default=None)
     parser.add_argument("--parser_background_augment", dest="parser_background_augment", action="store_true", default=True)
     parser.add_argument("--no_parser_background_augment", dest="parser_background_augment", action="store_false")
     parser.add_argument("--parser_background_augment_prob", type=float, default=0.9)
@@ -513,6 +535,16 @@ def main():
     dense_parser, parser_checkpoint_args = load_dense_parser(args.parser_checkpoint, device)
     if args.parser_semantic_gate is None:
         args.parser_semantic_gate = parser_checkpoint_args.get("semantic_gate", True)
+    if args.parser_affine_refine is None:
+        args.parser_affine_refine = parser_checkpoint_args.get("affine_refine", True)
+    if args.parser_affine_refine_translation_px is None:
+        checkpoint_translation_px = parser_checkpoint_args.get("affine_refine_translation_px")
+        args.parser_affine_refine_translation_px = (
+            2.0 if checkpoint_translation_px is None else checkpoint_translation_px
+        )
+    if args.parser_affine_refine_scale is None:
+        checkpoint_scale = parser_checkpoint_args.get("affine_refine_scale")
+        args.parser_affine_refine_scale = 0.0 if checkpoint_scale is None else checkpoint_scale
     parser_views = parse_views(parser_checkpoint_args.get("views", ""))
     if parser_views and parser_views != parse_views(args.views):
         raise ValueError(
@@ -653,6 +685,9 @@ def main():
         "parser_checkpoint": args.parser_checkpoint,
         "parser_splat_fg_threshold": args.parser_splat_fg_threshold,
         "parser_semantic_gate": args.parser_semantic_gate,
+        "parser_affine_refine": args.parser_affine_refine,
+        "parser_affine_refine_translation_px": args.parser_affine_refine_translation_px,
+        "parser_affine_refine_scale": args.parser_affine_refine_scale,
         "parser_checkpoint_views": parse_views(parser_checkpoint_args.get("views", "")) if parser_checkpoint_args else None,
         "best_metric": args.best_metric,
         "scheduler": args.scheduler,
@@ -691,6 +726,9 @@ def main():
             parser_background_augment_prob=args.parser_background_augment_prob,
             dense_parser=dense_parser, parser_splat_fg_threshold=args.parser_splat_fg_threshold,
             parser_semantic_gate=args.parser_semantic_gate,
+            parser_affine_refine=args.parser_affine_refine,
+            parser_affine_refine_translation_px=args.parser_affine_refine_translation_px,
+            parser_affine_refine_scale=args.parser_affine_refine_scale,
             bg_color=dataset.bg_color, log_every=args.log_every,
         )
         metrics = {"train": train_metrics}
@@ -712,6 +750,9 @@ def main():
                     train=False, d_optimizer=None, views=views, augmenter=val_augmenter,
                     dense_parser=dense_parser, parser_splat_fg_threshold=args.parser_splat_fg_threshold,
                     parser_semantic_gate=args.parser_semantic_gate,
+                    parser_affine_refine=args.parser_affine_refine,
+                    parser_affine_refine_translation_px=args.parser_affine_refine_translation_px,
+                    parser_affine_refine_scale=args.parser_affine_refine_scale,
                     bg_color=dataset.bg_color, log_every=args.log_every,
                 )
             metrics["val"] = val_metrics
@@ -743,6 +784,10 @@ def main():
                     dense_parser=dense_parser,
                     augmenter=None,
                     parser_splat_fg_threshold=args.parser_splat_fg_threshold,
+                    parser_semantic_gate=args.parser_semantic_gate,
+                    parser_affine_refine=args.parser_affine_refine,
+                    parser_affine_refine_translation_px=args.parser_affine_refine_translation_px,
+                    parser_affine_refine_scale=args.parser_affine_refine_scale,
                     bg_color=dataset.bg_color,
                 )
                 pred_uv = model(preview_cond)

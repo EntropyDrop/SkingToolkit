@@ -70,6 +70,9 @@ PARSER_CHECKPOINT_NAME="${PARSER_CHECKPOINT_NAME:-best.pt}"
 PARSER_CHECKPOINT="${PARSER_CHECKPOINT:-}"
 PARSER_SPLAT_FG_THRESHOLD="${PARSER_SPLAT_FG_THRESHOLD:-0.5}"
 PARSER_SEMANTIC_GATE="${PARSER_SEMANTIC_GATE:-true}"
+PARSER_AFFINE_REFINE="${PARSER_AFFINE_REFINE:-true}"
+PARSER_AFFINE_REFINE_TRANSLATION_PX="${PARSER_AFFINE_REFINE_TRANSLATION_PX:-2.0}"
+PARSER_AFFINE_REFINE_SCALE="${PARSER_AFFINE_REFINE_SCALE:-0.0}"
 PARSER_BACKGROUND_AUGMENT="${PARSER_BACKGROUND_AUGMENT:-true}"
 PARSER_BACKGROUND_AUGMENT_PROB="${PARSER_BACKGROUND_AUGMENT_PROB:-0.9}"
 
@@ -113,11 +116,18 @@ fi
 conditioning_args=(
   --parser_checkpoint "$PARSER_CHECKPOINT"
   --parser_splat_fg_threshold "$PARSER_SPLAT_FG_THRESHOLD"
+  --parser_affine_refine_translation_px "$PARSER_AFFINE_REFINE_TRANSLATION_PX"
+  --parser_affine_refine_scale "$PARSER_AFFINE_REFINE_SCALE"
 )
 if [[ "$PARSER_SEMANTIC_GATE" == "true" ]]; then
   conditioning_args+=(--parser_semantic_gate)
 else
   conditioning_args+=(--no_parser_semantic_gate)
+fi
+if [[ "$PARSER_AFFINE_REFINE" == "true" ]]; then
+  conditioning_args+=(--parser_affine_refine)
+else
+  conditioning_args+=(--no_parser_affine_refine)
 fi
 parser_background_args=()
 if [[ "$PARSER_BACKGROUND_AUGMENT" == "true" ]]; then

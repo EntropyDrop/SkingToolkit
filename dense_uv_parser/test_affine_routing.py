@@ -9,19 +9,25 @@ from SkingToolkit.dense_uv_parser.utils import (
     augment_dense_batch,
     canonicalize_parser_render,
     canonicalize_tensor,
+    refine_parser_affine,
     splat_deterministic_targets_to_uv_conditioning,
     splat_parser_predictions_to_uv_conditioning,
 )
 
 
 class FakeRenderer(nn.Module):
-    def __init__(self, height=8, width=8, valid_pixels=1):
+    def __init__(self, height=8, width=8, valid_pixels=1, mask=None):
         super().__init__()
+        if mask is not None:
+            height, width = mask.shape
         grid = torch.zeros(height, width, 2)
         grid[..., 0] = -1.0
         grid[..., 1] = -1.0
-        mask = torch.zeros(height, width)
-        mask.view(-1)[:valid_pixels] = 1.0
+        if mask is None:
+            mask = torch.zeros(height, width)
+            mask.view(-1)[:valid_pixels] = 1.0
+        else:
+            mask = mask.float().clone()
         self.register_buffer("front_inner_grid", grid)
         self.register_buffer("front_outer_grid", grid)
         self.register_buffer("front_inner_mask", mask)
@@ -97,6 +103,53 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         sharp_fractional = (sharp[interior] - sharp[interior].round()).abs().mean()
         smooth_fractional = (smooth[interior] - smooth[interior].round()).abs().mean()
         self.assertLess(sharp_fractional, smooth_fractional)
+
+    def test_affine_refinement_snaps_a_one_pixel_translation(self):
+        height = width = 32
+        target = torch.zeros(height, width)
+        target[7:25, 9:23] = 1.0
+        shifted = torch.zeros_like(target)
+        shifted[:, 1:] = target[:, :-1]
+        renderer = FakeRenderer(mask=target)
+        outputs = {
+            "foreground": torch.where(
+                shifted.view(1, 1, height, width) > 0.5,
+                torch.tensor(10.0),
+                torch.tensor(-10.0),
+            ),
+            "affine": torch.zeros(1, 3),
+        }
+
+        refined, details = refine_parser_affine(
+            outputs,
+            renderer,
+            ["front"],
+            translation_radius_px=2.0,
+            scale_radius=0.0,
+        )
+
+        self.assertTrue(details["accepted"][0])
+        self.assertAlmostEqual(float(details["translation_px"][0, 0]), 1.0, places=4)
+        self.assertAlmostEqual(float(refined[0, 0]), 2.0 / width, places=4)
+
+    def test_affine_refinement_preserves_exact_alignment(self):
+        height = width = 32
+        target = torch.zeros(height, width)
+        target[7:25, 9:23] = 1.0
+        renderer = FakeRenderer(mask=target)
+        outputs = {
+            "foreground": torch.where(
+                target.view(1, 1, height, width) > 0.5,
+                torch.tensor(10.0),
+                torch.tensor(-10.0),
+            ),
+            "affine": torch.zeros(1, 3),
+        }
+
+        refined, details = refine_parser_affine(outputs, renderer, ["front"])
+
+        self.assertFalse(details["accepted"][0])
+        self.assertTrue(torch.equal(refined, outputs["affine"]))
 
     def test_mapping_mask_rejects_background_false_positives(self):
         renderer = FakeRenderer(valid_pixels=1)

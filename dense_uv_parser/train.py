@@ -229,6 +229,9 @@ def save_preview(model, renderer, loader, device, args, output_path, max_items=2
                 fg_threshold=args.splat_fg_threshold,
                 bg_color=args.bg_color,
                 semantic_gate=args.semantic_gate,
+                affine_refine=args.affine_refine,
+                affine_refine_translation_px=args.affine_refine_translation_px,
+                affine_refine_scale=args.affine_refine_scale,
                 return_details=True,
             )
             gt_conditioning = splat_deterministic_targets_to_uv_conditioning(
@@ -387,6 +390,10 @@ def build_arg_parser():
     parser.add_argument("--no_cudnn_benchmark", dest="cudnn_benchmark", action="store_false")
     parser.add_argument("--target_alpha_threshold", type=float, default=0.5)
     parser.add_argument("--splat_fg_threshold", type=float, default=0.5)
+    parser.add_argument("--affine_refine", dest="affine_refine", action="store_true", default=True)
+    parser.add_argument("--no_affine_refine", dest="affine_refine", action="store_false")
+    parser.add_argument("--affine_refine_translation_px", type=float, default=2.0)
+    parser.add_argument("--affine_refine_scale", type=float, default=0.0)
     parser.add_argument("--augment", dest="augment", action="store_true", default=True)
     parser.add_argument("--no_augment", dest="augment", action="store_false")
     parser.add_argument("--augment_validation", dest="augment_validation", action="store_true", default=True)
@@ -505,6 +512,9 @@ def main():
         "background_augment": args.background_augment,
         "background_augment_prob": args.background_augment_prob,
         "semantic_gate": args.semantic_gate,
+        "affine_refine": args.affine_refine,
+        "affine_refine_translation_px": args.affine_refine_translation_px,
+        "affine_refine_scale": args.affine_refine_scale,
     }
     with open(output_dir / "config.json", "w", encoding="utf-8") as handle:
         json.dump({"args": vars(args), "metadata": metadata}, handle, indent=2)

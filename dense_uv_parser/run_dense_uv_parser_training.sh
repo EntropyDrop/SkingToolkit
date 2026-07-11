@@ -38,6 +38,9 @@ SCALE_RANGE="${SCALE_RANGE:-0.03}"
 BACKGROUND_AUGMENT="${BACKGROUND_AUGMENT:-true}"
 BACKGROUND_AUGMENT_PROB="${BACKGROUND_AUGMENT_PROB:-0.9}"
 SEMANTIC_GATE="${SEMANTIC_GATE:-true}"
+AFFINE_REFINE="${AFFINE_REFINE:-true}"
+AFFINE_REFINE_TRANSLATION_PX="${AFFINE_REFINE_TRANSLATION_PX:-2.0}"
+AFFINE_REFINE_SCALE="${AFFINE_REFINE_SCALE:-0.0}"
 
 LAMBDA_FOREGROUND="${LAMBDA_FOREGROUND:-1.0}"
 LAMBDA_LAYER="${LAMBDA_LAYER:-1.0}"
@@ -85,6 +88,12 @@ if [[ "$SEMANTIC_GATE" == "true" ]]; then
 else
   semantic_gate_args=(--no_semantic_gate)
 fi
+affine_refine_args=()
+if [[ "$AFFINE_REFINE" == "true" ]]; then
+  affine_refine_args=(--affine_refine)
+else
+  affine_refine_args=(--no_affine_refine)
+fi
 cudnn_args=()
 if [[ "$CUDNN_BENCHMARK" == "true" ]]; then
   cudnn_args=(--cudnn_benchmark)
@@ -116,8 +125,11 @@ python train.py \
   --lambda_uv_class "$LAMBDA_UV_CLASS" \
   --lambda_affine "$LAMBDA_AFFINE" \
   --lambda_surface "$LAMBDA_SURFACE" \
+  --affine_refine_translation_px "$AFFINE_REFINE_TRANSLATION_PX" \
+  --affine_refine_scale "$AFFINE_REFINE_SCALE" \
   "${augment_args[@]}" \
   "${background_args[@]}" \
   "${semantic_gate_args[@]}" \
+  "${affine_refine_args[@]}" \
   "${uv_class_args[@]}" \
   "${cudnn_args[@]}"

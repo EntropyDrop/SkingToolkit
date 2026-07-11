@@ -1,4 +1,5 @@
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -145,7 +146,11 @@ def save_debug_preview(
     fg_threshold,
     bg_color=(128, 128, 128),
     routing=None,
+    overlay_output=None,
+    overlay_alpha=0.45,
 ):
+    if not 0.0 <= overlay_alpha <= 1.0:
+        raise ValueError(f"overlay_alpha must be in [0, 1], got {overlay_alpha}.")
     pred_fg = routing["foreground"] if routing is not None else torch.sigmoid(outputs["foreground"])[:, 0] > fg_threshold
     pred_part = torch.where(
         pred_fg,
@@ -164,23 +169,40 @@ def save_debug_preview(
         else prediction_uv01(outputs)
     )
 
-    debug_images = [
-        rendered[:, :3],
-        colorize_foreground(pred_fg, bg_color, rendered),
-        colorize_labels(pred_part, PART_PALETTE, bg_color, rendered),
-        colorize_labels(pred_layer, LAYER_PALETTE, bg_color, rendered),
-    ]
+    part_color = colorize_labels(pred_part, PART_PALETTE, bg_color, rendered)
+    layer_color = colorize_labels(pred_layer, LAYER_PALETTE, bg_color, rendered)
+    debug_images = [rendered[:, :3], colorize_foreground(pred_fg, bg_color, rendered), part_color, layer_color]
+    surface_color = None
     if routing is not None:
         pred_surface = torch.where(
             pred_fg,
             routing["surface"],
             torch.full_like(routing["surface"], IGNORE_INDEX),
         )
-        debug_images.append(colorize_surface(pred_surface, bg_color, rendered))
+        surface_color = colorize_surface(pred_surface, bg_color, rendered)
+        debug_images.append(surface_color)
     debug_images.append(colorize_uv(pred_uv, pred_fg, bg_color))
-    debug_preview = torch.cat(debug_images, dim=0)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    save_image(debug_preview.clamp(0.0, 1.0).detach().cpu(), output_path, nrow=view_count)
+    if output_path is not None:
+        debug_preview = torch.cat(debug_images, dim=0)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        save_image(debug_preview.clamp(0.0, 1.0).detach().cpu(), output_path, nrow=view_count)
+
+    if overlay_output is not None:
+        rgb = rendered[:, :3]
+        mask = pred_fg.unsqueeze(1)
+        bg = rgb.new_tensor(bg_color).view(1, 3, 1, 1) / 255.0
+        routed_original = torch.where(mask, rgb, bg.expand_as(rgb))
+
+        def overlay(colorized):
+            blended = rgb * (1.0 - overlay_alpha) + colorized * overlay_alpha
+            return torch.where(mask, blended, rgb)
+
+        overlay_images = [rgb, routed_original, overlay(part_color), overlay(layer_color)]
+        if surface_color is not None:
+            overlay_images.append(overlay(surface_color))
+        overlay_preview = torch.cat(overlay_images, dim=0)
+        overlay_output.parent.mkdir(parents=True, exist_ok=True)
+        save_image(overlay_preview.clamp(0.0, 1.0).detach().cpu(), overlay_output, nrow=view_count)
 
 
 def build_arg_parser():
@@ -190,6 +212,8 @@ def build_arg_parser():
     parser.add_argument("--output", default=None, help="Final RGBA UV PNG path; requires --inpaint_checkpoint.")
     parser.add_argument("--conditioning_output", default=None, help="Optional preview image for parser-splatted conditioning.")
     parser.add_argument("--debug_output", default=None, help="Optional path to write a debug preview grid of predictions.")
+    parser.add_argument("--overlay_output", default=None, help="Optional path for segmentation overlays on canonicalized input views.")
+    parser.add_argument("--overlay_alpha", type=float, default=0.45)
     parser.add_argument("--front", default=None)
     parser.add_argument("--back", default=None)
     parser.add_argument("--combined", default=None)
@@ -197,6 +221,10 @@ def build_arg_parser():
     parser.add_argument("--mappings_dir", default=None)
     parser.add_argument("--fg_threshold", type=float, default=0.5)
     parser.add_argument("--no_semantic_gate", dest="semantic_gate", action="store_false", default=None)
+    parser.add_argument("--affine_refine", dest="affine_refine", action="store_true", default=None)
+    parser.add_argument("--no_affine_refine", dest="affine_refine", action="store_false")
+    parser.add_argument("--affine_refine_translation_px", type=float, default=None)
+    parser.add_argument("--affine_refine_scale", type=float, default=None)
     parser.add_argument("--alpha_threshold", type=float, default=0.5)
     parser.add_argument("--no_enforce_base_alpha", action="store_true")
     parser.add_argument("--device", default="auto")
@@ -207,8 +235,8 @@ def main():
     args = build_arg_parser().parse_args()
     if args.output and not args.inpaint_checkpoint:
         raise ValueError("--output requires --inpaint_checkpoint.")
-    if not args.output and not args.conditioning_output and not args.debug_output:
-        raise ValueError("Provide --output, --conditioning_output, and/or --debug_output.")
+    if not args.output and not args.conditioning_output and not args.debug_output and not args.overlay_output:
+        raise ValueError("Provide --output, --conditioning_output, --debug_output, and/or --overlay_output.")
 
     device = get_device(args.device)
     parser_model, parser_args = load_parser(args.parser_checkpoint, device)
@@ -232,6 +260,19 @@ def main():
 
     bg_color = parser_args.get("bg_color", (128, 128, 128))
     semantic_gate = parser_args.get("semantic_gate", True) if args.semantic_gate is None else args.semantic_gate
+    affine_refine = parser_args.get("affine_refine", True) if args.affine_refine is None else args.affine_refine
+    checkpoint_translation_px = parser_args.get("affine_refine_translation_px")
+    affine_refine_translation_px = (
+        args.affine_refine_translation_px
+        if args.affine_refine_translation_px is not None
+        else 2.0 if checkpoint_translation_px is None else checkpoint_translation_px
+    )
+    checkpoint_scale = parser_args.get("affine_refine_scale")
+    affine_refine_scale = (
+        args.affine_refine_scale
+        if args.affine_refine_scale is not None
+        else 0.0 if checkpoint_scale is None else checkpoint_scale
+    )
     rendered = load_view_images(args, views, renderer, bg_color=bg_color).to(device)
     view_ids = torch.arange(len(views), device=device)
     with torch.no_grad():
@@ -245,18 +286,47 @@ def main():
             fg_threshold=args.fg_threshold,
             bg_color=bg_color,
             semantic_gate=semantic_gate,
+            affine_refine=affine_refine,
+            affine_refine_translation_px=affine_refine_translation_px,
+            affine_refine_scale=affine_refine_scale,
             return_details=True,
         )
 
-    if args.debug_output:
+    alignment = routing_details.get("alignment")
+    if alignment is not None:
+        translation = alignment["translation_px"].detach().cpu()
+        scale_percent = alignment["scale_percent"].detach().cpu()
+        score_before = alignment["score_before"].detach().cpu()
+        score_after = alignment["score_after"].detach().cpu()
+        accepted = alignment["accepted"].detach().cpu()
+        for index in range(translation.shape[0]):
+            print(
+                "affine_refinement="
+                + json.dumps(
+                    {
+                        "view": views[index % len(views)],
+                        "accepted": bool(accepted[index]),
+                        "dx_px": round(float(translation[index, 0]), 3),
+                        "dy_px": round(float(translation[index, 1]), 3),
+                        "scale_percent": round(float(scale_percent[index]), 4),
+                        "score_before": round(float(score_before[index]), 6),
+                        "score_after": round(float(score_after[index]), 6),
+                    },
+                    sort_keys=True,
+                )
+            )
+
+    if args.debug_output or args.overlay_output:
         save_debug_preview(
             routing_details["rendered"],
             routing_details["outputs"],
             len(views),
-            Path(args.debug_output),
+            Path(args.debug_output) if args.debug_output else None,
             args.fg_threshold,
             bg_color=bg_color,
             routing=routing_details["routing"],
+            overlay_output=Path(args.overlay_output) if args.overlay_output else None,
+            overlay_alpha=args.overlay_alpha,
         )
 
     if args.conditioning_output:
@@ -272,6 +342,24 @@ def main():
             raise ValueError(
                 "The inverse_uv checkpoint was trained with a different parser: "
                 f"expected {checkpoint_run_id(expected_parser)}, got {checkpoint_run_id(args.parser_checkpoint)}."
+            )
+        expected_refine = inpaint_args.get("parser_affine_refine")
+        if expected_refine is not None and bool(expected_refine) != affine_refine:
+            raise ValueError(
+                "Parser affine-refinement setting does not match the inverse_uv checkpoint: "
+                f"checkpoint={expected_refine}, requested={affine_refine}."
+            )
+        expected_translation_px = inpaint_args.get("parser_affine_refine_translation_px")
+        if expected_translation_px is not None and abs(float(expected_translation_px) - affine_refine_translation_px) > 1e-9:
+            raise ValueError(
+                "Parser affine-refinement translation range does not match the inverse_uv checkpoint: "
+                f"checkpoint={expected_translation_px}, requested={affine_refine_translation_px}."
+            )
+        expected_scale = inpaint_args.get("parser_affine_refine_scale")
+        if expected_scale is not None and abs(float(expected_scale) - affine_refine_scale) > 1e-9:
+            raise ValueError(
+                "Parser affine-refinement scale range does not match the inverse_uv checkpoint: "
+                f"checkpoint={expected_scale}, requested={affine_refine_scale}."
             )
         with torch.no_grad():
             pred_uv = finalize_minecraft_alpha(

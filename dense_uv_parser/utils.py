@@ -1,3 +1,4 @@
+import math
 import sys
 from pathlib import Path
 
@@ -482,6 +483,118 @@ def canonicalize_parser_render(rendered, outputs, mode="nearest"):
     return canonicalize_tensor(rendered, outputs["affine"], mode=mode)
 
 
+def _mask_moments(weights):
+    weights = weights.float()
+    N, H, W = weights.shape
+    y = torch.arange(H, device=weights.device, dtype=weights.dtype).view(1, H, 1)
+    x = torch.arange(W, device=weights.device, dtype=weights.dtype).view(1, 1, W)
+    total = weights.sum(dim=(1, 2)).clamp_min(1e-6)
+    mean_x = (weights * x).sum(dim=(1, 2)) / total
+    mean_y = (weights * y).sum(dim=(1, 2)) / total
+    var_x = (weights * (x - mean_x.view(N, 1, 1)).square()).sum(dim=(1, 2)) / total
+    var_y = (weights * (y - mean_y.view(N, 1, 1)).square()).sum(dim=(1, 2)) / total
+    return total, mean_x, mean_y, var_x.clamp_min(1e-6).sqrt(), var_y.clamp_min(1e-6).sqrt()
+
+
+def _soft_mask_dice(probability, target, support):
+    probability = probability.float() * support.float()
+    target = target.float()
+    intersection = (probability * target).sum(dim=(1, 2, 3))
+    denominator = probability.sum(dim=(1, 2, 3)) + target.sum(dim=(1, 2, 3))
+    return (2.0 * intersection + 1e-6) / (denominator + 1e-6)
+
+
+def refine_parser_affine(
+    outputs,
+    renderer,
+    views,
+    translation_radius_px=2.0,
+    scale_radius=0.0,
+    translation_step_px=0.5,
+):
+    """Refine parser affine predictions against the fixed inner-layer silhouette."""
+    if "affine" not in outputs or "foreground" not in outputs:
+        return outputs.get("affine"), None
+    if translation_radius_px < 0 or scale_radius < 0:
+        raise ValueError("Affine refinement radii must be non-negative.")
+    if translation_step_px <= 0:
+        raise ValueError("translation_step_px must be positive.")
+
+    views = parse_views(views)
+    affine = outputs["affine"]
+    foreground_prob = torch.sigmoid(outputs["foreground"])
+    N, _, H, W = foreground_prob.shape
+    if not views or N % len(views) != 0:
+        raise ValueError(f"N={N} must be divisible by the number of views ({len(views)}).")
+
+    target = foreground_prob.new_zeros(N, 1, H, W)
+    for view_index, view in enumerate(views):
+        static = build_static_surface_routing(renderer, view, foreground_prob.device)
+        inner_mask = static["masks"][0]
+        if inner_mask.shape != (H, W):
+            raise ValueError(
+                f"View {view!r} mapping shape {tuple(inner_mask.shape)} does not match parser shape {(H, W)}."
+            )
+        target[view_index::len(views), 0] = inner_mask.to(dtype=target.dtype)
+
+    support_radius = max(math.ceil(translation_radius_px) + 2, 2)
+    support = F.max_pool2d(
+        target,
+        kernel_size=support_radius * 2 + 1,
+        stride=1,
+        padding=support_radius,
+    ).clamp(0.0, 1.0)
+
+    base_canonical = canonicalize_tensor(foreground_prob, affine, mode="bilinear")
+    base_score = _soft_mask_dice(base_canonical, target, support)
+    target_stats = _mask_moments(target[:, 0])
+    base_stats = _mask_moments(base_canonical[:, 0] * support[:, 0])
+    target_total, _, _, target_std_x, target_std_y = target_stats
+    base_total, _, _, base_std_x, base_std_y = base_stats
+    enough_foreground = base_total > target_total * 0.25
+
+    if scale_radius > 0:
+        scale_delta = 0.5 * (
+            (base_std_x / target_std_x).clamp_min(1e-6).log()
+            + (base_std_y / target_std_y).clamp_min(1e-6).log()
+        )
+        scale_delta = scale_delta.clamp(-scale_radius, scale_radius)
+        scale_affine = affine.clone()
+        scale_affine[:, 2] = scale_affine[:, 2] + scale_delta.to(dtype=scale_affine.dtype)
+        scale_canonical = canonicalize_tensor(foreground_prob, scale_affine, mode="bilinear")
+    else:
+        scale_delta = torch.zeros_like(base_score)
+        scale_affine = affine
+        scale_canonical = base_canonical
+    _, pred_mean_x, pred_mean_y, _, _ = _mask_moments(scale_canonical[:, 0] * support[:, 0])
+    _, target_mean_x, target_mean_y, _, _ = target_stats
+    delta_x_px = (pred_mean_x - target_mean_x).clamp(-translation_radius_px, translation_radius_px)
+    delta_y_px = (pred_mean_y - target_mean_y).clamp(-translation_radius_px, translation_radius_px)
+    delta_x_px = (delta_x_px / translation_step_px).round() * translation_step_px
+    delta_y_px = (delta_y_px / translation_step_px).round() * translation_step_px
+
+    candidate_affine = scale_affine.clone()
+    candidate_affine[:, 0] = candidate_affine[:, 0] + (2.0 * delta_x_px / W).to(candidate_affine.dtype)
+    candidate_affine[:, 1] = candidate_affine[:, 1] + (2.0 * delta_y_px / H).to(candidate_affine.dtype)
+    candidate_canonical = canonicalize_tensor(foreground_prob, candidate_affine, mode="bilinear")
+    candidate_score = _soft_mask_dice(candidate_canonical, target, support)
+    accepted = enough_foreground & (candidate_score > base_score + 1e-5)
+    refined_affine = torch.where(accepted.unsqueeze(1), candidate_affine, affine)
+
+    accepted_float = accepted.to(dtype=delta_x_px.dtype)
+    details = {
+        "accepted": accepted,
+        "translation_px": torch.stack(
+            [delta_x_px * accepted_float, delta_y_px * accepted_float],
+            dim=1,
+        ),
+        "scale_percent": (scale_delta.exp() - 1.0) * 100.0 * accepted_float,
+        "score_before": base_score,
+        "score_after": torch.where(accepted, candidate_score, base_score),
+    }
+    return refined_affine, details
+
+
 def _routing_from_affine_outputs(renderer, views, outputs, fg_threshold=0.5, semantic_gate=True):
     views = parse_views(views)
     if not views:
@@ -580,6 +693,9 @@ def splat_parser_predictions_to_uv_conditioning(
     fg_threshold=0.5,
     bg_color=(128, 128, 128),
     semantic_gate=True,
+    affine_refine=True,
+    affine_refine_translation_px=2.0,
+    affine_refine_scale=0.0,
     return_details=False,
 ):
     """Route parser outputs to UV, using static mappings for affine-parser checkpoints."""
@@ -592,7 +708,7 @@ def splat_parser_predictions_to_uv_conditioning(
             bg_color=bg_color,
         )
         if return_details:
-            return conditioning, {"rendered": rendered, "outputs": outputs, "routing": None}
+            return conditioning, {"rendered": rendered, "outputs": outputs, "routing": None, "alignment": None}
         return conditioning
 
     if renderer is None or views is None:
@@ -601,8 +717,21 @@ def splat_parser_predictions_to_uv_conditioning(
     if group_size != len(views):
         raise ValueError(f"group_size={group_size} must equal the number of views ({len(views)}).")
 
-    canonical_rendered = canonicalize_parser_render(rendered, outputs, mode="nearest")
-    canonical_outputs = canonicalize_parser_outputs(outputs)
+    alignment = None
+    routing_outputs = outputs
+    if affine_refine:
+        refined_affine, alignment = refine_parser_affine(
+            outputs,
+            renderer,
+            views,
+            translation_radius_px=affine_refine_translation_px,
+            scale_radius=affine_refine_scale,
+        )
+        routing_outputs = dict(outputs)
+        routing_outputs["affine"] = refined_affine
+
+    canonical_rendered = canonicalize_parser_render(rendered, routing_outputs, mode="nearest")
+    canonical_outputs = canonicalize_parser_outputs(routing_outputs)
     routing = _routing_from_affine_outputs(
         renderer,
         views,
@@ -624,6 +753,7 @@ def splat_parser_predictions_to_uv_conditioning(
             "rendered": canonical_rendered,
             "outputs": canonical_outputs,
             "routing": routing,
+            "alignment": alignment,
         }
     return conditioning
 

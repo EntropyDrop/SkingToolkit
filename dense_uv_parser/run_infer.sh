@@ -65,6 +65,7 @@ fi
 OUTPUT="${OUTPUT-outputs/pred_uv.png}"
 CONDITIONING_OUTPUT="${CONDITIONING_OUTPUT-outputs/parser_conditioning.png}"
 DEBUG_OUTPUT="${DEBUG_OUTPUT-outputs/parser_debug.png}"
+OVERLAY_OUTPUT="${OVERLAY_OUTPUT-outputs/parser_debug_overlay.png}"
 
 COMBINED="${COMBINED:-}"
 VIEW_IMAGES="${VIEW_IMAGES:-}"
@@ -73,14 +74,20 @@ BACK="${BACK:-../test_imgs/back_rgba.png}"
 MAPPINGS_DIR="${MAPPINGS_DIR:-}"
 FG_THRESHOLD="${FG_THRESHOLD:-0.5}"
 SEMANTIC_GATE="${SEMANTIC_GATE:-true}"
+AFFINE_REFINE="${AFFINE_REFINE:-true}"
+AFFINE_REFINE_TRANSLATION_PX="${AFFINE_REFINE_TRANSLATION_PX:-2.0}"
+AFFINE_REFINE_SCALE="${AFFINE_REFINE_SCALE:-0.0}"
 ALPHA_THRESHOLD="${ALPHA_THRESHOLD:-0.5}"
 DEVICE="${DEVICE:-auto}"
 NO_ENFORCE_BASE_ALPHA="${NO_ENFORCE_BASE_ALPHA:-false}"
+OVERLAY_ALPHA="${OVERLAY_ALPHA:-0.45}"
 
 args=(
   infer.py
   --parser_checkpoint "$PARSER_CHECKPOINT"
   --fg_threshold "$FG_THRESHOLD"
+  --affine_refine_translation_px "$AFFINE_REFINE_TRANSLATION_PX"
+  --affine_refine_scale "$AFFINE_REFINE_SCALE"
   --alpha_threshold "$ALPHA_THRESHOLD"
   --device "$DEVICE"
 )
@@ -90,6 +97,11 @@ if [[ -n "$MAPPINGS_DIR" ]]; then
 fi
 if [[ "$SEMANTIC_GATE" != "true" ]]; then
   args+=(--no_semantic_gate)
+fi
+if [[ "$AFFINE_REFINE" == "true" ]]; then
+  args+=(--affine_refine)
+else
+  args+=(--no_affine_refine)
 fi
 
 if [[ -n "$COMBINED" ]]; then
@@ -109,6 +121,10 @@ if [[ -n "$DEBUG_OUTPUT" ]]; then
   args+=(--debug_output "$DEBUG_OUTPUT")
 fi
 
+if [[ -n "$OVERLAY_OUTPUT" ]]; then
+  args+=(--overlay_output "$OVERLAY_OUTPUT" --overlay_alpha "$OVERLAY_ALPHA")
+fi
+
 if [[ -n "$OUTPUT" ]]; then
   if [[ -n "$INPAINT_CHECKPOINT" ]]; then
     args+=(--inpaint_checkpoint "$INPAINT_CHECKPOINT" --output "$OUTPUT")
@@ -121,8 +137,8 @@ if [[ -n "$OUTPUT" ]]; then
   fi
 fi
 
-if [[ -z "$CONDITIONING_OUTPUT" && -z "$DEBUG_OUTPUT" && ( -z "$OUTPUT" || -z "$INPAINT_CHECKPOINT" ) ]]; then
-  echo "Nothing to write. Set CONDITIONING_OUTPUT, DEBUG_OUTPUT and/or OUTPUT with a valid INPAINT_CHECKPOINT." >&2
+if [[ -z "$CONDITIONING_OUTPUT" && -z "$DEBUG_OUTPUT" && -z "$OVERLAY_OUTPUT" && ( -z "$OUTPUT" || -z "$INPAINT_CHECKPOINT" ) ]]; then
+  echo "Nothing to write. Set CONDITIONING_OUTPUT, DEBUG_OUTPUT, OVERLAY_OUTPUT and/or OUTPUT with a valid INPAINT_CHECKPOINT." >&2
   exit 1
 fi
 
@@ -139,6 +155,9 @@ if [[ -n "$CONDITIONING_OUTPUT" ]]; then
 fi
 if [[ -n "$DEBUG_OUTPUT" ]]; then
   echo "Debug output: $DEBUG_OUTPUT"
+fi
+if [[ -n "$OVERLAY_OUTPUT" ]]; then
+  echo "Overlay output: $OVERLAY_OUTPUT"
 fi
 if [[ -n "$OUTPUT" && -n "$INPAINT_CHECKPOINT" ]]; then
   echo "Final output: $OUTPUT"
