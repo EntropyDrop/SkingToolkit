@@ -66,6 +66,8 @@ OUTPUT="${OUTPUT-outputs/pred_uv.png}"
 CONDITIONING_OUTPUT="${CONDITIONING_OUTPUT-outputs/parser_conditioning.png}"
 DEBUG_OUTPUT="${DEBUG_OUTPUT-outputs/parser_debug.png}"
 OVERLAY_OUTPUT="${OVERLAY_OUTPUT-outputs/parser_debug_overlay.png}"
+INNER_CUTOUT_OUTPUT="${INNER_CUTOUT_OUTPUT-outputs/parser_debug_inner.png}"
+OUTER_CUTOUT_OUTPUT="${OUTER_CUTOUT_OUTPUT-outputs/parser_debug_outer.png}"
 
 COMBINED="${COMBINED:-}"
 VIEW_IMAGES="${VIEW_IMAGES:-}"
@@ -125,6 +127,14 @@ if [[ -n "$OVERLAY_OUTPUT" ]]; then
   args+=(--overlay_output "$OVERLAY_OUTPUT" --overlay_alpha "$OVERLAY_ALPHA")
 fi
 
+if [[ -n "$INNER_CUTOUT_OUTPUT" ]]; then
+  args+=(--inner_cutout_output "$INNER_CUTOUT_OUTPUT")
+fi
+
+if [[ -n "$OUTER_CUTOUT_OUTPUT" ]]; then
+  args+=(--outer_cutout_output "$OUTER_CUTOUT_OUTPUT")
+fi
+
 if [[ -n "$OUTPUT" ]]; then
   if [[ -n "$INPAINT_CHECKPOINT" ]]; then
     args+=(--inpaint_checkpoint "$INPAINT_CHECKPOINT" --output "$OUTPUT")
@@ -137,8 +147,8 @@ if [[ -n "$OUTPUT" ]]; then
   fi
 fi
 
-if [[ -z "$CONDITIONING_OUTPUT" && -z "$DEBUG_OUTPUT" && -z "$OVERLAY_OUTPUT" && ( -z "$OUTPUT" || -z "$INPAINT_CHECKPOINT" ) ]]; then
-  echo "Nothing to write. Set CONDITIONING_OUTPUT, DEBUG_OUTPUT, OVERLAY_OUTPUT and/or OUTPUT with a valid INPAINT_CHECKPOINT." >&2
+if [[ -z "$CONDITIONING_OUTPUT" && -z "$DEBUG_OUTPUT" && -z "$OVERLAY_OUTPUT" && -z "$INNER_CUTOUT_OUTPUT" && -z "$OUTER_CUTOUT_OUTPUT" && ( -z "$OUTPUT" || -z "$INPAINT_CHECKPOINT" ) ]]; then
+  echo "Nothing to write. Set a debug/conditioning output or OUTPUT with a valid INPAINT_CHECKPOINT." >&2
   exit 1
 fi
 
@@ -158,6 +168,12 @@ if [[ -n "$DEBUG_OUTPUT" ]]; then
 fi
 if [[ -n "$OVERLAY_OUTPUT" ]]; then
   echo "Overlay output: $OVERLAY_OUTPUT"
+fi
+if [[ -n "$INNER_CUTOUT_OUTPUT" ]]; then
+  echo "Inner cutout output: $INNER_CUTOUT_OUTPUT"
+fi
+if [[ -n "$OUTER_CUTOUT_OUTPUT" ]]; then
+  echo "Outer cutout output: $OUTER_CUTOUT_OUTPUT"
 fi
 if [[ -n "$OUTPUT" && -n "$INPAINT_CHECKPOINT" ]]; then
   echo "Final output: $OUTPUT"

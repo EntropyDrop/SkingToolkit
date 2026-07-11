@@ -92,6 +92,7 @@ def load_inpaint(checkpoint_path, device):
     model = InverseUVNet(
         input_channels=input_channels,
         base_channels=checkpoint_args.get("base_channels", 64),
+        preserve_known=checkpoint_args.get("preserve_known", True),
     ).to(device)
     model.load_state_dict(checkpoint["model"])
     model.eval()
@@ -148,6 +149,8 @@ def save_debug_preview(
     routing=None,
     overlay_output=None,
     overlay_alpha=0.45,
+    inner_cutout_output=None,
+    outer_cutout_output=None,
 ):
     if not 0.0 <= overlay_alpha <= 1.0:
         raise ValueError(f"overlay_alpha must be in [0, 1], got {overlay_alpha}.")
@@ -187,22 +190,43 @@ def save_debug_preview(
         output_path.parent.mkdir(parents=True, exist_ok=True)
         save_image(debug_preview.clamp(0.0, 1.0).detach().cpu(), output_path, nrow=view_count)
 
-    if overlay_output is not None:
+    if overlay_output is not None or inner_cutout_output is not None or outer_cutout_output is not None:
         rgb = rendered[:, :3]
         mask = pred_fg.unsqueeze(1)
         bg = rgb.new_tensor(bg_color).view(1, 3, 1, 1) / 255.0
         routed_original = torch.where(mask, rgb, bg.expand_as(rgb))
+        inner_mask = (pred_fg & (pred_layer_values == 0)).unsqueeze(1)
+        outer_mask = (pred_fg & (pred_layer_values == 1)).unsqueeze(1)
+        inner_cutout = torch.where(inner_mask, rgb, bg.expand_as(rgb))
+        outer_cutout = torch.where(outer_mask, rgb, bg.expand_as(rgb))
+
+        def save_cutout(cutout, path):
+            if path is None:
+                return
+            path.parent.mkdir(parents=True, exist_ok=True)
+            save_image(cutout.clamp(0.0, 1.0).detach().cpu(), path, nrow=view_count)
+
+        save_cutout(inner_cutout, inner_cutout_output)
+        save_cutout(outer_cutout, outer_cutout_output)
 
         def overlay(colorized):
             blended = rgb * (1.0 - overlay_alpha) + colorized * overlay_alpha
             return torch.where(mask, blended, rgb)
 
-        overlay_images = [rgb, routed_original, overlay(part_color), overlay(layer_color)]
-        if surface_color is not None:
-            overlay_images.append(overlay(surface_color))
-        overlay_preview = torch.cat(overlay_images, dim=0)
-        overlay_output.parent.mkdir(parents=True, exist_ok=True)
-        save_image(overlay_preview.clamp(0.0, 1.0).detach().cpu(), overlay_output, nrow=view_count)
+        if overlay_output is not None:
+            overlay_images = [
+                rgb,
+                routed_original,
+                inner_cutout,
+                outer_cutout,
+                overlay(part_color),
+                overlay(layer_color),
+            ]
+            if surface_color is not None:
+                overlay_images.append(overlay(surface_color))
+            overlay_preview = torch.cat(overlay_images, dim=0)
+            overlay_output.parent.mkdir(parents=True, exist_ok=True)
+            save_image(overlay_preview.clamp(0.0, 1.0).detach().cpu(), overlay_output, nrow=view_count)
 
 
 def build_arg_parser():
@@ -214,6 +238,8 @@ def build_arg_parser():
     parser.add_argument("--debug_output", default=None, help="Optional path to write a debug preview grid of predictions.")
     parser.add_argument("--overlay_output", default=None, help="Optional path for segmentation overlays on canonicalized input views.")
     parser.add_argument("--overlay_alpha", type=float, default=0.45)
+    parser.add_argument("--inner_cutout_output", default=None, help="Original-color cutout for routed inner-layer pixels.")
+    parser.add_argument("--outer_cutout_output", default=None, help="Original-color cutout for routed outer/decor pixels.")
     parser.add_argument("--front", default=None)
     parser.add_argument("--back", default=None)
     parser.add_argument("--combined", default=None)
@@ -235,8 +261,20 @@ def main():
     args = build_arg_parser().parse_args()
     if args.output and not args.inpaint_checkpoint:
         raise ValueError("--output requires --inpaint_checkpoint.")
-    if not args.output and not args.conditioning_output and not args.debug_output and not args.overlay_output:
-        raise ValueError("Provide --output, --conditioning_output, --debug_output, and/or --overlay_output.")
+    if not any(
+        (
+            args.output,
+            args.conditioning_output,
+            args.debug_output,
+            args.overlay_output,
+            args.inner_cutout_output,
+            args.outer_cutout_output,
+        )
+    ):
+        raise ValueError(
+            "Provide --output, --conditioning_output, --debug_output, --overlay_output, "
+            "--inner_cutout_output, and/or --outer_cutout_output."
+        )
 
     device = get_device(args.device)
     parser_model, parser_args = load_parser(args.parser_checkpoint, device)
@@ -316,7 +354,7 @@ def main():
                 )
             )
 
-    if args.debug_output or args.overlay_output:
+    if args.debug_output or args.overlay_output or args.inner_cutout_output or args.outer_cutout_output:
         save_debug_preview(
             routing_details["rendered"],
             routing_details["outputs"],
@@ -327,6 +365,8 @@ def main():
             routing=routing_details["routing"],
             overlay_output=Path(args.overlay_output) if args.overlay_output else None,
             overlay_alpha=args.overlay_alpha,
+            inner_cutout_output=Path(args.inner_cutout_output) if args.inner_cutout_output else None,
+            outer_cutout_output=Path(args.outer_cutout_output) if args.outer_cutout_output else None,
         )
 
     if args.conditioning_output:

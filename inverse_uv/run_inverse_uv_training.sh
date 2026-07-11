@@ -62,6 +62,7 @@ BEST_METRIC="${BEST_METRIC:-loss_recon_total}"
 SCHEDULER="${SCHEDULER:-cosine}"
 MIN_LR="${MIN_LR:-1e-5}"
 LOG_EVERY="${LOG_EVERY:-50}"
+PRESERVE_KNOWN="${PRESERVE_KNOWN:-false}"
 
 # --- Dense parser conditioning ---
 PARSER_RUNS_DIR="${PARSER_RUNS_DIR:-../dense_uv_parser/runs}"
@@ -104,6 +105,12 @@ fi
 resume_lr_args=()
 if [[ -n "$RESUME_LR" ]]; then
   resume_lr_args=(--resume_lr "$RESUME_LR")
+fi
+preserve_known_args=()
+if [[ "$PRESERVE_KNOWN" == "true" ]]; then
+  preserve_known_args=(--preserve_known)
+else
+  preserve_known_args=(--no_preserve_known)
 fi
 if [[ -z "$PARSER_CHECKPOINT" ]]; then
   PARSER_CHECKPOINT="$(find_latest_checkpoint "$PARSER_RUNS_DIR" "$PARSER_RUN_PREFIX" "$PARSER_CHECKPOINT_NAME")"
@@ -179,6 +186,7 @@ python train.py \
   --mixed_precision "$MIXED_PRECISION" \
   --matmul_precision "$MATMUL_PRECISION" \
   ${conditioning_args[@]+"${conditioning_args[@]}"} \
+  ${preserve_known_args[@]+"${preserve_known_args[@]}"} \
   ${parser_background_args[@]+"${parser_background_args[@]}"} \
   --best_metric "$BEST_METRIC" \
   --scheduler "$SCHEDULER" \

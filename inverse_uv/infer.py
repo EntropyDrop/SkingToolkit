@@ -173,6 +173,7 @@ def main():
     model = InverseUVNet(
         input_channels=model_config["input_channels"],
         base_channels=model_config["base_channels"],
+        preserve_known=checkpoint_args.get("preserve_known", True),
     ).to(device)
     model.load_state_dict(checkpoint["model"])
     model.eval()

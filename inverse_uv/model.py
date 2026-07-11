@@ -72,8 +72,16 @@ class SpatialSelfAttention(nn.Module):
 
 
 class InverseUVNet(nn.Module):
-    def __init__(self, input_channels=10, base_channels=64, output_channels=4, **kwargs):
+    def __init__(
+        self,
+        input_channels=10,
+        base_channels=64,
+        output_channels=4,
+        preserve_known=True,
+        **kwargs,
+    ):
         super().__init__()
+        self.preserve_known = bool(preserve_known)
         c = base_channels
         self.stem = ConvBlock(input_channels, c)
         self.down1 = DownBlock(c, c * 2)
@@ -108,7 +116,7 @@ class InverseUVNet(nn.Module):
         x = self.up1(x, s1)
         x = self.up0(x, s0)
         pred = torch.sigmoid(self.head(x))
-        if conditioning.shape[1] == 10:
+        if self.preserve_known and conditioning.shape[1] == 10:
             inner_rgba = conditioning[:, 0:4]
             inner_known = conditioning[:, 4:5].clamp(0.0, 1.0)
             outer_rgba = conditioning[:, 5:9]

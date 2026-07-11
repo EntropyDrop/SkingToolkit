@@ -402,6 +402,14 @@ def build_arg_parser():
     parser = argparse.ArgumentParser(description="Train render-to-UV inverse Minecraft skin model.")
     parser.add_argument("--data_dir", required=True, help="Folder containing GT 64x64 RGBA skin PNGs.")
     parser.add_argument("--output_dir", default="inverse_uv_runs/default", help="Checkpoint/output folder.")
+    parser.add_argument(
+        "--preserve_known",
+        dest="preserve_known",
+        action="store_true",
+        default=False,
+        help="Hard-copy known conditioning texels to the output (legacy behavior).",
+    )
+    parser.add_argument("--no_preserve_known", dest="preserve_known", action="store_false")
     parser.add_argument("--mappings_dir", default=None, help="Renderer mappings directory.")
     parser.add_argument("--views", default="static_front,static_back", help="Comma-separated render views.")
     parser.add_argument(
@@ -606,7 +614,11 @@ def main():
             **loader_kwargs,
         )
 
-    model = InverseUVNet(input_channels=input_channels, base_channels=args.base_channels).to(device)
+    model = InverseUVNet(
+        input_channels=input_channels,
+        base_channels=args.base_channels,
+        preserve_known=args.preserve_known,
+    ).to(device)
 
     discriminator = None
     d_optimizer = None
@@ -645,6 +657,12 @@ def main():
     checkpoint = None
     if args.resume:
         checkpoint = torch.load(args.resume, map_location=device)
+        checkpoint_preserve_known = checkpoint.get("args", {}).get("preserve_known", True)
+        if bool(checkpoint_preserve_known) != args.preserve_known:
+            raise ValueError(
+                "Cannot resume with a different preserve-known mode: "
+                f"checkpoint={bool(checkpoint_preserve_known)}, requested={args.preserve_known}."
+            )
         model.load_state_dict(checkpoint["model"])
         optimizer.load_state_dict(checkpoint["optimizer"])
         if discriminator is not None and "discriminator" in checkpoint:
@@ -682,6 +700,7 @@ def main():
         "input_channels": input_channels,
         "conditioning_mode": args.conditioning_mode,
         "conditioning_source": "dense_parser",
+        "preserve_known": args.preserve_known,
         "parser_checkpoint": args.parser_checkpoint,
         "parser_splat_fg_threshold": args.parser_splat_fg_threshold,
         "parser_semantic_gate": args.parser_semantic_gate,
