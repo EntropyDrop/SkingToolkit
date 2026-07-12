@@ -63,12 +63,15 @@ def load_parser(checkpoint_path, device):
     checkpoint = torch.load(checkpoint_path, map_location=device)
     checkpoint_args = checkpoint.get("args", {})
     model_config = checkpoint.get("model_config", {})
+    if model_config.get("arm_model", "steve") != "steve":
+        raise ValueError("Geometry parser only supports standard Steve arms.")
     state_dict = checkpoint["model"]
     has_uv_classification = any(key.startswith("uv_x.") or key.startswith("uv_y.") for key in state_dict)
     has_layer_face = any(key.startswith("layer_face.") for key in state_dict)
     uv_classification = model_config.get("uv_classification", has_uv_classification)
     parser_mode = model_config.get("parser_mode", checkpoint_args.get("parser_mode", "dense"))
-    predict_affine = model_config.get("predict_affine", parser_mode == "global_affine")
+    predict_affine = model_config.get("predict_affine", parser_mode in ("global_affine", "geometry_fit"))
+    geometry_only = model_config.get("geometry_only", parser_mode == "geometry_fit")
     model = DenseUVParserNet(
         base_channels=model_config.get("base_channels", checkpoint_args.get("base_channels", 32)),
         uv_size=model_config.get("uv_size", 64),
@@ -82,8 +85,9 @@ def load_parser(checkpoint_path, device):
         affine_scale_range=model_config.get("affine_scale_range", checkpoint_args.get("scale_range", 0.03)),
         surface_classes=model_config.get(
             "surface_classes",
-            checkpoint_args.get("surface_classes", 2 if predict_affine else 0),
+            checkpoint_args.get("surface_classes", 0 if geometry_only else 2 if predict_affine else 0),
         ),
+        geometry_only=geometry_only,
     ).to(device)
     model.load_state_dict(state_dict)
     model.eval()
@@ -164,11 +168,12 @@ def save_debug_preview(
     if not 0.0 <= overlay_alpha <= 1.0:
         raise ValueError(f"overlay_alpha must be in [0, 1], got {overlay_alpha}.")
     pred_fg = routing["foreground"] if routing is not None else torch.sigmoid(outputs["foreground"])[:, 0] > fg_threshold
-    pred_part = torch.where(
-        pred_fg,
-        outputs["part"].argmax(dim=1),
-        torch.full_like(outputs["part"].argmax(dim=1), IGNORE_INDEX),
+    pred_part_values = (
+        outputs["part"].argmax(dim=1)
+        if "part" in outputs
+        else routing["part"]
     )
+    pred_part = torch.where(pred_fg, pred_part_values, torch.full_like(pred_part_values, IGNORE_INDEX))
     raw_layer_values = outputs["layer"].argmax(dim=1)
     pred_layer_values = routing["layer"] if routing is not None else raw_layer_values
     pred_layer = torch.where(
@@ -176,7 +181,7 @@ def save_debug_preview(
         pred_layer_values,
         torch.full_like(outputs["layer"].argmax(dim=1), IGNORE_INDEX),
     )
-    raw_face_values = outputs["face"].argmax(dim=1)
+    raw_face_values = outputs["face"].argmax(dim=1) if "face" in outputs else routing["face"]
     raw_face = torch.where(
         pred_fg,
         raw_face_values,
@@ -203,11 +208,7 @@ def save_debug_preview(
         )
         raw_layer_face = combine_layer_face(raw_layer, raw_face)
     pred_layer_face = combine_layer_face(pred_layer, pred_face)
-    pred_uv = (
-        flat_uv_to_uv01(routing["flat_uv"], rendered.dtype)
-        if routing is not None
-        else prediction_uv01(outputs)
-    )
+    pred_uv = flat_uv_to_uv01(routing["flat_uv"], rendered.dtype) if routing is not None else prediction_uv01(outputs)
 
     part_color = colorize_labels(pred_part, PART_PALETTE, bg_color, rendered)
     layer_color = colorize_labels(pred_layer, LAYER_PALETTE, bg_color, rendered)
@@ -367,7 +368,7 @@ def main():
     missing_views = [view for view in views if view not in renderer.views]
     if missing_views:
         raise ValueError(f"Unknown renderer views {missing_views}. Available views: {', '.join(renderer.views)}")
-    if parser_model.predict_affine:
+    if parser_model.predict_affine and not parser_model.geometry_only:
         mapping_surface_classes = surface_class_count(renderer, views)
         if parser_model.surface_classes != mapping_surface_classes:
             raise ValueError(

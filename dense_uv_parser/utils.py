@@ -749,6 +749,96 @@ def _routing_from_affine_outputs(renderer, views, outputs, fg_threshold=0.5, sem
     }
 
 
+def _routing_from_geometry_outputs(renderer, views, outputs, fg_threshold=0.5, outer_threshold=0.5):
+    """Route a fitted Steve render through fixed inner/outer cuboid UV maps."""
+    views = parse_views(views)
+    if not views:
+        raise ValueError("At least one renderer view is required for geometry routing.")
+    foreground_prob = torch.sigmoid(outputs["foreground"])[:, 0]
+    layer_prob = torch.softmax(outputs["layer"], dim=1)
+    outer_prob = layer_prob[:, 1]
+    inner_prob = layer_prob[:, 0]
+    N, H, W = outer_prob.shape
+    if N % len(views) != 0:
+        raise ValueError(f"N={N} must be divisible by {len(views)} renderer views.")
+
+    fg = torch.zeros_like(outer_prob, dtype=torch.bool)
+    layer = torch.zeros((N, H, W), dtype=torch.long, device=outer_prob.device)
+    flat_uv = torch.zeros_like(layer)
+    surface = torch.full_like(layer, IGNORE_INDEX)
+    confidence = torch.zeros_like(outer_prob)
+    confidence_margin = torch.zeros_like(outer_prob)
+    confidence_margin_ratio = torch.zeros_like(outer_prob)
+    part = torch.full_like(layer, IGNORE_INDEX)
+    face = torch.full_like(layer, IGNORE_INDEX)
+
+    for view_index, view in enumerate(views):
+        selection = slice(view_index, N, len(views))
+        static = build_static_surface_routing(renderer, view, outer_prob.device)
+        if static["masks"].shape[-2:] != (H, W):
+            raise ValueError(
+                f"View {view!r} mapping shape {tuple(static['masks'].shape[-2:])} "
+                f"does not match parser shape {(H, W)}."
+            )
+
+        inner_valid = static["masks"][0].unsqueeze(0).expand(outer_prob[selection].shape[0], -1, -1)
+        outer_valid = static["masks"][1].unsqueeze(0).expand_as(inner_valid)
+        visible_outer = outer_prob[selection] >= outer_threshold
+        # The Steve base layer is opaque and therefore supplies a complete
+        # silhouette. Outer-only protrusions still need image foreground evidence.
+        choose_outer = outer_valid & visible_outer & (
+            inner_valid | (foreground_prob[selection] > fg_threshold)
+        )
+        choose_inner = inner_valid & ~choose_outer
+        selected_fg = choose_inner | choose_outer
+
+        inner_flat_uv = static["flat_uv"][0].unsqueeze(0).expand_as(layer[selection])
+        outer_flat_uv = static["flat_uv"][1].unsqueeze(0).expand_as(layer[selection])
+        inner_part = static["part"][0].unsqueeze(0).expand_as(layer[selection])
+        outer_part = static["part"][1].unsqueeze(0).expand_as(layer[selection])
+        inner_face = static["face"][0].unsqueeze(0).expand_as(layer[selection])
+        outer_face = static["face"][1].unsqueeze(0).expand_as(layer[selection])
+
+        fg[selection] = selected_fg
+        layer[selection] = choose_outer.long()
+        flat_uv[selection] = torch.where(choose_outer, outer_flat_uv, inner_flat_uv)
+        surface[selection] = torch.where(
+            selected_fg,
+            choose_outer.long(),
+            torch.full_like(layer[selection], IGNORE_INDEX),
+        )
+        part[selection] = torch.where(
+            selected_fg,
+            torch.where(choose_outer, outer_part, inner_part),
+            torch.full_like(layer[selection], IGNORE_INDEX),
+        )
+        face[selection] = torch.where(
+            selected_fg,
+            torch.where(choose_outer, outer_face, inner_face),
+            torch.full_like(layer[selection], IGNORE_INDEX),
+        )
+        selected_confidence = torch.where(choose_outer, outer_prob[selection], inner_prob[selection])
+        margin = (outer_prob[selection] - inner_prob[selection]).abs()
+        confidence[selection] = selected_confidence
+        confidence_margin[selection] = margin
+        confidence_margin_ratio[selection] = (
+            margin / selected_confidence.clamp_min(1e-8)
+        ).clamp(0.0, 1.0)
+
+    return {
+        "foreground": fg,
+        "layer": layer,
+        "flat_uv": flat_uv,
+        "surface": surface,
+        "confidence": confidence,
+        "confidence_margin": confidence_margin,
+        "confidence_margin_ratio": confidence_margin_ratio,
+        "semantic_fallback": torch.zeros_like(fg),
+        "part": part,
+        "face": face,
+    }
+
+
 def flat_uv_to_uv01(flat_uv, dtype):
     return torch.stack(
         [
@@ -775,6 +865,7 @@ def splat_parser_predictions_to_uv_conditioning(
     route_margin_threshold=0.0,
     outer_route_confidence_threshold=None,
     outer_route_margin_threshold=None,
+    geometry_outer_threshold=0.5,
     reject_semantic_fallback=False,
     reject_inner_semantic_fallback=False,
     return_details=False,
@@ -825,13 +916,22 @@ def splat_parser_predictions_to_uv_conditioning(
 
     canonical_rendered = canonicalize_parser_render(rendered, routing_outputs, mode="nearest")
     canonical_outputs = canonicalize_parser_outputs(routing_outputs)
-    routing = _routing_from_affine_outputs(
-        renderer,
-        views,
-        canonical_outputs,
-        fg_threshold=fg_threshold,
-        semantic_gate=semantic_gate,
-    )
+    if "surface" not in canonical_outputs and "part" not in canonical_outputs:
+        routing = _routing_from_geometry_outputs(
+            renderer,
+            views,
+            canonical_outputs,
+            fg_threshold=fg_threshold,
+            outer_threshold=geometry_outer_threshold,
+        )
+    else:
+        routing = _routing_from_affine_outputs(
+            renderer,
+            views,
+            canonical_outputs,
+            fg_threshold=fg_threshold,
+            semantic_gate=semantic_gate,
+        )
     raw_foreground = routing["foreground"]
     selected_outer = routing["layer"] == 1
     confidence_threshold = torch.where(

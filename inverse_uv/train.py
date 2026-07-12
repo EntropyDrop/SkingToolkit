@@ -106,15 +106,20 @@ def load_dense_parser(checkpoint_path, device):
     checkpoint = torch.load(checkpoint_path, map_location=device)
     checkpoint_args = checkpoint.get("args", {})
     model_config = checkpoint.get("model_config", {})
+    if model_config.get("arm_model", "steve") != "steve":
+        raise ValueError("Geometry parser only supports standard Steve arms.")
     state_dict = checkpoint["model"]
     has_uv_classification = any(key.startswith("uv_x.") or key.startswith("uv_y.") for key in state_dict)
+    has_layer_face = any(key.startswith("layer_face.") for key in state_dict)
     uv_classification = model_config.get("uv_classification", has_uv_classification)
     parser_mode = model_config.get("parser_mode", checkpoint_args.get("parser_mode", "dense"))
-    predict_affine = model_config.get("predict_affine", parser_mode == "global_affine")
+    predict_affine = model_config.get("predict_affine", parser_mode in ("global_affine", "geometry_fit"))
+    geometry_only = model_config.get("geometry_only", parser_mode == "geometry_fit")
     model = DenseUVParserNet(
         base_channels=model_config.get("base_channels", checkpoint_args.get("base_channels", 32)),
         uv_size=model_config.get("uv_size", 64),
         uv_classification=uv_classification,
+        layer_face_classes=model_config.get("layer_face_classes", 12 if has_layer_face else 0),
         view_classes=model_config.get("view_classes", 0),
         predict_affine=predict_affine,
         affine_translation_scale=model_config.get(
@@ -123,8 +128,9 @@ def load_dense_parser(checkpoint_path, device):
         affine_scale_range=model_config.get("affine_scale_range", checkpoint_args.get("scale_range", 0.03)),
         surface_classes=model_config.get(
             "surface_classes",
-            checkpoint_args.get("surface_classes", 2 if predict_affine else 0),
+            checkpoint_args.get("surface_classes", 0 if geometry_only else 2 if predict_affine else 0),
         ),
+        geometry_only=geometry_only,
     ).to(device)
     model.load_state_dict(state_dict)
     model.eval()
@@ -681,7 +687,7 @@ def main():
         covered_inner_alpha_threshold=args.covered_inner_alpha_threshold,
         discriminator=discriminator,
     ).to(device)
-    if dense_parser.predict_affine:
+    if dense_parser.predict_affine and not dense_parser.geometry_only:
         mapping_surface_classes = surface_class_count(criterion.renderer, parse_views(args.views))
         if dense_parser.surface_classes != mapping_surface_classes:
             raise ValueError(

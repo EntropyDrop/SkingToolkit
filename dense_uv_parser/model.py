@@ -66,9 +66,11 @@ class DenseUVParserNet(nn.Module):
         affine_translation_scale=0.03,
         affine_scale_range=0.03,
         surface_classes=0,
+        geometry_only=False,
     ):
         super().__init__()
-        self.uv_classification = uv_classification
+        self.geometry_only = bool(geometry_only)
+        self.uv_classification = bool(uv_classification) and not self.geometry_only
         self.view_classes = int(view_classes)
         self.predict_affine = bool(predict_affine)
         self.affine_translation_scale = float(affine_translation_scale)
@@ -89,21 +91,25 @@ class DenseUVParserNet(nn.Module):
         )
         self.foreground = nn.Conv2d(c, 1, kernel_size=1)
         self.layer = nn.Conv2d(c, layer_classes, kernel_size=1)
-        self.part = nn.Conv2d(c, part_classes, kernel_size=1)
-        self.face = nn.Conv2d(c, face_classes, kernel_size=1)
-        self.layer_face = (
-            nn.Conv2d(c, layer_face_classes, kernel_size=1)
-            if layer_face_classes > 0
-            else None
-        )
-        self.uv = nn.Conv2d(c, 2, kernel_size=1)
-        if uv_classification:
-            self.uv_x = nn.Conv2d(c, uv_size, kernel_size=1)
-            self.uv_y = nn.Conv2d(c, uv_size, kernel_size=1)
+        if not self.geometry_only:
+            self.part = nn.Conv2d(c, part_classes, kernel_size=1)
+            self.face = nn.Conv2d(c, face_classes, kernel_size=1)
+            self.layer_face = (
+                nn.Conv2d(c, layer_face_classes, kernel_size=1)
+                if layer_face_classes > 0
+                else None
+            )
+            self.uv = nn.Conv2d(c, 2, kernel_size=1)
+            if self.uv_classification:
+                self.uv_x = nn.Conv2d(c, uv_size, kernel_size=1)
+                self.uv_y = nn.Conv2d(c, uv_size, kernel_size=1)
+        else:
+            self.layer_face = None
         if self.predict_affine:
-            if self.surface_classes < 2:
+            if not self.geometry_only and self.surface_classes < 2:
                 raise ValueError("Global-affine routing requires at least two static surface classes.")
-            self.surface = nn.Conv2d(c, self.surface_classes, kernel_size=1)
+            if not self.geometry_only:
+                self.surface = nn.Conv2d(c, self.surface_classes, kernel_size=1)
             hidden = max(c * 4, 32)
             self.affine_head = nn.Sequential(
                 nn.AdaptiveAvgPool2d(1),
@@ -157,19 +163,21 @@ class DenseUVParserNet(nn.Module):
         outputs = {
             "foreground": self.foreground(x),
             "layer": self.layer(x),
-            "part": self.part(x),
-            "face": self.face(x),
-            "uv": torch.sigmoid(self.uv(x)),
         }
-        if self.layer_face is not None:
-            outputs["layer_face"] = self.layer_face(x)
-        if self.uv_classification:
-            outputs["uv_x"] = self.uv_x(x)
-            outputs["uv_y"] = self.uv_y(x)
+        if not self.geometry_only:
+            outputs["part"] = self.part(x)
+            outputs["face"] = self.face(x)
+            outputs["uv"] = torch.sigmoid(self.uv(x))
+            if self.layer_face is not None:
+                outputs["layer_face"] = self.layer_face(x)
+            if self.uv_classification:
+                outputs["uv_x"] = self.uv_x(x)
+                outputs["uv_y"] = self.uv_y(x)
         if affine is not None:
             # [tx, ty, log_scale]. tx/ty are affine_grid normalized coordinates.
             outputs["affine"] = affine
-            outputs["surface"] = self.surface(x)
+            if not self.geometry_only:
+                outputs["surface"] = self.surface(x)
         return outputs
 
 

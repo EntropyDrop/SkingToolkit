@@ -67,14 +67,23 @@ class DenseUVParserLoss(nn.Module):
         loss_foreground_dice = 1.0 - (2.0 * (fg_prob * fg_target).sum() + 1.0) / (dice_den + 1.0)
         loss_foreground = loss_foreground_bce + loss_foreground_dice
 
+        zero = outputs["foreground"].new_tensor(0.0)
         loss_layer = F.cross_entropy(outputs["layer"], targets["layer"], ignore_index=IGNORE_INDEX)
-        loss_part = F.cross_entropy(outputs["part"], targets["part"], ignore_index=IGNORE_INDEX)
-        loss_face = F.cross_entropy(outputs["face"], targets["face"], ignore_index=IGNORE_INDEX)
+        loss_part = (
+            F.cross_entropy(outputs["part"], targets["part"], ignore_index=IGNORE_INDEX)
+            if "part" in outputs
+            else zero
+        )
+        loss_face = (
+            F.cross_entropy(outputs["face"], targets["face"], ignore_index=IGNORE_INDEX)
+            if "face" in outputs
+            else zero
+        )
         layer_face_target = combine_layer_face(targets["layer"], targets["face"])
         if "layer_face" in outputs:
             loss_layer_face = _balanced_cross_entropy(outputs["layer_face"], layer_face_target)
         else:
-            loss_layer_face = outputs["foreground"].new_tensor(0.0)
+            loss_layer_face = zero
 
         fg_mask = targets["layer"] != IGNORE_INDEX
         use_uv = self.use_uv and "uv" in outputs
@@ -84,8 +93,8 @@ class DenseUVParserLoss(nn.Module):
             loss_uv = F.smooth_l1_loss(pred_uv_px, target_uv_px)
             loss_uv_l1_px = (pred_uv_px - target_uv_px).abs().mean()
         else:
-            loss_uv = outputs["foreground"].new_tensor(0.0)
-            loss_uv_l1_px = outputs["foreground"].new_tensor(0.0)
+            loss_uv = zero
+            loss_uv_l1_px = zero
 
         if use_uv and "uv_x" in outputs and "uv_y" in outputs and fg_mask.any():
             target_x, target_y = uv_class_targets(targets["uv"], targets["layer"], self.uv_size)
@@ -93,9 +102,9 @@ class DenseUVParserLoss(nn.Module):
             loss_uv_y = F.cross_entropy(outputs["uv_y"], target_y, ignore_index=IGNORE_INDEX)
             loss_uv_class = 0.5 * (loss_uv_x + loss_uv_y)
         else:
-            loss_uv_x = outputs["foreground"].new_tensor(0.0)
-            loss_uv_y = outputs["foreground"].new_tensor(0.0)
-            loss_uv_class = outputs["foreground"].new_tensor(0.0)
+            loss_uv_x = zero
+            loss_uv_y = zero
+            loss_uv_class = zero
 
         if "affine" in outputs and "affine" in targets:
             affine_error = outputs["affine"] - targets["affine"].to(outputs["affine"].dtype)
@@ -117,20 +126,22 @@ class DenseUVParserLoss(nn.Module):
                 outputs["affine"][:, 2].exp() - targets["affine"][:, 2].to(outputs["affine"].dtype).exp()
             ).abs().mean() * 100.0
         else:
-            loss_affine_translation = outputs["foreground"].new_tensor(0.0)
-            loss_affine_scale = outputs["foreground"].new_tensor(0.0)
-            loss_affine = outputs["foreground"].new_tensor(0.0)
-            err_affine_translation_px = outputs["foreground"].new_tensor(0.0)
-            err_affine_scale_pct = outputs["foreground"].new_tensor(0.0)
+            loss_affine_translation = zero
+            loss_affine_scale = zero
+            loss_affine = zero
+            err_affine_translation_px = zero
+            err_affine_scale_pct = zero
 
         if "surface" in outputs and "surface" in targets:
             loss_surface = F.cross_entropy(outputs["surface"], targets["surface"], ignore_index=IGNORE_INDEX)
             acc_surface = _masked_accuracy(outputs["surface"], targets["surface"])
         else:
-            loss_surface = outputs["foreground"].new_tensor(0.0)
-            acc_surface = outputs["foreground"].new_tensor(0.0)
+            loss_surface = zero
+            acc_surface = zero
 
-        loss_routing = loss_surface + loss_uv_class + loss_layer_face
+        geometry_only = "part" not in outputs and "surface" not in outputs
+        loss_routing = loss_layer + loss_affine if geometry_only else loss_surface + loss_uv_class + loss_layer_face
+        loss_geometry = loss_foreground + loss_layer + loss_affine
 
         loss_total = (
             self.lambda_foreground * loss_foreground
@@ -165,6 +176,7 @@ class DenseUVParserLoss(nn.Module):
             "err_affine_scale_pct": err_affine_scale_pct,
             "loss_surface": loss_surface,
             "loss_routing": loss_routing,
+            "loss_geometry": loss_geometry,
             "acc_surface": acc_surface,
         }
         metrics.update(classification_metrics(outputs, targets, self.uv_size, use_uv=use_uv))
@@ -204,9 +216,25 @@ def classification_metrics(outputs, targets, uv_size, use_uv=True):
         "recall_foreground": tp / (tp + fn).clamp_min(1.0),
         "iou_foreground": tp / (tp + fp + fn).clamp_min(1.0),
         "acc_layer": _masked_accuracy(outputs["layer"], targets["layer"]),
-        "acc_part": _masked_accuracy(outputs["part"], targets["part"]),
-        "acc_face": _masked_accuracy(outputs["face"], targets["face"]),
     }
+    valid_layer = targets["layer"] != IGNORE_INDEX
+    if valid_layer.any():
+        pred_outer = outputs["layer"].argmax(dim=1) == 1
+        target_outer = targets["layer"] == 1
+        outer_tp = (pred_outer & target_outer & valid_layer).sum().float()
+        outer_fp = (pred_outer & ~target_outer & valid_layer).sum().float()
+        outer_fn = (~pred_outer & target_outer & valid_layer).sum().float()
+        metrics.update(
+            {
+                "precision_outer": outer_tp / (outer_tp + outer_fp).clamp_min(1.0),
+                "recall_outer": outer_tp / (outer_tp + outer_fn).clamp_min(1.0),
+                "iou_outer": outer_tp / (outer_tp + outer_fp + outer_fn).clamp_min(1.0),
+            }
+        )
+    if "part" in outputs:
+        metrics["acc_part"] = _masked_accuracy(outputs["part"], targets["part"])
+    if "face" in outputs:
+        metrics["acc_face"] = _masked_accuracy(outputs["face"], targets["face"])
     if "layer_face" in outputs:
         metrics["acc_layer_face"] = _masked_accuracy(
             outputs["layer_face"],

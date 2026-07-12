@@ -78,6 +78,74 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         self.assertTrue(torch.isfinite(losses["loss_total"]))
         self.assertTrue(torch.isfinite(losses["loss_layer_face"]))
 
+    def test_geometry_model_only_emits_fit_and_visibility_heads(self):
+        rendered = torch.rand(1, 4, 32, 32)
+        rendered[:, 3] = 1.0
+        _, targets = augment_dense_batch(
+            rendered,
+            dense_targets(1, 32, 32),
+            translation_scale=0.0,
+            scale_range=0.0,
+        )
+        model = DenseUVParserNet(
+            base_channels=8,
+            uv_classification=False,
+            view_classes=1,
+            predict_affine=True,
+            surface_classes=0,
+            geometry_only=True,
+        )
+        outputs = model(rendered, view_ids=torch.zeros(1, dtype=torch.long))
+        self.assertEqual(set(outputs), {"foreground", "layer", "affine"})
+        losses = DenseUVParserLoss(use_uv=False)(outputs, targets)
+        self.assertTrue(torch.isfinite(losses["loss_geometry"]))
+        self.assertIn("precision_outer", losses)
+
+    def test_geometry_routing_uses_fixed_inner_outer_uv_maps(self):
+        renderer = FakeRenderer(valid_pixels=1)
+        renderer.front_outer_mask.copy_(renderer.front_inner_mask)
+        renderer.front_inner_grid[0, 0, 0] = (8.0 / 63.0) * 2.0 - 1.0
+        renderer.front_outer_grid[0, 0, 0] = (40.0 / 63.0) * 2.0 - 1.0
+        rendered = torch.rand(1, 4, 8, 8)
+        rendered[:, 3] = 1.0
+        outputs = {
+            "foreground": torch.full((1, 1, 8, 8), 10.0),
+            "layer": torch.cat(
+                [torch.full((1, 1, 8, 8), -10.0), torch.full((1, 1, 8, 8), 10.0)],
+                dim=1,
+            ),
+            "affine": torch.zeros(1, 3),
+        }
+
+        conditioning, details = splat_parser_predictions_to_uv_conditioning(
+            rendered,
+            outputs,
+            renderer=renderer,
+            views=["front"],
+            group_size=1,
+            affine_refine=False,
+            return_details=True,
+        )
+
+        self.assertEqual(int(details["routing"]["surface"][0, 0, 0]), 1)
+        self.assertEqual(int(details["routing"]["layer"][0, 0, 0]), 1)
+        self.assertEqual(int(conditioning[:, 4:5].sum()), 0)
+        self.assertEqual(int(conditioning[:, 9:10].sum()), 1)
+
+        outputs["layer"] = outputs["layer"].flip(1)
+        inner_conditioning, inner_details = splat_parser_predictions_to_uv_conditioning(
+            rendered,
+            outputs,
+            renderer=renderer,
+            views=["front"],
+            group_size=1,
+            affine_refine=False,
+            return_details=True,
+        )
+        self.assertEqual(int(inner_details["routing"]["surface"][0, 0, 0]), 0)
+        self.assertEqual(int(inner_conditioning[:, 4:5].sum()), 1)
+        self.assertEqual(int(inner_conditioning[:, 9:10].sum()), 0)
+
     def test_global_model_can_train_discrete_uv_routing_auxiliary(self):
         rendered = torch.rand(1, 4, 32, 32)
         rendered[:, 3] = 1.0

@@ -196,10 +196,14 @@ def run_epoch(model, criterion, renderer, loader, optimizer, scaler, device, pre
                 "total": f"{avg['loss_total']:.4f}",
                 "fg": f"{avg.get('recall_foreground', avg['acc_foreground']):.3f}",
             }
-            if args.parser_mode == "global_affine":
+            if args.parser_mode in ("global_affine", "geometry_fit"):
                 postfix["align"] = f"{avg.get('err_affine_translation_px', 0.0):.2f}px"
                 postfix["scale"] = f"{avg.get('err_affine_scale_pct', 0.0):.2f}%"
-                postfix["surface"] = f"{avg.get('acc_surface', 0.0):.3f}"
+                if args.parser_mode == "geometry_fit":
+                    postfix["outer_p"] = f"{avg.get('precision_outer', 0.0):.3f}"
+                    postfix["outer_r"] = f"{avg.get('recall_outer', 0.0):.3f}"
+                else:
+                    postfix["surface"] = f"{avg.get('acc_surface', 0.0):.3f}"
             else:
                 postfix["uv"] = f"{avg.get('loss_uv_l1_px', avg['loss_uv']):.2f}px"
                 postfix["uv1"] = f"{avg.get('acc_uv_within1', 0.0):.3f}"
@@ -303,17 +307,22 @@ def save_preview(model, renderer, loader, device, args, output_path, max_items=2
         pred_layer_values = debug_outputs["layer"].argmax(dim=1)
         pred_uv = prediction_uv01(debug_outputs)
     gt_fg = targets_debug["foreground"][:, 0] > 0.5
-    pred_part = torch.where(
-        pred_fg,
-        debug_outputs["part"].argmax(dim=1),
-        torch.full_like(debug_outputs["part"].argmax(dim=1), IGNORE_INDEX),
+    pred_part_values = (
+        debug_outputs["part"].argmax(dim=1)
+        if "part" in debug_outputs
+        else routing_debug["part"]
     )
+    pred_part = torch.where(pred_fg, pred_part_values, torch.full_like(pred_part_values, IGNORE_INDEX))
     pred_layer = torch.where(
         pred_fg,
         pred_layer_values,
         torch.full_like(debug_outputs["layer"].argmax(dim=1), IGNORE_INDEX),
     )
-    pred_face_values = debug_outputs["face"].argmax(dim=1)
+    pred_face_values = (
+        debug_outputs["face"].argmax(dim=1)
+        if "face" in debug_outputs
+        else routing_debug["face"]
+    )
     pred_face = torch.where(
         pred_fg,
         pred_face_values,
@@ -398,7 +407,9 @@ def save_checkpoint(path, model, optimizer, scaler, epoch, args, metrics, best_m
             "affine_translation_scale": model.affine_translation_scale,
             "affine_scale_range": model.affine_scale_range,
             "surface_classes": model.surface_classes,
-            "layer_face_classes": 12,
+            "layer_face_classes": 0 if model.geometry_only else 12,
+            "geometry_only": model.geometry_only,
+            "arm_model": "steve",
         },
     }
     torch.save(checkpoint, path)
@@ -413,9 +424,9 @@ def build_arg_parser():
     parser.add_argument("--views", default="walk_front_both_layer_ortho,walk_back_both_layer_ortho")
     parser.add_argument(
         "--parser_mode",
-        choices=["global_affine", "dense"],
-        default="global_affine",
-        help="global_affine aligns the render then uses fixed renderer UV mappings; dense preserves the legacy UV head.",
+        choices=["geometry_fit", "global_affine", "dense"],
+        default="geometry_fit",
+        help="geometry_fit learns only alignment and inner/outer visibility over fixed Steve cuboids.",
     )
     parser.add_argument("--max_samples", type=int, default=None)
     parser.add_argument("--val_split", type=float, default=0.1)
@@ -471,7 +482,7 @@ def build_arg_parser():
     parser.add_argument("--preview_every", type=int, default=1)
     parser.add_argument(
         "--best_metric",
-        choices=["loss_total", "loss_routing", "loss_surface", "loss_uv_class"],
+        choices=["loss_total", "loss_geometry", "loss_routing", "loss_surface", "loss_uv_class"],
         default="loss_total",
     )
     return parser
@@ -522,17 +533,23 @@ def main():
     if missing_views:
         raise ValueError(f"Unknown renderer views {missing_views}. Available views: {', '.join(renderer.views)}")
 
-    global_affine_mode = args.parser_mode == "global_affine"
-    surface_classes = surface_class_count(renderer, parse_views(args.views)) if global_affine_mode else 0
+    affine_mode = args.parser_mode in ("geometry_fit", "global_affine")
+    geometry_only = args.parser_mode == "geometry_fit"
+    surface_classes = (
+        surface_class_count(renderer, parse_views(args.views))
+        if args.parser_mode == "global_affine"
+        else 0
+    )
     model = DenseUVParserNet(
         base_channels=args.base_channels,
         uv_size=UV_SIZE,
-        uv_classification=args.uv_classification,
+        uv_classification=args.uv_classification and not geometry_only,
         view_classes=len(parse_views(args.views)),
-        predict_affine=global_affine_mode,
+        predict_affine=affine_mode,
         affine_translation_scale=args.translation_scale,
         affine_scale_range=args.scale_range,
         surface_classes=surface_classes,
+        geometry_only=geometry_only,
     ).to(device)
     criterion = DenseUVParserLoss(
         lambda_foreground=args.lambda_foreground,
@@ -545,9 +562,9 @@ def main():
         lambda_affine=args.lambda_affine,
         lambda_surface=args.lambda_surface,
         uv_size=UV_SIZE,
-        use_uv=(not global_affine_mode) or args.uv_classification,
-        affine_translation_limit=model.affine_translation_limit if global_affine_mode else 1.0,
-        affine_log_scale_limit=model.affine_log_scale_limit if global_affine_mode else 1.0,
+        use_uv=(not affine_mode) or model.uv_classification,
+        affine_translation_limit=model.affine_translation_limit if affine_mode else 1.0,
+        affine_log_scale_limit=model.affine_log_scale_limit if affine_mode else 1.0,
     ).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scaler = build_grad_scaler(device, args.mixed_precision)
@@ -556,11 +573,17 @@ def main():
     best_metric = float("inf")
     if args.resume:
         checkpoint = torch.load(args.resume, map_location=device)
-        if not any(key.startswith("layer_face.") for key in checkpoint["model"]):
+        checkpoint_mode = checkpoint.get("model_config", {}).get(
+            "parser_mode", checkpoint.get("args", {}).get("parser_mode", "dense")
+        )
+        if checkpoint_mode != args.parser_mode:
             raise ValueError(
-                "This checkpoint predates the joint layer-face head. Start a new run without RESUME "
-                "so all 12 inner/outer face classes are trained together."
+                f"Cannot resume parser_mode={checkpoint_mode!r} as {args.parser_mode!r}. Start a new run."
             )
+        if args.parser_mode == "global_affine" and not any(
+            key.startswith("layer_face.") for key in checkpoint["model"]
+        ):
+            raise ValueError("This global-affine checkpoint predates the joint layer-face head.")
         model.load_state_dict(checkpoint["model"])
         optimizer.load_state_dict(checkpoint["optimizer"])
         for param_group in optimizer.param_groups:
@@ -609,6 +632,8 @@ def main():
         "uv_classification": model.uv_classification,
         "view_classes": len(parse_views(args.views)),
         "surface_classes": surface_classes,
+        "geometry_only": geometry_only,
+        "arm_model": "steve",
         "best_metric": args.best_metric,
         "augment": args.augment,
         "augment_validation": args.augment_validation,
