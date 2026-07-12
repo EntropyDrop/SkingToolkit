@@ -57,7 +57,7 @@ class DenseUVParserNet(nn.Module):
         base_channels=32,
         part_classes=6,
         face_classes=6,
-        layer_classes=2,
+        layer_classes=None,
         layer_face_classes=12,
         uv_size=64,
         uv_classification=True,
@@ -70,6 +70,9 @@ class DenseUVParserNet(nn.Module):
     ):
         super().__init__()
         self.geometry_only = bool(geometry_only)
+        if layer_classes is None:
+            layer_classes = 3 if self.geometry_only else 2
+        self.layer_classes = int(layer_classes)
         self.uv_classification = bool(uv_classification) and not self.geometry_only
         self.view_classes = int(view_classes)
         self.predict_affine = bool(predict_affine)
@@ -90,7 +93,7 @@ class DenseUVParserNet(nn.Module):
             nn.SiLU(inplace=True),
         )
         self.foreground = nn.Conv2d(c, 1, kernel_size=1)
-        self.layer = nn.Conv2d(c, layer_classes, kernel_size=1)
+        self.layer = nn.Conv2d(c, self.layer_classes, kernel_size=1)
         if not self.geometry_only:
             self.part = nn.Conv2d(c, part_classes, kernel_size=1)
             self.face = nn.Conv2d(c, face_classes, kernel_size=1)

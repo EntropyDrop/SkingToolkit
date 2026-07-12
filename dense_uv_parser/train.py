@@ -22,6 +22,7 @@ from SkingToolkit.dense_uv_parser.utils import (  # noqa: E402
     LAYER_FACE_PALETTE,
     LAYER_PALETTE,
     PART_PALETTE,
+    ROUTE_ROLE_PALETTE,
     UV_SIZE,
     augment_dense_batch,
     build_dense_parser_batch,
@@ -245,6 +246,7 @@ def save_preview(model, renderer, loader, device, args, output_path, max_items=2
                 route_margin_threshold=args.route_margin_threshold,
                 outer_route_confidence_threshold=args.outer_route_confidence_threshold,
                 outer_route_margin_threshold=args.outer_route_margin_threshold,
+                outer_uv_min_coverage=args.outer_uv_min_coverage,
                 reject_semantic_fallback=not args.allow_semantic_fallback,
                 return_details=True,
             )
@@ -309,6 +311,7 @@ def save_preview(model, renderer, loader, device, args, output_path, max_items=2
         pred_layer_values = debug_outputs["layer"].argmax(dim=1)
         pred_uv = prediction_uv01(debug_outputs)
     gt_fg = targets_debug["foreground"][:, 0] > 0.5
+    raw_fg = torch.sigmoid(debug_outputs["foreground"])[:, 0] > args.splat_fg_threshold
     pred_part_values = (
         debug_outputs["part"].argmax(dim=1)
         if "part" in debug_outputs
@@ -366,6 +369,18 @@ def save_preview(model, renderer, loader, device, args, output_path, max_items=2
             rendered_debug,
         ),
     ]
+    if "route_role" in targets_debug and debug_outputs["layer"].shape[1] == 3:
+        pred_route_role = torch.where(
+            raw_fg,
+            debug_outputs["layer"].argmax(dim=1),
+            torch.full_like(debug_outputs["layer"].argmax(dim=1), IGNORE_INDEX),
+        )
+        debug_images.extend(
+            [
+                colorize_labels(pred_route_role, ROUTE_ROLE_PALETTE, args.bg_color, rendered_debug),
+                colorize_labels(targets_debug["route_role"], ROUTE_ROLE_PALETTE, args.bg_color, rendered_debug),
+            ]
+        )
     if routing_details is not None:
         geometry_debug = build_geometry_grid_debug(
             renderer,
@@ -425,6 +440,8 @@ def save_checkpoint(path, model, optimizer, scaler, epoch, args, metrics, best_m
             "affine_translation_scale": model.affine_translation_scale,
             "affine_scale_range": model.affine_scale_range,
             "surface_classes": model.surface_classes,
+            "layer_classes": model.layer_classes,
+            "route_role_classes": model.layer_classes if model.geometry_only else 0,
             "layer_face_classes": 0 if model.geometry_only else 12,
             "geometry_only": model.geometry_only,
             "arm_model": "steve",
@@ -444,7 +461,7 @@ def build_arg_parser():
         "--parser_mode",
         choices=["geometry_fit", "global_affine", "dense"],
         default="geometry_fit",
-        help="geometry_fit learns only alignment and inner/outer visibility over fixed Steve cuboids.",
+        help="geometry_fit learns alignment plus primary inner/outer versus secondary/backface routing.",
     )
     parser.add_argument("--max_samples", type=int, default=None)
     parser.add_argument("--val_split", type=float, default=0.1)
@@ -471,6 +488,7 @@ def build_arg_parser():
     parser.add_argument("--route_margin_threshold", type=float, default=0.0)
     parser.add_argument("--outer_route_confidence_threshold", type=float, default=0.10)
     parser.add_argument("--outer_route_margin_threshold", type=float, default=0.20)
+    parser.add_argument("--outer_uv_min_coverage", type=float, default=0.5)
     parser.add_argument("--allow_semantic_fallback", action="store_true")
     parser.add_argument("--augment", dest="augment", action="store_true", default=True)
     parser.add_argument("--no_augment", dest="augment", action="store_false")
@@ -598,6 +616,12 @@ def main():
             raise ValueError(
                 f"Cannot resume parser_mode={checkpoint_mode!r} as {args.parser_mode!r}. Start a new run."
             )
+        checkpoint_layer_classes = checkpoint.get("model_config", {}).get("layer_classes", 2)
+        if geometry_only and checkpoint_layer_classes != model.layer_classes:
+            raise ValueError(
+                "This geometry checkpoint predates the secondary/backface route class. "
+                "Start a new parser run instead of resuming it."
+            )
         if args.parser_mode == "global_affine" and not any(
             key.startswith("layer_face.") for key in checkpoint["model"]
         ):
@@ -650,6 +674,8 @@ def main():
         "uv_classification": model.uv_classification,
         "view_classes": len(parse_views(args.views)),
         "surface_classes": surface_classes,
+        "layer_classes": model.layer_classes,
+        "route_role_classes": model.layer_classes if geometry_only else 0,
         "geometry_only": geometry_only,
         "arm_model": "steve",
         "best_metric": args.best_metric,

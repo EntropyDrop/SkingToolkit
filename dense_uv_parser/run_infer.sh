@@ -68,6 +68,7 @@ DEBUG_OUTPUT="${DEBUG_OUTPUT-outputs/parser_debug.png}"
 OVERLAY_OUTPUT="${OVERLAY_OUTPUT-outputs/parser_debug_overlay.png}"
 INNER_CUTOUT_OUTPUT="${INNER_CUTOUT_OUTPUT-outputs/parser_debug_inner.png}"
 OUTER_CUTOUT_OUTPUT="${OUTER_CUTOUT_OUTPUT-outputs/parser_debug_outer.png}"
+SECONDARY_CUTOUT_OUTPUT="${SECONDARY_CUTOUT_OUTPUT-outputs/parser_debug_secondary.png}"
 FACE_OUTPUT="${FACE_OUTPUT-outputs/parser_debug_face.png}"
 LAYER_FACE_OUTPUT="${LAYER_FACE_OUTPUT-outputs/parser_debug_layer_face.png}"
 RAW_FACE_OUTPUT="${RAW_FACE_OUTPUT-outputs/parser_debug_face_raw.png}"
@@ -85,6 +86,7 @@ ROUTE_CONFIDENCE_THRESHOLD="${ROUTE_CONFIDENCE_THRESHOLD:-0.0}"
 ROUTE_MARGIN_THRESHOLD="${ROUTE_MARGIN_THRESHOLD:-0.0}"
 OUTER_ROUTE_CONFIDENCE_THRESHOLD="${OUTER_ROUTE_CONFIDENCE_THRESHOLD:-0.10}"
 OUTER_ROUTE_MARGIN_THRESHOLD="${OUTER_ROUTE_MARGIN_THRESHOLD:-0.20}"
+OUTER_UV_MIN_COVERAGE="${OUTER_UV_MIN_COVERAGE:-0.5}"
 ALLOW_SEMANTIC_FALLBACK="${ALLOW_SEMANTIC_FALLBACK:-false}"
 SEMANTIC_GATE="${SEMANTIC_GATE:-true}"
 AFFINE_REFINE="${AFFINE_REFINE:-true}"
@@ -103,6 +105,7 @@ args=(
   --route_margin_threshold "$ROUTE_MARGIN_THRESHOLD"
   --outer_route_confidence_threshold "$OUTER_ROUTE_CONFIDENCE_THRESHOLD"
   --outer_route_margin_threshold "$OUTER_ROUTE_MARGIN_THRESHOLD"
+  --outer_uv_min_coverage "$OUTER_UV_MIN_COVERAGE"
   --affine_refine_translation_px "$AFFINE_REFINE_TRANSLATION_PX"
   --affine_refine_scale "$AFFINE_REFINE_SCALE"
   --alpha_threshold "$ALPHA_THRESHOLD"
@@ -153,6 +156,9 @@ fi
 if [[ -n "$OUTER_CUTOUT_OUTPUT" ]]; then
   args+=(--outer_cutout_output "$OUTER_CUTOUT_OUTPUT")
 fi
+if [[ -n "$SECONDARY_CUTOUT_OUTPUT" ]]; then
+  args+=(--secondary_cutout_output "$SECONDARY_CUTOUT_OUTPUT")
+fi
 
 if [[ -n "$FACE_OUTPUT" ]]; then
   args+=(--face_output "$FACE_OUTPUT")
@@ -190,7 +196,7 @@ if [[ -n "$OUTPUT" ]]; then
   fi
 fi
 
-if [[ -z "$CONDITIONING_OUTPUT" && -z "$DEBUG_OUTPUT" && -z "$OVERLAY_OUTPUT" && -z "$INNER_CUTOUT_OUTPUT" && -z "$OUTER_CUTOUT_OUTPUT" && -z "$FACE_OUTPUT" && -z "$LAYER_FACE_OUTPUT" && -z "$RAW_FACE_OUTPUT" && -z "$RAW_LAYER_FACE_OUTPUT" && -z "$GEOMETRY_GRID_OUTPUT" && -z "$GEOMETRY_FILL_OUTPUT" && ( -z "$OUTPUT" || -z "$INPAINT_CHECKPOINT" ) ]]; then
+if [[ -z "$CONDITIONING_OUTPUT" && -z "$DEBUG_OUTPUT" && -z "$OVERLAY_OUTPUT" && -z "$INNER_CUTOUT_OUTPUT" && -z "$OUTER_CUTOUT_OUTPUT" && -z "$SECONDARY_CUTOUT_OUTPUT" && -z "$FACE_OUTPUT" && -z "$LAYER_FACE_OUTPUT" && -z "$RAW_FACE_OUTPUT" && -z "$RAW_LAYER_FACE_OUTPUT" && -z "$GEOMETRY_GRID_OUTPUT" && -z "$GEOMETRY_FILL_OUTPUT" && ( -z "$OUTPUT" || -z "$INPAINT_CHECKPOINT" ) ]]; then
   echo "Nothing to write. Set a debug/conditioning output or OUTPUT with a valid INPAINT_CHECKPOINT." >&2
   exit 1
 fi
@@ -217,6 +223,9 @@ if [[ -n "$INNER_CUTOUT_OUTPUT" ]]; then
 fi
 if [[ -n "$OUTER_CUTOUT_OUTPUT" ]]; then
   echo "Outer cutout output: $OUTER_CUTOUT_OUTPUT"
+fi
+if [[ -n "$SECONDARY_CUTOUT_OUTPUT" ]]; then
+  echo "Secondary/backface output: $SECONDARY_CUTOUT_OUTPUT"
 fi
 if [[ -n "$FACE_OUTPUT" ]]; then
   echo "Face output: $FACE_OUTPUT"

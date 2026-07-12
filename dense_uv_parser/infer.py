@@ -21,6 +21,7 @@ from SkingToolkit.dense_uv_parser.utils import (  # noqa: E402
     LAYER_FACE_PALETTE,
     LAYER_PALETTE,
     PART_PALETTE,
+    ROUTE_ROLE_PALETTE,
     combine_layer_face,
     build_geometry_grid_debug,
     fill_geometry_grid_debug,
@@ -74,10 +75,17 @@ def load_parser(checkpoint_path, device):
     parser_mode = model_config.get("parser_mode", checkpoint_args.get("parser_mode", "dense"))
     predict_affine = model_config.get("predict_affine", parser_mode in ("global_affine", "geometry_fit"))
     geometry_only = model_config.get("geometry_only", parser_mode == "geometry_fit")
+    layer_classes = model_config.get("layer_classes", 2)
+    if geometry_only and layer_classes != 3:
+        raise ValueError(
+            "This geometry parser predates the secondary/backface route class. "
+            "Train a new dense_uv_parser checkpoint."
+        )
     model = DenseUVParserNet(
         base_channels=model_config.get("base_channels", checkpoint_args.get("base_channels", 32)),
         uv_size=model_config.get("uv_size", 64),
         uv_classification=uv_classification,
+        layer_classes=layer_classes,
         layer_face_classes=model_config.get("layer_face_classes", 12 if has_layer_face else 0),
         view_classes=model_config.get("view_classes", 0),
         predict_affine=predict_affine,
@@ -162,6 +170,7 @@ def save_debug_preview(
     overlay_alpha=0.45,
     inner_cutout_output=None,
     outer_cutout_output=None,
+    secondary_cutout_output=None,
     face_output=None,
     layer_face_output=None,
     raw_face_output=None,
@@ -181,6 +190,7 @@ def save_debug_preview(
     )
     pred_part = torch.where(pred_fg, pred_part_values, torch.full_like(pred_part_values, IGNORE_INDEX))
     raw_layer_values = outputs["layer"].argmax(dim=1)
+    raw_fg = torch.sigmoid(outputs["foreground"])[:, 0] > fg_threshold
     pred_layer_values = routing["layer"] if routing is not None else raw_layer_values
     pred_layer = torch.where(
         pred_fg,
@@ -207,10 +217,8 @@ def save_debug_preview(
             torch.full_like(raw_layer_face_values, IGNORE_INDEX),
         )
     else:
-        raw_layer = torch.where(
-            pred_fg,
-            raw_layer_values,
-            torch.full_like(raw_layer_values, IGNORE_INDEX),
+        raw_layer = pred_layer if outputs["layer"].shape[1] == 3 else torch.where(
+            pred_fg, raw_layer_values, torch.full_like(raw_layer_values, IGNORE_INDEX)
         )
         raw_layer_face = combine_layer_face(raw_layer, raw_face)
     pred_layer_face = combine_layer_face(pred_layer, pred_face)
@@ -218,6 +226,12 @@ def save_debug_preview(
 
     part_color = colorize_labels(pred_part, PART_PALETTE, bg_color, rendered)
     layer_color = colorize_labels(pred_layer, LAYER_PALETTE, bg_color, rendered)
+    route_role = torch.where(
+        raw_fg,
+        raw_layer_values,
+        torch.full_like(raw_layer_values, IGNORE_INDEX),
+    )
+    route_role_color = colorize_labels(route_role, ROUTE_ROLE_PALETTE, bg_color, rendered)
     raw_face_color = colorize_labels(raw_face, FACE_PALETTE, bg_color, rendered)
     face_color = colorize_labels(pred_face, FACE_PALETTE, bg_color, rendered)
     raw_layer_face_color = colorize_labels(raw_layer_face, LAYER_FACE_PALETTE, bg_color, rendered)
@@ -237,6 +251,7 @@ def save_debug_preview(
         colorize_foreground(pred_fg, bg_color, rendered),
         part_color,
         layer_color,
+        route_role_color,
         raw_face_color,
         face_color,
         raw_layer_face_color,
@@ -282,15 +297,26 @@ def save_debug_preview(
                     nrow=view_count,
                 )
 
-    if overlay_output is not None or inner_cutout_output is not None or outer_cutout_output is not None:
+    if (
+        overlay_output is not None
+        or inner_cutout_output is not None
+        or outer_cutout_output is not None
+        or secondary_cutout_output is not None
+    ):
         rgb = rendered[:, :3]
         mask = pred_fg.unsqueeze(1)
         bg = rgb.new_tensor(bg_color).view(1, 3, 1, 1) / 255.0
         routed_original = torch.where(mask, rgb, bg.expand_as(rgb))
         inner_mask = (pred_fg & (pred_layer_values == 0)).unsqueeze(1)
         outer_mask = (pred_fg & (pred_layer_values == 1)).unsqueeze(1)
+        secondary_mask = (
+            routing.get("secondary", raw_fg & (raw_layer_values == 2))
+            if routing is not None
+            else raw_fg & (raw_layer_values == 2)
+        ).unsqueeze(1)
         inner_cutout = torch.where(inner_mask, rgb, bg.expand_as(rgb))
         outer_cutout = torch.where(outer_mask, rgb, bg.expand_as(rgb))
+        secondary_cutout = torch.where(secondary_mask, rgb, bg.expand_as(rgb))
 
         def save_cutout(cutout, path):
             if path is None:
@@ -300,6 +326,7 @@ def save_debug_preview(
 
         save_cutout(inner_cutout, inner_cutout_output)
         save_cutout(outer_cutout, outer_cutout_output)
+        save_cutout(secondary_cutout, secondary_cutout_output)
 
         def overlay(colorized):
             blended = rgb * (1.0 - overlay_alpha) + colorized * overlay_alpha
@@ -311,8 +338,10 @@ def save_debug_preview(
                 routed_original,
                 inner_cutout,
                 outer_cutout,
+                secondary_cutout,
                 overlay(part_color),
                 overlay(layer_color),
+                overlay(route_role_color),
                 overlay(face_color),
                 overlay(layer_face_color),
             ]
@@ -334,6 +363,11 @@ def build_arg_parser():
     parser.add_argument("--overlay_alpha", type=float, default=0.45)
     parser.add_argument("--inner_cutout_output", default=None, help="Original-color cutout for routed inner-layer pixels.")
     parser.add_argument("--outer_cutout_output", default=None, help="Original-color cutout for routed outer/decor pixels.")
+    parser.add_argument(
+        "--secondary_cutout_output",
+        default=None,
+        help="Original-color cutout for rejected secondary/back-facing pixels.",
+    )
     parser.add_argument("--face_output", default=None, help="Six-class routed cube-face visualization.")
     parser.add_argument("--layer_face_output", default=None, help="Twelve-class inner/outer-by-face visualization.")
     parser.add_argument("--raw_face_output", default=None, help="Six-class raw face-head visualization.")
@@ -350,6 +384,12 @@ def build_arg_parser():
     parser.add_argument("--route_margin_threshold", type=float, default=0.0)
     parser.add_argument("--outer_route_confidence_threshold", type=float, default=0.10)
     parser.add_argument("--outer_route_margin_threshold", type=float, default=0.20)
+    parser.add_argument(
+        "--outer_uv_min_coverage",
+        type=float,
+        default=0.5,
+        help="Reject outer UV texels supported by less than this fraction of their projected footprint.",
+    )
     parser.add_argument(
         "--allow_semantic_fallback",
         action="store_true",
@@ -378,6 +418,7 @@ def main():
             args.overlay_output,
             args.inner_cutout_output,
             args.outer_cutout_output,
+            args.secondary_cutout_output,
             args.face_output,
             args.layer_face_output,
             args.raw_face_output,
@@ -388,7 +429,7 @@ def main():
     ):
         raise ValueError(
             "Provide --output, --conditioning_output, --debug_output, --overlay_output, "
-            "--inner_cutout_output, and/or --outer_cutout_output."
+            "--inner_cutout_output, --outer_cutout_output, and/or --secondary_cutout_output."
         )
 
     device = get_device(args.device)
@@ -446,6 +487,7 @@ def main():
             route_margin_threshold=args.route_margin_threshold,
             outer_route_confidence_threshold=args.outer_route_confidence_threshold,
             outer_route_margin_threshold=args.outer_route_margin_threshold,
+            outer_uv_min_coverage=args.outer_uv_min_coverage,
             reject_semantic_fallback=not args.allow_semantic_fallback,
             return_details=True,
         )
@@ -458,6 +500,11 @@ def main():
         raw_outer = routing["raw_foreground"] & (routing["layer"] == 1)
         rejected_inner = routing["rejected"] & (routing["layer"] == 0)
         rejected_outer = routing["rejected"] & (routing["layer"] == 1)
+        coverage_rejected_outer = raw_outer & (
+            routing.get("outer_uv_coverage", torch.ones_like(routing["confidence"]))
+            < args.outer_uv_min_coverage
+        )
+        secondary_count = int(routing.get("secondary", torch.zeros_like(raw_outer)).sum().item())
         print(
             "routing_filter="
             + json.dumps(
@@ -474,6 +521,8 @@ def main():
                         100.0 * int(rejected_outer.sum().item()) / max(int(raw_outer.sum().item()), 1),
                         3,
                     ),
+                    "outer_coverage_rejected_pixels": int(coverage_rejected_outer.sum().item()),
+                    "secondary_backface_pixels": secondary_count,
                 },
                 sort_keys=True,
             )
@@ -509,6 +558,7 @@ def main():
             args.overlay_output,
             args.inner_cutout_output,
             args.outer_cutout_output,
+            args.secondary_cutout_output,
             args.face_output,
             args.layer_face_output,
             args.raw_face_output,
@@ -529,6 +579,9 @@ def main():
             overlay_alpha=args.overlay_alpha,
             inner_cutout_output=Path(args.inner_cutout_output) if args.inner_cutout_output else None,
             outer_cutout_output=Path(args.outer_cutout_output) if args.outer_cutout_output else None,
+            secondary_cutout_output=(
+                Path(args.secondary_cutout_output) if args.secondary_cutout_output else None
+            ),
             face_output=Path(args.face_output) if args.face_output else None,
             layer_face_output=Path(args.layer_face_output) if args.layer_face_output else None,
             raw_face_output=Path(args.raw_face_output) if args.raw_face_output else None,
@@ -580,6 +633,14 @@ def main():
             raise ValueError(
                 "Parser affine-refinement scale range does not match the inverse_uv checkpoint: "
                 f"checkpoint={expected_scale}, requested={affine_refine_scale}."
+            )
+        expected_outer_coverage = inpaint_args.get("parser_outer_uv_min_coverage")
+        if expected_outer_coverage is not None and abs(
+            float(expected_outer_coverage) - args.outer_uv_min_coverage
+        ) > 1e-9:
+            raise ValueError(
+                "Parser outer UV coverage threshold does not match the inverse_uv checkpoint: "
+                f"checkpoint={expected_outer_coverage}, requested={args.outer_uv_min_coverage}."
             )
         with torch.no_grad():
             pred_uv = finalize_minecraft_alpha(

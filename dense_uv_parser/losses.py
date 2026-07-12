@@ -68,7 +68,13 @@ class DenseUVParserLoss(nn.Module):
         loss_foreground = loss_foreground_bce + loss_foreground_dice
 
         zero = outputs["foreground"].new_tensor(0.0)
-        loss_layer = F.cross_entropy(outputs["layer"], targets["layer"], ignore_index=IGNORE_INDEX)
+        geometry_route_roles = outputs["layer"].shape[1] == 3 and "route_role" in targets
+        layer_target = targets["route_role"] if geometry_route_roles else targets["layer"]
+        loss_layer = (
+            _balanced_cross_entropy(outputs["layer"], layer_target)
+            if geometry_route_roles
+            else F.cross_entropy(outputs["layer"], layer_target, ignore_index=IGNORE_INDEX)
+        )
         loss_part = (
             F.cross_entropy(outputs["part"], targets["part"], ignore_index=IGNORE_INDEX)
             if "part" in outputs
@@ -210,14 +216,31 @@ def classification_metrics(outputs, targets, uv_size, use_uv=True):
     tp = (fg_pred_flat & fg_target_flat).sum().float()
     fp = (fg_pred_flat & ~fg_target_flat).sum().float()
     fn = (~fg_pred_flat & fg_target_flat).sum().float()
+    geometry_route_roles = outputs["layer"].shape[1] == 3 and "route_role" in targets
+    layer_target = targets["route_role"] if geometry_route_roles else targets["layer"]
     metrics = {
         "acc_foreground": fg_acc,
         "precision_foreground": tp / (tp + fp).clamp_min(1.0),
         "recall_foreground": tp / (tp + fn).clamp_min(1.0),
         "iou_foreground": tp / (tp + fp + fn).clamp_min(1.0),
-        "acc_layer": _masked_accuracy(outputs["layer"], targets["layer"]),
+        "acc_layer": _masked_accuracy(outputs["layer"], layer_target),
     }
-    valid_layer = targets["layer"] != IGNORE_INDEX
+    if geometry_route_roles:
+        metrics["acc_route_role"] = metrics["acc_layer"]
+        valid_role = layer_target != IGNORE_INDEX
+        pred_role = outputs["layer"].argmax(dim=1)
+        for name, role in (("outer", 1), ("secondary", 2)):
+            target_role = layer_target == role
+            predicted_role = pred_role == role
+            role_tp = (predicted_role & target_role & valid_role).sum().float()
+            role_fp = (predicted_role & ~target_role & valid_role).sum().float()
+            role_fn = (~predicted_role & target_role & valid_role).sum().float()
+            metrics[f"precision_{name}"] = role_tp / (role_tp + role_fp).clamp_min(1.0)
+            metrics[f"recall_{name}"] = role_tp / (role_tp + role_fn).clamp_min(1.0)
+            metrics[f"iou_{name}"] = role_tp / (role_tp + role_fp + role_fn).clamp_min(1.0)
+        valid_layer = torch.zeros_like(valid_role)
+    else:
+        valid_layer = targets["layer"] != IGNORE_INDEX
     if valid_layer.any():
         pred_outer = outputs["layer"].argmax(dim=1) == 1
         target_outer = targets["layer"] == 1

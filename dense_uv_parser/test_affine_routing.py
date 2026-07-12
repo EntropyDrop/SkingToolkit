@@ -14,6 +14,7 @@ from SkingToolkit.dense_uv_parser.utils import (
     augment_dense_batch,
     canonicalize_parser_render,
     canonicalize_tensor,
+    classify_route_role,
     refine_parser_affine,
     splat_deterministic_targets_to_uv_conditioning,
     splat_parser_predictions_to_uv_conditioning,
@@ -49,6 +50,7 @@ class FakeGeometryModel(nn.Module):
                 [
                     torch.full((batch, 1, height, width), 10.0),
                     torch.full((batch, 1, height, width), -10.0),
+                    torch.full((batch, 1, height, width), -10.0),
                 ],
                 dim=1,
             ),
@@ -60,6 +62,7 @@ def dense_targets(batch, height, width):
     return {
         "foreground": torch.ones(batch, 1, height, width),
         "layer": torch.zeros(batch, height, width, dtype=torch.long),
+        "route_role": torch.zeros(batch, height, width, dtype=torch.long),
         "part": torch.zeros(batch, height, width, dtype=torch.long),
         "face": torch.zeros(batch, height, width, dtype=torch.long),
         "surface": torch.zeros(batch, height, width, dtype=torch.long),
@@ -68,6 +71,19 @@ def dense_targets(batch, height, width):
 
 
 class GlobalAffineRoutingTest(unittest.TestCase):
+    def test_route_role_marks_only_mismatched_visible_uv_as_secondary(self):
+        static = {
+            "masks": torch.ones(2, 1, 2, dtype=torch.bool),
+            "flat_uv": torch.tensor([[[7, 8]], [[40, 41]]]),
+        }
+        layer = torch.tensor([[[0, 1]]])
+        visible_uv = torch.tensor([[[7, 55]]])
+        valid = torch.ones(1, 1, 2, dtype=torch.bool)
+
+        role = classify_route_role(static, layer, visible_uv, valid)
+
+        self.assertTrue(torch.equal(role, torch.tensor([[[0, 2]]])))
+
     def test_balanced_cross_entropy_supports_bfloat16_logits(self):
         logits = torch.randn(2, 12, 8, 8, dtype=torch.bfloat16)
         target = torch.randint(0, 12, (2, 8, 8))
@@ -132,7 +148,11 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         outputs = {
             "foreground": torch.full((1, 1, 8, 8), 10.0),
             "layer": torch.cat(
-                [torch.full((1, 1, 8, 8), -10.0), torch.full((1, 1, 8, 8), 10.0)],
+                [
+                    torch.full((1, 1, 8, 8), -10.0),
+                    torch.full((1, 1, 8, 8), 10.0),
+                    torch.full((1, 1, 8, 8), -10.0),
+                ],
                 dim=1,
             ),
             "affine": torch.zeros(1, 3),
@@ -153,7 +173,14 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         self.assertEqual(int(conditioning[:, 4:5].sum()), 0)
         self.assertEqual(int(conditioning[:, 9:10].sum()), 1)
 
-        outputs["layer"] = outputs["layer"].flip(1)
+        outputs["layer"] = torch.cat(
+            [
+                torch.full((1, 1, 8, 8), 10.0),
+                torch.full((1, 1, 8, 8), -10.0),
+                torch.full((1, 1, 8, 8), -10.0),
+            ],
+            dim=1,
+        )
         inner_conditioning, inner_details = splat_parser_predictions_to_uv_conditioning(
             rendered,
             outputs,
@@ -166,6 +193,68 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         self.assertEqual(int(inner_details["routing"]["surface"][0, 0, 0]), 0)
         self.assertEqual(int(inner_conditioning[:, 4:5].sum()), 1)
         self.assertEqual(int(inner_conditioning[:, 9:10].sum()), 0)
+
+    def test_outer_uv_coverage_rejects_partial_texel_without_removing_inner(self):
+        mask = torch.ones(1, 2)
+        renderer = FakeRenderer(mask=mask)
+        renderer.front_outer_mask.copy_(mask)
+        rendered = torch.rand(1, 4, 1, 2)
+        rendered[:, 3] = 1.0
+        outputs = {
+            "foreground": torch.full((1, 1, 1, 2), 10.0),
+            "layer": torch.tensor(
+                [[[[ -10.0, 10.0]], [[10.0, -10.0]], [[-10.0, -10.0]]]]
+            ),
+            "affine": torch.zeros(1, 3),
+        }
+
+        conditioning, details = splat_parser_predictions_to_uv_conditioning(
+            rendered,
+            outputs,
+            renderer=renderer,
+            views=["front"],
+            group_size=1,
+            affine_refine=False,
+            outer_uv_min_coverage=0.75,
+            return_details=True,
+        )
+
+        self.assertEqual(int(conditioning[:, 9:10].sum()), 0)
+        self.assertEqual(int(conditioning[:, 4:5].sum()), 1)
+        self.assertEqual(int(details["routing"]["rejected"][0, 0, 0]), 1)
+        self.assertAlmostEqual(float(details["routing"]["outer_uv_coverage"][0, 0, 0]), 0.5)
+
+    def test_geometry_secondary_backface_is_visible_in_debug_but_not_splatted(self):
+        renderer = FakeRenderer(valid_pixels=1)
+        renderer.front_outer_mask.copy_(renderer.front_inner_mask)
+        rendered = torch.rand(1, 4, 8, 8)
+        rendered[:, 3] = 1.0
+        outputs = {
+            "foreground": torch.full((1, 1, 8, 8), 10.0),
+            "layer": torch.cat(
+                [
+                    torch.full((1, 1, 8, 8), -10.0),
+                    torch.full((1, 1, 8, 8), -10.0),
+                    torch.full((1, 1, 8, 8), 10.0),
+                ],
+                dim=1,
+            ),
+            "affine": torch.zeros(1, 3),
+        }
+
+        conditioning, details = splat_parser_predictions_to_uv_conditioning(
+            rendered,
+            outputs,
+            renderer=renderer,
+            views=["front"],
+            group_size=1,
+            affine_refine=False,
+            return_details=True,
+        )
+
+        self.assertTrue(details["routing"]["secondary"][0, 0, 0])
+        self.assertEqual(int(details["routing"]["foreground"].sum()), 0)
+        self.assertEqual(int(conditioning[:, 4:5].sum() + conditioning[:, 9:10].sum()), 0)
 
     def test_geometry_training_preview_has_no_semantic_heads(self):
         renderer = FakeRenderer(valid_pixels=1)
@@ -185,6 +274,7 @@ class GlobalAffineRoutingTest(unittest.TestCase):
             route_margin_threshold=0.0,
             outer_route_confidence_threshold=0.1,
             outer_route_margin_threshold=0.2,
+            outer_uv_min_coverage=0.5,
             allow_semantic_fallback=False,
         )
         loader = [{"uv": torch.zeros(1, 4, 64, 64), "path": ["test.png"]}]

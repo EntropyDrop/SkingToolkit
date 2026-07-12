@@ -17,6 +17,10 @@ PART_CLASSES = 6
 FACE_CLASSES = 6
 LAYER_CLASSES = 2
 LAYER_FACE_CLASSES = LAYER_CLASSES * FACE_CLASSES
+ROUTE_ROLE_CLASSES = 3
+ROUTE_INNER_PRIMARY = 0
+ROUTE_OUTER_PRIMARY = 1
+ROUTE_SECONDARY = 2
 UV_SIZE = 64
 
 
@@ -192,6 +196,21 @@ def _sample_surface_alpha(skins, static):
     return sampled.reshape(B, surface_count, H, W) * static["masks"].unsqueeze(0)
 
 
+def classify_route_role(static, selected_layer, selected_flat_uv, valid):
+    """Classify visible pixels as direct inner/outer surfaces or deeper backfaces."""
+    B, H, W = selected_layer.shape
+    safe_layer = selected_layer.clamp(0, LAYER_CLASSES - 1)
+    direct_masks = static["masks"][:LAYER_CLASSES].unsqueeze(0).expand(B, -1, H, W)
+    direct_uv = static["flat_uv"][:LAYER_CLASSES].unsqueeze(0).expand(B, -1, H, W)
+    direct_valid = direct_masks.gather(1, safe_layer.unsqueeze(1)).squeeze(1)
+    expected_uv = direct_uv.gather(1, safe_layer.unsqueeze(1)).squeeze(1)
+    primary = valid & direct_valid & (selected_flat_uv == expected_uv)
+    route_role = torch.full_like(selected_layer, IGNORE_INDEX)
+    route_role[primary] = selected_layer[primary]
+    route_role[valid & ~primary] = ROUTE_SECONDARY
+    return route_role
+
+
 def build_dense_parser_batch(skins, renderer, view, alpha_threshold=0.5):
     """Render skins and label the exact fixed surface that produced every pixel."""
     device = skins.device
@@ -252,6 +271,7 @@ def build_dense_parser_batch(skins, renderer, view, alpha_threshold=0.5):
     selected = _select_static_surface(static, surface)
     valid = selected["valid"]
     layer = torch.where(valid, selected["layer"], torch.full_like(surface, IGNORE_INDEX))
+    route_role = classify_route_role(static, selected["layer"], selected["flat_uv"], valid)
     part = torch.where(valid, selected["part"], torch.full_like(surface, IGNORE_INDEX))
     face = torch.where(valid, selected["face"], torch.full_like(surface, IGNORE_INDEX))
     uv = flat_uv_to_uv01(selected["flat_uv"], dtype).masked_fill(~valid.unsqueeze(1), 0.0)
@@ -259,6 +279,7 @@ def build_dense_parser_batch(skins, renderer, view, alpha_threshold=0.5):
     targets = {
         "foreground": valid.unsqueeze(1).to(dtype=dtype),
         "layer": layer,
+        "route_role": route_role,
         "part": part,
         "face": face,
         "surface": torch.where(valid, surface, torch.full_like(surface, IGNORE_INDEX)),
@@ -329,6 +350,7 @@ def augment_dense_batch(
         align_corners=False,
     )
     layer = _sample_index_target(targets["layer"], grid)
+    route_role = _sample_index_target(targets["route_role"], grid)
     part = _sample_index_target(targets["part"], grid)
     face = _sample_index_target(targets["face"], grid)
     surface = _sample_index_target(targets["surface"], grid)
@@ -354,6 +376,7 @@ def augment_dense_batch(
     return rendered_aug, {
         "foreground": foreground,
         "layer": layer,
+        "route_role": route_role,
         "part": part,
         "face": face,
         "surface": surface,
@@ -453,6 +476,7 @@ def canonicalize_dense_targets(targets):
     canonical = {
         "foreground": canonicalize_tensor(targets["foreground"], affine, mode="nearest"),
         "layer": canonicalize_index_tensor(targets["layer"], affine),
+        "route_role": canonicalize_index_tensor(targets["route_role"], affine),
         "part": canonicalize_index_tensor(targets["part"], affine),
         "face": canonicalize_index_tensor(targets["face"], affine),
         "surface": canonicalize_index_tensor(targets["surface"], affine),
@@ -755,9 +779,17 @@ def _routing_from_geometry_outputs(renderer, views, outputs, fg_threshold=0.5, o
     if not views:
         raise ValueError("At least one renderer view is required for geometry routing.")
     foreground_prob = torch.sigmoid(outputs["foreground"])[:, 0]
-    layer_prob = torch.softmax(outputs["layer"], dim=1)
-    outer_prob = layer_prob[:, 1]
-    inner_prob = layer_prob[:, 0]
+    if outputs["layer"].shape[1] != ROUTE_ROLE_CLASSES:
+        raise ValueError(
+            "geometry_fit requires a three-class route-role head "
+            "(inner_primary, outer_primary, secondary_backface). Retrain the parser."
+        )
+    role_prob = torch.softmax(outputs["layer"], dim=1)
+    route_role = role_prob.argmax(dim=1)
+    outer_prob = role_prob[:, ROUTE_OUTER_PRIMARY]
+    inner_prob = role_prob[:, ROUTE_INNER_PRIMARY]
+    top_prob = role_prob.topk(2, dim=1).values
+    role_margin = top_prob[:, 0] - top_prob[:, 1]
     N, H, W = outer_prob.shape
     if N % len(views) != 0:
         raise ValueError(f"N={N} must be divisible by {len(views)} renderer views.")
@@ -771,6 +803,7 @@ def _routing_from_geometry_outputs(renderer, views, outputs, fg_threshold=0.5, o
     confidence_margin_ratio = torch.zeros_like(outer_prob)
     part = torch.full_like(layer, IGNORE_INDEX)
     face = torch.full_like(layer, IGNORE_INDEX)
+    secondary = (route_role == ROUTE_SECONDARY) & (foreground_prob > fg_threshold)
 
     for view_index, view in enumerate(views):
         selection = slice(view_index, N, len(views))
@@ -783,13 +816,16 @@ def _routing_from_geometry_outputs(renderer, views, outputs, fg_threshold=0.5, o
 
         inner_valid = static["masks"][0].unsqueeze(0).expand(outer_prob[selection].shape[0], -1, -1)
         outer_valid = static["masks"][1].unsqueeze(0).expand_as(inner_valid)
-        visible_outer = outer_prob[selection] >= outer_threshold
+        visible_outer = (
+            (route_role[selection] == ROUTE_OUTER_PRIMARY)
+            & (outer_prob[selection] >= outer_threshold)
+        )
         # The Steve base layer is opaque and therefore supplies a complete
         # silhouette. Outer-only protrusions still need image foreground evidence.
         choose_outer = outer_valid & visible_outer & (
             inner_valid | (foreground_prob[selection] > fg_threshold)
         )
-        choose_inner = inner_valid & ~choose_outer
+        choose_inner = inner_valid & (route_role[selection] == ROUTE_INNER_PRIMARY)
         selected_fg = choose_inner | choose_outer
 
         inner_flat_uv = static["flat_uv"][0].unsqueeze(0).expand_as(layer[selection])
@@ -818,7 +854,7 @@ def _routing_from_geometry_outputs(renderer, views, outputs, fg_threshold=0.5, o
             torch.full_like(layer[selection], IGNORE_INDEX),
         )
         selected_confidence = torch.where(choose_outer, outer_prob[selection], inner_prob[selection])
-        margin = (outer_prob[selection] - inner_prob[selection]).abs()
+        margin = role_margin[selection]
         confidence[selection] = selected_confidence
         confidence_margin[selection] = margin
         confidence_margin_ratio[selection] = (
@@ -836,6 +872,8 @@ def _routing_from_geometry_outputs(renderer, views, outputs, fg_threshold=0.5, o
         "semantic_fallback": torch.zeros_like(fg),
         "part": part,
         "face": face,
+        "route_role": route_role,
+        "secondary": secondary,
     }
 
 
@@ -865,6 +903,7 @@ def splat_parser_predictions_to_uv_conditioning(
     route_margin_threshold=0.0,
     outer_route_confidence_threshold=None,
     outer_route_margin_threshold=None,
+    outer_uv_min_coverage=0.5,
     geometry_outer_threshold=0.5,
     reject_semantic_fallback=False,
     reject_inner_semantic_fallback=False,
@@ -883,6 +922,8 @@ def splat_parser_predictions_to_uv_conditioning(
         raise ValueError("outer_route_confidence_threshold must be in [0, 1].")
     if not 0.0 <= outer_route_margin_threshold <= 1.0:
         raise ValueError("outer_route_margin_threshold must be in [0, 1].")
+    if not 0.0 <= outer_uv_min_coverage <= 1.0:
+        raise ValueError("outer_uv_min_coverage must be in [0, 1].")
     if "affine" not in outputs:
         conditioning = splat_predictions_to_uv_conditioning(
             rendered,
@@ -954,9 +995,38 @@ def splat_parser_predictions_to_uv_conditioning(
             selected_outer | reject_inner_semantic_fallback
         )
         trusted = trusted & ~rejected_fallback
+    outer_uv_coverage = torch.ones_like(routing["confidence"])
+    if outer_uv_min_coverage > 0.0:
+        views_per_group = len(views)
+        group_count = trusted.shape[0] // views_per_group
+        expected = routing["confidence"].new_zeros(UV_SIZE * UV_SIZE)
+        for view in views:
+            static = build_static_surface_routing(renderer, view, trusted.device)
+            expected_uv = static["flat_uv"][1][static["masks"][1]]
+            expected.scatter_add_(
+                0,
+                expected_uv,
+                torch.ones(expected_uv.shape[0], device=trusted.device, dtype=expected.dtype),
+            )
+
+        item_groups = torch.arange(trusted.shape[0], device=trusted.device) // views_per_group
+        grouped_uv = routing["flat_uv"] + item_groups.view(-1, 1, 1) * (UV_SIZE * UV_SIZE)
+        observed_mask = trusted & selected_outer
+        observed = routing["confidence"].new_zeros(group_count * UV_SIZE * UV_SIZE)
+        observed_uv = grouped_uv[observed_mask]
+        observed.scatter_add_(
+            0,
+            observed_uv,
+            torch.ones(observed_uv.shape[0], device=trusted.device, dtype=observed.dtype),
+        )
+        coverage = observed.reshape(group_count, UV_SIZE * UV_SIZE) / expected.clamp_min(1.0)
+        pixel_coverage = coverage[item_groups.view(-1, 1, 1), routing["flat_uv"]]
+        outer_uv_coverage = torch.where(selected_outer, pixel_coverage, outer_uv_coverage)
+        trusted = trusted & (~selected_outer | (pixel_coverage >= outer_uv_min_coverage))
     routing["raw_foreground"] = raw_foreground
     routing["rejected"] = raw_foreground & ~trusted
     routing["foreground"] = trusted
+    routing["outer_uv_coverage"] = outer_uv_coverage
     conditioning = splat_to_uv_conditioning(
         canonical_rendered,
         routing["foreground"],
@@ -1185,6 +1255,11 @@ PART_PALETTE = (
 LAYER_PALETTE = (
     (72, 169, 166),
     (255, 179, 71),
+)
+ROUTE_ROLE_PALETTE = (
+    (72, 169, 166),
+    (255, 179, 71),
+    (218, 112, 232),
 )
 FACE_NAMES = ("front", "back", "left", "right", "top", "bottom")
 FACE_PALETTE = (
