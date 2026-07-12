@@ -1236,6 +1236,72 @@ def colorize_labels(labels, palette, bg_color, reference):
     return bg
 
 
+def build_geometry_grid_debug(renderer, views, item_count, reference, bg_color=(128, 128, 128)):
+    """Build fitted inner/outer cuboid face maps with projected UV texel boundaries."""
+    views = parse_views(views)
+    if not views:
+        raise ValueError("At least one view is required for geometry-grid debug output.")
+    colors = [[], []]
+    masks = [[], []]
+    edges = [[], []]
+    for item_index in range(item_count):
+        static = build_static_surface_routing(renderer, views[item_index % len(views)], reference.device)
+        for layer_index in range(LAYER_CLASSES):
+            mask = static["masks"][layer_index]
+            face = static["face"][layer_index]
+            flat_uv = static["flat_uv"][layer_index]
+            labels = combine_layer_face(
+                torch.full_like(face, layer_index),
+                torch.where(mask, face, torch.full_like(face, IGNORE_INDEX)),
+            ).unsqueeze(0)
+            color = colorize_labels(labels, LAYER_FACE_PALETTE, bg_color, reference[:1])[0]
+
+            edge = torch.zeros_like(mask)
+            different_x = (flat_uv[:, 1:] != flat_uv[:, :-1]) | (face[:, 1:] != face[:, :-1])
+            different_y = (flat_uv[1:, :] != flat_uv[:-1, :]) | (face[1:, :] != face[:-1, :])
+            edge[:, 1:] |= mask[:, 1:] & mask[:, :-1] & different_x
+            edge[1:, :] |= mask[1:, :] & mask[:-1, :] & different_y
+            interior = -F.max_pool2d(-mask.float().unsqueeze(0).unsqueeze(0), 3, 1, 1)[0, 0]
+            edge |= mask & (interior < 0.5)
+            edge_color = reference.new_tensor((0.08, 0.08, 0.08)).view(3, 1, 1)
+            color = torch.where(edge.unsqueeze(0), edge_color, color)
+
+            colors[layer_index].append(color)
+            masks[layer_index].append(mask)
+            edges[layer_index].append(edge)
+
+    return (
+        torch.stack(colors[0]),
+        torch.stack(colors[1]),
+        torch.stack(masks[0]),
+        torch.stack(masks[1]),
+        torch.stack(edges[0]),
+        torch.stack(edges[1]),
+    )
+
+
+def fill_geometry_grid_debug(rendered, foreground, layer, geometry_debug, bg_color=(128, 128, 128)):
+    """Fill fitted cuboid grids with RGB pixels assigned to each predicted layer."""
+    inner_grid, outer_grid, inner_geometry, outer_geometry, inner_edges, outer_edges = geometry_debug
+    rgb = rendered[:, :3]
+    bg = rgb.new_tensor(bg_color).view(1, 3, 1, 1) / 255.0
+
+    def fill(grid, geometry_mask, edge_mask, layer_index):
+        dim_grid = torch.where(
+            geometry_mask.unsqueeze(1),
+            grid * 0.35 + bg * 0.65,
+            bg.expand_as(grid),
+        )
+        classified = (foreground & (layer == layer_index)).unsqueeze(1)
+        filled = torch.where(classified, rgb, dim_grid)
+        edge_color = rgb.new_tensor((0.08, 0.08, 0.08)).view(1, 3, 1, 1)
+        return torch.where(edge_mask.unsqueeze(1), edge_color, filled)
+
+    return fill(inner_grid, inner_geometry, inner_edges, 0), fill(
+        outer_grid, outer_geometry, outer_edges, 1
+    )
+
+
 def colorize_surface(labels, bg_color, reference):
     """Colorize fixed renderer surface slots without assuming a fixed slot count."""
     N, H, W = labels.shape

@@ -51,7 +51,7 @@ Set `BACKGROUND_AUGMENT=false` to use a fixed gray RGB background; the input sti
 Training previews are saved under `runs/<run>/previews`:
 
 - `epoch_XXXX.png`: predicted inner/outer RGB rows, followed by GT inner/outer RGB rows.
-- `epoch_XXXX_debug.png`: rendered input, predicted/GT foreground, predicted/GT part, predicted/GT layer, and predicted/GT UV color maps.
+- `epoch_XXXX_debug.png`: semantic diagnostics plus fitted inner/outer grids and RGB-filled grid previews.
 
 For good parser splatting, watch `precision_outer`, `recall_outer`, `acc_layer`, `err_affine_translation_px`, and `err_affine_scale_pct`. `best.pt` defaults to the lowest `loss_geometry`.
 
@@ -68,6 +68,8 @@ Use the latest parser checkpoint automatically:
 By default it looks for the highest `runs/dense_uv_parser_v*/best.pt`, then looks for the highest `../inverse_uv/runs/inverse_uv_full_v*/best.pt`. It writes:
 
 - `outputs/parser_conditioning.png`
+- `outputs/parser_debug_geometry_grid.png`: fitted inner/outer cuboid faces with projected UV texel boundaries
+- `outputs/parser_debug_geometry_fill.png`: classified source RGB filled onto the inner/outer cuboid grids
 - `outputs/pred_uv.png` when an inverse_uv inpaint checkpoint is found
 
 Common overrides:

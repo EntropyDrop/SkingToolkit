@@ -22,6 +22,8 @@ from SkingToolkit.dense_uv_parser.utils import (  # noqa: E402
     LAYER_PALETTE,
     PART_PALETTE,
     combine_layer_face,
+    build_geometry_grid_debug,
+    fill_geometry_grid_debug,
     colorize_foreground,
     colorize_labels,
     colorize_surface,
@@ -164,6 +166,10 @@ def save_debug_preview(
     layer_face_output=None,
     raw_face_output=None,
     raw_layer_face_output=None,
+    geometry_grid_output=None,
+    geometry_fill_output=None,
+    renderer=None,
+    views=None,
 ):
     if not 0.0 <= overlay_alpha <= 1.0:
         raise ValueError(f"overlay_alpha must be in [0, 1], got {overlay_alpha}.")
@@ -216,6 +222,16 @@ def save_debug_preview(
     face_color = colorize_labels(pred_face, FACE_PALETTE, bg_color, rendered)
     raw_layer_face_color = colorize_labels(raw_layer_face, LAYER_FACE_PALETTE, bg_color, rendered)
     layer_face_color = colorize_labels(pred_layer_face, LAYER_FACE_PALETTE, bg_color, rendered)
+    geometry_images = None
+    if renderer is not None and views is not None and routing is not None:
+        geometry_debug = build_geometry_grid_debug(
+            renderer, views, rendered.shape[0], rendered, bg_color=bg_color
+        )
+        inner_grid, outer_grid = geometry_debug[:2]
+        inner_fill, outer_fill = fill_geometry_grid_debug(
+            rendered, pred_fg, pred_layer_values, geometry_debug, bg_color=bg_color
+        )
+        geometry_images = (inner_grid, outer_grid, inner_fill, outer_fill)
     debug_images = [
         rendered[:, :3],
         colorize_foreground(pred_fg, bg_color, rendered),
@@ -226,6 +242,8 @@ def save_debug_preview(
         raw_layer_face_color,
         layer_face_color,
     ]
+    if geometry_images is not None:
+        debug_images.extend(geometry_images)
     surface_color = None
     if routing is not None:
         pred_surface = torch.where(
@@ -250,6 +268,19 @@ def save_debug_preview(
         if path is not None:
             path.parent.mkdir(parents=True, exist_ok=True)
             save_image(colorized.clamp(0.0, 1.0).detach().cpu(), path, nrow=view_count)
+
+    if geometry_images is not None:
+        for images, path in (
+            (geometry_images[:2], geometry_grid_output),
+            (geometry_images[2:], geometry_fill_output),
+        ):
+            if path is not None:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                save_image(
+                    torch.cat(images, dim=0).clamp(0.0, 1.0).detach().cpu(),
+                    path,
+                    nrow=view_count,
+                )
 
     if overlay_output is not None or inner_cutout_output is not None or outer_cutout_output is not None:
         rgb = rendered[:, :3]
@@ -307,6 +338,8 @@ def build_arg_parser():
     parser.add_argument("--layer_face_output", default=None, help="Twelve-class inner/outer-by-face visualization.")
     parser.add_argument("--raw_face_output", default=None, help="Six-class raw face-head visualization.")
     parser.add_argument("--raw_layer_face_output", default=None, help="Twelve-class raw joint-head visualization.")
+    parser.add_argument("--geometry_grid_output", default=None, help="Fitted inner/outer cuboid UV grid preview.")
+    parser.add_argument("--geometry_fill_output", default=None, help="Classified RGB filled onto inner/outer cuboid grids.")
     parser.add_argument("--front", default=None)
     parser.add_argument("--back", default=None)
     parser.add_argument("--combined", default=None)
@@ -349,6 +382,8 @@ def main():
             args.layer_face_output,
             args.raw_face_output,
             args.raw_layer_face_output,
+            args.geometry_grid_output,
+            args.geometry_fill_output,
         )
     ):
         raise ValueError(
@@ -476,6 +511,10 @@ def main():
             args.outer_cutout_output,
             args.face_output,
             args.layer_face_output,
+            args.raw_face_output,
+            args.raw_layer_face_output,
+            args.geometry_grid_output,
+            args.geometry_fill_output,
         )
     ):
         save_debug_preview(
@@ -494,6 +533,10 @@ def main():
             layer_face_output=Path(args.layer_face_output) if args.layer_face_output else None,
             raw_face_output=Path(args.raw_face_output) if args.raw_face_output else None,
             raw_layer_face_output=Path(args.raw_layer_face_output) if args.raw_layer_face_output else None,
+            geometry_grid_output=Path(args.geometry_grid_output) if args.geometry_grid_output else None,
+            geometry_fill_output=Path(args.geometry_fill_output) if args.geometry_fill_output else None,
+            renderer=renderer,
+            views=views,
         )
 
     if args.conditioning_output:
