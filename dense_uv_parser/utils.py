@@ -617,6 +617,7 @@ def _routing_from_affine_outputs(renderer, views, outputs, fg_threshold=0.5, sem
     surface = torch.full_like(layer, IGNORE_INDEX)
     confidence = torch.zeros_like(foreground_prob)
     confidence_margin = torch.zeros_like(foreground_prob)
+    confidence_margin_ratio = torch.zeros_like(foreground_prob)
     semantic_fallback = torch.zeros_like(foreground_prob, dtype=torch.bool)
     expected_part = torch.full_like(layer, IGNORE_INDEX)
     expected_face = torch.full_like(layer, IGNORE_INDEX)
@@ -702,8 +703,12 @@ def _routing_from_affine_outputs(renderer, views, outputs, fg_threshold=0.5, sem
         if surface_count > 1:
             top_scores = candidate_score.topk(k=2, dim=1).values
             route_margin = (top_scores[:, 0] - top_scores[:, 1]).clamp_min(0.0)
+            route_margin_ratio = (
+                route_margin / top_scores[:, 0].abs().clamp_min(1e-8)
+            ).clamp(0.0, 1.0)
         else:
             route_margin = best_score.clamp_min(0.0)
+            route_margin_ratio = (best_score > 0.0).to(best_score.dtype)
 
         routed = _select_static_surface(static, selected_surface)
         selected_layer = routed["layer"]
@@ -726,6 +731,7 @@ def _routing_from_affine_outputs(renderer, views, outputs, fg_threshold=0.5, sem
         )
         confidence[selection] = foreground_prob[selection] * best_score.clamp_min(0.0)
         confidence_margin[selection] = route_margin
+        confidence_margin_ratio[selection] = route_margin_ratio
         expected_part[selection] = selected_part
         expected_face[selection] = selected_face
 
@@ -736,6 +742,7 @@ def _routing_from_affine_outputs(renderer, views, outputs, fg_threshold=0.5, sem
         "surface": surface,
         "confidence": confidence,
         "confidence_margin": confidence_margin,
+        "confidence_margin_ratio": confidence_margin_ratio,
         "semantic_fallback": semantic_fallback,
         "part": expected_part,
         "face": expected_face,
@@ -764,9 +771,16 @@ def splat_parser_predictions_to_uv_conditioning(
     affine_refine=True,
     affine_refine_translation_px=2.0,
     affine_refine_scale=0.0,
+    route_confidence_threshold=0.0,
+    route_margin_threshold=0.0,
+    reject_semantic_fallback=False,
     return_details=False,
 ):
     """Route parser outputs to UV, using static mappings for affine-parser checkpoints."""
+    if not 0.0 <= route_confidence_threshold <= 1.0:
+        raise ValueError("route_confidence_threshold must be in [0, 1].")
+    if not 0.0 <= route_margin_threshold <= 1.0:
+        raise ValueError("route_margin_threshold must be in [0, 1].")
     if "affine" not in outputs:
         conditioning = splat_predictions_to_uv_conditioning(
             rendered,
@@ -807,6 +821,17 @@ def splat_parser_predictions_to_uv_conditioning(
         fg_threshold=fg_threshold,
         semantic_gate=semantic_gate,
     )
+    raw_foreground = routing["foreground"]
+    trusted = (
+        raw_foreground
+        & (routing["confidence"] >= route_confidence_threshold)
+        & (routing["confidence_margin_ratio"] >= route_margin_threshold)
+    )
+    if reject_semantic_fallback:
+        trusted = trusted & ~routing["semantic_fallback"]
+    routing["raw_foreground"] = raw_foreground
+    routing["rejected"] = raw_foreground & ~trusted
+    routing["foreground"] = trusted
     conditioning = splat_to_uv_conditioning(
         canonical_rendered,
         routing["foreground"],

@@ -286,6 +286,13 @@ def build_arg_parser():
     parser.add_argument("--view_images", nargs="*", default=None)
     parser.add_argument("--mappings_dir", default=None)
     parser.add_argument("--fg_threshold", type=float, default=0.5)
+    parser.add_argument("--route_confidence_threshold", type=float, default=0.05)
+    parser.add_argument("--route_margin_threshold", type=float, default=0.10)
+    parser.add_argument(
+        "--allow_semantic_fallback",
+        action="store_true",
+        help="Keep pixels whose strict semantic routing had no valid candidate.",
+    )
     parser.add_argument("--no_semantic_gate", dest="semantic_gate", action="store_false", default=None)
     parser.add_argument("--affine_refine", dest="affine_refine", action="store_true", default=None)
     parser.add_argument("--no_affine_refine", dest="affine_refine", action="store_false")
@@ -369,7 +376,27 @@ def main():
             affine_refine=affine_refine,
             affine_refine_translation_px=affine_refine_translation_px,
             affine_refine_scale=affine_refine_scale,
+            route_confidence_threshold=args.route_confidence_threshold,
+            route_margin_threshold=args.route_margin_threshold,
+            reject_semantic_fallback=not args.allow_semantic_fallback,
             return_details=True,
+        )
+
+    routing = routing_details.get("routing")
+    if routing is not None:
+        raw_count = int(routing["raw_foreground"].sum().item())
+        rejected_count = int(routing["rejected"].sum().item())
+        print(
+            "routing_filter="
+            + json.dumps(
+                {
+                    "raw_pixels": raw_count,
+                    "kept_pixels": raw_count - rejected_count,
+                    "rejected_pixels": rejected_count,
+                    "rejected_percent": round(100.0 * rejected_count / max(raw_count, 1), 3),
+                },
+                sort_keys=True,
+            )
         )
 
     alignment = routing_details.get("alignment")

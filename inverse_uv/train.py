@@ -146,6 +146,9 @@ def build_dense_parser_conditioning(
     affine_refine=True,
     affine_refine_translation_px=2.0,
     affine_refine_scale=0.0,
+    route_confidence_threshold=0.05,
+    route_margin_threshold=0.10,
+    reject_semantic_fallback=True,
     bg_color=(128, 128, 128),
     return_renders=False,
 ):
@@ -185,6 +188,9 @@ def build_dense_parser_conditioning(
             affine_refine=affine_refine,
             affine_refine_translation_px=affine_refine_translation_px,
             affine_refine_scale=affine_refine_scale,
+            route_confidence_threshold=route_confidence_threshold,
+            route_margin_threshold=route_margin_threshold,
+            reject_semantic_fallback=reject_semantic_fallback,
         )
 
     if not is_batched:
@@ -207,6 +213,9 @@ def build_training_conditioning(
     parser_affine_refine=True,
     parser_affine_refine_translation_px=2.0,
     parser_affine_refine_scale=0.0,
+    parser_route_confidence_threshold=0.05,
+    parser_route_margin_threshold=0.10,
+    parser_reject_semantic_fallback=True,
     bg_color=(128, 128, 128),
     return_renders=False,
 ):
@@ -225,6 +234,9 @@ def build_training_conditioning(
         affine_refine=parser_affine_refine,
         affine_refine_translation_px=parser_affine_refine_translation_px,
         affine_refine_scale=parser_affine_refine_scale,
+        route_confidence_threshold=parser_route_confidence_threshold,
+        route_margin_threshold=parser_route_margin_threshold,
+        reject_semantic_fallback=parser_reject_semantic_fallback,
         bg_color=bg_color,
         return_renders=return_renders,
     )
@@ -250,6 +262,9 @@ def run_epoch(
     parser_affine_refine=True,
     parser_affine_refine_translation_px=2.0,
     parser_affine_refine_scale=0.0,
+    parser_route_confidence_threshold=0.05,
+    parser_route_margin_threshold=0.10,
+    parser_reject_semantic_fallback=True,
     bg_color=(128, 128, 128),
     log_every=50,
 ):
@@ -283,6 +298,9 @@ def run_epoch(
                 parser_affine_refine=parser_affine_refine,
                 parser_affine_refine_translation_px=parser_affine_refine_translation_px,
                 parser_affine_refine_scale=parser_affine_refine_scale,
+                parser_route_confidence_threshold=parser_route_confidence_threshold,
+                parser_route_margin_threshold=parser_route_margin_threshold,
+                parser_reject_semantic_fallback=parser_reject_semantic_fallback,
                 bg_color=bg_color,
                 return_renders=True,
             )
@@ -406,8 +424,8 @@ def build_arg_parser():
         "--preserve_known",
         dest="preserve_known",
         action="store_true",
-        default=False,
-        help="Hard-copy known conditioning texels to the output (legacy behavior).",
+        default=True,
+        help="Hard-copy trusted known conditioning texels to the output.",
     )
     parser.add_argument("--no_preserve_known", dest="preserve_known", action="store_false")
     parser.add_argument("--mappings_dir", default=None, help="Renderer mappings directory.")
@@ -482,6 +500,13 @@ def build_arg_parser():
     parser.add_argument("--no_parser_affine_refine", dest="parser_affine_refine", action="store_false")
     parser.add_argument("--parser_affine_refine_translation_px", type=float, default=None)
     parser.add_argument("--parser_affine_refine_scale", type=float, default=None)
+    parser.add_argument("--parser_route_confidence_threshold", type=float, default=0.05)
+    parser.add_argument("--parser_route_margin_threshold", type=float, default=0.10)
+    parser.add_argument(
+        "--parser_allow_semantic_fallback",
+        action="store_true",
+        help="Keep parser pixels that required a semantic routing fallback.",
+    )
     parser.add_argument("--parser_background_augment", dest="parser_background_augment", action="store_true", default=True)
     parser.add_argument("--no_parser_background_augment", dest="parser_background_augment", action="store_false")
     parser.add_argument("--parser_background_augment_prob", type=float, default=0.9)
@@ -748,6 +773,9 @@ def main():
             parser_affine_refine=args.parser_affine_refine,
             parser_affine_refine_translation_px=args.parser_affine_refine_translation_px,
             parser_affine_refine_scale=args.parser_affine_refine_scale,
+            parser_route_confidence_threshold=args.parser_route_confidence_threshold,
+            parser_route_margin_threshold=args.parser_route_margin_threshold,
+            parser_reject_semantic_fallback=not args.parser_allow_semantic_fallback,
             bg_color=dataset.bg_color, log_every=args.log_every,
         )
         metrics = {"train": train_metrics}
@@ -772,6 +800,9 @@ def main():
                     parser_affine_refine=args.parser_affine_refine,
                     parser_affine_refine_translation_px=args.parser_affine_refine_translation_px,
                     parser_affine_refine_scale=args.parser_affine_refine_scale,
+                    parser_route_confidence_threshold=args.parser_route_confidence_threshold,
+                    parser_route_margin_threshold=args.parser_route_margin_threshold,
+                    parser_reject_semantic_fallback=not args.parser_allow_semantic_fallback,
                     bg_color=dataset.bg_color, log_every=args.log_every,
                 )
             metrics["val"] = val_metrics
@@ -807,6 +838,9 @@ def main():
                     parser_affine_refine=args.parser_affine_refine,
                     parser_affine_refine_translation_px=args.parser_affine_refine_translation_px,
                     parser_affine_refine_scale=args.parser_affine_refine_scale,
+                    parser_route_confidence_threshold=args.parser_route_confidence_threshold,
+                    parser_route_margin_threshold=args.parser_route_margin_threshold,
+                    parser_reject_semantic_fallback=not args.parser_allow_semantic_fallback,
                     bg_color=dataset.bg_color,
                 )
                 pred_uv = model(preview_cond)

@@ -391,6 +391,22 @@ class GlobalAffineRoutingTest(unittest.TestCase):
 
         self.assertEqual(int(details["routing"]["surface"][0, 0, 0]), 1)
 
+        outputs["layer_face"].zero_()
+        _, filtered_details = splat_parser_predictions_to_uv_conditioning(
+            rendered,
+            outputs,
+            renderer=renderer,
+            views=["front"],
+            group_size=1,
+            semantic_gate=False,
+            affine_refine=False,
+            route_margin_threshold=0.10,
+            return_details=True,
+        )
+        self.assertEqual(int(filtered_details["routing"]["raw_foreground"].sum()), 1)
+        self.assertEqual(int(filtered_details["routing"]["foreground"].sum()), 0)
+        self.assertEqual(int(filtered_details["routing"]["rejected"].sum()), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

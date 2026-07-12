@@ -235,6 +235,9 @@ def save_preview(model, renderer, loader, device, args, output_path, max_items=2
                 affine_refine=args.affine_refine,
                 affine_refine_translation_px=args.affine_refine_translation_px,
                 affine_refine_scale=args.affine_refine_scale,
+                route_confidence_threshold=args.route_confidence_threshold,
+                route_margin_threshold=args.route_margin_threshold,
+                reject_semantic_fallback=not args.allow_semantic_fallback,
                 return_details=True,
             )
             gt_conditioning = splat_deterministic_targets_to_uv_conditioning(
@@ -433,6 +436,9 @@ def build_arg_parser():
     parser.add_argument("--no_affine_refine", dest="affine_refine", action="store_false")
     parser.add_argument("--affine_refine_translation_px", type=float, default=2.0)
     parser.add_argument("--affine_refine_scale", type=float, default=0.0)
+    parser.add_argument("--route_confidence_threshold", type=float, default=0.05)
+    parser.add_argument("--route_margin_threshold", type=float, default=0.10)
+    parser.add_argument("--allow_semantic_fallback", action="store_true")
     parser.add_argument("--augment", dest="augment", action="store_true", default=True)
     parser.add_argument("--no_augment", dest="augment", action="store_false")
     parser.add_argument("--augment_validation", dest="augment_validation", action="store_true", default=True)

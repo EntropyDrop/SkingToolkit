@@ -77,6 +77,9 @@ FRONT="${FRONT:-../test_imgs/front_rgba.png}"
 BACK="${BACK:-../test_imgs/back_rgba.png}"
 MAPPINGS_DIR="${MAPPINGS_DIR:-}"
 FG_THRESHOLD="${FG_THRESHOLD:-0.5}"
+ROUTE_CONFIDENCE_THRESHOLD="${ROUTE_CONFIDENCE_THRESHOLD:-0.05}"
+ROUTE_MARGIN_THRESHOLD="${ROUTE_MARGIN_THRESHOLD:-0.10}"
+ALLOW_SEMANTIC_FALLBACK="${ALLOW_SEMANTIC_FALLBACK:-false}"
 SEMANTIC_GATE="${SEMANTIC_GATE:-true}"
 AFFINE_REFINE="${AFFINE_REFINE:-true}"
 AFFINE_REFINE_TRANSLATION_PX="${AFFINE_REFINE_TRANSLATION_PX:-2.0}"
@@ -90,11 +93,17 @@ args=(
   infer.py
   --parser_checkpoint "$PARSER_CHECKPOINT"
   --fg_threshold "$FG_THRESHOLD"
+  --route_confidence_threshold "$ROUTE_CONFIDENCE_THRESHOLD"
+  --route_margin_threshold "$ROUTE_MARGIN_THRESHOLD"
   --affine_refine_translation_px "$AFFINE_REFINE_TRANSLATION_PX"
   --affine_refine_scale "$AFFINE_REFINE_SCALE"
   --alpha_threshold "$ALPHA_THRESHOLD"
   --device "$DEVICE"
 )
+
+if [[ "$ALLOW_SEMANTIC_FALLBACK" == "true" ]]; then
+  args+=(--allow_semantic_fallback)
+fi
 
 if [[ -n "$MAPPINGS_DIR" ]]; then
   args+=(--mappings_dir "$MAPPINGS_DIR")

@@ -83,6 +83,9 @@ SEMANTIC_GATE="${SEMANTIC_GATE:-true}"
 AFFINE_REFINE="${AFFINE_REFINE:-true}"
 AFFINE_REFINE_TRANSLATION_PX="${AFFINE_REFINE_TRANSLATION_PX:-2.0}"
 AFFINE_REFINE_SCALE="${AFFINE_REFINE_SCALE:-0.0}"
+ROUTE_CONFIDENCE_THRESHOLD="${ROUTE_CONFIDENCE_THRESHOLD:-0.05}"
+ROUTE_MARGIN_THRESHOLD="${ROUTE_MARGIN_THRESHOLD:-0.10}"
+ALLOW_SEMANTIC_FALLBACK="${ALLOW_SEMANTIC_FALLBACK:-false}"
 
 LAMBDA_FOREGROUND="${LAMBDA_FOREGROUND:-1.0}"
 LAMBDA_LAYER="${LAMBDA_LAYER:-1.0}"
@@ -137,6 +140,10 @@ if [[ "$AFFINE_REFINE" == "true" ]]; then
 else
   affine_refine_args=(--no_affine_refine)
 fi
+fallback_args=()
+if [[ "$ALLOW_SEMANTIC_FALLBACK" == "true" ]]; then
+  fallback_args=(--allow_semantic_fallback)
+fi
 cudnn_args=()
 if [[ "$CUDNN_BENCHMARK" == "true" ]]; then
   cudnn_args=(--cudnn_benchmark)
@@ -176,10 +183,13 @@ python train.py \
   --lambda_surface "$LAMBDA_SURFACE" \
   --affine_refine_translation_px "$AFFINE_REFINE_TRANSLATION_PX" \
   --affine_refine_scale "$AFFINE_REFINE_SCALE" \
+  --route_confidence_threshold "$ROUTE_CONFIDENCE_THRESHOLD" \
+  --route_margin_threshold "$ROUTE_MARGIN_THRESHOLD" \
   "${augment_args[@]}" \
   "${background_args[@]}" \
   "${semantic_gate_args[@]}" \
   "${affine_refine_args[@]}" \
+  "${fallback_args[@]}" \
   "${uv_class_args[@]}" \
   "${cudnn_args[@]}" \
   "${resume_args[@]}"
