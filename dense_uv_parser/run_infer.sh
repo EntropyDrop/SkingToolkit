@@ -70,6 +70,8 @@ INNER_CUTOUT_OUTPUT="${INNER_CUTOUT_OUTPUT-outputs/parser_debug_inner.png}"
 OUTER_CUTOUT_OUTPUT="${OUTER_CUTOUT_OUTPUT-outputs/parser_debug_outer.png}"
 FACE_OUTPUT="${FACE_OUTPUT-outputs/parser_debug_face.png}"
 LAYER_FACE_OUTPUT="${LAYER_FACE_OUTPUT-outputs/parser_debug_layer_face.png}"
+RAW_FACE_OUTPUT="${RAW_FACE_OUTPUT-outputs/parser_debug_face_raw.png}"
+RAW_LAYER_FACE_OUTPUT="${RAW_LAYER_FACE_OUTPUT-outputs/parser_debug_layer_face_raw.png}"
 
 COMBINED="${COMBINED:-}"
 VIEW_IMAGES="${VIEW_IMAGES:-}"
@@ -154,6 +156,14 @@ if [[ -n "$LAYER_FACE_OUTPUT" ]]; then
   args+=(--layer_face_output "$LAYER_FACE_OUTPUT")
 fi
 
+if [[ -n "$RAW_FACE_OUTPUT" ]]; then
+  args+=(--raw_face_output "$RAW_FACE_OUTPUT")
+fi
+
+if [[ -n "$RAW_LAYER_FACE_OUTPUT" ]]; then
+  args+=(--raw_layer_face_output "$RAW_LAYER_FACE_OUTPUT")
+fi
+
 if [[ -n "$OUTPUT" ]]; then
   if [[ -n "$INPAINT_CHECKPOINT" ]]; then
     args+=(--inpaint_checkpoint "$INPAINT_CHECKPOINT" --output "$OUTPUT")
@@ -166,7 +176,7 @@ if [[ -n "$OUTPUT" ]]; then
   fi
 fi
 
-if [[ -z "$CONDITIONING_OUTPUT" && -z "$DEBUG_OUTPUT" && -z "$OVERLAY_OUTPUT" && -z "$INNER_CUTOUT_OUTPUT" && -z "$OUTER_CUTOUT_OUTPUT" && -z "$FACE_OUTPUT" && -z "$LAYER_FACE_OUTPUT" && ( -z "$OUTPUT" || -z "$INPAINT_CHECKPOINT" ) ]]; then
+if [[ -z "$CONDITIONING_OUTPUT" && -z "$DEBUG_OUTPUT" && -z "$OVERLAY_OUTPUT" && -z "$INNER_CUTOUT_OUTPUT" && -z "$OUTER_CUTOUT_OUTPUT" && -z "$FACE_OUTPUT" && -z "$LAYER_FACE_OUTPUT" && -z "$RAW_FACE_OUTPUT" && -z "$RAW_LAYER_FACE_OUTPUT" && ( -z "$OUTPUT" || -z "$INPAINT_CHECKPOINT" ) ]]; then
   echo "Nothing to write. Set a debug/conditioning output or OUTPUT with a valid INPAINT_CHECKPOINT." >&2
   exit 1
 fi
@@ -199,6 +209,12 @@ if [[ -n "$FACE_OUTPUT" ]]; then
 fi
 if [[ -n "$LAYER_FACE_OUTPUT" ]]; then
   echo "Layer-face output: $LAYER_FACE_OUTPUT"
+fi
+if [[ -n "$RAW_FACE_OUTPUT" ]]; then
+  echo "Raw face output: $RAW_FACE_OUTPUT"
+fi
+if [[ -n "$RAW_LAYER_FACE_OUTPUT" ]]; then
+  echo "Raw layer-face output: $RAW_LAYER_FACE_OUTPUT"
 fi
 if [[ -n "$OUTPUT" && -n "$INPAINT_CHECKPOINT" ]]; then
   echo "Final output: $OUTPUT"

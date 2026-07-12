@@ -158,6 +158,8 @@ def save_debug_preview(
     outer_cutout_output=None,
     face_output=None,
     layer_face_output=None,
+    raw_face_output=None,
+    raw_layer_face_output=None,
 ):
     if not 0.0 <= overlay_alpha <= 1.0:
         raise ValueError(f"overlay_alpha must be in [0, 1], got {overlay_alpha}.")
@@ -167,27 +169,40 @@ def save_debug_preview(
         outputs["part"].argmax(dim=1),
         torch.full_like(outputs["part"].argmax(dim=1), IGNORE_INDEX),
     )
-    pred_layer_values = routing["layer"] if routing is not None else outputs["layer"].argmax(dim=1)
+    raw_layer_values = outputs["layer"].argmax(dim=1)
+    pred_layer_values = routing["layer"] if routing is not None else raw_layer_values
     pred_layer = torch.where(
         pred_fg,
         pred_layer_values,
         torch.full_like(outputs["layer"].argmax(dim=1), IGNORE_INDEX),
     )
-    pred_face_values = outputs["face"].argmax(dim=1)
+    raw_face_values = outputs["face"].argmax(dim=1)
+    raw_face = torch.where(
+        pred_fg,
+        raw_face_values,
+        torch.full_like(raw_face_values, IGNORE_INDEX),
+    )
+    pred_face_values = routing["face"] if routing is not None else raw_face_values
     pred_face = torch.where(
         pred_fg,
         pred_face_values,
-        torch.full_like(outputs["face"].argmax(dim=1), IGNORE_INDEX),
+        torch.full_like(pred_face_values, IGNORE_INDEX),
     )
     if "layer_face" in outputs:
-        pred_layer_face_values = outputs["layer_face"].argmax(dim=1)
-        pred_layer_face = torch.where(
+        raw_layer_face_values = outputs["layer_face"].argmax(dim=1)
+        raw_layer_face = torch.where(
             pred_fg,
-            pred_layer_face_values,
-            torch.full_like(pred_layer_face_values, IGNORE_INDEX),
+            raw_layer_face_values,
+            torch.full_like(raw_layer_face_values, IGNORE_INDEX),
         )
     else:
-        pred_layer_face = combine_layer_face(pred_layer, pred_face)
+        raw_layer = torch.where(
+            pred_fg,
+            raw_layer_values,
+            torch.full_like(raw_layer_values, IGNORE_INDEX),
+        )
+        raw_layer_face = combine_layer_face(raw_layer, raw_face)
+    pred_layer_face = combine_layer_face(pred_layer, pred_face)
     pred_uv = (
         flat_uv_to_uv01(routing["flat_uv"], rendered.dtype)
         if routing is not None
@@ -196,14 +211,18 @@ def save_debug_preview(
 
     part_color = colorize_labels(pred_part, PART_PALETTE, bg_color, rendered)
     layer_color = colorize_labels(pred_layer, LAYER_PALETTE, bg_color, rendered)
+    raw_face_color = colorize_labels(raw_face, FACE_PALETTE, bg_color, rendered)
     face_color = colorize_labels(pred_face, FACE_PALETTE, bg_color, rendered)
+    raw_layer_face_color = colorize_labels(raw_layer_face, LAYER_FACE_PALETTE, bg_color, rendered)
     layer_face_color = colorize_labels(pred_layer_face, LAYER_FACE_PALETTE, bg_color, rendered)
     debug_images = [
         rendered[:, :3],
         colorize_foreground(pred_fg, bg_color, rendered),
         part_color,
         layer_color,
+        raw_face_color,
         face_color,
+        raw_layer_face_color,
         layer_face_color,
     ]
     surface_color = None
@@ -221,7 +240,12 @@ def save_debug_preview(
         output_path.parent.mkdir(parents=True, exist_ok=True)
         save_image(debug_preview.clamp(0.0, 1.0).detach().cpu(), output_path, nrow=view_count)
 
-    for colorized, path in ((face_color, face_output), (layer_face_color, layer_face_output)):
+    for colorized, path in (
+        (face_color, face_output),
+        (layer_face_color, layer_face_output),
+        (raw_face_color, raw_face_output),
+        (raw_layer_face_color, raw_layer_face_output),
+    ):
         if path is not None:
             path.parent.mkdir(parents=True, exist_ok=True)
             save_image(colorized.clamp(0.0, 1.0).detach().cpu(), path, nrow=view_count)
@@ -280,6 +304,8 @@ def build_arg_parser():
     parser.add_argument("--outer_cutout_output", default=None, help="Original-color cutout for routed outer/decor pixels.")
     parser.add_argument("--face_output", default=None, help="Six-class routed cube-face visualization.")
     parser.add_argument("--layer_face_output", default=None, help="Twelve-class inner/outer-by-face visualization.")
+    parser.add_argument("--raw_face_output", default=None, help="Six-class raw face-head visualization.")
+    parser.add_argument("--raw_layer_face_output", default=None, help="Twelve-class raw joint-head visualization.")
     parser.add_argument("--front", default=None)
     parser.add_argument("--back", default=None)
     parser.add_argument("--combined", default=None)
@@ -318,6 +344,8 @@ def main():
             args.outer_cutout_output,
             args.face_output,
             args.layer_face_output,
+            args.raw_face_output,
+            args.raw_layer_face_output,
         )
     ):
         raise ValueError(
@@ -447,6 +475,8 @@ def main():
             outer_cutout_output=Path(args.outer_cutout_output) if args.outer_cutout_output else None,
             face_output=Path(args.face_output) if args.face_output else None,
             layer_face_output=Path(args.layer_face_output) if args.layer_face_output else None,
+            raw_face_output=Path(args.raw_face_output) if args.raw_face_output else None,
+            raw_layer_face_output=Path(args.raw_layer_face_output) if args.raw_layer_face_output else None,
         )
 
     if args.conditioning_output:
@@ -454,6 +484,16 @@ def main():
 
     if args.output:
         inpaint_model, inpaint_args = load_inpaint(args.inpaint_checkpoint, device)
+        print(
+            "inpaint_config="
+            + json.dumps(
+                {
+                    "checkpoint": checkpoint_run_id(args.inpaint_checkpoint),
+                    "preserve_known": bool(inpaint_args.get("preserve_known", True)),
+                },
+                sort_keys=True,
+            )
+        )
         inpaint_views = parse_views(inpaint_args.get("views", ""))
         if inpaint_views and inpaint_views != views:
             raise ValueError(f"Parser/inpaint view mismatch: parser={views}, inpaint={inpaint_views}")
