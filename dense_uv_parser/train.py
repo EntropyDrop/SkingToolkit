@@ -326,7 +326,7 @@ def save_preview(model, renderer, loader, device, args, output_path, max_items=2
     pred_face = torch.where(
         pred_fg,
         pred_face_values,
-        torch.full_like(debug_outputs["face"].argmax(dim=1), IGNORE_INDEX),
+        torch.full_like(pred_face_values, IGNORE_INDEX),
     )
     gt_face = torch.where(
         gt_fg,
@@ -667,9 +667,6 @@ def main():
         metric = metric_source[args.best_metric]
         print(f"epoch={epoch} metrics={json.dumps(metrics, sort_keys=True)}")
 
-        if epoch % args.preview_every == 0:
-            save_preview(model, renderer, val_loader or train_loader, device, args, output_dir / "previews" / f"epoch_{epoch:04d}.png")
-
         is_best = metric < best_metric
         if is_best:
             best_metric = metric
@@ -680,6 +677,15 @@ def main():
         if is_best:
             save_checkpoint(
                 output_dir / "best.pt", model, optimizer, scaler, epoch, args, metrics, best_metric=best_metric
+            )
+        if epoch % args.preview_every == 0:
+            save_preview(
+                model,
+                renderer,
+                val_loader or train_loader,
+                device,
+                args,
+                output_dir / "previews" / f"epoch_{epoch:04d}.png",
             )
 
 

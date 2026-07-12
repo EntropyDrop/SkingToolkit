@@ -1,10 +1,15 @@
+import tempfile
 import unittest
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import torch
 import torch.nn as nn
 
 from SkingToolkit.dense_uv_parser.losses import DenseUVParserLoss, _balanced_cross_entropy
 from SkingToolkit.dense_uv_parser.model import DenseUVParserNet
+from SkingToolkit.dense_uv_parser import train as parser_train
 from SkingToolkit.dense_uv_parser.utils import (
     augment_dense_batch,
     canonicalize_parser_render,
@@ -33,6 +38,22 @@ class FakeRenderer(nn.Module):
         self.register_buffer("front_outer_grid", grid.clone())
         self.register_buffer("front_inner_mask", mask)
         self.register_buffer("front_outer_mask", torch.zeros_like(mask))
+
+
+class FakeGeometryModel(nn.Module):
+    def forward(self, rendered, view_ids=None):
+        batch, _, height, width = rendered.shape
+        return {
+            "foreground": torch.full((batch, 1, height, width), 10.0),
+            "layer": torch.cat(
+                [
+                    torch.full((batch, 1, height, width), 10.0),
+                    torch.full((batch, 1, height, width), -10.0),
+                ],
+                dim=1,
+            ),
+            "affine": torch.zeros(batch, 3),
+        }
 
 
 def dense_targets(batch, height, width):
@@ -145,6 +166,47 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         self.assertEqual(int(inner_details["routing"]["surface"][0, 0, 0]), 0)
         self.assertEqual(int(inner_conditioning[:, 4:5].sum()), 1)
         self.assertEqual(int(inner_conditioning[:, 9:10].sum()), 0)
+
+    def test_geometry_training_preview_has_no_semantic_heads(self):
+        renderer = FakeRenderer(valid_pixels=1)
+        rendered = torch.rand(1, 4, 8, 8)
+        rendered[:, 3] = 1.0
+        targets = dense_targets(1, 8, 8)
+        targets["affine"] = torch.zeros(1, 3)
+        args = SimpleNamespace(
+            views="front",
+            splat_fg_threshold=0.5,
+            bg_color=(128, 128, 128),
+            semantic_gate=True,
+            affine_refine=False,
+            affine_refine_translation_px=2.0,
+            affine_refine_scale=0.0,
+            route_confidence_threshold=0.0,
+            route_margin_threshold=0.0,
+            outer_route_confidence_threshold=0.1,
+            outer_route_margin_threshold=0.2,
+            allow_semantic_fallback=False,
+        )
+        loader = [{"uv": torch.zeros(1, 4, 64, 64), "path": ["test.png"]}]
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "preview.png"
+            with patch.object(
+                parser_train,
+                "build_parser_inputs",
+                return_value=(rendered, targets, 1, torch.zeros(1, dtype=torch.long)),
+            ):
+                parser_train.save_preview(
+                    FakeGeometryModel(),
+                    renderer,
+                    loader,
+                    torch.device("cpu"),
+                    args,
+                    output,
+                    max_items=1,
+                )
+            self.assertTrue(output.exists())
+            self.assertTrue(output.with_name("preview_debug.png").exists())
 
     def test_global_model_can_train_discrete_uv_routing_auxiliary(self):
         rendered = torch.rand(1, 4, 32, 32)
