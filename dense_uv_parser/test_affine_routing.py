@@ -258,12 +258,27 @@ class GlobalAffineRoutingTest(unittest.TestCase):
             group_size=1,
             semantic_gate=True,
             affine_refine=False,
+            reject_semantic_fallback=True,
             return_details=True,
         )
 
         self.assertEqual(int(details["routing"]["foreground"].sum()), 1)
         self.assertTrue(details["routing"]["semantic_fallback"][0, 0, 0])
         self.assertEqual(int(conditioning[:, 4:5].sum()), 1)
+
+        _, strict_details = splat_parser_predictions_to_uv_conditioning(
+            rendered,
+            outputs,
+            renderer=renderer,
+            views=["front"],
+            group_size=1,
+            semantic_gate=True,
+            affine_refine=False,
+            reject_semantic_fallback=True,
+            reject_inner_semantic_fallback=True,
+            return_details=True,
+        )
+        self.assertEqual(int(strict_details["routing"]["foreground"].sum()), 0)
 
     def test_routing_reranks_surface_classes_that_are_invalid_at_pixel(self):
         renderer = FakeRenderer(valid_pixels=1)

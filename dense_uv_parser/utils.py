@@ -776,6 +776,7 @@ def splat_parser_predictions_to_uv_conditioning(
     outer_route_confidence_threshold=None,
     outer_route_margin_threshold=None,
     reject_semantic_fallback=False,
+    reject_inner_semantic_fallback=False,
     return_details=False,
 ):
     """Route parser outputs to UV, using static mappings for affine-parser checkpoints."""
@@ -849,7 +850,10 @@ def splat_parser_predictions_to_uv_conditioning(
         & (routing["confidence_margin_ratio"] >= margin_threshold)
     )
     if reject_semantic_fallback:
-        trusted = trusted & ~routing["semantic_fallback"]
+        rejected_fallback = routing["semantic_fallback"] & (
+            selected_outer | reject_inner_semantic_fallback
+        )
+        trusted = trusted & ~rejected_fallback
     routing["raw_foreground"] = raw_foreground
     routing["rejected"] = raw_foreground & ~trusted
     routing["foreground"] = trusted
