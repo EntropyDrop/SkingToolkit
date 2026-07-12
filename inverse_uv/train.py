@@ -20,6 +20,7 @@ from SkingToolkit.inverse_uv.losses import InverseUVLoss  # noqa: E402
 from SkingToolkit.inverse_uv.model import InverseUVNet, PatchGANDiscriminator, count_parameters  # noqa: E402
 from SkingToolkit.dense_uv_parser.model import DenseUVParserNet  # noqa: E402
 from SkingToolkit.dense_uv_parser.utils import (  # noqa: E402
+    SPLAT_COLOR_AGGREGATIONS,
     randomize_render_background,
     splat_parser_predictions_to_uv_conditioning,
     surface_class_count,
@@ -164,6 +165,7 @@ def build_dense_parser_conditioning(
     outer_route_confidence_threshold=0.10,
     outer_route_margin_threshold=0.20,
     outer_uv_min_coverage=0.5,
+    color_aggregation="exact_mode",
     reject_semantic_fallback=True,
     bg_color=(128, 128, 128),
     return_renders=False,
@@ -209,6 +211,7 @@ def build_dense_parser_conditioning(
             outer_route_confidence_threshold=outer_route_confidence_threshold,
             outer_route_margin_threshold=outer_route_margin_threshold,
             outer_uv_min_coverage=outer_uv_min_coverage,
+            color_aggregation=color_aggregation,
             reject_semantic_fallback=reject_semantic_fallback,
         )
 
@@ -237,6 +240,7 @@ def build_training_conditioning(
     parser_outer_route_confidence_threshold=0.10,
     parser_outer_route_margin_threshold=0.20,
     parser_outer_uv_min_coverage=0.5,
+    parser_splat_color_aggregation="exact_mode",
     parser_reject_semantic_fallback=True,
     bg_color=(128, 128, 128),
     return_renders=False,
@@ -261,6 +265,7 @@ def build_training_conditioning(
         outer_route_confidence_threshold=parser_outer_route_confidence_threshold,
         outer_route_margin_threshold=parser_outer_route_margin_threshold,
         outer_uv_min_coverage=parser_outer_uv_min_coverage,
+        color_aggregation=parser_splat_color_aggregation,
         reject_semantic_fallback=parser_reject_semantic_fallback,
         bg_color=bg_color,
         return_renders=return_renders,
@@ -292,6 +297,7 @@ def run_epoch(
     parser_outer_route_confidence_threshold=0.10,
     parser_outer_route_margin_threshold=0.20,
     parser_outer_uv_min_coverage=0.5,
+    parser_splat_color_aggregation="exact_mode",
     parser_reject_semantic_fallback=True,
     bg_color=(128, 128, 128),
     log_every=50,
@@ -331,6 +337,7 @@ def run_epoch(
                 parser_outer_route_confidence_threshold=parser_outer_route_confidence_threshold,
                 parser_outer_route_margin_threshold=parser_outer_route_margin_threshold,
                 parser_outer_uv_min_coverage=parser_outer_uv_min_coverage,
+                parser_splat_color_aggregation=parser_splat_color_aggregation,
                 parser_reject_semantic_fallback=parser_reject_semantic_fallback,
                 bg_color=bg_color,
                 return_renders=True,
@@ -536,6 +543,11 @@ def build_arg_parser():
     parser.add_argument("--parser_outer_route_confidence_threshold", type=float, default=0.10)
     parser.add_argument("--parser_outer_route_margin_threshold", type=float, default=0.20)
     parser.add_argument("--parser_outer_uv_min_coverage", type=float, default=0.5)
+    parser.add_argument(
+        "--parser_splat_color_aggregation",
+        choices=SPLAT_COLOR_AGGREGATIONS,
+        default="exact_mode",
+    )
     parser.add_argument(
         "--parser_allow_semantic_fallback",
         action="store_true",
@@ -812,6 +824,7 @@ def main():
             parser_outer_route_confidence_threshold=args.parser_outer_route_confidence_threshold,
             parser_outer_route_margin_threshold=args.parser_outer_route_margin_threshold,
             parser_outer_uv_min_coverage=args.parser_outer_uv_min_coverage,
+            parser_splat_color_aggregation=args.parser_splat_color_aggregation,
             parser_reject_semantic_fallback=not args.parser_allow_semantic_fallback,
             bg_color=dataset.bg_color, log_every=args.log_every,
         )
@@ -842,6 +855,7 @@ def main():
                     parser_outer_route_confidence_threshold=args.parser_outer_route_confidence_threshold,
                     parser_outer_route_margin_threshold=args.parser_outer_route_margin_threshold,
                     parser_outer_uv_min_coverage=args.parser_outer_uv_min_coverage,
+                    parser_splat_color_aggregation=args.parser_splat_color_aggregation,
                     parser_reject_semantic_fallback=not args.parser_allow_semantic_fallback,
                     bg_color=dataset.bg_color, log_every=args.log_every,
                 )
@@ -883,6 +897,7 @@ def main():
                     parser_outer_route_confidence_threshold=args.parser_outer_route_confidence_threshold,
                     parser_outer_route_margin_threshold=args.parser_outer_route_margin_threshold,
                     parser_outer_uv_min_coverage=args.parser_outer_uv_min_coverage,
+                    parser_splat_color_aggregation=args.parser_splat_color_aggregation,
                     parser_reject_semantic_fallback=not args.parser_allow_semantic_fallback,
                     bg_color=dataset.bg_color,
                 )

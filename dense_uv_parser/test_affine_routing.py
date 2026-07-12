@@ -275,6 +275,7 @@ class GlobalAffineRoutingTest(unittest.TestCase):
             outer_route_confidence_threshold=0.1,
             outer_route_margin_threshold=0.2,
             outer_uv_min_coverage=0.5,
+            splat_color_aggregation="exact_mode",
             allow_semantic_fallback=False,
         )
         loader = [{"uv": torch.zeros(1, 4, 64, 64), "path": ["test.png"]}]
@@ -555,6 +556,30 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         )
 
         self.assertTrue(torch.equal(conditioning[0, :3, 0, 0], torch.tensor([1.0, 0.0, 0.0])))
+
+    def test_exact_mode_uses_majority_color_after_layer_separation(self):
+        rendered = torch.zeros(4, 4, 1, 1)
+        rendered[0:2, 0, 0, 0] = 1.0
+        rendered[2, 2, 0, 0] = 1.0
+        rendered[3, 1, 0, 0] = 1.0
+        rendered[:, 3, 0, 0] = 1.0
+        fg = torch.ones(4, 1, 1, dtype=torch.bool)
+        layer = torch.tensor([0, 0, 1, 1]).view(4, 1, 1)
+        flat_uv = torch.zeros(4, 1, 1, dtype=torch.long)
+        confidence = torch.tensor([0.6, 0.6, 0.99, 0.5]).view(4, 1, 1)
+
+        conditioning = splat_to_uv_conditioning(
+            rendered,
+            fg,
+            layer,
+            flat_uv,
+            group_size=4,
+            confidence=confidence,
+            color_aggregation="exact_mode",
+        )
+
+        self.assertTrue(torch.equal(conditioning[0, :3, 0, 0], torch.tensor([1.0, 0.0, 0.0])))
+        self.assertTrue(torch.equal(conditioning[0, 5:8, 0, 0], torch.tensor([0.0, 0.0, 1.0])))
 
     def test_uv_classification_reranks_ambiguous_surface_candidates(self):
         renderer = FakeRenderer(valid_pixels=1)

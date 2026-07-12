@@ -22,6 +22,7 @@ ROUTE_INNER_PRIMARY = 0
 ROUTE_OUTER_PRIMARY = 1
 ROUTE_SECONDARY = 2
 UV_SIZE = 64
+SPLAT_COLOR_AGGREGATIONS = ("exact_mode", "best")
 
 
 def parse_views(views):
@@ -904,6 +905,7 @@ def splat_parser_predictions_to_uv_conditioning(
     outer_route_confidence_threshold=None,
     outer_route_margin_threshold=None,
     outer_uv_min_coverage=0.5,
+    color_aggregation="exact_mode",
     geometry_outer_threshold=0.5,
     reject_semantic_fallback=False,
     reject_inner_semantic_fallback=False,
@@ -1035,6 +1037,7 @@ def splat_parser_predictions_to_uv_conditioning(
         group_size=group_size,
         bg_color=bg_color,
         confidence=routing["confidence"],
+        color_aggregation=color_aggregation,
     )
     if return_details:
         return conditioning, {
@@ -1155,6 +1158,79 @@ def splat_targets_to_uv_conditioning(rendered, targets, group_size=1, bg_color=(
     return splat_to_uv_conditioning(rendered, fg, safe_layer, flat_uv, group_size=group_size, bg_color=bg_color)
 
 
+def _select_exact_mode_candidates(values, target_uv, scores):
+    """Select one real source pixel from the most frequent 8-bit RGB value per UV texel."""
+    if target_uv.numel() == 0:
+        return values, target_uv, scores
+
+    rgb8 = (values[:3].clamp(0.0, 1.0) * 255.0).round().long()
+    color_code = rgb8[0] | (rgb8[1] << 8) | (rgb8[2] << 16)
+    color_count = 1 << 24
+    combined_key = target_uv.long() * color_count + color_code
+    unique_keys, inverse = torch.unique(combined_key, sorted=False, return_inverse=True)
+    votes = scores.new_zeros(unique_keys.shape[0])
+    votes.index_add_(0, inverse, torch.ones_like(scores))
+
+    positions = torch.arange(target_uv.shape[0], device=target_uv.device)
+    first_position = torch.full(
+        (unique_keys.shape[0],),
+        target_uv.shape[0],
+        dtype=torch.long,
+        device=target_uv.device,
+    )
+    first_position.scatter_reduce_(0, inverse, positions, reduce="amin", include_self=True)
+
+    unique_uv = unique_keys.div(color_count, rounding_mode="floor")
+    best_votes = votes.new_full((UV_SIZE * UV_SIZE,), -torch.inf)
+    best_votes.scatter_reduce_(0, unique_uv, votes, reduce="amax", include_self=True)
+    tied_winner = votes >= (best_votes[unique_uv] - 1e-7)
+    earliest_winner = torch.full(
+        (UV_SIZE * UV_SIZE,),
+        target_uv.shape[0],
+        dtype=torch.long,
+        device=target_uv.device,
+    )
+    earliest_winner.scatter_reduce_(
+        0,
+        unique_uv[tied_winner],
+        first_position[tied_winner],
+        reduce="amin",
+        include_self=True,
+    )
+    winning_unique = tied_winner & (first_position == earliest_winner[unique_uv])
+    winning_key = torch.full(
+        (UV_SIZE * UV_SIZE,),
+        -1,
+        dtype=torch.long,
+        device=target_uv.device,
+    )
+    winning_key[unique_uv[winning_unique]] = unique_keys[winning_unique]
+    in_winning_color = combined_key == winning_key[target_uv]
+
+    values = values[:, in_winning_color]
+    target_uv = target_uv[in_winning_color]
+    scores = scores[in_winning_color]
+    best_scores = scores.new_full((UV_SIZE * UV_SIZE,), -torch.inf)
+    best_scores.scatter_reduce_(0, target_uv, scores, reduce="amax", include_self=True)
+    tied_representative = scores >= (best_scores[target_uv] - 1e-7)
+    positions = torch.arange(target_uv.shape[0], device=target_uv.device)
+    first_representative = torch.full(
+        (UV_SIZE * UV_SIZE,),
+        target_uv.shape[0],
+        dtype=torch.long,
+        device=target_uv.device,
+    )
+    first_representative.scatter_reduce_(
+        0,
+        target_uv[tied_representative],
+        positions[tied_representative],
+        reduce="amin",
+        include_self=True,
+    )
+    selected = tied_representative & (positions == first_representative[target_uv])
+    return values[:, selected], target_uv[selected], scores[selected]
+
+
 def splat_to_uv_conditioning(
     rendered,
     fg,
@@ -1163,12 +1239,18 @@ def splat_to_uv_conditioning(
     group_size=1,
     bg_color=(128, 128, 128),
     confidence=None,
+    color_aggregation="exact_mode",
 ):
     if rendered.dim() != 4:
         raise ValueError(f"Expected rendered tensor as NCHW, got {tuple(rendered.shape)}.")
     N, _, _, _ = rendered.shape
     if N % group_size != 0:
         raise ValueError(f"N={N} must be divisible by group_size={group_size}.")
+    if color_aggregation not in SPLAT_COLOR_AGGREGATIONS:
+        raise ValueError(
+            f"Unknown color_aggregation={color_aggregation!r}; "
+            f"expected one of {SPLAT_COLOR_AGGREGATIONS}."
+        )
 
     groups = N // group_size
     device = rendered.device
@@ -1202,7 +1284,11 @@ def splat_to_uv_conditioning(
             values = torch.cat(candidate_values, dim=1)
             target_uv = torch.cat(candidate_uv, dim=0)
             scores = torch.cat(candidate_confidence, dim=0).float()
-            if select_highest_confidence:
+            if color_aggregation == "exact_mode":
+                values, target_uv, scores = _select_exact_mode_candidates(
+                    values, target_uv, scores
+                )
+            if color_aggregation == "best" and select_highest_confidence:
                 best_scores = scores.new_full((UV_SIZE * UV_SIZE,), -torch.inf)
                 best_scores.scatter_reduce_(0, target_uv, scores, reduce="amax", include_self=True)
                 is_best = scores >= (best_scores[target_uv] - 1e-7)

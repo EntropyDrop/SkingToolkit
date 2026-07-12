@@ -22,6 +22,7 @@ from SkingToolkit.dense_uv_parser.utils import (  # noqa: E402
     LAYER_PALETTE,
     PART_PALETTE,
     ROUTE_ROLE_PALETTE,
+    SPLAT_COLOR_AGGREGATIONS,
     combine_layer_face,
     build_geometry_grid_debug,
     fill_geometry_grid_debug,
@@ -391,6 +392,12 @@ def build_arg_parser():
         help="Reject outer UV texels supported by less than this fraction of their projected footprint.",
     )
     parser.add_argument(
+        "--color_aggregation",
+        choices=SPLAT_COLOR_AGGREGATIONS,
+        default="exact_mode",
+        help="How source colors mapping to the same UV texel are selected.",
+    )
+    parser.add_argument(
         "--allow_semantic_fallback",
         action="store_true",
         help="Keep pixels whose strict semantic routing had no valid candidate.",
@@ -488,6 +495,7 @@ def main():
             outer_route_confidence_threshold=args.outer_route_confidence_threshold,
             outer_route_margin_threshold=args.outer_route_margin_threshold,
             outer_uv_min_coverage=args.outer_uv_min_coverage,
+            color_aggregation=args.color_aggregation,
             reject_semantic_fallback=not args.allow_semantic_fallback,
             return_details=True,
         )
@@ -641,6 +649,12 @@ def main():
             raise ValueError(
                 "Parser outer UV coverage threshold does not match the inverse_uv checkpoint: "
                 f"checkpoint={expected_outer_coverage}, requested={args.outer_uv_min_coverage}."
+            )
+        expected_color_aggregation = inpaint_args.get("parser_splat_color_aggregation")
+        if expected_color_aggregation is not None and expected_color_aggregation != args.color_aggregation:
+            raise ValueError(
+                "Parser color aggregation does not match the inverse_uv checkpoint: "
+                f"checkpoint={expected_color_aggregation}, requested={args.color_aggregation}."
             )
         with torch.no_grad():
             pred_uv = finalize_minecraft_alpha(

@@ -55,7 +55,7 @@ Training previews are saved under `runs/<run>/previews`:
 
 For good parser splatting, watch `precision_outer`, `recall_outer`, `precision_secondary`, `recall_secondary`, `acc_route_role`, `err_affine_translation_px`, and `err_affine_scale_pct`. `best.pt` defaults to the lowest `loss_geometry`.
 
-Predicted splatting keeps the highest-confidence render sample for each layer/UV texel instead of averaging all candidates, reducing color mixing at pixel boundaries.
+Predicted splatting first separates inner, outer, and rejected secondary pixels. For each remaining layer/UV texel it uses the most frequent exact 8-bit RGB value and returns a real source pixel of that color; it never averages colors. Use `COLOR_AGGREGATION=best` during inference only as a diagnostic comparison with the former highest-confidence single-pixel strategy.
 
 ## Infer With Inpaint
 
