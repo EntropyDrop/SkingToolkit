@@ -148,6 +148,8 @@ def build_dense_parser_conditioning(
     affine_refine_scale=0.0,
     route_confidence_threshold=0.05,
     route_margin_threshold=0.10,
+    outer_route_confidence_threshold=0.10,
+    outer_route_margin_threshold=0.20,
     reject_semantic_fallback=True,
     bg_color=(128, 128, 128),
     return_renders=False,
@@ -190,6 +192,8 @@ def build_dense_parser_conditioning(
             affine_refine_scale=affine_refine_scale,
             route_confidence_threshold=route_confidence_threshold,
             route_margin_threshold=route_margin_threshold,
+            outer_route_confidence_threshold=outer_route_confidence_threshold,
+            outer_route_margin_threshold=outer_route_margin_threshold,
             reject_semantic_fallback=reject_semantic_fallback,
         )
 
@@ -215,6 +219,8 @@ def build_training_conditioning(
     parser_affine_refine_scale=0.0,
     parser_route_confidence_threshold=0.05,
     parser_route_margin_threshold=0.10,
+    parser_outer_route_confidence_threshold=0.10,
+    parser_outer_route_margin_threshold=0.20,
     parser_reject_semantic_fallback=True,
     bg_color=(128, 128, 128),
     return_renders=False,
@@ -236,6 +242,8 @@ def build_training_conditioning(
         affine_refine_scale=parser_affine_refine_scale,
         route_confidence_threshold=parser_route_confidence_threshold,
         route_margin_threshold=parser_route_margin_threshold,
+        outer_route_confidence_threshold=parser_outer_route_confidence_threshold,
+        outer_route_margin_threshold=parser_outer_route_margin_threshold,
         reject_semantic_fallback=parser_reject_semantic_fallback,
         bg_color=bg_color,
         return_renders=return_renders,
@@ -264,6 +272,8 @@ def run_epoch(
     parser_affine_refine_scale=0.0,
     parser_route_confidence_threshold=0.05,
     parser_route_margin_threshold=0.10,
+    parser_outer_route_confidence_threshold=0.10,
+    parser_outer_route_margin_threshold=0.20,
     parser_reject_semantic_fallback=True,
     bg_color=(128, 128, 128),
     log_every=50,
@@ -300,6 +310,8 @@ def run_epoch(
                 parser_affine_refine_scale=parser_affine_refine_scale,
                 parser_route_confidence_threshold=parser_route_confidence_threshold,
                 parser_route_margin_threshold=parser_route_margin_threshold,
+                parser_outer_route_confidence_threshold=parser_outer_route_confidence_threshold,
+                parser_outer_route_margin_threshold=parser_outer_route_margin_threshold,
                 parser_reject_semantic_fallback=parser_reject_semantic_fallback,
                 bg_color=bg_color,
                 return_renders=True,
@@ -502,6 +514,8 @@ def build_arg_parser():
     parser.add_argument("--parser_affine_refine_scale", type=float, default=None)
     parser.add_argument("--parser_route_confidence_threshold", type=float, default=0.05)
     parser.add_argument("--parser_route_margin_threshold", type=float, default=0.10)
+    parser.add_argument("--parser_outer_route_confidence_threshold", type=float, default=0.10)
+    parser.add_argument("--parser_outer_route_margin_threshold", type=float, default=0.20)
     parser.add_argument(
         "--parser_allow_semantic_fallback",
         action="store_true",
@@ -775,6 +789,8 @@ def main():
             parser_affine_refine_scale=args.parser_affine_refine_scale,
             parser_route_confidence_threshold=args.parser_route_confidence_threshold,
             parser_route_margin_threshold=args.parser_route_margin_threshold,
+            parser_outer_route_confidence_threshold=args.parser_outer_route_confidence_threshold,
+            parser_outer_route_margin_threshold=args.parser_outer_route_margin_threshold,
             parser_reject_semantic_fallback=not args.parser_allow_semantic_fallback,
             bg_color=dataset.bg_color, log_every=args.log_every,
         )
@@ -802,6 +818,8 @@ def main():
                     parser_affine_refine_scale=args.parser_affine_refine_scale,
                     parser_route_confidence_threshold=args.parser_route_confidence_threshold,
                     parser_route_margin_threshold=args.parser_route_margin_threshold,
+                    parser_outer_route_confidence_threshold=args.parser_outer_route_confidence_threshold,
+                    parser_outer_route_margin_threshold=args.parser_outer_route_margin_threshold,
                     parser_reject_semantic_fallback=not args.parser_allow_semantic_fallback,
                     bg_color=dataset.bg_color, log_every=args.log_every,
                 )
@@ -840,6 +858,8 @@ def main():
                     parser_affine_refine_scale=args.parser_affine_refine_scale,
                     parser_route_confidence_threshold=args.parser_route_confidence_threshold,
                     parser_route_margin_threshold=args.parser_route_margin_threshold,
+                    parser_outer_route_confidence_threshold=args.parser_outer_route_confidence_threshold,
+                    parser_outer_route_margin_threshold=args.parser_outer_route_margin_threshold,
                     parser_reject_semantic_fallback=not args.parser_allow_semantic_fallback,
                     bg_color=dataset.bg_color,
                 )

@@ -773,6 +773,8 @@ def splat_parser_predictions_to_uv_conditioning(
     affine_refine_scale=0.0,
     route_confidence_threshold=0.0,
     route_margin_threshold=0.0,
+    outer_route_confidence_threshold=None,
+    outer_route_margin_threshold=None,
     reject_semantic_fallback=False,
     return_details=False,
 ):
@@ -781,6 +783,14 @@ def splat_parser_predictions_to_uv_conditioning(
         raise ValueError("route_confidence_threshold must be in [0, 1].")
     if not 0.0 <= route_margin_threshold <= 1.0:
         raise ValueError("route_margin_threshold must be in [0, 1].")
+    if outer_route_confidence_threshold is None:
+        outer_route_confidence_threshold = route_confidence_threshold
+    if outer_route_margin_threshold is None:
+        outer_route_margin_threshold = route_margin_threshold
+    if not 0.0 <= outer_route_confidence_threshold <= 1.0:
+        raise ValueError("outer_route_confidence_threshold must be in [0, 1].")
+    if not 0.0 <= outer_route_margin_threshold <= 1.0:
+        raise ValueError("outer_route_margin_threshold must be in [0, 1].")
     if "affine" not in outputs:
         conditioning = splat_predictions_to_uv_conditioning(
             rendered,
@@ -822,10 +832,21 @@ def splat_parser_predictions_to_uv_conditioning(
         semantic_gate=semantic_gate,
     )
     raw_foreground = routing["foreground"]
+    selected_outer = routing["layer"] == 1
+    confidence_threshold = torch.where(
+        selected_outer,
+        routing["confidence"].new_tensor(outer_route_confidence_threshold),
+        routing["confidence"].new_tensor(route_confidence_threshold),
+    )
+    margin_threshold = torch.where(
+        selected_outer,
+        routing["confidence_margin_ratio"].new_tensor(outer_route_margin_threshold),
+        routing["confidence_margin_ratio"].new_tensor(route_margin_threshold),
+    )
     trusted = (
         raw_foreground
-        & (routing["confidence"] >= route_confidence_threshold)
-        & (routing["confidence_margin_ratio"] >= route_margin_threshold)
+        & (routing["confidence"] >= confidence_threshold)
+        & (routing["confidence_margin_ratio"] >= margin_threshold)
     )
     if reject_semantic_fallback:
         trusted = trusted & ~routing["semantic_fallback"]

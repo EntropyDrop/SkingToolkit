@@ -314,6 +314,8 @@ def build_arg_parser():
     parser.add_argument("--fg_threshold", type=float, default=0.5)
     parser.add_argument("--route_confidence_threshold", type=float, default=0.05)
     parser.add_argument("--route_margin_threshold", type=float, default=0.10)
+    parser.add_argument("--outer_route_confidence_threshold", type=float, default=0.10)
+    parser.add_argument("--outer_route_margin_threshold", type=float, default=0.20)
     parser.add_argument(
         "--allow_semantic_fallback",
         action="store_true",
@@ -406,6 +408,8 @@ def main():
             affine_refine_scale=affine_refine_scale,
             route_confidence_threshold=args.route_confidence_threshold,
             route_margin_threshold=args.route_margin_threshold,
+            outer_route_confidence_threshold=args.outer_route_confidence_threshold,
+            outer_route_margin_threshold=args.outer_route_margin_threshold,
             reject_semantic_fallback=not args.allow_semantic_fallback,
             return_details=True,
         )
@@ -414,6 +418,10 @@ def main():
     if routing is not None:
         raw_count = int(routing["raw_foreground"].sum().item())
         rejected_count = int(routing["rejected"].sum().item())
+        raw_inner = routing["raw_foreground"] & (routing["layer"] == 0)
+        raw_outer = routing["raw_foreground"] & (routing["layer"] == 1)
+        rejected_inner = routing["rejected"] & (routing["layer"] == 0)
+        rejected_outer = routing["rejected"] & (routing["layer"] == 1)
         print(
             "routing_filter="
             + json.dumps(
@@ -422,6 +430,14 @@ def main():
                     "kept_pixels": raw_count - rejected_count,
                     "rejected_pixels": rejected_count,
                     "rejected_percent": round(100.0 * rejected_count / max(raw_count, 1), 3),
+                    "inner_rejected_percent": round(
+                        100.0 * int(rejected_inner.sum().item()) / max(int(raw_inner.sum().item()), 1),
+                        3,
+                    ),
+                    "outer_rejected_percent": round(
+                        100.0 * int(rejected_outer.sum().item()) / max(int(raw_outer.sum().item()), 1),
+                        3,
+                    ),
                 },
                 sort_keys=True,
             )

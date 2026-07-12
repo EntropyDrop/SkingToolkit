@@ -237,6 +237,8 @@ def save_preview(model, renderer, loader, device, args, output_path, max_items=2
                 affine_refine_scale=args.affine_refine_scale,
                 route_confidence_threshold=args.route_confidence_threshold,
                 route_margin_threshold=args.route_margin_threshold,
+                outer_route_confidence_threshold=args.outer_route_confidence_threshold,
+                outer_route_margin_threshold=args.outer_route_margin_threshold,
                 reject_semantic_fallback=not args.allow_semantic_fallback,
                 return_details=True,
             )
@@ -438,6 +440,8 @@ def build_arg_parser():
     parser.add_argument("--affine_refine_scale", type=float, default=0.0)
     parser.add_argument("--route_confidence_threshold", type=float, default=0.05)
     parser.add_argument("--route_margin_threshold", type=float, default=0.10)
+    parser.add_argument("--outer_route_confidence_threshold", type=float, default=0.10)
+    parser.add_argument("--outer_route_margin_threshold", type=float, default=0.20)
     parser.add_argument("--allow_semantic_fallback", action="store_true")
     parser.add_argument("--augment", dest="augment", action="store_true", default=True)
     parser.add_argument("--no_augment", dest="augment", action="store_false")

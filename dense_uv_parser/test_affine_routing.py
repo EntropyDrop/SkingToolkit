@@ -407,6 +407,39 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         self.assertEqual(int(filtered_details["routing"]["foreground"].sum()), 0)
         self.assertEqual(int(filtered_details["routing"]["rejected"].sum()), 1)
 
+    def test_outer_threshold_does_not_remove_inner_pixels(self):
+        renderer = FakeRenderer(valid_pixels=1)
+        rendered = torch.rand(1, 4, 8, 8)
+        rendered[:, 3] = 1.0
+        outputs = {
+            "foreground": torch.full((1, 1, 8, 8), 10.0),
+            "layer": torch.zeros(1, 2, 8, 8),
+            "part": torch.zeros(1, 6, 8, 8),
+            "face": torch.zeros(1, 6, 8, 8),
+            "surface": torch.cat(
+                [torch.full((1, 1, 8, 8), 10.0), torch.full((1, 1, 8, 8), -10.0)],
+                dim=1,
+            ),
+            "affine": torch.zeros(1, 3),
+        }
+
+        _, details = splat_parser_predictions_to_uv_conditioning(
+            rendered,
+            outputs,
+            renderer=renderer,
+            views=["front"],
+            group_size=1,
+            semantic_gate=False,
+            affine_refine=False,
+            route_confidence_threshold=0.0,
+            route_margin_threshold=0.0,
+            outer_route_confidence_threshold=1.0,
+            outer_route_margin_threshold=1.0,
+            return_details=True,
+        )
+
+        self.assertEqual(int(details["routing"]["foreground"].sum()), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
