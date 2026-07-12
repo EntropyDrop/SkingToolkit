@@ -146,8 +146,8 @@ def build_dense_parser_conditioning(
     affine_refine=True,
     affine_refine_translation_px=2.0,
     affine_refine_scale=0.0,
-    route_confidence_threshold=0.05,
-    route_margin_threshold=0.10,
+    route_confidence_threshold=0.0,
+    route_margin_threshold=0.0,
     outer_route_confidence_threshold=0.10,
     outer_route_margin_threshold=0.20,
     reject_semantic_fallback=True,
@@ -217,8 +217,8 @@ def build_training_conditioning(
     parser_affine_refine=True,
     parser_affine_refine_translation_px=2.0,
     parser_affine_refine_scale=0.0,
-    parser_route_confidence_threshold=0.05,
-    parser_route_margin_threshold=0.10,
+    parser_route_confidence_threshold=0.0,
+    parser_route_margin_threshold=0.0,
     parser_outer_route_confidence_threshold=0.10,
     parser_outer_route_margin_threshold=0.20,
     parser_reject_semantic_fallback=True,
@@ -270,8 +270,8 @@ def run_epoch(
     parser_affine_refine=True,
     parser_affine_refine_translation_px=2.0,
     parser_affine_refine_scale=0.0,
-    parser_route_confidence_threshold=0.05,
-    parser_route_margin_threshold=0.10,
+    parser_route_confidence_threshold=0.0,
+    parser_route_margin_threshold=0.0,
     parser_outer_route_confidence_threshold=0.10,
     parser_outer_route_margin_threshold=0.20,
     parser_reject_semantic_fallback=True,
@@ -512,8 +512,8 @@ def build_arg_parser():
     parser.add_argument("--no_parser_affine_refine", dest="parser_affine_refine", action="store_false")
     parser.add_argument("--parser_affine_refine_translation_px", type=float, default=None)
     parser.add_argument("--parser_affine_refine_scale", type=float, default=None)
-    parser.add_argument("--parser_route_confidence_threshold", type=float, default=0.05)
-    parser.add_argument("--parser_route_margin_threshold", type=float, default=0.10)
+    parser.add_argument("--parser_route_confidence_threshold", type=float, default=0.0)
+    parser.add_argument("--parser_route_margin_threshold", type=float, default=0.0)
     parser.add_argument("--parser_outer_route_confidence_threshold", type=float, default=0.10)
     parser.add_argument("--parser_outer_route_margin_threshold", type=float, default=0.20)
     parser.add_argument(

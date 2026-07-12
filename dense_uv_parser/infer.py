@@ -312,8 +312,8 @@ def build_arg_parser():
     parser.add_argument("--view_images", nargs="*", default=None)
     parser.add_argument("--mappings_dir", default=None)
     parser.add_argument("--fg_threshold", type=float, default=0.5)
-    parser.add_argument("--route_confidence_threshold", type=float, default=0.05)
-    parser.add_argument("--route_margin_threshold", type=float, default=0.10)
+    parser.add_argument("--route_confidence_threshold", type=float, default=0.0)
+    parser.add_argument("--route_margin_threshold", type=float, default=0.0)
     parser.add_argument("--outer_route_confidence_threshold", type=float, default=0.10)
     parser.add_argument("--outer_route_margin_threshold", type=float, default=0.20)
     parser.add_argument(
