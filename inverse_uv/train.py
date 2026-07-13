@@ -718,7 +718,7 @@ def main():
         covered_inner_alpha_threshold=args.covered_inner_alpha_threshold,
         discriminator=discriminator,
     ).to(device)
-    if dense_parser.predict_affine and not dense_parser.geometry_only:
+    if dense_parser.predict_affine and dense_parser.surface_classes > 0:
         mapping_surface_classes = surface_class_count(criterion.renderer, parse_views(args.views))
         if dense_parser.surface_classes != mapping_surface_classes:
             raise ValueError(

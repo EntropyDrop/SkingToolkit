@@ -56,13 +56,13 @@ else
 fi
 
 DATA_DIR="${DATA_DIR:-../skins}"
-MAPPINGS_SIZE="${MAPPINGS_SIZE:-512x1024}"
+MAPPINGS_SIZE="${MAPPINGS_SIZE:-256x512}"
 MAPPINGS_DIR="${MAPPINGS_DIR:-../../github/differentiable_minecraft_renderer/mappings_${MAPPINGS_SIZE}}"
 VIEWS="${VIEWS:-walk_front_both_layer_ortho,walk_back_both_layer_ortho}"
 PARSER_MODE="${PARSER_MODE:-geometry_fit}"
 MAX_SAMPLES="${MAX_SAMPLES:-30000}"
 BASE_CHANNELS="${BASE_CHANNELS:-32}"
-BATCH_SIZE="${BATCH_SIZE:-16}"
+BATCH_SIZE="${BATCH_SIZE:-32}"
 NUM_WORKERS="${NUM_WORKERS:-16}"
 PREFETCH_FACTOR="${PREFETCH_FACTOR:-4}"
 EPOCHS="${EPOCHS:-30}"

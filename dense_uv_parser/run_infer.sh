@@ -227,7 +227,7 @@ if [[ -n "$OUTER_CUTOUT_OUTPUT" ]]; then
   echo "Outer cutout output: $OUTER_CUTOUT_OUTPUT"
 fi
 if [[ -n "$SECONDARY_CUTOUT_OUTPUT" ]]; then
-  echo "Secondary/backface output: $SECONDARY_CUTOUT_OUTPUT"
+  echo "Secondary/deeper-surface output: $SECONDARY_CUTOUT_OUTPUT"
 fi
 if [[ -n "$FACE_OUTPUT" ]]; then
   echo "Face output: $FACE_OUTPUT"

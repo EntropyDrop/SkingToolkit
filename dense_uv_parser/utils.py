@@ -1079,6 +1079,135 @@ def _routing_from_geometry_outputs(
     }
 
 
+def _routing_from_geometry_surface_outputs(renderer, views, outputs, fg_threshold=0.5):
+    """Route every visible geometry surface using joint role and surface evidence."""
+    views = parse_views(views)
+    if not views:
+        raise ValueError("At least one renderer view is required for geometry-surface routing.")
+    if outputs["layer"].shape[1] != ROUTE_ROLE_CLASSES:
+        raise ValueError("Geometry-surface routing requires the three-class route-role head.")
+    if "surface" not in outputs:
+        raise ValueError("Geometry-surface routing requires a static surface classifier.")
+
+    foreground_prob = torch.sigmoid(outputs["foreground"])[:, 0]
+    role_prob = torch.softmax(outputs["layer"].float(), dim=1)
+    surface_prob = torch.softmax(outputs["surface"].float(), dim=1)
+    raw_route_role = role_prob.argmax(dim=1)
+    N, _, H, W = surface_prob.shape
+    if N % len(views) != 0:
+        raise ValueError(f"N={N} must be divisible by {len(views)} renderer views.")
+
+    fg = torch.zeros((N, H, W), dtype=torch.bool, device=surface_prob.device)
+    layer = torch.zeros((N, H, W), dtype=torch.long, device=surface_prob.device)
+    flat_uv = torch.zeros_like(layer)
+    surface = torch.full_like(layer, IGNORE_INDEX)
+    route_role = torch.full_like(layer, IGNORE_INDEX)
+    confidence = torch.zeros_like(foreground_prob)
+    confidence_margin = torch.zeros_like(foreground_prob)
+    confidence_margin_ratio = torch.zeros_like(foreground_prob)
+    part = torch.full_like(layer, IGNORE_INDEX)
+    face = torch.full_like(layer, IGNORE_INDEX)
+
+    for view_index, view in enumerate(views):
+        selection = slice(view_index, N, len(views))
+        static = build_static_surface_routing(renderer, view, surface_prob.device)
+        if static["masks"].shape[-2:] != (H, W):
+            raise ValueError(
+                f"View {view!r} mapping shape {tuple(static['masks'].shape[-2:])} "
+                f"does not match parser shape {(H, W)}."
+            )
+        surface_count = static["masks"].shape[0]
+        if surface_prob.shape[1] < surface_count:
+            raise ValueError(
+                f"Parser has {surface_prob.shape[1]} surface classes, but view {view!r} "
+                f"requires {surface_count}."
+            )
+
+        candidate_layer = static["layer"].clamp(0, LAYER_CLASSES - 1)
+        direct_masks = static["masks"][:LAYER_CLASSES].gather(
+            0, candidate_layer
+        )
+        direct_uv = static["flat_uv"][:LAYER_CLASSES].gather(
+            0, candidate_layer
+        )
+        primary = static["masks"] & direct_masks & (static["flat_uv"] == direct_uv)
+        candidate_role = torch.where(
+            primary,
+            candidate_layer,
+            torch.full_like(candidate_layer, ROUTE_SECONDARY),
+        )
+
+        view_batch = surface_prob[selection].shape[0]
+        candidate_role_prob = role_prob[selection].gather(
+            1,
+            candidate_role.unsqueeze(0).expand(view_batch, -1, -1, -1),
+        )
+        candidate_score = (
+            surface_prob[selection, :surface_count] * candidate_role_prob
+        ).clamp_min(0.0).sqrt()
+        candidate_valid = static["masks"].unsqueeze(0).expand(view_batch, -1, -1, -1)
+        candidate_score = candidate_score.masked_fill(~candidate_valid, -1.0)
+        best_score, selected_surface = candidate_score.max(dim=1)
+        if surface_count > 1:
+            top_scores = candidate_score.topk(k=2, dim=1).values
+            margin = (top_scores[:, 0] - top_scores[:, 1]).clamp_min(0.0)
+            margin_ratio = (
+                margin / top_scores[:, 0].abs().clamp_min(1e-8)
+            ).clamp(0.0, 1.0)
+        else:
+            margin = best_score.clamp_min(0.0)
+            margin_ratio = (best_score > 0.0).to(best_score.dtype)
+
+        routed = _select_static_surface(static, selected_surface)
+        has_candidate = best_score >= 0.0
+        base_silhouette = static["masks"][0].unsqueeze(0).expand(view_batch, -1, -1)
+        routed_fg = (
+            ((foreground_prob[selection] > fg_threshold) | base_silhouette)
+            & has_candidate
+            & routed["valid"]
+        )
+        selected_role = candidate_role.unsqueeze(0).expand(
+            view_batch, -1, -1, -1
+        ).gather(1, selected_surface.unsqueeze(1)).squeeze(1)
+
+        fg[selection] = routed_fg
+        layer[selection] = routed["layer"]
+        flat_uv[selection] = routed["flat_uv"]
+        surface[selection] = torch.where(
+            routed_fg,
+            selected_surface,
+            torch.full_like(selected_surface, IGNORE_INDEX),
+        )
+        route_role[selection] = torch.where(
+            routed_fg,
+            selected_role,
+            torch.full_like(selected_role, IGNORE_INDEX),
+        )
+        confidence[selection] = best_score.clamp_min(0.0)
+        confidence_margin[selection] = margin
+        confidence_margin_ratio[selection] = margin_ratio
+        part[selection] = routed["part"]
+        face[selection] = routed["face"]
+
+    secondary = fg & (route_role == ROUTE_SECONDARY)
+    return {
+        "foreground": fg,
+        "layer": layer,
+        "flat_uv": flat_uv,
+        "surface": surface,
+        "confidence": confidence,
+        "confidence_margin": confidence_margin,
+        "confidence_margin_ratio": confidence_margin_ratio,
+        "semantic_fallback": torch.zeros_like(fg),
+        "part": part,
+        "face": face,
+        "raw_route_role": raw_route_role,
+        "route_role": route_role,
+        "secondary": secondary,
+        "secondary_routed": secondary,
+    }
+
+
 def flat_uv_to_uv01(flat_uv, dtype):
     return torch.stack(
         [
@@ -1188,7 +1317,14 @@ def splat_parser_predictions_to_uv_conditioning(
         mode="nearest",
     )[:, 0] > 0.5
     canonical_outputs = canonicalize_parser_outputs(routing_outputs)
-    if "surface" not in canonical_outputs and "part" not in canonical_outputs:
+    if "surface" in canonical_outputs and "part" not in canonical_outputs:
+        routing = _routing_from_geometry_surface_outputs(
+            renderer,
+            views,
+            canonical_outputs,
+            fg_threshold=fg_threshold,
+        )
+    elif "surface" not in canonical_outputs and "part" not in canonical_outputs:
         routing = _routing_from_geometry_outputs(
             renderer,
             views,
@@ -1264,6 +1400,9 @@ def splat_parser_predictions_to_uv_conditioning(
     routing["background_rejected"] = raw_foreground & ~canonical_observed_foreground
     routing["rejected"] = raw_foreground & ~trusted
     routing["foreground"] = trusted
+    if "secondary_routed" in routing:
+        routing["secondary_rejected"] = routing["secondary"] & ~trusted
+        routing["secondary_routed"] = routing["secondary"] & trusted
     routing["outer_uv_coverage"] = outer_uv_coverage
     conditioning = splat_to_uv_conditioning(
         canonical_rendered,

@@ -373,7 +373,7 @@ def build_arg_parser():
     parser.add_argument(
         "--secondary_cutout_output",
         default=None,
-        help="Original-color cutout for rejected secondary/back-facing pixels.",
+        help="Original-color cutout for secondary/deeper surface pixels.",
     )
     parser.add_argument("--face_output", default=None, help="Six-class routed cube-face visualization.")
     parser.add_argument("--layer_face_output", default=None, help="Twelve-class inner/outer-by-face visualization.")
@@ -522,6 +522,12 @@ def main():
             < args.outer_uv_min_coverage
         )
         secondary_count = int(routing.get("secondary", torch.zeros_like(raw_outer)).sum().item())
+        routed_secondary_count = int(
+            routing.get("secondary_routed", torch.zeros_like(raw_outer)).sum().item()
+        )
+        rejected_secondary_count = int(
+            routing.get("secondary_rejected", torch.zeros_like(raw_outer)).sum().item()
+        )
         background_rejected_count = int(
             routing.get("background_rejected", torch.zeros_like(raw_outer)).sum().item()
         )
@@ -556,6 +562,8 @@ def main():
                     "outer_coverage_rejected_pixels": int(coverage_rejected_outer.sum().item()),
                     "background_rejected_pixels": background_rejected_count,
                     "secondary_backface_pixels": secondary_count,
+                    "routed_secondary_pixels": routed_secondary_count,
+                    "rejected_secondary_pixels": rejected_secondary_count,
                     "raw_secondary_backface_pixels": raw_secondary_count,
                 },
                 sort_keys=True,

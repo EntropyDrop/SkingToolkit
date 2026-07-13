@@ -111,7 +111,9 @@ class DenseUVParserNet(nn.Module):
         if self.predict_affine:
             if not self.geometry_only and self.surface_classes < 2:
                 raise ValueError("Global-affine routing requires at least two static surface classes.")
-            if not self.geometry_only:
+            if self.surface_classes == 1:
+                raise ValueError("Surface routing requires at least two static surface classes.")
+            if self.surface_classes > 0:
                 self.surface = nn.Conv2d(c, self.surface_classes, kernel_size=1)
             hidden = max(c * 4, 32)
             self.affine_head = nn.Sequential(
@@ -179,7 +181,7 @@ class DenseUVParserNet(nn.Module):
         if affine is not None:
             # [tx, ty, log_scale]. tx/ty are affine_grid normalized coordinates.
             outputs["affine"] = affine
-            if not self.geometry_only:
+            if self.surface_classes > 0:
                 outputs["surface"] = self.surface(x)
         return outputs
 

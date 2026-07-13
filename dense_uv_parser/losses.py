@@ -139,15 +139,21 @@ class DenseUVParserLoss(nn.Module):
             err_affine_scale_pct = zero
 
         if "surface" in outputs and "surface" in targets:
-            loss_surface = F.cross_entropy(outputs["surface"], targets["surface"], ignore_index=IGNORE_INDEX)
+            loss_surface = _balanced_cross_entropy(outputs["surface"], targets["surface"])
             acc_surface = _masked_accuracy(outputs["surface"], targets["surface"])
         else:
             loss_surface = zero
             acc_surface = zero
 
-        geometry_only = "part" not in outputs and "surface" not in outputs
-        loss_routing = loss_layer + loss_affine if geometry_only else loss_surface + loss_uv_class + loss_layer_face
-        loss_geometry = loss_foreground + loss_layer + loss_affine
+        geometry_route_roles = outputs["layer"].shape[1] == 3 and "route_role" in targets
+        loss_routing = (
+            loss_layer + loss_affine + loss_surface
+            if geometry_route_roles
+            else loss_surface + loss_uv_class + loss_layer_face
+        )
+        loss_geometry = loss_foreground + loss_layer + loss_affine + (
+            loss_surface if geometry_route_roles else zero
+        )
 
         loss_total = (
             self.lambda_foreground * loss_foreground

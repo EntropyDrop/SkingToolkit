@@ -464,7 +464,7 @@ def build_arg_parser():
         "--parser_mode",
         choices=["geometry_fit", "global_affine", "dense"],
         default="geometry_fit",
-        help="geometry_fit learns alignment plus primary inner/outer versus secondary/backface routing.",
+        help="geometry_fit learns alignment, route role, and exact renderer surface-slot routing.",
     )
     parser.add_argument("--max_samples", type=int, default=None)
     parser.add_argument("--val_split", type=float, default=0.1)
@@ -581,7 +581,7 @@ def main():
     geometry_only = args.parser_mode == "geometry_fit"
     surface_classes = (
         surface_class_count(renderer, parse_views(args.views))
-        if args.parser_mode == "global_affine"
+        if args.parser_mode in ("geometry_fit", "global_affine")
         else 0
     )
     model = DenseUVParserNet(
@@ -628,6 +628,12 @@ def main():
         if geometry_only and checkpoint_layer_classes != model.layer_classes:
             raise ValueError(
                 "This geometry checkpoint predates the secondary/backface route class. "
+                "Start a new parser run instead of resuming it."
+            )
+        checkpoint_surface_classes = checkpoint.get("model_config", {}).get("surface_classes", 0)
+        if geometry_only and checkpoint_surface_classes != model.surface_classes:
+            raise ValueError(
+                "This geometry checkpoint predates exact surface-slot routing. "
                 "Start a new parser run instead of resuming it."
             )
         if args.parser_mode == "global_affine" and not any(

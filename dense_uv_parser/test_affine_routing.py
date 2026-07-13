@@ -73,6 +73,69 @@ def dense_targets(batch, height, width):
 
 
 class GlobalAffineRoutingTest(unittest.TestCase):
+    def test_geometry_model_emits_exact_surface_head(self):
+        model = DenseUVParserNet(
+            base_channels=8,
+            view_classes=1,
+            predict_affine=True,
+            surface_classes=3,
+            geometry_only=True,
+        )
+        rendered = torch.rand(1, 4, 16, 16)
+
+        outputs = model(rendered, view_ids=torch.zeros(1, dtype=torch.long))
+
+        self.assertEqual(tuple(outputs["surface"].shape), (1, 3, 16, 16))
+        self.assertNotIn("part", outputs)
+        self.assertNotIn("uv", outputs)
+
+    def test_geometry_surface_head_routes_secondary_to_exact_uv(self):
+        renderer = FakeRenderer(valid_pixels=1)
+        composite_grid = renderer.front_inner_grid.unsqueeze(0).clone()
+        composite_grid[0, 0, 0, 0] = (1.0 / 63.0) * 2.0 - 1.0
+        renderer.register_buffer("front_composite_grid_layers", composite_grid)
+        renderer.register_buffer(
+            "front_composite_mask_layers", renderer.front_inner_mask.unsqueeze(0).clone()
+        )
+        renderer.register_buffer(
+            "front_composite_is_decor_layers",
+            torch.zeros_like(renderer.front_inner_mask.unsqueeze(0), dtype=torch.bool),
+        )
+        rendered = torch.full((1, 4, 8, 8), 0.5)
+        rendered[:, :3, 0, 0] = torch.tensor([1.0, 0.0, 0.0])
+        rendered[:, 3] = 1.0
+        role_logits = torch.full((1, 3, 8, 8), -10.0)
+        role_logits[:, 2, 0, 0] = 10.0
+        surface_logits = torch.full((1, 3, 8, 8), -10.0)
+        surface_logits[:, 2, 0, 0] = 10.0
+        outputs = {
+            "foreground": torch.full((1, 1, 8, 8), 10.0),
+            "layer": role_logits,
+            "surface": surface_logits,
+            "affine": torch.zeros(1, 3),
+        }
+        observed = torch.zeros(1, 8, 8, dtype=torch.bool)
+        observed[:, 0, 0] = True
+
+        conditioning, details = splat_parser_predictions_to_uv_conditioning(
+            rendered,
+            outputs,
+            renderer=renderer,
+            views=["front"],
+            group_size=1,
+            affine_refine=False,
+            observed_foreground=observed,
+            return_details=True,
+        )
+
+        routing = details["routing"]
+        self.assertTrue(routing["foreground"][0, 0, 0])
+        self.assertTrue(routing["secondary_routed"][0, 0, 0])
+        self.assertEqual(int(routing["surface"][0, 0, 0]), 2)
+        self.assertEqual(int(routing["flat_uv"][0, 0, 0]), 1)
+        self.assertEqual(float(conditioning[0, 4, 0, 1]), 1.0)
+        self.assertTrue(torch.equal(conditioning[0, :3, 0, 1], torch.tensor([1.0, 0.0, 0.0])))
+
     def test_geometry_fill_hides_unclassified_theoretical_grid(self):
         rendered = torch.zeros(1, 4, 2, 2)
         rendered[:, :3] = torch.tensor([1.0, 0.0, 0.0]).view(1, 3, 1, 1)
