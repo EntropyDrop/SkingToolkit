@@ -158,7 +158,7 @@ def build_dense_parser_conditioning(
     fg_threshold=0.5,
     semantic_gate=True,
     affine_refine=True,
-    affine_refine_translation_px=2.0,
+    affine_refine_translation_px=8.0,
     affine_refine_scale=0.0,
     route_confidence_threshold=0.0,
     route_margin_threshold=0.0,
@@ -238,7 +238,7 @@ def build_training_conditioning(
     parser_splat_fg_threshold=0.5,
     parser_semantic_gate=True,
     parser_affine_refine=True,
-    parser_affine_refine_translation_px=2.0,
+    parser_affine_refine_translation_px=8.0,
     parser_affine_refine_scale=0.0,
     parser_route_confidence_threshold=0.0,
     parser_route_margin_threshold=0.0,
@@ -295,7 +295,7 @@ def run_epoch(
     parser_splat_fg_threshold=0.5,
     parser_semantic_gate=True,
     parser_affine_refine=True,
-    parser_affine_refine_translation_px=2.0,
+    parser_affine_refine_translation_px=8.0,
     parser_affine_refine_scale=0.0,
     parser_route_confidence_threshold=0.0,
     parser_route_margin_threshold=0.0,
@@ -624,7 +624,7 @@ def main():
     if args.parser_affine_refine_translation_px is None:
         checkpoint_translation_px = parser_checkpoint_args.get("affine_refine_translation_px")
         args.parser_affine_refine_translation_px = (
-            2.0 if checkpoint_translation_px is None else checkpoint_translation_px
+            8.0 if checkpoint_translation_px is None else checkpoint_translation_px
         )
     if args.parser_affine_refine_scale is None:
         checkpoint_scale = parser_checkpoint_args.get("affine_refine_scale")

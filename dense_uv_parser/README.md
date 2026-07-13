@@ -57,6 +57,8 @@ For good parser splatting, watch `precision_outer`, `recall_outer`, `precision_s
 
 Predicted geometry routing first estimates a border-connected solid-background mask, then averages inner/outer/secondary probabilities inside each projected Minecraft texel. A destructive secondary rejection requires majority probability for the whole texel. This removes texture-dependent holes and background fringes without spreading labels across cuboid or UV boundaries. It then separates inner, outer, and rejected secondary pixels. For each remaining layer/UV texel it uses the most frequent exact 8-bit RGB value and returns a real source pixel of that color; it never averages colors. Use `COLOR_AGGREGATION=best` during inference only as a diagnostic comparison with the former highest-confidence single-pixel strategy.
 
+Affine refinement defaults to an 8-pixel residual search and uses the observed solid-background silhouette rather than the parser's noisy foreground logits. Canonicalized RGB is padded with the detected source background color instead of black.
+
 ## Infer With Inpaint
 
 Use the latest parser checkpoint automatically:

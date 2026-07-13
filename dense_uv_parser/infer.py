@@ -472,7 +472,7 @@ def main():
     affine_refine_translation_px = (
         args.affine_refine_translation_px
         if args.affine_refine_translation_px is not None
-        else 2.0 if checkpoint_translation_px is None else checkpoint_translation_px
+        else 8.0 if checkpoint_translation_px is None else checkpoint_translation_px
     )
     checkpoint_scale = parser_args.get("affine_refine_scale")
     affine_refine_scale = (
@@ -649,9 +649,16 @@ def main():
             )
         expected_translation_px = inpaint_args.get("parser_affine_refine_translation_px")
         if expected_translation_px is not None and abs(float(expected_translation_px) - affine_refine_translation_px) > 1e-9:
-            raise ValueError(
-                "Parser affine-refinement translation range does not match the inverse_uv checkpoint: "
-                f"checkpoint={expected_translation_px}, requested={affine_refine_translation_px}."
+            print(
+                "inpaint_warning="
+                + json.dumps(
+                    {
+                        "message": "parser affine-refinement translation range differs from checkpoint",
+                        "checkpoint_translation_px": float(expected_translation_px),
+                        "requested_translation_px": float(affine_refine_translation_px),
+                    },
+                    sort_keys=True,
+                )
             )
         expected_scale = inpaint_args.get("parser_affine_refine_scale")
         if expected_scale is not None and abs(float(expected_scale) - affine_refine_scale) > 1e-9:

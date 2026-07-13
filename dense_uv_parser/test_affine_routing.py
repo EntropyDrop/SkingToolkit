@@ -463,6 +463,17 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         smooth_fractional = (smooth[interior] - smooth[interior].round()).abs().mean()
         self.assertLess(sharp_fractional, smooth_fractional)
 
+    def test_canonical_render_uses_background_fill_outside_input(self):
+        rendered = torch.zeros(1, 4, 16, 16)
+        fill = torch.tensor([0.2, 0.7, 0.8, 1.0]).view(1, 4, 1, 1)
+        rendered[:] = fill
+        canonical = canonicalize_parser_render(
+            rendered,
+            {"affine": torch.tensor([[0.25, -0.25, 0.0]])},
+            fill_color=fill,
+        )
+        self.assertTrue(torch.allclose(canonical, rendered))
+
     def test_affine_refinement_snaps_a_one_pixel_translation(self):
         height = width = 32
         target = torch.zeros(height, width)
@@ -509,6 +520,34 @@ class GlobalAffineRoutingTest(unittest.TestCase):
 
         self.assertFalse(details["accepted"][0])
         self.assertTrue(torch.equal(refined, outputs["affine"]))
+
+    def test_affine_refinement_prefers_observed_mask_over_noisy_head(self):
+        height = width = 32
+        target = torch.zeros(height, width)
+        target[7:25, 9:23] = 1.0
+        shifted = torch.zeros_like(target)
+        shifted[:, 1:] = target[:, :-1]
+        renderer = FakeRenderer(mask=target)
+        outputs = {
+            "foreground": torch.where(
+                target.view(1, 1, height, width) > 0.5,
+                torch.tensor(10.0),
+                torch.tensor(-10.0),
+            ),
+            "affine": torch.zeros(1, 3),
+        }
+
+        refined, details = refine_parser_affine(
+            outputs,
+            renderer,
+            ["front"],
+            translation_radius_px=2.0,
+            observed_foreground=shifted.unsqueeze(0) > 0.5,
+        )
+
+        self.assertTrue(details["accepted"][0])
+        self.assertAlmostEqual(float(details["translation_px"][0, 0]), 1.0, places=4)
+        self.assertAlmostEqual(float(refined[0, 0]), 2.0 / width, places=4)
 
     def test_mapping_mask_rejects_background_false_positives(self):
         renderer = FakeRenderer(valid_pixels=1)

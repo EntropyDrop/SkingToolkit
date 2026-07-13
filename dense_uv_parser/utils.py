@@ -419,12 +419,11 @@ def randomize_render_background(rendered, probability=0.9, bg_color=(128, 128, 1
     return torch.cat([composited_rgb, torch.ones_like(alpha)], dim=1)
 
 
-def estimate_solid_background_foreground(
+def estimate_solid_background_color(
     rendered,
     color_tolerance=SOLID_BACKGROUND_COLOR_TOLERANCE,
     min_corner_support=SOLID_BACKGROUND_MIN_CORNER_SUPPORT,
 ):
-    """Find non-background pixels without deleting matching colors enclosed by the subject."""
     if rendered.dim() != 4 or rendered.shape[1] < 3:
         raise ValueError(f"Expected NCHW RGB(A), got {tuple(rendered.shape)}.")
     if not 0.0 <= color_tolerance <= 1.0:
@@ -434,9 +433,6 @@ def estimate_solid_background_foreground(
 
     rgb = rendered[:, :3].float()
     batch, _, height, width = rgb.shape
-    if min(height, width) < 8:
-        return torch.ones(batch, height, width, dtype=torch.bool, device=rendered.device)
-
     patch = max(2, min(32, min(height, width) // 16))
     corners = torch.cat(
         [
@@ -450,6 +446,30 @@ def estimate_solid_background_foreground(
     background_rgb = corners.median(dim=2).values.view(batch, 3, 1, 1)
     corner_distance = (corners - background_rgb.flatten(2)).abs().amax(dim=1)
     solid_background = (corner_distance <= color_tolerance).float().mean(dim=1) >= min_corner_support
+    return background_rgb, solid_background
+
+
+def estimate_solid_background_foreground(
+    rendered,
+    color_tolerance=SOLID_BACKGROUND_COLOR_TOLERANCE,
+    min_corner_support=SOLID_BACKGROUND_MIN_CORNER_SUPPORT,
+):
+    """Find non-background pixels without deleting matching colors enclosed by the subject."""
+    if min(rendered.shape[-2:]) < 8:
+        return torch.ones(
+            rendered.shape[0],
+            *rendered.shape[-2:],
+            dtype=torch.bool,
+            device=rendered.device,
+        )
+
+    rgb = rendered[:, :3].float()
+    batch, _, height, width = rgb.shape
+    background_rgb, solid_background = estimate_solid_background_color(
+        rendered,
+        color_tolerance=color_tolerance,
+        min_corner_support=min_corner_support,
+    )
 
     background_candidate = (rgb - background_rgb).abs().amax(dim=1) <= color_tolerance
     candidate_u8 = background_candidate.to(torch.uint8)
@@ -560,11 +580,23 @@ def canonicalize_parser_outputs(outputs):
     return canonical
 
 
-def canonicalize_parser_render(rendered, outputs, mode="nearest"):
+def canonicalize_parser_render(rendered, outputs, mode="nearest", fill_color=None):
     """Undo the global transform for colors without blending Minecraft texels."""
     if "affine" not in outputs:
         return rendered
-    return canonicalize_tensor(rendered, outputs["affine"], mode=mode)
+    if fill_color is None:
+        return canonicalize_tensor(rendered, outputs["affine"], mode=mode)
+    if fill_color.dim() == 2:
+        fill_color = fill_color.unsqueeze(-1).unsqueeze(-1)
+    if fill_color.shape != (rendered.shape[0], rendered.shape[1], 1, 1):
+        raise ValueError(
+            "fill_color must have shape "
+            f"{(rendered.shape[0], rendered.shape[1], 1, 1)}, got {tuple(fill_color.shape)}."
+        )
+    fill_color = fill_color.to(device=rendered.device, dtype=rendered.dtype)
+    return canonicalize_tensor(
+        rendered - fill_color, outputs["affine"], mode=mode
+    ) + fill_color
 
 
 def _mask_moments(weights):
@@ -592,9 +624,10 @@ def refine_parser_affine(
     outputs,
     renderer,
     views,
-    translation_radius_px=2.0,
+    translation_radius_px=8.0,
     scale_radius=0.0,
     translation_step_px=0.5,
+    observed_foreground=None,
 ):
     """Refine parser affine predictions against the fixed inner-layer silhouette."""
     if "affine" not in outputs or "foreground" not in outputs:
@@ -606,7 +639,18 @@ def refine_parser_affine(
 
     views = parse_views(views)
     affine = outputs["affine"]
-    foreground_prob = torch.sigmoid(outputs["foreground"])
+    if observed_foreground is None:
+        foreground_prob = torch.sigmoid(outputs["foreground"])
+    else:
+        if observed_foreground.shape != outputs["foreground"].shape[:1] + outputs["foreground"].shape[-2:]:
+            raise ValueError(
+                "observed_foreground must match parser spatial output shape, got "
+                f"{tuple(observed_foreground.shape)}."
+            )
+        foreground_prob = observed_foreground.to(
+            device=outputs["foreground"].device,
+            dtype=outputs["foreground"].dtype,
+        ).unsqueeze(1)
     N, _, H, W = foreground_prob.shape
     if not views or N % len(views) != 0:
         raise ValueError(f"N={N} must be divisible by the number of views ({len(views)}).")
@@ -1055,7 +1099,7 @@ def splat_parser_predictions_to_uv_conditioning(
     bg_color=(128, 128, 128),
     semantic_gate=True,
     affine_refine=True,
-    affine_refine_translation_px=2.0,
+    affine_refine_translation_px=8.0,
     affine_refine_scale=0.0,
     route_confidence_threshold=0.0,
     route_margin_threshold=0.0,
@@ -1103,20 +1147,6 @@ def splat_parser_predictions_to_uv_conditioning(
     if group_size != len(views):
         raise ValueError(f"group_size={group_size} must equal the number of views ({len(views)}).")
 
-    alignment = None
-    routing_outputs = outputs
-    if affine_refine:
-        refined_affine, alignment = refine_parser_affine(
-            outputs,
-            renderer,
-            views,
-            translation_radius_px=affine_refine_translation_px,
-            scale_radius=affine_refine_scale,
-        )
-        routing_outputs = dict(outputs)
-        routing_outputs["affine"] = refined_affine
-
-    canonical_rendered = canonicalize_parser_render(rendered, routing_outputs, mode="nearest")
     if observed_foreground is None:
         observed_foreground = estimate_solid_background_foreground(rendered)
     else:
@@ -1128,6 +1158,30 @@ def splat_parser_predictions_to_uv_conditioning(
         observed_foreground = observed_foreground.to(
             device=rendered.device, dtype=torch.bool
         )
+    source_background_rgb, _ = estimate_solid_background_color(rendered)
+    source_fill = rendered.new_ones(rendered.shape[0], rendered.shape[1], 1, 1)
+    source_fill[:, :3] = source_background_rgb.to(dtype=rendered.dtype)
+
+    alignment = None
+    routing_outputs = outputs
+    if affine_refine:
+        refined_affine, alignment = refine_parser_affine(
+            outputs,
+            renderer,
+            views,
+            translation_radius_px=affine_refine_translation_px,
+            scale_radius=affine_refine_scale,
+            observed_foreground=observed_foreground,
+        )
+        routing_outputs = dict(outputs)
+        routing_outputs["affine"] = refined_affine
+
+    canonical_rendered = canonicalize_parser_render(
+        rendered,
+        routing_outputs,
+        mode="nearest",
+        fill_color=source_fill,
+    )
     canonical_observed_foreground = canonicalize_tensor(
         observed_foreground.unsqueeze(1).to(dtype=rendered.dtype),
         routing_outputs["affine"],

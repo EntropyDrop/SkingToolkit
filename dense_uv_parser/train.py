@@ -485,7 +485,7 @@ def build_arg_parser():
     parser.add_argument("--splat_fg_threshold", type=float, default=0.5)
     parser.add_argument("--affine_refine", dest="affine_refine", action="store_true", default=True)
     parser.add_argument("--no_affine_refine", dest="affine_refine", action="store_false")
-    parser.add_argument("--affine_refine_translation_px", type=float, default=2.0)
+    parser.add_argument("--affine_refine_translation_px", type=float, default=8.0)
     parser.add_argument("--affine_refine_scale", type=float, default=0.0)
     parser.add_argument("--route_confidence_threshold", type=float, default=0.0)
     parser.add_argument("--route_margin_threshold", type=float, default=0.0)
