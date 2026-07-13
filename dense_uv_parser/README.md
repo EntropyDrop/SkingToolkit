@@ -41,13 +41,13 @@ Parser training uses solid-color background randomization by default. Parser inp
 
 The input still needs an unobstructed Minecraft render in the configured camera/pose; arbitrary background does not mean arbitrary photo composition or a character hidden behind other objects.
 
-Render-space augmentation is enabled by default. It applies one affine transform to the whole character with translation and uniform scale sampled up to `+/-3%`, matching nearly fixed views with mild global placement/size drift. It does not move individual limbs independently.
+Geometric augmentation is disabled by default. Training and validation use the canonical renderer coordinates without deformation, translation, scale, or perspective transforms. Solid-color background randomization remains enabled because it does not move character pixels.
 
 ```bash
 ./run_dense_uv_parser_training.sh
 ```
 
-The validation set uses the same `+/-3%` range with a fixed random seed, so `best.pt` is selected on repeatable perturbed inputs. Set `AUGMENT=false` and `AUGMENT_VALIDATION=false` only for canonical-view experiments.
+The validation set is also canonical, so `best.pt` is selected on the same fixed geometry used for inference. Geometric augmentation remains available only as an explicit override.
 
 Set `BACKGROUND_AUGMENT=false` to use a fixed gray RGB background; the input still remains RGB with alpha fixed to one internally.
 
@@ -60,7 +60,7 @@ For good parser splatting, watch `precision_outer`, `recall_outer`, `precision_s
 
 Predicted geometry routing first estimates a border-connected solid-background mask, then jointly scores the predicted route role and every physically valid renderer surface slot. Surface evidence is aggregated inside each projected Minecraft UV texel and blended only into low-margin local decisions; confident pixels remain untouched so real occlusion boundaries are preserved, while isolated ambiguous pixels cannot easily split a face, hat brim, or other texture block between inner and outer layers. Direct inner/outer pixels retain their fixed cuboid mapping, while secondary/deeper pixels use the selected composite or geometry surface mapping. Outer coverage is measured within the direct outer view/surface/UV cell rather than against unrelated surfaces. Composite and geometry slots can be partially occluded, so they rely on exact slot classification and texel consensus instead of an invalid full-mask coverage denominator. For each resulting layer/UV texel it uses the most frequent exact 8-bit RGB value and returns a real source pixel of that color; it never averages colors. Use `COLOR_AGGREGATION=best` during inference only as a diagnostic comparison with the former highest-confidence single-pixel strategy.
 
-Affine refinement defaults to an 8-pixel residual search and uses the observed solid-background silhouette rather than the parser's noisy foreground logits. Canonicalized RGB is padded with the detected source background color instead of black.
+Affine refinement is disabled by default so fixed-view inputs are never shifted after parsing. When explicitly enabled, it uses the observed solid-background silhouette rather than the parser's noisy foreground logits. Canonicalized RGB is padded with the detected source background color instead of black.
 
 ## Infer With Inpaint
 
@@ -75,6 +75,7 @@ By default it looks for the highest `runs/dense_uv_parser_v*/best.pt`, then look
 - `outputs/parser_conditioning.png`
 - `outputs/parser_debug_geometry_grid.png`: fitted inner/outer cuboid faces with projected UV texel boundaries
 - `outputs/parser_debug_geometry_overlay.png`: inner (cyan) and outer (magenta) fitted grids overlaid on the canonicalized source views
+- `outputs/parser_debug_geometry_routed_overlay.png`: the same grids over only pixels routed to their matching inner/outer layer
 - `outputs/parser_debug_geometry_fill.png`: only source RGB actually routed to inner/outer; unclassified pixels are gray
 - `outputs/parser_debug_secondary.png`: secondary/deeper source pixels, including those recovered by exact surface routing
 - `outputs/pred_uv.png` when an inverse_uv inpaint checkpoint is found

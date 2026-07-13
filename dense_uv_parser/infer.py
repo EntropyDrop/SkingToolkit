@@ -57,8 +57,7 @@ def image_to_render_tensor(image, view_size, bg_color=(128, 128, 128)):
         tensor = F.interpolate(
             tensor.unsqueeze(0),
             size=view_size,
-            mode="bilinear",
-            align_corners=False,
+            mode="nearest",
         ).squeeze(0)
     tensor = tensor.clamp(0.0, 1.0)
     return torch.cat([tensor, torch.ones_like(tensor[:1])], dim=0)
@@ -179,6 +178,7 @@ def save_debug_preview(
     raw_layer_face_output=None,
     geometry_grid_output=None,
     geometry_overlay_output=None,
+    geometry_routed_overlay_output=None,
     geometry_fill_output=None,
     renderer=None,
     views=None,
@@ -247,6 +247,7 @@ def save_debug_preview(
     layer_face_color = colorize_labels(pred_layer_face, LAYER_FACE_PALETTE, bg_color, rendered)
     geometry_images = None
     geometry_overlays = None
+    geometry_routed_overlays = None
     if renderer is not None and views is not None and routing is not None:
         geometry_debug = build_geometry_grid_debug(
             renderer, views, rendered.shape[0], rendered, bg_color=bg_color
@@ -257,6 +258,11 @@ def save_debug_preview(
         )
         geometry_images = (inner_grid, outer_grid, inner_fill, outer_fill)
         geometry_overlays = overlay_geometry_grid_debug(rendered, geometry_debug)
+        geometry_routed_overlays = overlay_geometry_grid_debug(
+            rendered,
+            geometry_debug,
+            base_images=(inner_fill, outer_fill),
+        )
     debug_images = [
         rendered[:, :3],
         colorize_foreground(pred_fg, bg_color, rendered),
@@ -270,6 +276,7 @@ def save_debug_preview(
     ]
     if geometry_images is not None:
         debug_images.extend(geometry_overlays)
+        debug_images.extend(geometry_routed_overlays)
         debug_images.extend(geometry_images)
     surface_color = None
     if routing is not None:
@@ -299,6 +306,7 @@ def save_debug_preview(
     if geometry_images is not None:
         for images, path in (
             (geometry_overlays, geometry_overlay_output),
+            (geometry_routed_overlays, geometry_routed_overlay_output),
             (geometry_images[:2], geometry_grid_output),
             (geometry_images[2:], geometry_fill_output),
         ):
@@ -350,6 +358,7 @@ def save_debug_preview(
                 rgb,
                 routed_original,
                 *(geometry_overlays or ()),
+                *(geometry_routed_overlays or ()),
                 inner_cutout,
                 outer_cutout,
                 secondary_cutout,
@@ -391,6 +400,11 @@ def build_arg_parser():
         "--geometry_overlay_output",
         default=None,
         help="Inner/outer fitted UV texel grids overlaid on canonicalized source views.",
+    )
+    parser.add_argument(
+        "--geometry_routed_overlay_output",
+        default=None,
+        help="Inner/outer UV grids overlaid on only the pixels routed to that layer.",
     )
     parser.add_argument("--geometry_fill_output", default=None, help="Classified RGB filled onto inner/outer cuboid grids.")
     parser.add_argument("--front", default=None)
@@ -450,6 +464,7 @@ def main():
             args.raw_layer_face_output,
             args.geometry_grid_output,
             args.geometry_overlay_output,
+            args.geometry_routed_overlay_output,
             args.geometry_fill_output,
         )
     ):
@@ -620,6 +635,7 @@ def main():
             args.raw_layer_face_output,
             args.geometry_grid_output,
             args.geometry_overlay_output,
+            args.geometry_routed_overlay_output,
             args.geometry_fill_output,
         )
     ):
@@ -645,6 +661,11 @@ def main():
             geometry_grid_output=Path(args.geometry_grid_output) if args.geometry_grid_output else None,
             geometry_overlay_output=(
                 Path(args.geometry_overlay_output) if args.geometry_overlay_output else None
+            ),
+            geometry_routed_overlay_output=(
+                Path(args.geometry_routed_overlay_output)
+                if args.geometry_routed_overlay_output
+                else None
             ),
             geometry_fill_output=Path(args.geometry_fill_output) if args.geometry_fill_output else None,
             renderer=renderer,

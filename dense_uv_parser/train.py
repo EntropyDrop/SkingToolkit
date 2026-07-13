@@ -404,10 +404,17 @@ def save_preview(model, renderer, loader, device, args, output_path, max_items=2
             rendered_debug,
             geometry_debug,
         )
+        inner_routed_overlay, outer_routed_overlay = overlay_geometry_grid_debug(
+            rendered_debug,
+            geometry_debug,
+            base_images=(inner_fill, outer_fill),
+        )
         debug_images.extend(
             [
                 inner_overlay,
                 outer_overlay,
+                inner_routed_overlay,
+                outer_routed_overlay,
                 geometry_debug[0],
                 geometry_debug[1],
                 inner_fill,
@@ -497,9 +504,9 @@ def build_arg_parser():
     parser.add_argument("--no_cudnn_benchmark", dest="cudnn_benchmark", action="store_false")
     parser.add_argument("--target_alpha_threshold", type=float, default=0.5)
     parser.add_argument("--splat_fg_threshold", type=float, default=0.5)
-    parser.add_argument("--affine_refine", dest="affine_refine", action="store_true", default=True)
+    parser.add_argument("--affine_refine", dest="affine_refine", action="store_true", default=False)
     parser.add_argument("--no_affine_refine", dest="affine_refine", action="store_false")
-    parser.add_argument("--affine_refine_translation_px", type=float, default=8.0)
+    parser.add_argument("--affine_refine_translation_px", type=float, default=0.0)
     parser.add_argument("--affine_refine_scale", type=float, default=0.0)
     parser.add_argument("--route_confidence_threshold", type=float, default=0.0)
     parser.add_argument("--route_margin_threshold", type=float, default=0.0)
@@ -512,12 +519,12 @@ def build_arg_parser():
         default="exact_mode",
     )
     parser.add_argument("--allow_semantic_fallback", action="store_true")
-    parser.add_argument("--augment", dest="augment", action="store_true", default=True)
+    parser.add_argument("--augment", dest="augment", action="store_true", default=False)
     parser.add_argument("--no_augment", dest="augment", action="store_false")
-    parser.add_argument("--augment_validation", dest="augment_validation", action="store_true", default=True)
+    parser.add_argument("--augment_validation", dest="augment_validation", action="store_true", default=False)
     parser.add_argument("--no_augment_validation", dest="augment_validation", action="store_false")
-    parser.add_argument("--translation_scale", type=float, default=0.03)
-    parser.add_argument("--scale_range", type=float, default=0.03)
+    parser.add_argument("--translation_scale", type=float, default=0.0)
+    parser.add_argument("--scale_range", type=float, default=0.0)
     parser.add_argument("--background_augment", dest="background_augment", action="store_true", default=True)
     parser.add_argument("--no_background_augment", dest="background_augment", action="store_false")
     parser.add_argument("--background_augment_prob", type=float, default=0.9)

@@ -98,8 +98,8 @@ Useful knobs:
 
 Performance notes:
 
-- `run_inverse_uv_training.sh` defaults to one whole-character affine transform with `TRANSLATION_SCALE=0.03`, `SCALE_RANGE=0.03`, and `PERSPECTIVE_SCALE=0.0`. It does not independently transform limbs.
-- Validation uses the same affine range with a fixed seed, keeping checkpoint comparisons repeatable.
+- `run_inverse_uv_training.sh` disables geometric augmentation by default: `AUGMENT=false`, `TRANSLATION_SCALE=0.0`, `SCALE_RANGE=0.0`, and `PERSPECTIVE_SCALE=0.0`.
+- Validation also uses fixed canonical geometry, and parser affine refinement is disabled. Pure solid-background randomization remains enabled.
 - For lower console overhead on fast GPUs, raise `LOG_EVERY` (for example `LOG_EVERY=100`).
 
 ### Train Inpaint From Dense Parser Conditioning

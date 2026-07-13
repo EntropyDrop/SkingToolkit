@@ -36,8 +36,8 @@ class RenderAugmenter:
 
     def __init__(
         self,
-        translation_scale=0.03,
-        scale_range=0.03,
+        translation_scale=0.0,
+        scale_range=0.0,
         perspective_scale=0.0,
         bg_color=(128, 128, 128),
         generator=None,
@@ -489,8 +489,8 @@ class InverseUVDataset(Dataset):
         normalize_model=True,
         unproject_mode="mean",
         augment=False,
-        translation_scale=0.03,
-        scale_range=0.03,
+        translation_scale=0.0,
+        scale_range=0.0,
         perspective_scale=0.0,
     ):
         self.data_dir = data_dir

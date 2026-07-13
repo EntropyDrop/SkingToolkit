@@ -308,8 +308,8 @@ def _sample_index_target(target, grid):
 def augment_dense_batch(
     rendered,
     targets,
-    translation_scale=0.03,
-    scale_range=0.03,
+    translation_scale=0.0,
+    scale_range=0.0,
     bg_color=(128, 128, 128),
     generator=None,
 ):
@@ -1958,12 +1958,23 @@ def fill_geometry_grid_debug(rendered, foreground, layer, geometry_debug, bg_col
     return fill(0), fill(1)
 
 
-def overlay_geometry_grid_debug(rendered, geometry_debug, tint_alpha=0.12):
+def overlay_geometry_grid_debug(
+    rendered,
+    geometry_debug,
+    tint_alpha=0.12,
+    base_images=None,
+):
     """Overlay fitted inner/outer UV texel grids on the canonical source image."""
     if not 0.0 <= tint_alpha <= 1.0:
         raise ValueError(f"tint_alpha must be in [0, 1], got {tint_alpha}.")
 
     rgb = rendered[:, :3]
+    if base_images is None:
+        base_images = (rgb, rgb)
+    if len(base_images) != LAYER_CLASSES:
+        raise ValueError(
+            f"base_images must contain {LAYER_CLASSES} tensors, got {len(base_images)}."
+        )
     masks = geometry_debug[2:4]
     edges = geometry_debug[4:6]
     fill_colors = (
@@ -1976,13 +1987,17 @@ def overlay_geometry_grid_debug(rendered, geometry_debug, tint_alpha=0.12):
     )
 
     overlays = []
-    for mask, edge, fill_color, edge_color in zip(
-        masks, edges, fill_colors, edge_colors
+    for base, mask, edge, fill_color, edge_color in zip(
+        base_images, masks, edges, fill_colors, edge_colors
     ):
+        if base.shape != rgb.shape:
+            raise ValueError(
+                f"Geometry overlay base shape {tuple(base.shape)} does not match RGB {tuple(rgb.shape)}."
+            )
         fill_color = fill_color.view(1, 3, 1, 1)
         edge_color = edge_color.view(1, 3, 1, 1)
-        tinted = rgb * (1.0 - tint_alpha) + fill_color * tint_alpha
-        overlay = torch.where(mask.unsqueeze(1), tinted, rgb)
+        tinted = base * (1.0 - tint_alpha) + fill_color * tint_alpha
+        overlay = torch.where(mask.unsqueeze(1), tinted, base)
         overlay = torch.where(edge.unsqueeze(1), edge_color, overlay)
         overlays.append(overlay)
     return tuple(overlays)

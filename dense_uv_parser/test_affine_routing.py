@@ -10,6 +10,7 @@ import torch.nn as nn
 from SkingToolkit.dense_uv_parser.losses import DenseUVParserLoss, _balanced_cross_entropy
 from SkingToolkit.dense_uv_parser.model import DenseUVParserNet
 from SkingToolkit.dense_uv_parser import train as parser_train
+from SkingToolkit.inverse_uv import train as inverse_train
 from SkingToolkit.dense_uv_parser.utils import (
     augment_dense_batch,
     canonicalize_parser_render,
@@ -74,6 +75,24 @@ def dense_targets(batch, height, width):
 
 
 class GlobalAffineRoutingTest(unittest.TestCase):
+    def test_training_defaults_keep_geometry_fixed(self):
+        parser_args = parser_train.build_arg_parser().parse_args([])
+        self.assertFalse(parser_args.augment)
+        self.assertFalse(parser_args.augment_validation)
+        self.assertEqual(parser_args.translation_scale, 0.0)
+        self.assertEqual(parser_args.scale_range, 0.0)
+        self.assertFalse(parser_args.affine_refine)
+        self.assertEqual(parser_args.affine_refine_translation_px, 0.0)
+
+        inverse_args = inverse_train.build_arg_parser().parse_args(
+            ["--data_dir", "unused"]
+        )
+        self.assertFalse(inverse_args.augment)
+        self.assertFalse(inverse_args.augment_validation)
+        self.assertEqual(inverse_args.translation_scale, 0.0)
+        self.assertEqual(inverse_args.scale_range, 0.0)
+        self.assertEqual(inverse_args.perspective_scale, 0.0)
+
     def test_geometry_model_emits_exact_surface_head(self):
         model = DenseUVParserNet(
             base_channels=8,
@@ -269,6 +288,16 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         self.assertTrue(torch.allclose(outer[0, :, 1, 1], torch.tensor([1.0, 0.25, 0.85])))
         self.assertTrue(torch.allclose(inner[0, :, 1, 0], torch.full((3,), 0.4)))
         self.assertFalse(torch.allclose(inner[0, :, 0, 1], torch.full((3,), 0.4)))
+
+        inner_base = torch.zeros(1, 3, 2, 2)
+        outer_base = torch.ones(1, 3, 2, 2)
+        inner_routed, outer_routed = overlay_geometry_grid_debug(
+            rendered,
+            geometry_debug,
+            base_images=(inner_base, outer_base),
+        )
+        self.assertTrue(torch.allclose(inner_routed[0, :, 1, 0], torch.zeros(3)))
+        self.assertTrue(torch.allclose(outer_routed[0, :, 0, 0], torch.ones(3)))
 
     def test_solid_background_mask_preserves_enclosed_matching_color(self):
         rendered = torch.zeros(1, 4, 16, 16)

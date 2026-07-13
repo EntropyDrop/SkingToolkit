@@ -63,8 +63,8 @@ class DenseUVParserNet(nn.Module):
         uv_classification=True,
         view_classes=0,
         predict_affine=False,
-        affine_translation_scale=0.03,
-        affine_scale_range=0.03,
+        affine_translation_scale=0.0,
+        affine_scale_range=0.0,
         surface_classes=0,
         geometry_only=False,
     ):
