@@ -216,6 +216,7 @@ class GlobalAffineRoutingTest(unittest.TestCase):
             group_size=1,
             affine_refine=False,
             outer_uv_min_coverage=0.75,
+            geometry_route_texel_consensus=False,
             return_details=True,
         )
 
@@ -255,6 +256,35 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         self.assertTrue(details["routing"]["secondary"][0, 0, 0])
         self.assertEqual(int(details["routing"]["foreground"].sum()), 0)
         self.assertEqual(int(conditioning[:, 4:5].sum() + conditioning[:, 9:10].sum()), 0)
+
+    def test_geometry_route_role_uses_projected_texel_consensus(self):
+        mask = torch.ones(1, 4)
+        renderer = FakeRenderer(mask=mask)
+        rendered = torch.rand(1, 4, 1, 4)
+        rendered[:, 3] = 1.0
+        outputs = {
+            "foreground": torch.full((1, 1, 1, 4), 10.0),
+            "layer": torch.tensor(
+                [[[[8.0, 8.0, -8.0, 8.0]], [[-8.0] * 4], [[-8.0, -8.0, 8.0, -8.0]]]]
+            ),
+            "affine": torch.zeros(1, 3),
+        }
+
+        _, details = splat_parser_predictions_to_uv_conditioning(
+            rendered,
+            outputs,
+            renderer=renderer,
+            views=["front"],
+            group_size=1,
+            affine_refine=False,
+            return_details=True,
+        )
+
+        routing = details["routing"]
+        self.assertEqual(int((routing["raw_route_role"] == 2).sum()), 1)
+        self.assertEqual(int(routing["secondary"].sum()), 0)
+        self.assertEqual(int(routing["foreground"].sum()), 4)
+        self.assertTrue(torch.equal(routing["route_role"], torch.zeros_like(routing["route_role"])))
 
     def test_geometry_training_preview_has_no_semantic_heads(self):
         renderer = FakeRenderer(valid_pixels=1)

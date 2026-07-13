@@ -774,7 +774,43 @@ def _routing_from_affine_outputs(renderer, views, outputs, fg_threshold=0.5, sem
     }
 
 
-def _routing_from_geometry_outputs(renderer, views, outputs, fg_threshold=0.5, outer_threshold=0.5):
+def _aggregate_role_probabilities_by_direct_texel(role_prob, static):
+    """Average route-role probabilities within each projected Minecraft texel."""
+    role_prob = role_prob.float()
+    batch, role_count, height, width = role_prob.shape
+    aggregated = []
+    for layer_index in range(LAYER_CLASSES):
+        valid = static["masks"][layer_index].reshape(1, 1, -1)
+        flat_uv = static["flat_uv"][layer_index].reshape(1, 1, -1)
+        sums = role_prob.new_zeros(batch, role_count, UV_SIZE * UV_SIZE)
+        sums.scatter_add_(
+            2,
+            flat_uv.expand(batch, role_count, -1),
+            role_prob.flatten(2) * valid,
+        )
+        counts = role_prob.new_zeros(UV_SIZE * UV_SIZE)
+        counts.scatter_add_(
+            0,
+            flat_uv.reshape(-1),
+            valid.reshape(-1).to(dtype=role_prob.dtype),
+        )
+        means = sums / counts.view(1, 1, -1).clamp_min(1.0)
+        aggregated.append(
+            means.gather(2, flat_uv.expand(batch, role_count, -1)).reshape(
+                batch, role_count, height, width
+            )
+        )
+    return torch.stack(aggregated, dim=1)
+
+
+def _routing_from_geometry_outputs(
+    renderer,
+    views,
+    outputs,
+    fg_threshold=0.5,
+    outer_threshold=0.5,
+    texel_consensus=True,
+):
     """Route a fitted Steve render through fixed inner/outer cuboid UV maps."""
     views = parse_views(views)
     if not views:
@@ -785,10 +821,11 @@ def _routing_from_geometry_outputs(renderer, views, outputs, fg_threshold=0.5, o
             "geometry_fit requires a three-class route-role head "
             "(inner_primary, outer_primary, secondary_backface). Retrain the parser."
         )
-    role_prob = torch.softmax(outputs["layer"], dim=1)
-    route_role = role_prob.argmax(dim=1)
-    outer_prob = role_prob[:, ROUTE_OUTER_PRIMARY]
-    inner_prob = role_prob[:, ROUTE_INNER_PRIMARY]
+    role_prob = torch.softmax(outputs["layer"].float(), dim=1)
+    raw_route_role = role_prob.argmax(dim=1)
+    route_role = raw_route_role.clone()
+    outer_prob = role_prob[:, ROUTE_OUTER_PRIMARY].clone()
+    inner_prob = role_prob[:, ROUTE_INNER_PRIMARY].clone()
     top_prob = role_prob.topk(2, dim=1).values
     role_margin = top_prob[:, 0] - top_prob[:, 1]
     N, H, W = outer_prob.shape
@@ -804,8 +841,6 @@ def _routing_from_geometry_outputs(renderer, views, outputs, fg_threshold=0.5, o
     confidence_margin_ratio = torch.zeros_like(outer_prob)
     part = torch.full_like(layer, IGNORE_INDEX)
     face = torch.full_like(layer, IGNORE_INDEX)
-    secondary = (route_role == ROUTE_SECONDARY) & (foreground_prob > fg_threshold)
-
     for view_index, view in enumerate(views):
         selection = slice(view_index, N, len(views))
         static = build_static_surface_routing(renderer, view, outer_prob.device)
@@ -817,6 +852,60 @@ def _routing_from_geometry_outputs(renderer, views, outputs, fg_threshold=0.5, o
 
         inner_valid = static["masks"][0].unsqueeze(0).expand(outer_prob[selection].shape[0], -1, -1)
         outer_valid = static["masks"][1].unsqueeze(0).expand_as(inner_valid)
+        if texel_consensus:
+            direct_scores = _aggregate_role_probabilities_by_direct_texel(
+                role_prob[selection], static
+            )
+            unavailable = role_prob.new_tensor(-1.0)
+            inner_score = torch.where(
+                inner_valid,
+                direct_scores[:, 0, ROUTE_INNER_PRIMARY],
+                unavailable,
+            )
+            outer_score = torch.where(
+                outer_valid,
+                direct_scores[:, 1, ROUTE_OUTER_PRIMARY],
+                unavailable,
+            )
+            secondary_score = torch.maximum(
+                torch.where(
+                    inner_valid,
+                    direct_scores[:, 0, ROUTE_SECONDARY],
+                    unavailable,
+                ),
+                torch.where(
+                    outer_valid,
+                    direct_scores[:, 1, ROUTE_SECONDARY],
+                    unavailable,
+                ),
+            )
+            consensus_scores = torch.stack(
+                [inner_score, outer_score, secondary_score], dim=1
+            )
+            has_direct_candidate = inner_valid | outer_valid
+            consensus_role = consensus_scores.argmax(dim=1)
+            route_role[selection] = torch.where(
+                has_direct_candidate,
+                consensus_role,
+                raw_route_role[selection],
+            )
+            inner_prob[selection] = torch.where(
+                has_direct_candidate,
+                inner_score.clamp_min(0.0),
+                inner_prob[selection],
+            )
+            outer_prob[selection] = torch.where(
+                has_direct_candidate,
+                outer_score.clamp_min(0.0),
+                outer_prob[selection],
+            )
+            consensus_top = consensus_scores.topk(2, dim=1).values
+            role_margin[selection] = torch.where(
+                has_direct_candidate,
+                consensus_top[:, 0] - consensus_top[:, 1],
+                role_margin[selection],
+            )
+
         visible_outer = (
             (route_role[selection] == ROUTE_OUTER_PRIMARY)
             & (outer_prob[selection] >= outer_threshold)
@@ -862,6 +951,7 @@ def _routing_from_geometry_outputs(renderer, views, outputs, fg_threshold=0.5, o
             margin / selected_confidence.clamp_min(1e-8)
         ).clamp(0.0, 1.0)
 
+    secondary = (route_role == ROUTE_SECONDARY) & (foreground_prob > fg_threshold)
     return {
         "foreground": fg,
         "layer": layer,
@@ -873,6 +963,7 @@ def _routing_from_geometry_outputs(renderer, views, outputs, fg_threshold=0.5, o
         "semantic_fallback": torch.zeros_like(fg),
         "part": part,
         "face": face,
+        "raw_route_role": raw_route_role,
         "route_role": route_role,
         "secondary": secondary,
     }
@@ -907,6 +998,7 @@ def splat_parser_predictions_to_uv_conditioning(
     outer_uv_min_coverage=0.5,
     color_aggregation="exact_mode",
     geometry_outer_threshold=0.5,
+    geometry_route_texel_consensus=True,
     reject_semantic_fallback=False,
     reject_inner_semantic_fallback=False,
     return_details=False,
@@ -966,6 +1058,7 @@ def splat_parser_predictions_to_uv_conditioning(
             canonical_outputs,
             fg_threshold=fg_threshold,
             outer_threshold=geometry_outer_threshold,
+            texel_consensus=geometry_route_texel_consensus,
         )
     else:
         routing = _routing_from_affine_outputs(

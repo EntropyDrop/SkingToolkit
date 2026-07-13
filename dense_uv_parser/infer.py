@@ -227,10 +227,16 @@ def save_debug_preview(
 
     part_color = colorize_labels(pred_part, PART_PALETTE, bg_color, rendered)
     layer_color = colorize_labels(pred_layer, LAYER_PALETTE, bg_color, rendered)
+    route_role_values = routing.get("route_role", raw_layer_values) if routing is not None else raw_layer_values
+    route_role_mask = (
+        pred_fg | routing.get("secondary", torch.zeros_like(pred_fg))
+        if routing is not None
+        else raw_fg
+    )
     route_role = torch.where(
-        raw_fg,
-        raw_layer_values,
-        torch.full_like(raw_layer_values, IGNORE_INDEX),
+        route_role_mask,
+        route_role_values,
+        torch.full_like(route_role_values, IGNORE_INDEX),
     )
     route_role_color = colorize_labels(route_role, ROUTE_ROLE_PALETTE, bg_color, rendered)
     raw_face_color = colorize_labels(raw_face, FACE_PALETTE, bg_color, rendered)
@@ -513,6 +519,12 @@ def main():
             < args.outer_uv_min_coverage
         )
         secondary_count = int(routing.get("secondary", torch.zeros_like(raw_outer)).sum().item())
+        raw_secondary_count = int(
+            (
+                (routing.get("raw_route_role", routing.get("route_role")) == 2)
+                & (torch.sigmoid(routing_details["outputs"]["foreground"])[:, 0] > args.fg_threshold)
+            ).sum().item()
+        )
         print(
             "routing_filter="
             + json.dumps(
@@ -531,6 +543,7 @@ def main():
                     ),
                     "outer_coverage_rejected_pixels": int(coverage_rejected_outer.sum().item()),
                     "secondary_backface_pixels": secondary_count,
+                    "raw_secondary_backface_pixels": raw_secondary_count,
                 },
                 sort_keys=True,
             )
