@@ -519,6 +519,9 @@ def main():
             < args.outer_uv_min_coverage
         )
         secondary_count = int(routing.get("secondary", torch.zeros_like(raw_outer)).sum().item())
+        background_rejected_count = int(
+            routing.get("background_rejected", torch.zeros_like(raw_outer)).sum().item()
+        )
         raw_secondary_count = int(
             (
                 (routing.get("raw_route_role", routing.get("route_role")) == 2)
@@ -542,6 +545,7 @@ def main():
                         3,
                     ),
                     "outer_coverage_rejected_pixels": int(coverage_rejected_outer.sum().item()),
+                    "background_rejected_pixels": background_rejected_count,
                     "secondary_backface_pixels": secondary_count,
                     "raw_secondary_backface_pixels": raw_secondary_count,
                 },

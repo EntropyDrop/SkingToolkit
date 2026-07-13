@@ -55,7 +55,7 @@ Training previews are saved under `runs/<run>/previews`:
 
 For good parser splatting, watch `precision_outer`, `recall_outer`, `precision_secondary`, `recall_secondary`, `acc_route_role`, `err_affine_translation_px`, and `err_affine_scale_pct`. `best.pt` defaults to the lowest `loss_geometry`.
 
-Predicted geometry routing first averages inner/outer/secondary probabilities inside each projected Minecraft texel. This removes texture-dependent single-pixel secondary holes without spreading labels across cuboid or UV boundaries. It then separates inner, outer, and rejected secondary pixels. For each remaining layer/UV texel it uses the most frequent exact 8-bit RGB value and returns a real source pixel of that color; it never averages colors. Use `COLOR_AGGREGATION=best` during inference only as a diagnostic comparison with the former highest-confidence single-pixel strategy.
+Predicted geometry routing first estimates a border-connected solid-background mask, then averages inner/outer/secondary probabilities inside each projected Minecraft texel. A destructive secondary rejection requires majority probability for the whole texel. This removes texture-dependent holes and background fringes without spreading labels across cuboid or UV boundaries. It then separates inner, outer, and rejected secondary pixels. For each remaining layer/UV texel it uses the most frequent exact 8-bit RGB value and returns a real source pixel of that color; it never averages colors. Use `COLOR_AGGREGATION=best` during inference only as a diagnostic comparison with the former highest-confidence single-pixel strategy.
 
 ## Infer With Inpaint
 

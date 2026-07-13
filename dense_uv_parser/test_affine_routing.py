@@ -15,6 +15,7 @@ from SkingToolkit.dense_uv_parser.utils import (
     canonicalize_parser_render,
     canonicalize_tensor,
     classify_route_role,
+    estimate_solid_background_foreground,
     refine_parser_affine,
     splat_deterministic_targets_to_uv_conditioning,
     splat_parser_predictions_to_uv_conditioning,
@@ -71,6 +72,52 @@ def dense_targets(batch, height, width):
 
 
 class GlobalAffineRoutingTest(unittest.TestCase):
+    def test_solid_background_mask_preserves_enclosed_matching_color(self):
+        rendered = torch.zeros(1, 4, 16, 16)
+        rendered[:, :3] = torch.tensor([0.2, 0.7, 0.8]).view(1, 3, 1, 1)
+        rendered[:, 3] = 1.0
+        rendered[:, :3, 4:12, 4:12] = 0.9
+        rendered[:, :3, 7:9, 7:9] = torch.tensor([0.2, 0.7, 0.8]).view(1, 3, 1, 1)
+
+        foreground = estimate_solid_background_foreground(rendered)
+
+        self.assertFalse(foreground[0, 0, 0])
+        self.assertTrue(foreground[0, 5, 5])
+        self.assertTrue(foreground[0, 7, 7])
+
+    def test_geometry_routing_rejects_solid_background_inside_mapping(self):
+        renderer = FakeRenderer(mask=torch.ones(16, 16))
+        rendered = torch.zeros(1, 4, 16, 16)
+        rendered[:, :3] = torch.tensor([0.2, 0.7, 0.8]).view(1, 3, 1, 1)
+        rendered[:, :3, 6:10, 6:10] = 0.9
+        rendered[:, 3] = 1.0
+        outputs = {
+            "foreground": torch.full((1, 1, 16, 16), 10.0),
+            "layer": torch.cat(
+                [
+                    torch.full((1, 1, 16, 16), 10.0),
+                    torch.full((1, 1, 16, 16), -10.0),
+                    torch.full((1, 1, 16, 16), -10.0),
+                ],
+                dim=1,
+            ),
+            "affine": torch.zeros(1, 3),
+        }
+
+        _, details = splat_parser_predictions_to_uv_conditioning(
+            rendered,
+            outputs,
+            renderer=renderer,
+            views=["front"],
+            group_size=1,
+            affine_refine=False,
+            return_details=True,
+        )
+
+        routing = details["routing"]
+        self.assertEqual(int(routing["foreground"].sum()), 16)
+        self.assertEqual(int(routing["background_rejected"].sum()), 240)
+
     def test_route_role_marks_only_mismatched_visible_uv_as_secondary(self):
         static = {
             "masks": torch.ones(2, 1, 2, dtype=torch.bool),
@@ -285,6 +332,33 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         self.assertEqual(int(routing["secondary"].sum()), 0)
         self.assertEqual(int(routing["foreground"].sum()), 4)
         self.assertTrue(torch.equal(routing["route_role"], torch.zeros_like(routing["route_role"])))
+
+    def test_geometry_secondary_requires_absolute_texel_majority(self):
+        renderer = FakeRenderer(mask=torch.ones(1, 4))
+        rendered = torch.rand(1, 4, 1, 4)
+        rendered[:, 3] = 1.0
+        outputs = {
+            "foreground": torch.full((1, 1, 1, 4), 10.0),
+            "layer": torch.tensor(
+                [[[[0.0] * 4], [[-0.2] * 4], [[0.1] * 4]]]
+            ),
+            "affine": torch.zeros(1, 3),
+        }
+
+        _, details = splat_parser_predictions_to_uv_conditioning(
+            rendered,
+            outputs,
+            renderer=renderer,
+            views=["front"],
+            group_size=1,
+            affine_refine=False,
+            return_details=True,
+        )
+
+        routing = details["routing"]
+        self.assertEqual(int((routing["raw_route_role"] == 2).sum()), 4)
+        self.assertEqual(int(routing["secondary"].sum()), 0)
+        self.assertEqual(int(routing["foreground"].sum()), 4)
 
     def test_geometry_training_preview_has_no_semantic_heads(self):
         renderer = FakeRenderer(valid_pixels=1)

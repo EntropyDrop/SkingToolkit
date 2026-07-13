@@ -23,6 +23,9 @@ ROUTE_OUTER_PRIMARY = 1
 ROUTE_SECONDARY = 2
 UV_SIZE = 64
 SPLAT_COLOR_AGGREGATIONS = ("exact_mode", "best")
+SOLID_BACKGROUND_COLOR_TOLERANCE = 16.0 / 255.0
+SOLID_BACKGROUND_MIN_CORNER_SUPPORT = 0.5
+SECONDARY_TEXEL_MIN_PROBABILITY = 0.5
 
 
 def parse_views(views):
@@ -414,6 +417,59 @@ def randomize_render_background(rendered, probability=0.9, bg_color=(128, 128, 1
     composited_rgb = (alpha * foreground_rgb + (1.0 - alpha) * background).clamp(0.0, 1.0)
 
     return torch.cat([composited_rgb, torch.ones_like(alpha)], dim=1)
+
+
+def estimate_solid_background_foreground(
+    rendered,
+    color_tolerance=SOLID_BACKGROUND_COLOR_TOLERANCE,
+    min_corner_support=SOLID_BACKGROUND_MIN_CORNER_SUPPORT,
+):
+    """Find non-background pixels without deleting matching colors enclosed by the subject."""
+    if rendered.dim() != 4 or rendered.shape[1] < 3:
+        raise ValueError(f"Expected NCHW RGB(A), got {tuple(rendered.shape)}.")
+    if not 0.0 <= color_tolerance <= 1.0:
+        raise ValueError("color_tolerance must be in [0, 1].")
+    if not 0.0 <= min_corner_support <= 1.0:
+        raise ValueError("min_corner_support must be in [0, 1].")
+
+    rgb = rendered[:, :3].float()
+    batch, _, height, width = rgb.shape
+    if min(height, width) < 8:
+        return torch.ones(batch, height, width, dtype=torch.bool, device=rendered.device)
+
+    patch = max(2, min(32, min(height, width) // 16))
+    corners = torch.cat(
+        [
+            rgb[:, :, :patch, :patch].flatten(2),
+            rgb[:, :, :patch, -patch:].flatten(2),
+            rgb[:, :, -patch:, :patch].flatten(2),
+            rgb[:, :, -patch:, -patch:].flatten(2),
+        ],
+        dim=2,
+    )
+    background_rgb = corners.median(dim=2).values.view(batch, 3, 1, 1)
+    corner_distance = (corners - background_rgb.flatten(2)).abs().amax(dim=1)
+    solid_background = (corner_distance <= color_tolerance).float().mean(dim=1) >= min_corner_support
+
+    background_candidate = (rgb - background_rgb).abs().amax(dim=1) <= color_tolerance
+    candidate_u8 = background_candidate.to(torch.uint8)
+    connected_to_border = (
+        candidate_u8.cumprod(dim=2).bool()
+        | candidate_u8.flip(2).cumprod(dim=2).flip(2).bool()
+        | candidate_u8.cumprod(dim=1).bool()
+        | candidate_u8.flip(1).cumprod(dim=1).flip(1).bool()
+    )
+    connected_to_border &= solid_background.view(batch, 1, 1)
+    max_steps = max(height, width)
+    for _ in range(max_steps):
+        expanded = F.max_pool2d(
+            connected_to_border.unsqueeze(1).float(), 3, stride=1, padding=1
+        )[:, 0] > 0.0
+        updated = connected_to_border | (background_candidate & expanded)
+        if torch.equal(updated, connected_to_border):
+            break
+        connected_to_border = updated
+    return ~connected_to_border
 
 
 def affine_to_canonical_grid(affine, output_shape):
@@ -879,11 +935,21 @@ def _routing_from_geometry_outputs(
                     unavailable,
                 ),
             )
-            consensus_scores = torch.stack(
-                [inner_score, outer_score, secondary_score], dim=1
+            primary_scores = torch.stack([inner_score, outer_score], dim=1)
+            best_primary_score, best_primary_role = primary_scores.max(dim=1)
+            secondary_supported = (
+                (secondary_score >= SECONDARY_TEXEL_MIN_PROBABILITY)
+                & (secondary_score > best_primary_score)
+            )
+            consensus_role = torch.where(
+                secondary_supported,
+                torch.full_like(best_primary_role, ROUTE_SECONDARY),
+                best_primary_role,
+            )
+            consensus_scores = torch.cat(
+                [primary_scores, secondary_score.unsqueeze(1)], dim=1
             )
             has_direct_candidate = inner_valid | outer_valid
-            consensus_role = consensus_scores.argmax(dim=1)
             route_role[selection] = torch.where(
                 has_direct_candidate,
                 consensus_role,
@@ -999,6 +1065,7 @@ def splat_parser_predictions_to_uv_conditioning(
     color_aggregation="exact_mode",
     geometry_outer_threshold=0.5,
     geometry_route_texel_consensus=True,
+    observed_foreground=None,
     reject_semantic_fallback=False,
     reject_inner_semantic_fallback=False,
     return_details=False,
@@ -1050,6 +1117,22 @@ def splat_parser_predictions_to_uv_conditioning(
         routing_outputs["affine"] = refined_affine
 
     canonical_rendered = canonicalize_parser_render(rendered, routing_outputs, mode="nearest")
+    if observed_foreground is None:
+        observed_foreground = estimate_solid_background_foreground(rendered)
+    else:
+        if observed_foreground.shape != rendered.shape[:1] + rendered.shape[-2:]:
+            raise ValueError(
+                "observed_foreground must have shape "
+                f"{rendered.shape[:1] + rendered.shape[-2:]}, got {tuple(observed_foreground.shape)}."
+            )
+        observed_foreground = observed_foreground.to(
+            device=rendered.device, dtype=torch.bool
+        )
+    canonical_observed_foreground = canonicalize_tensor(
+        observed_foreground.unsqueeze(1).to(dtype=rendered.dtype),
+        routing_outputs["affine"],
+        mode="nearest",
+    )[:, 0] > 0.5
     canonical_outputs = canonicalize_parser_outputs(routing_outputs)
     if "surface" not in canonical_outputs and "part" not in canonical_outputs:
         routing = _routing_from_geometry_outputs(
@@ -1069,6 +1152,9 @@ def splat_parser_predictions_to_uv_conditioning(
             semantic_gate=semantic_gate,
         )
     raw_foreground = routing["foreground"]
+    routing["secondary"] = routing.get(
+        "secondary", torch.zeros_like(raw_foreground)
+    ) & canonical_observed_foreground
     selected_outer = routing["layer"] == 1
     confidence_threshold = torch.where(
         selected_outer,
@@ -1082,6 +1168,7 @@ def splat_parser_predictions_to_uv_conditioning(
     )
     trusted = (
         raw_foreground
+        & canonical_observed_foreground
         & (routing["confidence"] >= confidence_threshold)
         & (routing["confidence_margin_ratio"] >= margin_threshold)
     )
@@ -1119,6 +1206,8 @@ def splat_parser_predictions_to_uv_conditioning(
         outer_uv_coverage = torch.where(selected_outer, pixel_coverage, outer_uv_coverage)
         trusted = trusted & (~selected_outer | (pixel_coverage >= outer_uv_min_coverage))
     routing["raw_foreground"] = raw_foreground
+    routing["observed_foreground"] = canonical_observed_foreground
+    routing["background_rejected"] = raw_foreground & ~canonical_observed_foreground
     routing["rejected"] = raw_foreground & ~trusted
     routing["foreground"] = trusted
     routing["outer_uv_coverage"] = outer_uv_coverage

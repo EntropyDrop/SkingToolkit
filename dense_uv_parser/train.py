@@ -249,6 +249,7 @@ def save_preview(model, renderer, loader, device, args, output_path, max_items=2
                 outer_route_margin_threshold=args.outer_route_margin_threshold,
                 outer_uv_min_coverage=args.outer_uv_min_coverage,
                 color_aggregation=args.splat_color_aggregation,
+                observed_foreground=targets["foreground"][:, 0] > 0.5,
                 reject_semantic_fallback=not args.allow_semantic_fallback,
                 return_details=True,
             )

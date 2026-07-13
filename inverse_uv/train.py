@@ -175,6 +175,7 @@ def build_dense_parser_conditioning(
     skin_batch = skin if is_batched else skin.unsqueeze(0)
 
     rendered_by_view = []
+    observed_foreground_by_view = []
     gt_renders = {} if return_renders else None
     with torch.no_grad():
         for view in views:
@@ -182,6 +183,7 @@ def build_dense_parser_conditioning(
             if return_renders:
                 gt_renders[view] = clean_render if is_batched else clean_render.squeeze(0)
             parser_render = augmenter(clean_render) if augmenter is not None else clean_render
+            observed_foreground_by_view.append(parser_render[:, 3] > 0.5)
             parser_render = randomize_render_background(
                 parser_render,
                 probability=parser_background_augment_prob if parser_background_augment else 0.0,
@@ -190,8 +192,10 @@ def build_dense_parser_conditioning(
             rendered_by_view.append(parser_render)
 
         rendered = torch.stack(rendered_by_view, dim=1)
+        observed_foreground = torch.stack(observed_foreground_by_view, dim=1)
         B, V, C, H, W = rendered.shape
         rendered = rendered.reshape(B * V, C, H, W)
+        observed_foreground = observed_foreground.reshape(B * V, H, W)
         view_ids = torch.arange(V, device=rendered.device).view(1, V).expand(B, -1).reshape(B * V)
         outputs = dense_parser(rendered, view_ids=view_ids)
         conditioning = splat_parser_predictions_to_uv_conditioning(
@@ -212,6 +216,7 @@ def build_dense_parser_conditioning(
             outer_route_margin_threshold=outer_route_margin_threshold,
             outer_uv_min_coverage=outer_uv_min_coverage,
             color_aggregation=color_aggregation,
+            observed_foreground=observed_foreground,
             reject_semantic_fallback=reject_semantic_fallback,
         )
 
