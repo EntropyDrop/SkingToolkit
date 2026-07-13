@@ -74,6 +74,7 @@ LAYER_FACE_OUTPUT="${LAYER_FACE_OUTPUT-outputs/parser_debug_layer_face.png}"
 RAW_FACE_OUTPUT="${RAW_FACE_OUTPUT-outputs/parser_debug_face_raw.png}"
 RAW_LAYER_FACE_OUTPUT="${RAW_LAYER_FACE_OUTPUT-outputs/parser_debug_layer_face_raw.png}"
 GEOMETRY_GRID_OUTPUT="${GEOMETRY_GRID_OUTPUT-outputs/parser_debug_geometry_grid.png}"
+GEOMETRY_OVERLAY_OUTPUT="${GEOMETRY_OVERLAY_OUTPUT-outputs/parser_debug_geometry_overlay.png}"
 GEOMETRY_FILL_OUTPUT="${GEOMETRY_FILL_OUTPUT-outputs/parser_debug_geometry_fill.png}"
 
 COMBINED="${COMBINED:-}"
@@ -182,6 +183,10 @@ if [[ -n "$GEOMETRY_GRID_OUTPUT" ]]; then
   args+=(--geometry_grid_output "$GEOMETRY_GRID_OUTPUT")
 fi
 
+if [[ -n "$GEOMETRY_OVERLAY_OUTPUT" ]]; then
+  args+=(--geometry_overlay_output "$GEOMETRY_OVERLAY_OUTPUT")
+fi
+
 if [[ -n "$GEOMETRY_FILL_OUTPUT" ]]; then
   args+=(--geometry_fill_output "$GEOMETRY_FILL_OUTPUT")
 fi
@@ -198,7 +203,7 @@ if [[ -n "$OUTPUT" ]]; then
   fi
 fi
 
-if [[ -z "$CONDITIONING_OUTPUT" && -z "$DEBUG_OUTPUT" && -z "$OVERLAY_OUTPUT" && -z "$INNER_CUTOUT_OUTPUT" && -z "$OUTER_CUTOUT_OUTPUT" && -z "$SECONDARY_CUTOUT_OUTPUT" && -z "$FACE_OUTPUT" && -z "$LAYER_FACE_OUTPUT" && -z "$RAW_FACE_OUTPUT" && -z "$RAW_LAYER_FACE_OUTPUT" && -z "$GEOMETRY_GRID_OUTPUT" && -z "$GEOMETRY_FILL_OUTPUT" && ( -z "$OUTPUT" || -z "$INPAINT_CHECKPOINT" ) ]]; then
+if [[ -z "$CONDITIONING_OUTPUT" && -z "$DEBUG_OUTPUT" && -z "$OVERLAY_OUTPUT" && -z "$INNER_CUTOUT_OUTPUT" && -z "$OUTER_CUTOUT_OUTPUT" && -z "$SECONDARY_CUTOUT_OUTPUT" && -z "$FACE_OUTPUT" && -z "$LAYER_FACE_OUTPUT" && -z "$RAW_FACE_OUTPUT" && -z "$RAW_LAYER_FACE_OUTPUT" && -z "$GEOMETRY_GRID_OUTPUT" && -z "$GEOMETRY_OVERLAY_OUTPUT" && -z "$GEOMETRY_FILL_OUTPUT" && ( -z "$OUTPUT" || -z "$INPAINT_CHECKPOINT" ) ]]; then
   echo "Nothing to write. Set a debug/conditioning output or OUTPUT with a valid INPAINT_CHECKPOINT." >&2
   exit 1
 fi
@@ -243,6 +248,9 @@ if [[ -n "$RAW_LAYER_FACE_OUTPUT" ]]; then
 fi
 if [[ -n "$GEOMETRY_GRID_OUTPUT" ]]; then
   echo "Geometry grid output: $GEOMETRY_GRID_OUTPUT"
+fi
+if [[ -n "$GEOMETRY_OVERLAY_OUTPUT" ]]; then
+  echo "Geometry overlay output: $GEOMETRY_OVERLAY_OUTPUT"
 fi
 if [[ -n "$GEOMETRY_FILL_OUTPUT" ]]; then
   echo "Geometry fill output: $GEOMETRY_FILL_OUTPUT"

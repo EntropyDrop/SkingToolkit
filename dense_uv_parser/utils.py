@@ -1958,6 +1958,36 @@ def fill_geometry_grid_debug(rendered, foreground, layer, geometry_debug, bg_col
     return fill(0), fill(1)
 
 
+def overlay_geometry_grid_debug(rendered, geometry_debug, tint_alpha=0.12):
+    """Overlay fitted inner/outer UV texel grids on the canonical source image."""
+    if not 0.0 <= tint_alpha <= 1.0:
+        raise ValueError(f"tint_alpha must be in [0, 1], got {tint_alpha}.")
+
+    rgb = rendered[:, :3]
+    masks = geometry_debug[2:4]
+    edges = geometry_debug[4:6]
+    fill_colors = (
+        rgb.new_tensor((0.10, 0.85, 0.95)),
+        rgb.new_tensor((1.00, 0.65, 0.10)),
+    )
+    edge_colors = (
+        rgb.new_tensor((0.00, 1.00, 1.00)),
+        rgb.new_tensor((1.00, 0.25, 0.85)),
+    )
+
+    overlays = []
+    for mask, edge, fill_color, edge_color in zip(
+        masks, edges, fill_colors, edge_colors
+    ):
+        fill_color = fill_color.view(1, 3, 1, 1)
+        edge_color = edge_color.view(1, 3, 1, 1)
+        tinted = rgb * (1.0 - tint_alpha) + fill_color * tint_alpha
+        overlay = torch.where(mask.unsqueeze(1), tinted, rgb)
+        overlay = torch.where(edge.unsqueeze(1), edge_color, overlay)
+        overlays.append(overlay)
+    return tuple(overlays)
+
+
 def colorize_surface(labels, bg_color, reference):
     """Colorize fixed renderer surface slots without assuming a fixed slot count."""
     N, H, W = labels.shape

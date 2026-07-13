@@ -36,6 +36,7 @@ from SkingToolkit.dense_uv_parser.utils import (  # noqa: E402
     combine_layer_face,
     flat_uv_to_uv01,
     fill_geometry_grid_debug,
+    overlay_geometry_grid_debug,
     parse_views,
     prediction_uv01,
     randomize_render_background,
@@ -399,7 +400,20 @@ def save_preview(model, renderer, loader, device, args, output_path, max_items=2
             geometry_debug,
             bg_color=args.bg_color,
         )
-        debug_images.extend([geometry_debug[0], geometry_debug[1], inner_fill, outer_fill])
+        inner_overlay, outer_overlay = overlay_geometry_grid_debug(
+            rendered_debug,
+            geometry_debug,
+        )
+        debug_images.extend(
+            [
+                inner_overlay,
+                outer_overlay,
+                geometry_debug[0],
+                geometry_debug[1],
+                inner_fill,
+                outer_fill,
+            ]
+        )
     if routing_details is not None:
         pred_surface = torch.where(
             pred_fg,

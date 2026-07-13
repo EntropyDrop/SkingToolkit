@@ -26,6 +26,7 @@ from SkingToolkit.dense_uv_parser.utils import (  # noqa: E402
     combine_layer_face,
     build_geometry_grid_debug,
     fill_geometry_grid_debug,
+    overlay_geometry_grid_debug,
     colorize_foreground,
     colorize_labels,
     colorize_surface,
@@ -177,6 +178,7 @@ def save_debug_preview(
     raw_face_output=None,
     raw_layer_face_output=None,
     geometry_grid_output=None,
+    geometry_overlay_output=None,
     geometry_fill_output=None,
     renderer=None,
     views=None,
@@ -244,6 +246,7 @@ def save_debug_preview(
     raw_layer_face_color = colorize_labels(raw_layer_face, LAYER_FACE_PALETTE, bg_color, rendered)
     layer_face_color = colorize_labels(pred_layer_face, LAYER_FACE_PALETTE, bg_color, rendered)
     geometry_images = None
+    geometry_overlays = None
     if renderer is not None and views is not None and routing is not None:
         geometry_debug = build_geometry_grid_debug(
             renderer, views, rendered.shape[0], rendered, bg_color=bg_color
@@ -253,6 +256,7 @@ def save_debug_preview(
             rendered, pred_fg, pred_layer_values, geometry_debug, bg_color=bg_color
         )
         geometry_images = (inner_grid, outer_grid, inner_fill, outer_fill)
+        geometry_overlays = overlay_geometry_grid_debug(rendered, geometry_debug)
     debug_images = [
         rendered[:, :3],
         colorize_foreground(pred_fg, bg_color, rendered),
@@ -265,6 +269,7 @@ def save_debug_preview(
         layer_face_color,
     ]
     if geometry_images is not None:
+        debug_images.extend(geometry_overlays)
         debug_images.extend(geometry_images)
     surface_color = None
     if routing is not None:
@@ -293,6 +298,7 @@ def save_debug_preview(
 
     if geometry_images is not None:
         for images, path in (
+            (geometry_overlays, geometry_overlay_output),
             (geometry_images[:2], geometry_grid_output),
             (geometry_images[2:], geometry_fill_output),
         ):
@@ -343,6 +349,7 @@ def save_debug_preview(
             overlay_images = [
                 rgb,
                 routed_original,
+                *(geometry_overlays or ()),
                 inner_cutout,
                 outer_cutout,
                 secondary_cutout,
@@ -380,6 +387,11 @@ def build_arg_parser():
     parser.add_argument("--raw_face_output", default=None, help="Six-class raw face-head visualization.")
     parser.add_argument("--raw_layer_face_output", default=None, help="Twelve-class raw joint-head visualization.")
     parser.add_argument("--geometry_grid_output", default=None, help="Fitted inner/outer cuboid UV grid preview.")
+    parser.add_argument(
+        "--geometry_overlay_output",
+        default=None,
+        help="Inner/outer fitted UV texel grids overlaid on canonicalized source views.",
+    )
     parser.add_argument("--geometry_fill_output", default=None, help="Classified RGB filled onto inner/outer cuboid grids.")
     parser.add_argument("--front", default=None)
     parser.add_argument("--back", default=None)
@@ -437,6 +449,7 @@ def main():
             args.raw_face_output,
             args.raw_layer_face_output,
             args.geometry_grid_output,
+            args.geometry_overlay_output,
             args.geometry_fill_output,
         )
     ):
@@ -606,6 +619,7 @@ def main():
             args.raw_face_output,
             args.raw_layer_face_output,
             args.geometry_grid_output,
+            args.geometry_overlay_output,
             args.geometry_fill_output,
         )
     ):
@@ -629,6 +643,9 @@ def main():
             raw_face_output=Path(args.raw_face_output) if args.raw_face_output else None,
             raw_layer_face_output=Path(args.raw_layer_face_output) if args.raw_layer_face_output else None,
             geometry_grid_output=Path(args.geometry_grid_output) if args.geometry_grid_output else None,
+            geometry_overlay_output=(
+                Path(args.geometry_overlay_output) if args.geometry_overlay_output else None
+            ),
             geometry_fill_output=Path(args.geometry_fill_output) if args.geometry_fill_output else None,
             renderer=renderer,
             views=views,
