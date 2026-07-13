@@ -56,7 +56,7 @@ else
 fi
 
 DATA_DIR="${DATA_DIR:-../skins}"
-MAPPINGS_SIZE="${MAPPINGS_SIZE:-256x512}"
+MAPPINGS_SIZE="${MAPPINGS_SIZE:-512x1024}"
 MAPPINGS_DIR="${MAPPINGS_DIR:-../../github/differentiable_minecraft_renderer/mappings_${MAPPINGS_SIZE}}"
 VIEWS="${VIEWS:-walk_front_both_layer_ortho,walk_back_both_layer_ortho}"
 PARSER_MODE="${PARSER_MODE:-geometry_fit}"
