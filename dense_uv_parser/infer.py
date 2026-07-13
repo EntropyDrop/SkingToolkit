@@ -457,7 +457,7 @@ def main():
     missing_views = [view for view in views if view not in renderer.views]
     if missing_views:
         raise ValueError(f"Unknown renderer views {missing_views}. Available views: {', '.join(renderer.views)}")
-    if parser_model.predict_affine and not parser_model.geometry_only:
+    if parser_model.predict_affine and parser_model.surface_classes > 0:
         mapping_surface_classes = surface_class_count(renderer, views)
         if parser_model.surface_classes != mapping_surface_classes:
             raise ValueError(

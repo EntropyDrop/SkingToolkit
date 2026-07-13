@@ -136,6 +136,94 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         self.assertEqual(float(conditioning[0, 4, 0, 1]), 1.0)
         self.assertTrue(torch.equal(conditioning[0, :3, 0, 1], torch.tensor([1.0, 0.0, 0.0])))
 
+    def test_geometry_surface_routing_uses_projected_texel_consensus(self):
+        renderer = FakeRenderer(mask=torch.ones(1, 4))
+        composite_grid = renderer.front_inner_grid.unsqueeze(0).clone()
+        composite_grid[..., 0] = (1.0 / 63.0) * 2.0 - 1.0
+        renderer.register_buffer("front_composite_grid_layers", composite_grid)
+        renderer.register_buffer(
+            "front_composite_mask_layers", renderer.front_inner_mask.unsqueeze(0).clone()
+        )
+        renderer.register_buffer(
+            "front_composite_is_decor_layers",
+            torch.zeros_like(renderer.front_inner_mask.unsqueeze(0), dtype=torch.bool),
+        )
+        rendered = torch.rand(1, 4, 1, 4)
+        rendered[:, 3] = 1.0
+        role_logits = torch.full((1, 3, 1, 4), -8.0)
+        role_logits[:, 2, 0, :3] = 8.0
+        role_logits[:, 0, 0, 3] = 0.2
+        role_logits[:, 2, 0, 3] = 0.0
+        surface_logits = torch.full((1, 3, 1, 4), -8.0)
+        surface_logits[:, 2, 0, :3] = 8.0
+        surface_logits[:, 0, 0, 3] = 0.2
+        surface_logits[:, 2, 0, 3] = 0.0
+        outputs = {
+            "foreground": torch.full((1, 1, 1, 4), 10.0),
+            "layer": role_logits,
+            "surface": surface_logits,
+            "affine": torch.zeros(1, 3),
+        }
+
+        _, details = splat_parser_predictions_to_uv_conditioning(
+            rendered,
+            outputs,
+            renderer=renderer,
+            views=["front"],
+            group_size=1,
+            affine_refine=False,
+            observed_foreground=torch.ones(1, 1, 4, dtype=torch.bool),
+            return_details=True,
+        )
+
+        routing = details["routing"]
+        self.assertTrue(torch.equal(routing["surface"], torch.full_like(routing["surface"], 2)))
+        self.assertEqual(int(routing["secondary_routed"].sum()), 4)
+        self.assertEqual(int(routing["foreground"].sum()), 4)
+
+    def test_surface_aware_outer_coverage_preserves_complete_small_surface(self):
+        renderer = FakeRenderer(mask=torch.ones(1, 4))
+        renderer.front_outer_mask.copy_(renderer.front_inner_mask)
+        composite_grid = renderer.front_outer_grid.unsqueeze(0).clone()
+        composite_mask = torch.tensor([[[1.0, 1.0, 0.0, 0.0]]])
+        renderer.register_buffer("front_composite_grid_layers", composite_grid)
+        renderer.register_buffer("front_composite_mask_layers", composite_mask)
+        renderer.register_buffer(
+            "front_composite_is_decor_layers",
+            torch.ones_like(composite_mask, dtype=torch.bool),
+        )
+        rendered = torch.rand(1, 4, 1, 4)
+        rendered[:, 3] = 1.0
+        role_logits = torch.full((1, 3, 1, 4), -8.0)
+        role_logits[:, 1] = 8.0
+        surface_logits = torch.full((1, 3, 1, 4), -8.0)
+        surface_logits[:, 2] = 8.0
+        outputs = {
+            "foreground": torch.full((1, 1, 1, 4), 10.0),
+            "layer": role_logits,
+            "surface": surface_logits,
+            "affine": torch.zeros(1, 3),
+        }
+        observed = torch.tensor([[[True, True, False, False]]])
+
+        _, details = splat_parser_predictions_to_uv_conditioning(
+            rendered,
+            outputs,
+            renderer=renderer,
+            views=["front"],
+            group_size=1,
+            affine_refine=False,
+            observed_foreground=observed,
+            outer_route_confidence_threshold=0.0,
+            outer_route_margin_threshold=0.0,
+            outer_uv_min_coverage=0.75,
+            return_details=True,
+        )
+
+        routing = details["routing"]
+        self.assertEqual(int(routing["foreground"].sum()), 2)
+        self.assertTrue(torch.allclose(routing["outer_uv_coverage"][0, 0, :2], torch.ones(2)))
+
     def test_geometry_fill_hides_unclassified_theoretical_grid(self):
         rendered = torch.zeros(1, 4, 2, 2)
         rendered[:, :3] = torch.tensor([1.0, 0.0, 0.0]).view(1, 3, 1, 1)

@@ -1079,7 +1079,34 @@ def _routing_from_geometry_outputs(
     }
 
 
-def _routing_from_geometry_surface_outputs(renderer, views, outputs, fg_threshold=0.5):
+def _aggregate_surface_scores_by_candidate_texel(candidate_score, static):
+    """Average each surface candidate inside its projected Minecraft UV texel."""
+    candidate_score = candidate_score.float()
+    batch, surface_count, height, width = candidate_score.shape
+    flat_uv = static["flat_uv"][:surface_count].reshape(1, surface_count, -1)
+    valid = static["masks"][:surface_count].reshape(1, surface_count, -1)
+    indices = flat_uv.expand(batch, -1, -1)
+    values = candidate_score.flatten(2) * valid.to(dtype=candidate_score.dtype)
+
+    sums = candidate_score.new_zeros(batch, surface_count, UV_SIZE * UV_SIZE)
+    sums.scatter_add_(2, indices, values)
+    counts = candidate_score.new_zeros(1, surface_count, UV_SIZE * UV_SIZE)
+    counts.scatter_add_(
+        2,
+        flat_uv,
+        valid.to(dtype=candidate_score.dtype),
+    )
+    means = sums / counts.clamp_min(1.0)
+    return means.gather(2, indices).reshape(batch, surface_count, height, width)
+
+
+def _routing_from_geometry_surface_outputs(
+    renderer,
+    views,
+    outputs,
+    fg_threshold=0.5,
+    texel_consensus=True,
+):
     """Route every visible geometry surface using joint role and surface evidence."""
     views = parse_views(views)
     if not views:
@@ -1146,6 +1173,23 @@ def _routing_from_geometry_surface_outputs(renderer, views, outputs, fg_threshol
             surface_prob[selection, :surface_count] * candidate_role_prob
         ).clamp_min(0.0).sqrt()
         candidate_valid = static["masks"].unsqueeze(0).expand(view_batch, -1, -1, -1)
+        if texel_consensus:
+            consensus_score = _aggregate_surface_scores_by_candidate_texel(
+                candidate_score,
+                static,
+            )
+            local_scores = candidate_score.masked_fill(~candidate_valid, -1.0)
+            local_top = local_scores.topk(k=min(2, surface_count), dim=1).values
+            if surface_count > 1:
+                local_margin_ratio = (
+                    (local_top[:, 0] - local_top[:, 1]).clamp_min(0.0)
+                    / local_top[:, 0].abs().clamp_min(1e-8)
+                ).clamp(0.0, 1.0)
+                consensus_weight = (1.0 - local_margin_ratio).unsqueeze(1)
+                candidate_score = (
+                    candidate_score * (1.0 - consensus_weight)
+                    + consensus_score * consensus_weight
+                )
         candidate_score = candidate_score.masked_fill(~candidate_valid, -1.0)
         best_score, selected_surface = candidate_score.max(dim=1)
         if surface_count > 1:
@@ -1206,6 +1250,81 @@ def _routing_from_geometry_surface_outputs(renderer, views, outputs, fg_threshol
         "secondary": secondary,
         "secondary_routed": secondary,
     }
+
+
+def _surface_aware_outer_coverage(routing, trusted, selected_outer, renderer, views):
+    """Measure outer support within the selected view/surface/UV texel."""
+    views = parse_views(views)
+    views_per_group = len(views)
+    group_count = trusted.shape[0] // views_per_group
+    static_views = [
+        build_static_surface_routing(renderer, view, trusted.device)
+        for view in views
+    ]
+    surface_count = max(static["masks"].shape[0] for static in static_views)
+    uv_count = UV_SIZE * UV_SIZE
+    view_stride = surface_count * uv_count
+    group_stride = views_per_group * view_stride
+    expected = routing["confidence"].new_zeros(group_stride)
+
+    for view_index, static in enumerate(static_views):
+        static_surface_count = static["masks"].shape[0]
+        surface_offsets = (
+            torch.arange(static_surface_count, device=trusted.device).view(-1, 1, 1)
+            * uv_count
+        )
+        expected_indices = (
+            view_index * view_stride
+            + surface_offsets
+            + static["flat_uv"][:static_surface_count]
+        )
+        expected_mask = (
+            static["masks"][:static_surface_count]
+            & (static["layer"][:static_surface_count] == 1)
+        )
+        selected_indices = expected_indices[expected_mask]
+        expected.scatter_add_(
+            0,
+            selected_indices,
+            torch.ones(
+                selected_indices.shape[0],
+                device=trusted.device,
+                dtype=expected.dtype,
+            ),
+        )
+
+    item_indices = torch.arange(trusted.shape[0], device=trusted.device)
+    item_groups = item_indices // views_per_group
+    item_views = item_indices % views_per_group
+    selected_surface = routing["surface"].clamp(0, surface_count - 1)
+    route_index = (
+        item_views.view(-1, 1, 1) * view_stride
+        + selected_surface * uv_count
+        + routing["flat_uv"]
+    )
+    grouped_route_index = route_index + item_groups.view(-1, 1, 1) * group_stride
+    observed_mask = trusted & selected_outer
+    observed = routing["confidence"].new_zeros(group_count * group_stride)
+    observed_indices = grouped_route_index[observed_mask]
+    observed.scatter_add_(
+        0,
+        observed_indices,
+        torch.ones(
+            observed_indices.shape[0],
+            device=trusted.device,
+            dtype=observed.dtype,
+        ),
+    )
+    coverage = observed.reshape(group_count, group_stride) / expected.clamp_min(1.0)
+    pixel_coverage = coverage[item_groups.view(-1, 1, 1), route_index]
+    # Composite and geometry slots can be partially occluded by nearer surfaces,
+    # so their static masks are not valid coverage denominators. Their exact slot
+    # classifier and texel consensus already reject isolated fragments.
+    return torch.where(
+        selected_surface >= LAYER_CLASSES,
+        torch.ones_like(pixel_coverage),
+        pixel_coverage,
+    )
 
 
 def flat_uv_to_uv01(flat_uv, dtype):
@@ -1323,6 +1442,7 @@ def splat_parser_predictions_to_uv_conditioning(
             views,
             canonical_outputs,
             fg_threshold=fg_threshold,
+            texel_consensus=geometry_route_texel_consensus,
         )
     elif "surface" not in canonical_outputs and "part" not in canonical_outputs:
         routing = _routing_from_geometry_outputs(
@@ -1371,28 +1491,37 @@ def splat_parser_predictions_to_uv_conditioning(
     if outer_uv_min_coverage > 0.0:
         views_per_group = len(views)
         group_count = trusted.shape[0] // views_per_group
-        expected = routing["confidence"].new_zeros(UV_SIZE * UV_SIZE)
-        for view in views:
-            static = build_static_surface_routing(renderer, view, trusted.device)
-            expected_uv = static["flat_uv"][1][static["masks"][1]]
-            expected.scatter_add_(
-                0,
-                expected_uv,
-                torch.ones(expected_uv.shape[0], device=trusted.device, dtype=expected.dtype),
+        if "surface" in canonical_outputs:
+            pixel_coverage = _surface_aware_outer_coverage(
+                routing,
+                trusted,
+                selected_outer,
+                renderer,
+                views,
             )
+        else:
+            expected = routing["confidence"].new_zeros(UV_SIZE * UV_SIZE)
+            for view in views:
+                static = build_static_surface_routing(renderer, view, trusted.device)
+                expected_uv = static["flat_uv"][1][static["masks"][1]]
+                expected.scatter_add_(
+                    0,
+                    expected_uv,
+                    torch.ones(expected_uv.shape[0], device=trusted.device, dtype=expected.dtype),
+                )
 
-        item_groups = torch.arange(trusted.shape[0], device=trusted.device) // views_per_group
-        grouped_uv = routing["flat_uv"] + item_groups.view(-1, 1, 1) * (UV_SIZE * UV_SIZE)
-        observed_mask = trusted & selected_outer
-        observed = routing["confidence"].new_zeros(group_count * UV_SIZE * UV_SIZE)
-        observed_uv = grouped_uv[observed_mask]
-        observed.scatter_add_(
-            0,
-            observed_uv,
-            torch.ones(observed_uv.shape[0], device=trusted.device, dtype=observed.dtype),
-        )
-        coverage = observed.reshape(group_count, UV_SIZE * UV_SIZE) / expected.clamp_min(1.0)
-        pixel_coverage = coverage[item_groups.view(-1, 1, 1), routing["flat_uv"]]
+            item_groups = torch.arange(trusted.shape[0], device=trusted.device) // views_per_group
+            grouped_uv = routing["flat_uv"] + item_groups.view(-1, 1, 1) * (UV_SIZE * UV_SIZE)
+            observed_mask = trusted & selected_outer
+            observed = routing["confidence"].new_zeros(group_count * UV_SIZE * UV_SIZE)
+            observed_uv = grouped_uv[observed_mask]
+            observed.scatter_add_(
+                0,
+                observed_uv,
+                torch.ones(observed_uv.shape[0], device=trusted.device, dtype=observed.dtype),
+            )
+            coverage = observed.reshape(group_count, UV_SIZE * UV_SIZE) / expected.clamp_min(1.0)
+            pixel_coverage = coverage[item_groups.view(-1, 1, 1), routing["flat_uv"]]
         outer_uv_coverage = torch.where(selected_outer, pixel_coverage, outer_uv_coverage)
         trusted = trusted & (~selected_outer | (pixel_coverage >= outer_uv_min_coverage))
     routing["raw_foreground"] = raw_foreground
