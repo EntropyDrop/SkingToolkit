@@ -1678,25 +1678,16 @@ def build_geometry_grid_debug(renderer, views, item_count, reference, bg_color=(
 
 
 def fill_geometry_grid_debug(rendered, foreground, layer, geometry_debug, bg_color=(128, 128, 128)):
-    """Fill fitted cuboid grids with RGB pixels assigned to each predicted layer."""
-    inner_grid, outer_grid, inner_geometry, outer_geometry, inner_edges, outer_edges = geometry_debug
+    """Show only source RGB pixels actually routed to each predicted layer."""
+    del geometry_debug
     rgb = rendered[:, :3]
     bg = rgb.new_tensor(bg_color).view(1, 3, 1, 1) / 255.0
 
-    def fill(grid, geometry_mask, edge_mask, layer_index):
-        dim_grid = torch.where(
-            geometry_mask.unsqueeze(1),
-            grid * 0.35 + bg * 0.65,
-            bg.expand_as(grid),
-        )
+    def fill(layer_index):
         classified = (foreground & (layer == layer_index)).unsqueeze(1)
-        filled = torch.where(classified, rgb, dim_grid)
-        edge_color = rgb.new_tensor((0.08, 0.08, 0.08)).view(1, 3, 1, 1)
-        return torch.where(edge_mask.unsqueeze(1), edge_color, filled)
+        return torch.where(classified, rgb, bg.expand_as(rgb))
 
-    return fill(inner_grid, inner_geometry, inner_edges, 0), fill(
-        outer_grid, outer_geometry, outer_edges, 1
-    )
+    return fill(0), fill(1)
 
 
 def colorize_surface(labels, bg_color, reference):

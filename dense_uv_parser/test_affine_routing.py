@@ -16,6 +16,7 @@ from SkingToolkit.dense_uv_parser.utils import (
     canonicalize_tensor,
     classify_route_role,
     estimate_solid_background_foreground,
+    fill_geometry_grid_debug,
     refine_parser_affine,
     splat_deterministic_targets_to_uv_conditioning,
     splat_parser_predictions_to_uv_conditioning,
@@ -72,6 +73,28 @@ def dense_targets(batch, height, width):
 
 
 class GlobalAffineRoutingTest(unittest.TestCase):
+    def test_geometry_fill_hides_unclassified_theoretical_grid(self):
+        rendered = torch.zeros(1, 4, 2, 2)
+        rendered[:, :3] = torch.tensor([1.0, 0.0, 0.0]).view(1, 3, 1, 1)
+        foreground = torch.tensor([[[True, False], [False, True]]])
+        layer = torch.tensor([[[0, 0], [1, 1]]])
+        grid = torch.ones(1, 3, 2, 2)
+        geometry = torch.ones(1, 2, 2, dtype=torch.bool)
+        geometry_debug = (grid, grid, geometry, geometry, geometry, geometry)
+
+        inner, outer = fill_geometry_grid_debug(
+            rendered,
+            foreground,
+            layer,
+            geometry_debug,
+        )
+
+        gray = torch.tensor([128.0 / 255.0] * 3)
+        self.assertTrue(torch.allclose(inner[0, :, 0, 0], torch.tensor([1.0, 0.0, 0.0])))
+        self.assertTrue(torch.allclose(outer[0, :, 1, 1], torch.tensor([1.0, 0.0, 0.0])))
+        self.assertTrue(torch.allclose(inner[0, :, 1, 1], gray))
+        self.assertTrue(torch.allclose(outer[0, :, 0, 0], gray))
+
     def test_solid_background_mask_preserves_enclosed_matching_color(self):
         rendered = torch.zeros(1, 4, 16, 16)
         rendered[:, :3] = torch.tensor([0.2, 0.7, 0.8]).view(1, 3, 1, 1)

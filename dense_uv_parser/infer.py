@@ -510,6 +510,9 @@ def main():
     if routing is not None:
         raw_count = int(routing["raw_foreground"].sum().item())
         rejected_count = int(routing["rejected"].sum().item())
+        kept = routing["foreground"]
+        kept_inner_count = int((kept & (routing["layer"] == 0)).sum().item())
+        kept_outer_count = int((kept & (routing["layer"] == 1)).sum().item())
         raw_inner = routing["raw_foreground"] & (routing["layer"] == 0)
         raw_outer = routing["raw_foreground"] & (routing["layer"] == 1)
         rejected_inner = routing["rejected"] & (routing["layer"] == 0)
@@ -534,6 +537,12 @@ def main():
                 {
                     "raw_pixels": raw_count,
                     "kept_pixels": raw_count - rejected_count,
+                    "kept_inner_pixels": kept_inner_count,
+                    "kept_outer_pixels": kept_outer_count,
+                    "kept_outer_percent": round(
+                        100.0 * kept_outer_count / max(kept_inner_count + kept_outer_count, 1),
+                        3,
+                    ),
                     "rejected_pixels": rejected_count,
                     "rejected_percent": round(100.0 * rejected_count / max(raw_count, 1), 3),
                     "inner_rejected_percent": round(

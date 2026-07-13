@@ -71,7 +71,7 @@ By default it looks for the highest `runs/dense_uv_parser_v*/best.pt`, then look
 
 - `outputs/parser_conditioning.png`
 - `outputs/parser_debug_geometry_grid.png`: fitted inner/outer cuboid faces with projected UV texel boundaries
-- `outputs/parser_debug_geometry_fill.png`: classified source RGB filled onto the inner/outer cuboid grids
+- `outputs/parser_debug_geometry_fill.png`: only source RGB actually routed to inner/outer; unclassified pixels are gray
 - `outputs/parser_debug_secondary.png`: rejected secondary/back-facing source pixels
 - `outputs/pred_uv.png` when an inverse_uv inpaint checkpoint is found
 
