@@ -156,6 +156,65 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         self.assertEqual(float(conditioning[0, 4, 0, 1]), 1.0)
         self.assertTrue(torch.equal(conditioning[0, :3, 0, 1], torch.tensor([1.0, 0.0, 0.0])))
 
+    def test_surface_head_cannot_change_primary_role(self):
+        renderer = FakeRenderer(valid_pixels=1)
+        renderer.front_outer_mask.copy_(renderer.front_inner_mask)
+        renderer.front_inner_grid[0, 0, 0] = (8.0 / 63.0) * 2.0 - 1.0
+        renderer.front_outer_grid[0, 0, 0] = (40.0 / 63.0) * 2.0 - 1.0
+        composite_grid = renderer.front_inner_grid.unsqueeze(0).clone()
+        composite_grid[0, 0, 0, 0] = (48.0 / 63.0) * 2.0 - 1.0
+        renderer.register_buffer("front_composite_grid_layers", composite_grid)
+        renderer.register_buffer(
+            "front_composite_mask_layers", renderer.front_inner_mask.unsqueeze(0).clone()
+        )
+        renderer.register_buffer(
+            "front_composite_is_decor_layers",
+            torch.zeros_like(renderer.front_inner_mask.unsqueeze(0), dtype=torch.bool),
+        )
+        rendered = torch.full((1, 4, 8, 8), 0.5)
+        rendered[:, :3, 0, 0] = torch.tensor([1.0, 0.0, 0.0])
+        rendered[:, 3] = 1.0
+        role_logits = torch.full((1, 3, 8, 8), -8.0)
+        role_logits[:, 0] = 8.0
+        observed = torch.zeros(1, 8, 8, dtype=torch.bool)
+        observed[:, 0, 0] = True
+
+        for wrong_surface in (1, 2):
+            with self.subTest(wrong_surface=wrong_surface):
+                surface_logits = torch.full((1, 3, 8, 8), -20.0)
+                surface_logits[:, wrong_surface] = 20.0
+                outputs = {
+                    "foreground": torch.full((1, 1, 8, 8), 10.0),
+                    "layer": role_logits,
+                    "surface": surface_logits,
+                    "affine": torch.zeros(1, 3),
+                }
+
+                conditioning, details = splat_parser_predictions_to_uv_conditioning(
+                    rendered,
+                    outputs,
+                    renderer=renderer,
+                    views=["front"],
+                    group_size=1,
+                    affine_refine=False,
+                    observed_foreground=observed,
+                    return_details=True,
+                )
+
+                routing = details["routing"]
+                self.assertEqual(int(routing["route_role"][0, 0, 0]), 0)
+                self.assertFalse(routing["secondary"][0, 0, 0])
+                self.assertEqual(int(routing["surface"][0, 0, 0]), 0)
+                self.assertEqual(int(routing["flat_uv"][0, 0, 0]), 8)
+                self.assertEqual(float(conditioning[0, 4, 0, 8]), 1.0)
+                self.assertEqual(float(conditioning[0, 9].sum()), 0.0)
+                self.assertTrue(
+                    torch.equal(
+                        conditioning[0, :3, 0, 8],
+                        torch.tensor([1.0, 0.0, 0.0]),
+                    )
+                )
+
     def test_geometry_surface_routing_uses_projected_texel_consensus(self):
         renderer = FakeRenderer(mask=torch.ones(1, 4))
         composite_grid = renderer.front_inner_grid.unsqueeze(0).clone()
@@ -201,7 +260,7 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         self.assertEqual(int(routing["secondary_routed"].sum()), 4)
         self.assertEqual(int(routing["foreground"].sum()), 4)
 
-    def test_surface_aware_outer_coverage_preserves_complete_small_surface(self):
+    def test_primary_outer_coverage_uses_direct_surface(self):
         renderer = FakeRenderer(mask=torch.ones(1, 4))
         renderer.front_outer_mask.copy_(renderer.front_inner_mask)
         composite_grid = renderer.front_outer_grid.unsqueeze(0).clone()
@@ -241,8 +300,14 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         )
 
         routing = details["routing"]
-        self.assertEqual(int(routing["foreground"].sum()), 2)
-        self.assertTrue(torch.allclose(routing["outer_uv_coverage"][0, 0, :2], torch.ones(2)))
+        self.assertEqual(int(routing["surface"][0, 0, 0]), 1)
+        self.assertEqual(int(routing["foreground"].sum()), 0)
+        self.assertTrue(
+            torch.allclose(
+                routing["outer_uv_coverage"][0, 0, :2],
+                torch.full((2,), 0.5),
+            )
+        )
 
     def test_geometry_fill_hides_unclassified_theoretical_grid(self):
         rendered = torch.zeros(1, 4, 2, 2)

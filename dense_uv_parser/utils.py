@@ -1107,7 +1107,14 @@ def _routing_from_geometry_surface_outputs(
     fg_threshold=0.5,
     texel_consensus=True,
 ):
-    """Route every visible geometry surface using joint role and surface evidence."""
+    """Route primary layers first, then use the surface head for secondary UVs.
+
+    The route-role head owns the inner/outer/secondary decision.  The surface
+    head only disambiguates renderer slots that implement the selected role.
+    Keeping those decisions hierarchical is important: many composite and
+    geometry slots overlap a direct cuboid face, so a strong wrong surface
+    logit must not turn a primary pixel into a secondary/back-facing pixel.
+    """
     views = parse_views(views)
     if not views:
         raise ValueError("At least one renderer view is required for geometry-surface routing.")
@@ -1165,14 +1172,85 @@ def _routing_from_geometry_surface_outputs(
         )
 
         view_batch = surface_prob[selection].shape[0]
-        candidate_role_prob = role_prob[selection].gather(
-            1,
-            candidate_role.unsqueeze(0).expand(view_batch, -1, -1, -1),
+        view_role_prob = role_prob[selection]
+        selected_role = raw_route_role[selection]
+        selected_role_score = view_role_prob.gather(
+            1, selected_role.unsqueeze(1)
+        ).squeeze(1)
+        role_top = view_role_prob.topk(2, dim=1).values
+        role_margin = role_top[:, 0] - role_top[:, 1]
+
+        if texel_consensus:
+            direct_scores = _aggregate_role_probabilities_by_direct_texel(
+                view_role_prob, static
+            )
+            inner_valid = static["masks"][0].unsqueeze(0).expand(view_batch, -1, -1)
+            outer_valid = static["masks"][1].unsqueeze(0).expand_as(inner_valid)
+            unavailable = view_role_prob.new_tensor(-1.0)
+            inner_score = torch.where(
+                inner_valid,
+                direct_scores[:, 0, ROUTE_INNER_PRIMARY],
+                unavailable,
+            )
+            outer_score = torch.where(
+                outer_valid,
+                direct_scores[:, 1, ROUTE_OUTER_PRIMARY],
+                unavailable,
+            )
+            secondary_score = torch.maximum(
+                torch.where(
+                    inner_valid,
+                    direct_scores[:, 0, ROUTE_SECONDARY],
+                    unavailable,
+                ),
+                torch.where(
+                    outer_valid,
+                    direct_scores[:, 1, ROUTE_SECONDARY],
+                    unavailable,
+                ),
+            )
+            primary_scores = torch.stack([inner_score, outer_score], dim=1)
+            best_primary_score, best_primary_role = primary_scores.max(dim=1)
+            secondary_supported = (
+                (secondary_score >= SECONDARY_TEXEL_MIN_PROBABILITY)
+                & (secondary_score > best_primary_score)
+            )
+            consensus_role = torch.where(
+                secondary_supported,
+                torch.full_like(best_primary_role, ROUTE_SECONDARY),
+                best_primary_role,
+            )
+            consensus_scores = torch.cat(
+                [primary_scores, secondary_score.unsqueeze(1)], dim=1
+            )
+            has_direct_candidate = inner_valid | outer_valid
+            selected_role = torch.where(
+                has_direct_candidate,
+                consensus_role,
+                selected_role,
+            )
+            consensus_selected_score = consensus_scores.gather(
+                1, consensus_role.unsqueeze(1)
+            ).squeeze(1)
+            selected_role_score = torch.where(
+                has_direct_candidate,
+                consensus_selected_score,
+                selected_role_score,
+            )
+            consensus_top = consensus_scores.topk(2, dim=1).values
+            role_margin = torch.where(
+                has_direct_candidate,
+                consensus_top[:, 0] - consensus_top[:, 1],
+                role_margin,
+            )
+
+        candidate_score = surface_prob[selection, :surface_count]
+        candidate_valid = static["masks"].unsqueeze(0).expand(
+            view_batch, -1, -1, -1
         )
-        candidate_score = (
-            surface_prob[selection, :surface_count] * candidate_role_prob
-        ).clamp_min(0.0).sqrt()
-        candidate_valid = static["masks"].unsqueeze(0).expand(view_batch, -1, -1, -1)
+        candidate_valid = candidate_valid & (
+            candidate_role.unsqueeze(0) == selected_role.unsqueeze(1)
+        )
         if texel_consensus:
             consensus_score = _aggregate_surface_scores_by_candidate_texel(
                 candidate_score,
@@ -1191,28 +1269,54 @@ def _routing_from_geometry_surface_outputs(
                     + consensus_score * consensus_weight
                 )
         candidate_score = candidate_score.masked_fill(~candidate_valid, -1.0)
-        best_score, selected_surface = candidate_score.max(dim=1)
+        best_surface_score, selected_surface = candidate_score.max(dim=1)
+        selected_secondary = selected_role == ROUTE_SECONDARY
+        # Primary routes already have an exact direct cuboid surface and UV.
+        # Do not let an equivalent composite slot bypass direct-layer coverage
+        # filtering; the learned surface head is needed only for secondary UVs.
+        selected_surface = torch.where(
+            selected_secondary,
+            selected_surface,
+            selected_role,
+        )
         if surface_count > 1:
             top_scores = candidate_score.topk(k=2, dim=1).values
-            margin = (top_scores[:, 0] - top_scores[:, 1]).clamp_min(0.0)
-            margin_ratio = (
-                margin / top_scores[:, 0].abs().clamp_min(1e-8)
+            surface_margin = (top_scores[:, 0] - top_scores[:, 1]).clamp_min(0.0)
+            surface_margin_ratio = (
+                surface_margin / top_scores[:, 0].abs().clamp_min(1e-8)
             ).clamp(0.0, 1.0)
         else:
-            margin = best_score.clamp_min(0.0)
-            margin_ratio = (best_score > 0.0).to(best_score.dtype)
+            surface_margin = best_surface_score.clamp_min(0.0)
+            surface_margin_ratio = (best_surface_score > 0.0).to(
+                best_surface_score.dtype
+            )
 
         routed = _select_static_surface(static, selected_surface)
-        has_candidate = best_score >= 0.0
+        has_candidate = best_surface_score >= 0.0
         base_silhouette = static["masks"][0].unsqueeze(0).expand(view_batch, -1, -1)
         routed_fg = (
             ((foreground_prob[selection] > fg_threshold) | base_silhouette)
             & has_candidate
             & routed["valid"]
         )
-        selected_role = candidate_role.unsqueeze(0).expand(
-            view_batch, -1, -1, -1
-        ).gather(1, selected_surface.unsqueeze(1)).squeeze(1)
+        role_margin_ratio = (
+            role_margin / selected_role_score.clamp_min(1e-8)
+        ).clamp(0.0, 1.0)
+        selected_confidence = torch.where(
+            selected_secondary,
+            (selected_role_score * best_surface_score.clamp_min(0.0)).sqrt(),
+            selected_role_score,
+        )
+        selected_margin = torch.where(
+            selected_secondary,
+            torch.minimum(role_margin, surface_margin),
+            role_margin,
+        )
+        selected_margin_ratio = torch.where(
+            selected_secondary,
+            torch.minimum(role_margin_ratio, surface_margin_ratio),
+            role_margin_ratio,
+        )
 
         fg[selection] = routed_fg
         layer[selection] = routed["layer"]
@@ -1227,9 +1331,9 @@ def _routing_from_geometry_surface_outputs(
             selected_role,
             torch.full_like(selected_role, IGNORE_INDEX),
         )
-        confidence[selection] = best_score.clamp_min(0.0)
-        confidence_margin[selection] = margin
-        confidence_margin_ratio[selection] = margin_ratio
+        confidence[selection] = selected_confidence
+        confidence_margin[selection] = selected_margin
+        confidence_margin_ratio[selection] = selected_margin_ratio
         part[selection] = routed["part"]
         face[selection] = routed["face"]
 
