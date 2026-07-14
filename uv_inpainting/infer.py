@@ -12,15 +12,15 @@ WORKSPACE_ROOT = TOOLKIT_ROOT.parent
 if str(WORKSPACE_ROOT) not in sys.path:
     sys.path.insert(0, str(WORKSPACE_ROOT))
 
-from SkingToolkit.inverse_uv.dataset import (  # noqa: E402
+from SkingToolkit.uv_inpainting.dataset import (  # noqa: E402
     finalize_minecraft_alpha,
     parse_views,
     tensor_to_rgba_image,
     unproject_renders_to_uv,
     view_native_size,
 )
-from SkingToolkit.inverse_uv.model import InverseUVNet, LightInverseUVNet  # noqa: E402
-from SkingToolkit.inverse_uv.train import get_device  # noqa: E402
+from SkingToolkit.uv_inpainting.model import UVInpaintingNet, LightUVInpaintingNet  # noqa: E402
+from SkingToolkit.uv_inpainting.train import get_device  # noqa: E402
 from SkingToolkit.renderer import DifferentiableRenderer  # noqa: E402
 
 
@@ -170,7 +170,7 @@ def main():
     input_channels = checkpoint.get("input_channels", checkpoint_args.get("input_channels", 6))
     model_config = model_config_from_checkpoint(checkpoint, checkpoint_args, input_channels)
 
-    model = InverseUVNet(
+    model = UVInpaintingNet(
         input_channels=model_config["input_channels"],
         base_channels=model_config["base_channels"],
         preserve_known=checkpoint_args.get("preserve_known", True),

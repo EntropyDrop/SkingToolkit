@@ -246,7 +246,7 @@ def gan_loss(discriminator, pred_uv, gt_uv, uv_mask=None):
     return d_loss, g_loss
 
 
-class InverseUVLoss(nn.Module):
+class UVInpaintingLoss(nn.Module):
     def __init__(
         self,
         mappings_dir=None,

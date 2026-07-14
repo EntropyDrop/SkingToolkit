@@ -71,7 +71,7 @@ class SpatialSelfAttention(nn.Module):
         return x + self.proj(out)
 
 
-class InverseUVNet(nn.Module):
+class UVInpaintingNet(nn.Module):
     def __init__(
         self,
         input_channels=10,
@@ -162,4 +162,4 @@ def count_parameters(model):
 
 
 # Backward compatibility alias
-LightInverseUVNet = InverseUVNet
+LightUVInpaintingNet = UVInpaintingNet

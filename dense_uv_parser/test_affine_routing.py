@@ -10,7 +10,7 @@ import torch.nn as nn
 from SkingToolkit.dense_uv_parser.losses import DenseUVParserLoss, _balanced_cross_entropy
 from SkingToolkit.dense_uv_parser.model import DenseUVParserNet
 from SkingToolkit.dense_uv_parser import train as parser_train
-from SkingToolkit.inverse_uv import train as inverse_train
+from SkingToolkit.uv_inpainting import train as inpainting_train
 from SkingToolkit.dense_uv_parser.utils import (
     augment_dense_batch,
     canonicalize_parser_render,
@@ -171,14 +171,14 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         self.assertGreater(parser_args.lambda_soft_uv_rgb, 0.0)
         self.assertGreater(parser_args.lambda_render_rgb, 0.0)
 
-        inverse_args = inverse_train.build_arg_parser().parse_args(
+        inpainting_args = inpainting_train.build_arg_parser().parse_args(
             ["--data_dir", "unused"]
         )
-        self.assertFalse(inverse_args.augment)
-        self.assertFalse(inverse_args.augment_validation)
-        self.assertEqual(inverse_args.translation_scale, 0.0)
-        self.assertEqual(inverse_args.scale_range, 0.0)
-        self.assertEqual(inverse_args.perspective_scale, 0.0)
+        self.assertFalse(inpainting_args.augment)
+        self.assertFalse(inpainting_args.augment_validation)
+        self.assertEqual(inpainting_args.translation_scale, 0.0)
+        self.assertEqual(inpainting_args.scale_range, 0.0)
+        self.assertEqual(inpainting_args.perspective_scale, 0.0)
 
     def test_geometry_model_emits_exact_surface_head(self):
         model = DenseUVParserNet(

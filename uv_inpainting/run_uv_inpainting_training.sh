@@ -38,10 +38,10 @@ find_latest_checkpoint() {
 MODEL="${MODEL:-full}"
 if [[ -z "${RUN_NAME:-}" ]]; then
   v=1
-  while [[ -d "runs/inverse_uv_${MODEL}_v${v}" ]]; do
+  while [[ -d "runs/uv_inpainting_${MODEL}_v${v}" ]]; do
     ((v++))
   done
-  RUN_NAME="inverse_uv_${MODEL}_v${v}"
+  RUN_NAME="uv_inpainting_${MODEL}_v${v}"
 fi
 DATA_DIR="${DATA_DIR:-../skins}"
 MAPPINGS_SIZE="${MAPPINGS_SIZE:-256x512}"

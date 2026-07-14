@@ -9,15 +9,15 @@ CHECKPOINT="${CHECKPOINT:-}"
 if [[ -z "$CHECKPOINT" ]]; then
   v=1
   latest_cp=""
-  while [[ -d "runs/inverse_uv_${MODEL}_v${v}" ]]; do
-    latest_cp="runs/inverse_uv_${MODEL}_v${v}/best.pt"
+  while [[ -d "runs/uv_inpainting_${MODEL}_v${v}" ]]; do
+    latest_cp="runs/uv_inpainting_${MODEL}_v${v}/best.pt"
     ((v++))
   done
 
   if [[ -n "$latest_cp" ]]; then
     CHECKPOINT="$latest_cp"
   else
-    CHECKPOINT="runs/inverse_uv_${MODEL}_v1/best.pt"
+    CHECKPOINT="runs/uv_inpainting_${MODEL}_v1/best.pt"
   fi
 fi
 

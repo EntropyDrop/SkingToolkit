@@ -1,34 +1,33 @@
-# Inverse UV Training
+# UV Inpainting Training
 
 This module trains a supervised inpainting model for:
 
 ```text
-fixed-view render images -> unprojected UV conditioning -> original 64x64 RGBA Minecraft skin UV
+fixed-view render images -> dense parser UV conditioning -> complete 64x64 RGBA Minecraft skin UV
 ```
 
-It is intentionally separate from the existing Flux/LoRA training path.
+It is the completion stage after `dense_uv_parser` and is trained from the same parser-generated conditioning used at inference.
 
 ---
 
 ## 🧬 Working Principles & Core Architecture
 
-Reconstructing a flat 64x64 Minecraft skin layout from 2D camera renders is a difficult spatial mapping problem. Standard Convolutional Neural Networks (CNNs) struggle to map pixels over long coordinate distances (e.g., from the side of a character's arm in a render to its exact coordinate on a flat 64x64 texture map). 
+Reconstructing a flat 64x64 Minecraft skin layout from 2D camera renders is a difficult spatial mapping problem. A convolutional network should not have to rediscover the camera-to-UV geometry while also learning how to fill invisible texture regions.
 
-To solve this, `inverse_uv` utilizes coordinate-guided unprojection combined with UV-space inpainting:
+To solve this, `dense_uv_parser` performs coordinate-guided routing first and `uv_inpainting` concentrates on UV-space completion:
 
-### 1. Coordinate-Guided Unprojection
-Instead of learning the render-to-sheet translation from scratch, the system utilizes camera mapping files (`*.pt`) from the `DifferentiableRenderer`. 
-* Each camera view has a matching coordinate grid that details exactly where each pixel in the 2D render maps onto the 64x64 flat UV canvas.
-* Before feeding the views into the neural network, the dataset script uses these coordinates to **unproject** the multi-view renders into a combined 64x64 UV conditioning tensor (with layers for inner, outer, and known masks).
-* This shifts the network's objective from *complex coordinate translation* to *UV-space image inpainting/denoising*, which U-Nets are highly suited for.
+### 1. Dense Parser Conditioning
+* The frozen parser classifies visible pixels as inner, outer, or secondary/deeper surfaces.
+* Fixed renderer mappings route those pixels into a 10-channel tensor: inner RGBA plus known mask, followed by outer RGBA plus known mask.
+* Unknown and ambiguous texels remain empty, turning the task into UV-space inpainting rather than camera-coordinate translation.
 
-### 2. Network Architecture (`InverseUVNet`)
+### 2. Network Architecture (`UVInpaintingNet`)
 * The model is a custom 2D U-Net-like segmentation network.
 * **Encoder**: Consists of a Conv Stem followed by 3 Down-sampling blocks. Each down-block uses Group Normalization (dynamically selecting groups based on channels) and SiLU activations.
 * **Decoder**: Features 3 Up-sampling blocks with bilinear interpolation and skip connections from the encoder to retain high-frequency textures.
 * **Output Head**: Predicts a 4-channel (RGBA) flat skin in `[0, 1]` using a Sigmoid activation.
 
-### 3. Multi-Term Loss Formulation (`InverseUVLoss`)
+### 3. Multi-Term Loss Formulation (`UVInpaintingLoss`)
 To guarantee both flat UV accuracy and visual rendering consistency, training optimizes a weighted sum of reconstruction terms:
 1. **Alpha-Masked RGB L1 Loss (`loss_rgb`)**: Supervises RGB reconstruction strictly on valid skin UV regions, ignoring empty padding and inner-layer texels hidden behind opaque matching outer-layer texels.
 2. **Alpha Binary Cross-Entropy (`loss_alpha`)**: Supervises the transparency layout (sigmoidal BCE) on the same visible UV supervision mask.
@@ -44,7 +43,7 @@ To guarantee both flat UV accuracy and visual rendering consistency, training op
 Recommended first-stage training is color-first and edge-heavy:
 
 ```bash
-./run_inverse_uv_training.sh
+./run_uv_inpainting_training.sh
 ```
 
 The shell script defaults to the original two fixed `view_images`:
@@ -53,20 +52,20 @@ The shell script defaults to the original two fixed `view_images`:
 walk_front_both_layer_ortho,walk_back_both_layer_ortho
 ```
 
-It also defaults to global `+/-3%` translation/scale augmentation, repeatable perturbed validation, `LAMBDA_GAN=0`, `LAMBDA_RGB=2.0`, `LAMBDA_ALPHA=0.8`, `LAMBDA_ALPHA_DICE=0.5`, `LAMBDA_ALPHA_EDGE=0.5`, `LAMBDA_RENDER=0.2`, `LAMBDA_RENDER_ALPHA=0.4`, `LAMBDA_EDGE=1.0`, and `EPOCHS=30`.
+Geometric augmentation is disabled by default to preserve fixed-view pixel alignment. The other defaults are `LAMBDA_GAN=0`, `LAMBDA_RGB=2.0`, `LAMBDA_ALPHA=0.8`, `LAMBDA_ALPHA_DICE=0.5`, `LAMBDA_ALPHA_EDGE=0.5`, `LAMBDA_RENDER=0.2`, `LAMBDA_RENDER_ALPHA=0.4`, `LAMBDA_EDGE=1.0`, and `EPOCHS=30`.
 
 For a short sharpening finetune after the first run, resume from the best checkpoint with a very small GAN weight:
 
 ```bash
-RESUME=runs/inverse_uv_full_v1/best.pt RESUME_LR=5e-5 EPOCHS=15 LAMBDA_GAN=0.005 ./run_inverse_uv_training.sh
+RESUME=runs/uv_inpainting_full_v1/best.pt RESUME_LR=5e-5 EPOCHS=15 LAMBDA_GAN=0.005 ./run_uv_inpainting_training.sh
 ```
 
 Use the actual run folder name in `RESUME`. Avoid jumping straight back to `LAMBDA_GAN=0.03` unless the colors are already stable.
 
 ```bash
-python SkingToolkit/inverse_uv/train.py \
+python SkingToolkit/uv_inpainting/train.py \
   --data_dir /path/to/gt_skins \
-  --output_dir runs/inverse_uv_static \
+  --output_dir runs/uv_inpainting_static \
   --parser_checkpoint ../dense_uv_parser/runs/dense_uv_parser_v1/best.pt \
   --views static_front,static_back,top_front_45,top_back_45 \
   --batch_size 16 \
@@ -88,9 +87,6 @@ Useful knobs:
 - `--lambda_render_alpha`: rendered alpha consistency weight for visible holes/false positives.
 - `--lambda_gan`: PatchGAN adversarial weight. Defaults to `0` for color-first reconstruction; use tiny values like `0.005` for a later sharpening finetune.
 - `--lambda_edge`: UV-space edge reconstruction weight for sharper pixel boundaries.
-- `--coordconv` / `--no-coordconv`: append normalized x/y coordinates inside `InverseUVNet` so the model sees absolute UV position.
-- `--bottleneck_attention` / `--no-bottleneck-attention`: enable or disable lightweight bottleneck self-attention.
-- `--attention_heads`: number of bottleneck self-attention heads.
 - `--supervise_covered_inner`: keep supervising inner-layer UV texels even when opaque matching outer-layer texels hide them.
 - `--covered_inner_alpha_threshold`: GT outer-layer alpha threshold used to decide covered inner texels; defaults to `0.1`.
 - `--render_size`: deprecated compatibility option; UV unprojection uses native mapping sizes.
@@ -98,41 +94,41 @@ Useful knobs:
 
 Performance notes:
 
-- `run_inverse_uv_training.sh` disables geometric augmentation by default: `AUGMENT=false`, `TRANSLATION_SCALE=0.0`, `SCALE_RANGE=0.0`, and `PERSPECTIVE_SCALE=0.0`.
+- `run_uv_inpainting_training.sh` disables geometric augmentation by default: `AUGMENT=false`, `TRANSLATION_SCALE=0.0`, `SCALE_RANGE=0.0`, and `PERSPECTIVE_SCALE=0.0`.
 - Validation also uses fixed canonical geometry, and parser affine refinement is disabled. Pure solid-background randomization remains enabled.
 - For lower console overhead on fast GPUs, raise `LOG_EVERY` (for example `LOG_EVERY=100`).
 
-### Train Inpaint From Dense Parser Conditioning
+### Train From Dense Parser Conditioning
 
-Inverse UV training always uses parser-generated conditioning, matching `dense_uv_parser/infer.py` at inference time:
+UV Inpainting training always uses parser-generated conditioning, matching `dense_uv_parser/infer.py` at inference time:
 
 ```bash
-./run_inverse_uv_training.sh
+./run_uv_inpainting_training.sh
 ```
 
-This automatically finds the newest `../dense_uv_parser/runs/dense_uv_parser_v*/best.pt`. Its frozen parser also sees the same randomized solid-color RGB backgrounds used for parser training, so inverse UV learns to inpaint parser conditioning from arbitrary-solid-background inputs. To finetune from an existing inverse_uv checkpoint:
+This automatically finds the newest `../dense_uv_parser/runs/dense_uv_parser_v*/best.pt`. Its frozen parser also sees the same randomized solid-color RGB backgrounds used for parser training, so UV inpainting learns to complete parser conditioning from arbitrary-solid-background inputs. To finetune from an existing `uv_inpainting` checkpoint:
 
 Visible UV texels recovered by the parser are copied directly into the final output; the inpaint network only determines unknown texels. This prevents already observed colors from being blurred by reconstruction.
 
 ```bash
-RESUME=runs/inverse_uv_full_v34/best.pt \
+RESUME=runs/uv_inpainting_full_v34/best.pt \
 RESUME_LR=5e-5 \
 EPOCHS=15 \
-./run_inverse_uv_training.sh
+./run_uv_inpainting_training.sh
 ```
 
 Override parser selection with:
 
 ```bash
 PARSER_CHECKPOINT=../dense_uv_parser/runs/dense_uv_parser_v3/best.pt \
-./run_inverse_uv_training.sh
+./run_uv_inpainting_training.sh
 ```
 
 ## Infer
 
 ```bash
-python SkingToolkit/inverse_uv/infer.py \
-  --checkpoint runs/inverse_uv_static/best.pt \
+python SkingToolkit/uv_inpainting/infer.py \
+  --checkpoint runs/uv_inpainting_static/best.pt \
   --view_images /path/to/walk_front_both.png /path/to/walk_back_both.png \
   --output /path/to/pred_uv.png
 ```
@@ -140,8 +136,8 @@ python SkingToolkit/inverse_uv/infer.py \
 For a side-by-side image whose panels match the checkpoint view order:
 
 ```bash
-python SkingToolkit/inverse_uv/infer.py \
-  --checkpoint runs/inverse_uv_static/best.pt \
+python SkingToolkit/uv_inpainting/infer.py \
+  --checkpoint runs/uv_inpainting_static/best.pt \
   --combined /path/to/combined_views.png \
   --output /path/to/pred_uv.png
 ```
@@ -151,7 +147,7 @@ Inference binarizes alpha and, by default, forces the Minecraft base layer to op
 ## Generate Render Pairs
 
 ```bash
-python SkingToolkit/inverse_uv/generate_pairs.py \
+python SkingToolkit/uv_inpainting/generate_pairs.py \
   --data_dir /path/to/gt_skins \
   --output_dir /path/to/render_pairs \
   --views static_front,static_back,top_front_45,top_back_45 \

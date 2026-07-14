@@ -48,8 +48,8 @@ from SkingToolkit.dense_uv_parser.utils import (  # noqa: E402
     splat_targets_to_uv_conditioning,
     surface_class_count,
 )
-from SkingToolkit.inverse_uv.dataset import InverseUVDataset  # noqa: E402
-from SkingToolkit.inverse_uv.train import get_device  # noqa: E402
+from SkingToolkit.uv_inpainting.dataset import UVInpaintingDataset  # noqa: E402
+from SkingToolkit.uv_inpainting.train import get_device  # noqa: E402
 from SkingToolkit.renderer import DifferentiableRenderer  # noqa: E402
 
 try:
@@ -712,7 +712,7 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "previews").mkdir(exist_ok=True)
 
-    dataset = InverseUVDataset(
+    dataset = UVInpaintingDataset(
         data_dir=args.data_dir,
         mappings_dir=args.mappings_dir,
         views=args.views,

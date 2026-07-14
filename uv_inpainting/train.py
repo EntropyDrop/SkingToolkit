@@ -15,9 +15,9 @@ WORKSPACE_ROOT = TOOLKIT_ROOT.parent
 if str(WORKSPACE_ROOT) not in sys.path:
     sys.path.insert(0, str(WORKSPACE_ROOT))
 
-from SkingToolkit.inverse_uv.dataset import InverseUVDataset, finalize_minecraft_alpha, RenderAugmenter, parse_views  # noqa: E402
-from SkingToolkit.inverse_uv.losses import InverseUVLoss  # noqa: E402
-from SkingToolkit.inverse_uv.model import InverseUVNet, PatchGANDiscriminator, count_parameters  # noqa: E402
+from SkingToolkit.uv_inpainting.dataset import UVInpaintingDataset, finalize_minecraft_alpha, RenderAugmenter, parse_views  # noqa: E402
+from SkingToolkit.uv_inpainting.losses import UVInpaintingLoss  # noqa: E402
+from SkingToolkit.uv_inpainting.model import UVInpaintingNet, PatchGANDiscriminator, count_parameters  # noqa: E402
 from SkingToolkit.dense_uv_parser.model import DenseUVParserNet  # noqa: E402
 from SkingToolkit.dense_uv_parser.utils import (  # noqa: E402
     SPLAT_COLOR_AGGREGATIONS,
@@ -120,7 +120,7 @@ def load_dense_parser(checkpoint_path, device):
     if geometry_only and layer_classes != 3:
         raise ValueError(
             "This geometry parser predates the secondary/backface route class. "
-            "Train a new dense_uv_parser checkpoint before inverse_uv training."
+            "Train a new dense_uv_parser checkpoint before uv_inpainting training."
         )
     model = DenseUVParserNet(
         base_channels=model_config.get("base_channels", checkpoint_args.get("base_channels", 32)),
@@ -170,7 +170,7 @@ def build_dense_parser_conditioning(
     bg_color=(128, 128, 128),
     return_renders=False,
 ):
-    """Build inverse_uv conditioning through the same parser+splat path used at inference."""
+    """Build uv_inpainting conditioning through the same parser+splat path used at inference."""
     is_batched = skin.dim() == 4
     skin_batch = skin if is_batched else skin.unsqueeze(0)
 
@@ -460,9 +460,9 @@ def build_grad_scaler(device, precision):
 
 
 def build_arg_parser():
-    parser = argparse.ArgumentParser(description="Train render-to-UV inverse Minecraft skin model.")
+    parser = argparse.ArgumentParser(description="Train the Minecraft skin UV inpainting model.")
     parser.add_argument("--data_dir", required=True, help="Folder containing GT 64x64 RGBA skin PNGs.")
-    parser.add_argument("--output_dir", default="inverse_uv_runs/default", help="Checkpoint/output folder.")
+    parser.add_argument("--output_dir", default="uv_inpainting_runs/default", help="Checkpoint/output folder.")
     parser.add_argument(
         "--preserve_known",
         dest="preserve_known",
@@ -484,7 +484,7 @@ def build_arg_parser():
         action="store_true",
         help="Deprecated compatibility option; UV unprojection always builds RGBA plus mask conditioning.",
     )
-    parser.add_argument("--base_channels", type=int, default=64, help="Base channel width for InverseUVNet.")
+    parser.add_argument("--base_channels", type=int, default=64, help="Base channel width for UVInpaintingNet.")
     parser.add_argument("--augment", dest="augment", action="store_true", default=False, help="Enable optional render-space geometric augmentation.")
     parser.add_argument("--no_augment", dest="augment", action="store_false")
     parser.add_argument("--augment_validation", dest="augment_validation", action="store_true", default=False)
@@ -615,7 +615,7 @@ def main():
     device = get_device(args.device)
     configure_torch(args, device)
     if not args.parser_checkpoint:
-        raise ValueError("--parser_checkpoint is required for inverse UV training.")
+        raise ValueError("--parser_checkpoint is required for UV inpainting training.")
     dense_parser, parser_checkpoint_args = load_dense_parser(args.parser_checkpoint, device)
     if args.parser_semantic_gate is None:
         args.parser_semantic_gate = parser_checkpoint_args.get("semantic_gate", True)
@@ -632,11 +632,11 @@ def main():
     parser_views = parse_views(parser_checkpoint_args.get("views", ""))
     if parser_views and parser_views != parse_views(args.views):
         raise ValueError(
-            "Parser checkpoint views do not match inverse_uv training views: "
-            f"parser={parser_views}, inverse_uv={parse_views(args.views)}"
+            "Parser checkpoint views do not match uv_inpainting training views: "
+            f"parser={parser_views}, uv_inpainting={parse_views(args.views)}"
         )
 
-    dataset = InverseUVDataset(
+    dataset = UVInpaintingDataset(
         data_dir=args.data_dir,
         mappings_dir=args.mappings_dir,
         views=args.views,
@@ -690,7 +690,7 @@ def main():
             **loader_kwargs,
         )
 
-    model = InverseUVNet(
+    model = UVInpaintingNet(
         input_channels=input_channels,
         base_channels=args.base_channels,
         preserve_known=args.preserve_known,
@@ -702,7 +702,7 @@ def main():
         discriminator = PatchGANDiscriminator(base_channels=64).to(device)
         d_optimizer = torch.optim.AdamW(discriminator.parameters(), lr=args.lr, weight_decay=0.0)
 
-    criterion = InverseUVLoss(
+    criterion = UVInpaintingLoss(
         mappings_dir=args.mappings_dir,
         views=args.views,
         lambda_rgb=args.lambda_rgb,

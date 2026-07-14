@@ -38,9 +38,9 @@ from SkingToolkit.dense_uv_parser.utils import (  # noqa: E402
     splat_parser_predictions_to_uv_conditioning,
     surface_class_count,
 )
-from SkingToolkit.inverse_uv.dataset import finalize_minecraft_alpha, tensor_to_rgba_image, view_native_size  # noqa: E402
-from SkingToolkit.inverse_uv.model import InverseUVNet  # noqa: E402
-from SkingToolkit.inverse_uv.train import get_device  # noqa: E402
+from SkingToolkit.uv_inpainting.dataset import finalize_minecraft_alpha, tensor_to_rgba_image, view_native_size  # noqa: E402
+from SkingToolkit.uv_inpainting.model import UVInpaintingNet  # noqa: E402
+from SkingToolkit.uv_inpainting.train import get_device  # noqa: E402
 from SkingToolkit.renderer import DifferentiableRenderer  # noqa: E402
 
 
@@ -110,7 +110,7 @@ def load_inpaint(checkpoint_path, device):
     checkpoint = torch.load(checkpoint_path, map_location=device)
     checkpoint_args = checkpoint.get("args", {})
     input_channels = checkpoint.get("input_channels", checkpoint_args.get("input_channels", 10))
-    model = InverseUVNet(
+    model = UVInpaintingNet(
         input_channels=input_channels,
         base_channels=checkpoint_args.get("base_channels", 64),
         preserve_known=checkpoint_args.get("preserve_known", True),
@@ -401,7 +401,7 @@ def save_debug_preview(
 def build_arg_parser():
     parser = argparse.ArgumentParser(description="Infer UV conditioning with a dense UV parser.")
     parser.add_argument("--parser_checkpoint", required=True)
-    parser.add_argument("--inpaint_checkpoint", default=None, help="Optional inverse_uv checkpoint used to inpaint final skin.")
+    parser.add_argument("--inpaint_checkpoint", default=None, help="Optional uv_inpainting checkpoint used to inpaint final skin.")
     parser.add_argument("--output", default=None, help="Final RGBA UV PNG path; requires --inpaint_checkpoint.")
     parser.add_argument("--conditioning_output", default=None, help="Optional preview image for parser-splatted conditioning.")
     parser.add_argument(
@@ -730,13 +730,13 @@ def main():
         expected_parser = inpaint_args.get("parser_checkpoint")
         if expected_parser and checkpoint_run_id(expected_parser) != checkpoint_run_id(args.parser_checkpoint):
             raise ValueError(
-                "The inverse_uv checkpoint was trained with a different parser: "
+                "The uv_inpainting checkpoint was trained with a different parser: "
                 f"expected {checkpoint_run_id(expected_parser)}, got {checkpoint_run_id(args.parser_checkpoint)}."
             )
         expected_refine = inpaint_args.get("parser_affine_refine")
         if expected_refine is not None and bool(expected_refine) != affine_refine:
             raise ValueError(
-                "Parser affine-refinement setting does not match the inverse_uv checkpoint: "
+                "Parser affine-refinement setting does not match the uv_inpainting checkpoint: "
                 f"checkpoint={expected_refine}, requested={affine_refine}."
             )
         expected_translation_px = inpaint_args.get("parser_affine_refine_translation_px")
@@ -755,7 +755,7 @@ def main():
         expected_scale = inpaint_args.get("parser_affine_refine_scale")
         if expected_scale is not None and abs(float(expected_scale) - affine_refine_scale) > 1e-9:
             raise ValueError(
-                "Parser affine-refinement scale range does not match the inverse_uv checkpoint: "
+                "Parser affine-refinement scale range does not match the uv_inpainting checkpoint: "
                 f"checkpoint={expected_scale}, requested={affine_refine_scale}."
             )
         expected_outer_coverage = inpaint_args.get("parser_outer_uv_min_coverage")
@@ -763,13 +763,13 @@ def main():
             float(expected_outer_coverage) - args.outer_uv_min_coverage
         ) > 1e-9:
             raise ValueError(
-                "Parser outer UV coverage threshold does not match the inverse_uv checkpoint: "
+                "Parser outer UV coverage threshold does not match the uv_inpainting checkpoint: "
                 f"checkpoint={expected_outer_coverage}, requested={args.outer_uv_min_coverage}."
             )
         expected_color_aggregation = inpaint_args.get("parser_splat_color_aggregation")
         if expected_color_aggregation is not None and expected_color_aggregation != args.color_aggregation:
             raise ValueError(
-                "Parser color aggregation does not match the inverse_uv checkpoint: "
+                "Parser color aggregation does not match the uv_inpainting checkpoint: "
                 f"checkpoint={expected_color_aggregation}, requested={args.color_aggregation}."
             )
         with torch.no_grad():

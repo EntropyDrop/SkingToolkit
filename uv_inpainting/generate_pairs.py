@@ -11,7 +11,7 @@ WORKSPACE_ROOT = TOOLKIT_ROOT.parent
 if str(WORKSPACE_ROOT) not in sys.path:
     sys.path.insert(0, str(WORKSPACE_ROOT))
 
-from SkingToolkit.inverse_uv.dataset import IMAGE_EXTENSIONS, load_skin, parse_views, tensor_to_rgba_image  # noqa: E402
+from SkingToolkit.uv_inpainting.dataset import IMAGE_EXTENSIONS, load_skin, parse_views, tensor_to_rgba_image  # noqa: E402
 from SkingToolkit.renderer import DifferentiableRenderer  # noqa: E402
 
 

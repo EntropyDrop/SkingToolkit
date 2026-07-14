@@ -2,17 +2,17 @@ import unittest
 
 import torch
 
-from SkingToolkit.inverse_uv.model import InverseUVNet
+from SkingToolkit.uv_inpainting.model import UVInpaintingNet
 
 
-class InverseUVKnownPixelTest(unittest.TestCase):
+class UVInpaintingKnownPixelTest(unittest.TestCase):
     def test_preserve_known_mode_controls_hard_copy(self):
         conditioning = torch.zeros(1, 10, 64, 64)
         conditioning[0, 0, 8, 8] = 1.0
         conditioning[0, 3, 8, 8] = 1.0
         conditioning[0, 4, 8, 8] = 1.0
 
-        model = InverseUVNet(input_channels=10, base_channels=8, preserve_known=True)
+        model = UVInpaintingNet(input_channels=10, base_channels=8, preserve_known=True)
         for parameter in model.parameters():
             parameter.data.zero_()
 
