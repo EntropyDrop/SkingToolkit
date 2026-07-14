@@ -124,25 +124,16 @@ PARSER_CHECKPOINT=../dense_uv_parser/runs/dense_uv_parser_v3/best.pt \
 ./run_uv_inpainting_training.sh
 ```
 
-## Infer
+## Inference
+
+UV inpainting does not expose a standalone inference entry point. Production inference must first build conditioning with the same dense parser used during training:
 
 ```bash
-python SkingToolkit/uv_inpainting/infer.py \
-  --checkpoint runs/uv_inpainting_static/best.pt \
-  --view_images /path/to/walk_front_both.png /path/to/walk_back_both.png \
-  --output /path/to/pred_uv.png
+cd SkingToolkit/dense_uv_parser
+FRONT=/path/to/front.png BACK=/path/to/back.png ./run_infer.sh
 ```
 
-For a side-by-side image whose panels match the checkpoint view order:
-
-```bash
-python SkingToolkit/uv_inpainting/infer.py \
-  --checkpoint runs/uv_inpainting_static/best.pt \
-  --combined /path/to/combined_views.png \
-  --output /path/to/pred_uv.png
-```
-
-Inference binarizes alpha and, by default, forces the Minecraft base layer to opaque before saving. This prevents small alpha errors from creating transparent holes in the core body layer. Use `--no_enforce_base_alpha` only for nonstandard skins where the base layer is intentionally transparent.
+`dense_uv_parser/infer.py` loads `UVInpaintingNet` after parser splatting, then writes the completed skin to `outputs/pred_uv.png`.
 
 ## Generate Render Pairs
 

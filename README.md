@@ -30,9 +30,7 @@ SkingToolkit/
     ├── losses.py
     ├── dataset.py
     ├── train.py
-    ├── infer.py
-    ├── run_uv_inpainting_training.sh
-    └── run_uv_inpainting_infer.sh
+    └── run_uv_inpainting_training.sh
 ```
 
 ## Components

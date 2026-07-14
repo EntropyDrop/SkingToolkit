@@ -76,7 +76,6 @@ The launcher creates run directories named `runs/uv_inpainting_<model>_vN`. `bes
 - `model.py`: `UVInpaintingNet` and `PatchGANDiscriminator`.
 - `losses.py`: UV, alpha, edge, render, and GAN losses.
 - `train.py`: parser-conditioned training and checkpointing.
-- `infer.py`: standalone mapping-based inference helper.
 - `run_uv_inpainting_training.sh`: standard training configuration.
 
-Use `dense_uv_parser/infer.py` for the end-to-end parser-conditioned inference path so input construction exactly matches training.
+`dense_uv_parser/infer.py` is the only inference entry point, ensuring input construction exactly matches training.
