@@ -21,6 +21,8 @@ from SkingToolkit.dense_uv_parser.utils import (
     fill_geometry_grid_debug,
     overlay_geometry_grid_debug,
     refine_parser_affine,
+    render_direct_uv,
+    soft_splat_geometry_predictions_to_uv,
     splat_deterministic_targets_to_uv_conditioning,
     splat_parser_predictions_to_uv_conditioning,
     splat_to_uv_conditioning,
@@ -40,6 +42,7 @@ class FakeRenderer(nn.Module):
             mask.view(-1)[:valid_pixels] = 1.0
         else:
             mask = mask.float().clone()
+        self.register_buffer("bg_color", torch.tensor([0.5, 0.5, 0.5]))
         self.register_buffer("front_inner_grid", grid.clone())
         self.register_buffer("front_outer_grid", grid.clone())
         self.register_buffer("front_inner_mask", mask)
@@ -76,6 +79,55 @@ def dense_targets(batch, height, width):
 
 
 class GlobalAffineRoutingTest(unittest.TestCase):
+    def test_soft_geometry_splat_backpropagates_to_role_and_surface_logits(self):
+        renderer = FakeRenderer(valid_pixels=1)
+        composite_grid = renderer.front_inner_grid.unsqueeze(0).clone()
+        composite_grid[0, 0, 0, 0] = (1.0 / 63.0) * 2.0 - 1.0
+        renderer.register_buffer("front_composite_grid_layers", composite_grid)
+        renderer.register_buffer(
+            "front_composite_mask_layers", renderer.front_inner_mask.unsqueeze(0).clone()
+        )
+        renderer.register_buffer(
+            "front_composite_is_decor_layers",
+            torch.zeros_like(renderer.front_inner_mask.unsqueeze(0), dtype=torch.bool),
+        )
+        rendered = torch.zeros(1, 4, 8, 8)
+        rendered[:, 0, 0, 0] = 1.0
+        rendered[:, 3] = 1.0
+        foreground = torch.zeros(1, 1, 8, 8, requires_grad=True)
+        role_logits = torch.zeros(1, 3, 8, 8, requires_grad=True)
+        surface_logits = torch.zeros(1, 3, 8, 8, requires_grad=True)
+        outputs = {
+            "foreground": foreground,
+            "layer": role_logits,
+            "surface": surface_logits,
+            "affine": torch.zeros(1, 3),
+        }
+
+        pred_uv = soft_splat_geometry_predictions_to_uv(
+            rendered,
+            outputs,
+            renderer=renderer,
+            views=["front"],
+        )
+        loss = pred_uv[0, 3, 0, 1] + pred_uv[0, 0, 0, 1]
+        loss.backward()
+
+        self.assertEqual(tuple(pred_uv.shape), (1, 4, 64, 64))
+        self.assertGreater(float(foreground.grad.abs().sum()), 0.0)
+        self.assertGreater(float(role_logits.grad.abs().sum()), 0.0)
+        self.assertGreater(float(surface_logits.grad.abs().sum()), 0.0)
+
+    def test_direct_uv_renderer_is_differentiable(self):
+        renderer = FakeRenderer(valid_pixels=1)
+        skin = torch.zeros(1, 4, 64, 64, requires_grad=True)
+
+        rendered = render_direct_uv(skin, renderer, "front")
+        rendered.sum().backward()
+
+        self.assertEqual(tuple(rendered.shape), (1, 4, 8, 8))
+        self.assertGreater(float(skin.grad.abs().sum()), 0.0)
+
     def test_conditioning_merges_to_preliminary_pred_uv(self):
         conditioning = torch.full((1, 10, 2, 2), 0.5)
         conditioning[:, 3] = 0.0
@@ -116,6 +168,8 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         self.assertEqual(parser_args.scale_range, 0.0)
         self.assertFalse(parser_args.affine_refine)
         self.assertEqual(parser_args.affine_refine_translation_px, 0.0)
+        self.assertGreater(parser_args.lambda_soft_uv_rgb, 0.0)
+        self.assertGreater(parser_args.lambda_render_rgb, 0.0)
 
         inverse_args = inverse_train.build_arg_parser().parse_args(
             ["--data_dir", "unused"]

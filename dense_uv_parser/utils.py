@@ -1100,6 +1100,20 @@ def _aggregate_surface_scores_by_candidate_texel(candidate_score, static):
     return means.gather(2, indices).reshape(batch, surface_count, height, width)
 
 
+def _static_candidate_roles(static):
+    """Return the Minecraft layer and route role implemented by every surface pixel."""
+    candidate_layer = static["layer"].clamp(0, LAYER_CLASSES - 1)
+    direct_masks = static["masks"][:LAYER_CLASSES].gather(0, candidate_layer)
+    direct_uv = static["flat_uv"][:LAYER_CLASSES].gather(0, candidate_layer)
+    primary = static["masks"] & direct_masks & (static["flat_uv"] == direct_uv)
+    candidate_role = torch.where(
+        primary,
+        candidate_layer,
+        torch.full_like(candidate_layer, ROUTE_SECONDARY),
+    )
+    return candidate_layer, candidate_role
+
+
 def _routing_from_geometry_surface_outputs(
     renderer,
     views,
@@ -1157,19 +1171,7 @@ def _routing_from_geometry_surface_outputs(
                 f"requires {surface_count}."
             )
 
-        candidate_layer = static["layer"].clamp(0, LAYER_CLASSES - 1)
-        direct_masks = static["masks"][:LAYER_CLASSES].gather(
-            0, candidate_layer
-        )
-        direct_uv = static["flat_uv"][:LAYER_CLASSES].gather(
-            0, candidate_layer
-        )
-        primary = static["masks"] & direct_masks & (static["flat_uv"] == direct_uv)
-        candidate_role = torch.where(
-            primary,
-            candidate_layer,
-            torch.full_like(candidate_layer, ROUTE_SECONDARY),
-        )
+        candidate_layer, candidate_role = _static_candidate_roles(static)
 
         view_batch = surface_prob[selection].shape[0]
         view_role_prob = role_prob[selection]
@@ -1429,6 +1431,210 @@ def _surface_aware_outer_coverage(routing, trusted, selected_outer, renderer, vi
         torch.ones_like(pixel_coverage),
         pixel_coverage,
     )
+
+
+def _scatter_soft_uv(rgb_sum, weight_sum, source_rgb, weight, flat_uv, valid):
+    """Differentiably accumulate weighted render pixels into fixed UV indices."""
+    if not valid.any():
+        return rgb_sum, weight_sum
+    batch = source_rgb.shape[0]
+    indices = flat_uv[valid].reshape(1, -1).expand(batch, -1)
+    selected_weight = weight[:, valid]
+    selected_rgb = source_rgb[:, :, valid] * selected_weight.unsqueeze(1)
+    weight_contribution = weight_sum.new_zeros(batch, UV_SIZE * UV_SIZE).scatter_add(
+        1,
+        indices,
+        selected_weight,
+    )
+    rgb_contribution = rgb_sum.new_zeros(batch, 3, UV_SIZE * UV_SIZE).scatter_add(
+        2,
+        indices.unsqueeze(1).expand(-1, 3, -1),
+        selected_rgb,
+    )
+    return rgb_sum + rgb_contribution, weight_sum + weight_contribution
+
+
+def soft_splat_geometry_predictions_to_uv(
+    rendered,
+    outputs,
+    renderer,
+    views,
+    group_size=None,
+    temperature=1.0,
+    canonicalize=True,
+    eps=1e-6,
+    return_details=False,
+):
+    """Build a differentiable provisional UV atlas from geometry-parser probabilities.
+
+    Primary inner/outer probabilities are splatted through their direct cuboid
+    maps. Secondary probability is distributed through the learned exact
+    surface probabilities. UV scatter indices stay fixed while all weights and
+    the predicted affine remain differentiable.
+    """
+    if rendered.dim() != 4:
+        raise ValueError(f"Expected rendered NCHW tensor, got {tuple(rendered.shape)}.")
+    views = parse_views(views)
+    if not views:
+        raise ValueError("At least one renderer view is required for soft geometry splatting.")
+    if group_size is None:
+        group_size = len(views)
+    if group_size != len(views):
+        raise ValueError(f"group_size={group_size} must equal the number of views ({len(views)}).")
+    if rendered.shape[0] % group_size != 0:
+        raise ValueError(f"N={rendered.shape[0]} must be divisible by group_size={group_size}.")
+    if temperature <= 0:
+        raise ValueError("temperature must be positive.")
+    if outputs["layer"].shape[1] != ROUTE_ROLE_CLASSES or "surface" not in outputs:
+        raise ValueError(
+            "Soft geometry splatting requires three route-role logits and exact surface logits."
+        )
+
+    if canonicalize:
+        canonical_outputs = canonicalize_parser_outputs(outputs)
+        canonical_rendered = canonicalize_parser_render(
+            rendered,
+            outputs,
+            mode="bilinear",
+        ).float()
+    else:
+        canonical_outputs = outputs
+        canonical_rendered = rendered.float()
+    role_prob = torch.softmax(canonical_outputs["layer"].float() / temperature, dim=1)
+    surface_logits = canonical_outputs["surface"]
+    surface_log_normalizer = torch.logsumexp(surface_logits / temperature, dim=1)
+    foreground_prob = torch.sigmoid(canonical_outputs["foreground"][:, 0].float())
+    groups = rendered.shape[0] // group_size
+    reference = canonical_rendered
+    rgb_sums = [
+        reference.new_zeros(groups, 3, UV_SIZE * UV_SIZE)
+        for _ in range(LAYER_CLASSES)
+    ]
+    weight_sums = [
+        reference.new_zeros(groups, UV_SIZE * UV_SIZE)
+        for _ in range(LAYER_CLASSES)
+    ]
+    expected = reference.new_zeros(LAYER_CLASSES, UV_SIZE * UV_SIZE)
+
+    for view_index, view in enumerate(views):
+        selection = slice(view_index, rendered.shape[0], group_size)
+        static = build_static_surface_routing(renderer, view, rendered.device)
+        if static["masks"].shape[-2:] != canonical_rendered.shape[-2:]:
+            raise ValueError(
+                f"View {view!r} mapping shape {tuple(static['masks'].shape[-2:])} "
+                f"does not match parser shape {tuple(canonical_rendered.shape[-2:])}."
+            )
+        surface_count = static["masks"].shape[0]
+        if surface_logits.shape[1] < surface_count:
+            raise ValueError(
+                f"Parser has {surface_logits.shape[1]} surface classes, but view {view!r} "
+                f"requires {surface_count}."
+            )
+
+        source_rgb = canonical_rendered[selection, :3]
+        view_foreground = foreground_prob[selection]
+        view_role_prob = role_prob[selection]
+        view_surface_logits = surface_logits[selection]
+        view_surface_log_normalizer = surface_log_normalizer[selection]
+
+        for layer_index in range(LAYER_CLASSES):
+            valid = static["masks"][layer_index]
+            flat_uv = static["flat_uv"][layer_index]
+            weight = view_foreground * view_role_prob[:, layer_index]
+            rgb_sums[layer_index], weight_sums[layer_index] = _scatter_soft_uv(
+                rgb_sums[layer_index],
+                weight_sums[layer_index],
+                source_rgb,
+                weight,
+                flat_uv,
+                valid,
+            )
+            expected[layer_index].scatter_add_(
+                0,
+                flat_uv[valid],
+                torch.ones_like(flat_uv[valid], dtype=expected.dtype),
+            )
+
+        candidate_layer, candidate_role = _static_candidate_roles(static)
+        for surface_index in range(LAYER_CLASSES, surface_count):
+            secondary = (
+                static["masks"][surface_index]
+                & (candidate_role[surface_index] == ROUTE_SECONDARY)
+            )
+            if not secondary.any():
+                continue
+            surface_weight = (
+                view_foreground
+                * view_role_prob[:, ROUTE_SECONDARY]
+                * torch.exp(
+                    view_surface_logits[:, surface_index].float() / temperature
+                    - view_surface_log_normalizer.float()
+                )
+            )
+            for layer_index in range(LAYER_CLASSES):
+                valid = secondary & (candidate_layer[surface_index] == layer_index)
+                if not valid.any():
+                    continue
+                rgb_sums[layer_index], weight_sums[layer_index] = _scatter_soft_uv(
+                    rgb_sums[layer_index],
+                    weight_sums[layer_index],
+                    source_rgb,
+                    surface_weight,
+                    static["flat_uv"][surface_index],
+                    valid,
+                )
+
+    stacked_rgb_sum = torch.stack(rgb_sums, dim=1)
+    stacked_weight_sum = torch.stack(weight_sums, dim=1).unsqueeze(2)
+    expected = expected.view(1, LAYER_CLASSES, 1, UV_SIZE * UV_SIZE).clamp_min(1.0)
+    layer_alpha = (stacked_weight_sum / expected).clamp(0.0, 1.0)
+    total_rgb_sum = stacked_rgb_sum.sum(dim=1)
+    total_weight = stacked_weight_sum.sum(dim=1)
+    rgb = total_rgb_sum / total_weight.clamp_min(eps)
+    alpha = layer_alpha.amax(dim=1)
+    pred_uv = torch.cat([rgb, alpha], dim=1).reshape(groups, 4, UV_SIZE, UV_SIZE)
+    support = total_weight.reshape(groups, 1, UV_SIZE, UV_SIZE)
+    if return_details:
+        return pred_uv, {
+            "support": support,
+            "layer_weight": stacked_weight_sum.reshape(
+                groups, LAYER_CLASSES, UV_SIZE, UV_SIZE
+            ),
+            "canonical_rendered": canonical_rendered,
+            "canonical_outputs": canonical_outputs,
+        }
+    return pred_uv
+
+
+def render_direct_uv(skins, renderer, view):
+    """Differentiably render the direct inner/outer cuboids without deep composites."""
+    if skins.dim() != 4 or skins.shape[1:] != (4, UV_SIZE, UV_SIZE):
+        raise ValueError(f"Expected skins shaped (N, 4, 64, 64), got {tuple(skins.shape)}.")
+    batch = skins.shape[0]
+    dtype = skins.dtype
+    inner_grid = getattr(renderer, f"{view}_inner_grid").to(dtype=dtype)
+    outer_grid = getattr(renderer, f"{view}_outer_grid").to(dtype=dtype)
+    inner_mask = getattr(renderer, f"{view}_inner_mask").to(dtype=dtype)
+    outer_mask = getattr(renderer, f"{view}_outer_mask").to(dtype=dtype)
+    inner = F.grid_sample(
+        skins,
+        inner_grid.unsqueeze(0).expand(batch, -1, -1, -1),
+        mode="bilinear",
+        padding_mode="zeros",
+        align_corners=True,
+    ) * inner_mask.view(1, 1, *inner_mask.shape)
+    outer = F.grid_sample(
+        skins,
+        outer_grid.unsqueeze(0).expand(batch, -1, -1, -1),
+        mode="bilinear",
+        padding_mode="zeros",
+        align_corners=True,
+    ) * outer_mask.view(1, 1, *outer_mask.shape)
+    bg = renderer.bg_color.to(device=skins.device, dtype=dtype).view(1, 3, 1, 1)
+    inner_rgb = inner[:, 3:4] * inner[:, :3] + (1.0 - inner[:, 3:4]) * bg
+    rgb = outer[:, 3:4] * outer[:, :3] + (1.0 - outer[:, 3:4]) * inner_rgb
+    alpha = outer[:, 3:4] + (1.0 - outer[:, 3:4]) * inner[:, 3:4]
+    return torch.cat([rgb, alpha], dim=1)
 
 
 def flat_uv_to_uv01(flat_uv, dtype):

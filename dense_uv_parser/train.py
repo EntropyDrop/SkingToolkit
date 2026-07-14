@@ -40,6 +40,8 @@ from SkingToolkit.dense_uv_parser.utils import (  # noqa: E402
     parse_views,
     prediction_uv01,
     randomize_render_background,
+    render_direct_uv,
+    soft_splat_geometry_predictions_to_uv,
     splat_deterministic_targets_to_uv_conditioning,
     splat_parser_predictions_to_uv_conditioning,
     splat_predictions_to_uv_conditioning,
@@ -145,6 +147,84 @@ def build_parser_inputs(batch_uv, renderer, views, train, args, apply_augment=No
     return rendered, targets, V, view_ids
 
 
+def differentiable_geometry_losses(
+    rendered,
+    gt_uv,
+    outputs,
+    renderer,
+    views,
+    temperature=1.0,
+    canonicalize=True,
+):
+    """Photometric UV and multi-view render losses for geometry-parser logits."""
+    views = parse_views(views)
+    pred_uv, soft_details = soft_splat_geometry_predictions_to_uv(
+        rendered,
+        outputs,
+        renderer=renderer,
+        views=views,
+        group_size=len(views),
+        temperature=temperature,
+        canonicalize=canonicalize,
+        return_details=True,
+    )
+    gt_uv = gt_uv.float()
+    support = (pred_uv[:, 3:4].detach() > 0.05).to(dtype=pred_uv.dtype)
+    gt_alpha = (gt_uv[:, 3:4] > 0.5).to(dtype=pred_uv.dtype)
+    rgb_mask = support * gt_alpha
+    rgb_denom = (rgb_mask.sum(dim=(1, 2, 3)) * 3.0).clamp_min(1.0)
+    loss_soft_uv_rgb = (
+        ((pred_uv[:, :3] - gt_uv[:, :3]).abs() * rgb_mask)
+        .sum(dim=(1, 2, 3))
+        .div(rgb_denom)
+        .mean()
+    )
+    transparent_support = support * (1.0 - gt_alpha)
+    alpha_denom = transparent_support.sum(dim=(1, 2, 3)).clamp_min(1.0)
+    loss_soft_uv_alpha = (
+        (pred_uv[:, 3:4] * transparent_support)
+        .sum(dim=(1, 2, 3))
+        .div(alpha_denom)
+        .mean()
+    )
+
+    render_rgb_total = pred_uv.new_zeros(())
+    render_alpha_total = pred_uv.new_zeros(())
+    for view in views:
+        pred_render = render_direct_uv(pred_uv, renderer, view)
+        with torch.no_grad():
+            gt_render = render_direct_uv(gt_uv, renderer, view)
+        foreground = gt_render[:, 3:4].detach()
+        rgb_denom = (foreground.sum(dim=(1, 2, 3)) * 3.0).clamp_min(1.0)
+        render_rgb_total = render_rgb_total + (
+            ((pred_render[:, :3] - gt_render[:, :3]).abs() * foreground)
+            .sum(dim=(1, 2, 3))
+            .div(rgb_denom)
+            .mean()
+        )
+        alpha_support = torch.maximum(
+            pred_render[:, 3:4], gt_render[:, 3:4]
+        ).detach()
+        alpha_denom = alpha_support.sum(dim=(1, 2, 3)).clamp_min(1.0)
+        render_alpha_total = render_alpha_total + (
+            ((pred_render[:, 3:4] - gt_render[:, 3:4]).abs() * alpha_support)
+            .sum(dim=(1, 2, 3))
+            .div(alpha_denom)
+            .mean()
+        )
+
+    view_count = max(len(views), 1)
+    return {
+        "loss_soft_uv_rgb": loss_soft_uv_rgb,
+        "loss_soft_uv_alpha": loss_soft_uv_alpha,
+        "loss_render_rgb": render_rgb_total / view_count,
+        "loss_render_alpha": render_alpha_total / view_count,
+        "soft_uv_known_percent": (
+            (soft_details["support"] > 0.05).float().mean() * 100.0
+        ),
+    }
+
+
 def run_epoch(model, criterion, renderer, loader, optimizer, scaler, device, precision, args, train=True):
     model.train(train)
     views = parse_views(args.views)
@@ -175,6 +255,45 @@ def run_epoch(model, criterion, renderer, loader, optimizer, scaler, device, pre
             with autocast_context(device, precision):
                 outputs = model(rendered, view_ids=view_ids)
                 losses = criterion(outputs, targets)
+                zero = losses["loss_total"].new_zeros(())
+                auxiliary_enabled = args.parser_mode == "geometry_fit" and any(
+                    weight > 0
+                    for weight in (
+                        args.lambda_soft_uv_rgb,
+                        args.lambda_soft_uv_alpha,
+                        args.lambda_render_rgb,
+                        args.lambda_render_alpha,
+                    )
+                )
+                if auxiliary_enabled:
+                    auxiliary = differentiable_geometry_losses(
+                        rendered,
+                        batch["uv"],
+                        outputs,
+                        renderer,
+                        views,
+                        temperature=args.render_softmax_temperature,
+                        canonicalize=apply_augment,
+                    )
+                else:
+                    auxiliary = {
+                        "loss_soft_uv_rgb": zero,
+                        "loss_soft_uv_alpha": zero,
+                        "loss_render_rgb": zero,
+                        "loss_render_alpha": zero,
+                        "soft_uv_known_percent": zero,
+                    }
+                weighted_auxiliary = (
+                    args.lambda_soft_uv_rgb * auxiliary["loss_soft_uv_rgb"]
+                    + args.lambda_soft_uv_alpha * auxiliary["loss_soft_uv_alpha"]
+                    + args.lambda_render_rgb * auxiliary["loss_render_rgb"]
+                    + args.lambda_render_alpha * auxiliary["loss_render_alpha"]
+                )
+                losses.update(auxiliary)
+                losses["loss_differentiable"] = weighted_auxiliary
+                losses["loss_total"] = losses["loss_total"] + weighted_auxiliary
+                losses["loss_geometry"] = losses["loss_geometry"] + weighted_auxiliary
+                losses["loss_routing"] = losses["loss_routing"] + weighted_auxiliary
                 loss = losses["loss_total"]
 
         if train:
@@ -207,6 +326,7 @@ def run_epoch(model, criterion, renderer, loader, optimizer, scaler, device, pre
                 if args.parser_mode == "geometry_fit":
                     postfix["outer_p"] = f"{avg.get('precision_outer', 0.0):.3f}"
                     postfix["outer_r"] = f"{avg.get('recall_outer', 0.0):.3f}"
+                    postfix["render"] = f"{avg.get('loss_render_rgb', 0.0):.3f}"
                 else:
                     postfix["surface"] = f"{avg.get('acc_surface', 0.0):.3f}"
             else:
@@ -539,6 +659,16 @@ def build_arg_parser():
     parser.add_argument("--lambda_uv_class", type=float, default=1.0)
     parser.add_argument("--lambda_affine", type=float, default=1.0)
     parser.add_argument("--lambda_surface", type=float, default=1.0)
+    parser.add_argument("--lambda_soft_uv_rgb", type=float, default=0.25)
+    parser.add_argument("--lambda_soft_uv_alpha", type=float, default=0.10)
+    parser.add_argument("--lambda_render_rgb", type=float, default=0.20)
+    parser.add_argument("--lambda_render_alpha", type=float, default=0.10)
+    parser.add_argument(
+        "--render_softmax_temperature",
+        type=float,
+        default=1.0,
+        help="Temperature for the differentiable route/surface probabilities.",
+    )
     parser.add_argument("--uv_classification", dest="uv_classification", action="store_true", default=True)
     parser.add_argument("--no_uv_classification", dest="uv_classification", action="store_false")
     parser.add_argument("--grad_clip", type=float, default=1.0)
@@ -547,7 +677,14 @@ def build_arg_parser():
     parser.add_argument("--preview_every", type=int, default=1)
     parser.add_argument(
         "--best_metric",
-        choices=["loss_total", "loss_geometry", "loss_routing", "loss_surface", "loss_uv_class"],
+        choices=[
+            "loss_total",
+            "loss_geometry",
+            "loss_routing",
+            "loss_surface",
+            "loss_uv_class",
+            "loss_differentiable",
+        ],
         default="loss_total",
     )
     return parser
@@ -558,6 +695,16 @@ def main():
     args.bg_color = (128, 128, 128)
     if args.scale_range < 0 or args.scale_range >= 1:
         raise ValueError("--scale_range must be in [0, 1).")
+    differentiable_weights = (
+        args.lambda_soft_uv_rgb,
+        args.lambda_soft_uv_alpha,
+        args.lambda_render_rgb,
+        args.lambda_render_alpha,
+    )
+    if any(weight < 0 for weight in differentiable_weights):
+        raise ValueError("Differentiable parser loss weights must be non-negative.")
+    if args.render_softmax_temperature <= 0:
+        raise ValueError("--render_softmax_temperature must be positive.")
     device = get_device(args.device)
     configure_torch(args, device)
 
@@ -722,6 +869,11 @@ def main():
         "affine_refine": args.affine_refine,
         "affine_refine_translation_px": args.affine_refine_translation_px,
         "affine_refine_scale": args.affine_refine_scale,
+        "lambda_soft_uv_rgb": args.lambda_soft_uv_rgb,
+        "lambda_soft_uv_alpha": args.lambda_soft_uv_alpha,
+        "lambda_render_rgb": args.lambda_render_rgb,
+        "lambda_render_alpha": args.lambda_render_alpha,
+        "render_softmax_temperature": args.render_softmax_temperature,
     }
     with open(output_dir / "config.json", "w", encoding="utf-8") as handle:
         json.dump({"args": vars(args), "metadata": metadata}, handle, indent=2)

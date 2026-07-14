@@ -58,6 +58,20 @@ Training previews are saved under `runs/<run>/previews`:
 
 For good parser splatting, watch `precision_outer`, `recall_outer`, `precision_secondary`, `recall_secondary`, `acc_route_role`, `err_affine_translation_px`, and `err_affine_scale_pct`. `best.pt` defaults to the lowest `loss_geometry`.
 
+`geometry_fit` training also uses a differentiable photometric branch. Route-role and surface logits are converted to probabilities, softly splatted through the fixed renderer UV candidates, and merged into a provisional skin. That skin is rendered back through the direct inner/outer cuboids for every configured view. Soft-UV RGB/alpha errors and multi-view render RGB/alpha errors are added to the supervised classification losses, so wrong inner/outer or exact-surface choices receive color and silhouette gradients in addition to cross-entropy. Inference remains hard-routed and continues to use exact-color aggregation.
+
+The default auxiliary weights are conservative:
+
+```bash
+LAMBDA_SOFT_UV_RGB=0.25 \
+LAMBDA_SOFT_UV_ALPHA=0.10 \
+LAMBDA_RENDER_RGB=0.20 \
+LAMBDA_RENDER_ALPHA=0.10 \
+./run_dense_uv_parser_training.sh
+```
+
+Set all four values to `0` to recover classification-only training. `loss_differentiable`, `loss_soft_uv_rgb`, `loss_soft_uv_alpha`, `loss_render_rgb`, `loss_render_alpha`, and `soft_uv_known_percent` are recorded in epoch metrics. The differentiable branch shares one UV atlas across all configured views, providing multi-view consistency without changing the checkpoint architecture.
+
 Predicted geometry routing first estimates a border-connected solid-background mask, then decides the inner/outer/secondary route role with projected-texel consensus. It ranks only the physically valid renderer surface slots that implement the selected role, so a wrong surface logit cannot turn an inner pixel into outer skin or a secondary/back-facing surface. Surface evidence is aggregated inside each projected Minecraft UV texel and blended only into low-margin local decisions; confident pixels remain untouched so real occlusion boundaries are preserved, while isolated ambiguous pixels cannot easily split a face, hat brim, or other texture block between inner and outer layers. Direct inner/outer pixels retain their fixed cuboid mapping, while secondary/deeper pixels use the selected composite or geometry surface mapping. Outer coverage is measured within the direct outer view/surface/UV cell rather than against unrelated surfaces. Composite and geometry slots can be partially occluded, so they rely on exact slot classification and texel consensus instead of an invalid full-mask coverage denominator. For each resulting layer/UV texel it uses the most frequent exact 8-bit RGB value and returns a real source pixel of that color; it never averages colors. Use `COLOR_AGGREGATION=best` during inference only as a diagnostic comparison with the former highest-confidence single-pixel strategy.
 
 Affine refinement is disabled by default so fixed-view inputs are never shifted after parsing. When explicitly enabled, it uses the observed solid-background silhouette rather than the parser's noisy foreground logits. Canonicalized RGB is padded with the detected source background color instead of black.

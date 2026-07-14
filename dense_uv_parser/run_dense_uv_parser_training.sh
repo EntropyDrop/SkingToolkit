@@ -100,6 +100,11 @@ LAMBDA_UV="${LAMBDA_UV:-0.25}"
 LAMBDA_UV_CLASS="${LAMBDA_UV_CLASS:-1.0}"
 LAMBDA_AFFINE="${LAMBDA_AFFINE:-1.0}"
 LAMBDA_SURFACE="${LAMBDA_SURFACE:-1.0}"
+LAMBDA_SOFT_UV_RGB="${LAMBDA_SOFT_UV_RGB:-0.25}"
+LAMBDA_SOFT_UV_ALPHA="${LAMBDA_SOFT_UV_ALPHA:-0.10}"
+LAMBDA_RENDER_RGB="${LAMBDA_RENDER_RGB:-0.20}"
+LAMBDA_RENDER_ALPHA="${LAMBDA_RENDER_ALPHA:-0.10}"
+RENDER_SOFTMAX_TEMPERATURE="${RENDER_SOFTMAX_TEMPERATURE:-1.0}"
 UV_CLASSIFICATION="${UV_CLASSIFICATION:-true}"
 
 augment_args=()
@@ -185,6 +190,11 @@ python train.py \
   --lambda_uv_class "$LAMBDA_UV_CLASS" \
   --lambda_affine "$LAMBDA_AFFINE" \
   --lambda_surface "$LAMBDA_SURFACE" \
+  --lambda_soft_uv_rgb "$LAMBDA_SOFT_UV_RGB" \
+  --lambda_soft_uv_alpha "$LAMBDA_SOFT_UV_ALPHA" \
+  --lambda_render_rgb "$LAMBDA_RENDER_RGB" \
+  --lambda_render_alpha "$LAMBDA_RENDER_ALPHA" \
+  --render_softmax_temperature "$RENDER_SOFTMAX_TEMPERATURE" \
   --affine_refine_translation_px "$AFFINE_REFINE_TRANSLATION_PX" \
   --affine_refine_scale "$AFFINE_REFINE_SCALE" \
   --route_confidence_threshold "$ROUTE_CONFIDENCE_THRESHOLD" \
