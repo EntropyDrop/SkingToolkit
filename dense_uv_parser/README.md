@@ -73,6 +73,7 @@ Use the latest parser checkpoint automatically:
 By default it looks for the highest `runs/dense_uv_parser_v*/best.pt`, then looks for the highest `../inverse_uv/runs/inverse_uv_full_v*/best.pt`. It writes:
 
 - `outputs/parser_conditioning.png`
+- `outputs/parser_pred_uv.png`: preliminary 64x64 RGBA skin merged directly from known parser conditioning texels
 - `outputs/parser_debug_geometry_grid.png`: fitted inner/outer cuboid faces with projected UV texel boundaries
 - `outputs/parser_debug_geometry_overlay.png`: inner (cyan) and outer (magenta) fitted grids overlaid on the canonicalized source views
 - `outputs/parser_debug_geometry_routed_overlay.png`: the same grids over only pixels routed to their matching inner/outer layer
@@ -88,6 +89,7 @@ COMBINED=/path/to/combined.png ./run_infer.sh
 PARSER_CHECKPOINT=runs/dense_uv_parser_v3/best.pt ./run_infer.sh
 INPAINT_CHECKPOINT=../inverse_uv/runs/inverse_uv_full_v34/best.pt ./run_infer.sh
 OUTPUT= CONDITIONING_OUTPUT=outputs/parser_conditioning.png ./run_infer.sh
+OUTPUT= PARSER_UV_OUTPUT=outputs/parser_pred_uv.png ./run_infer.sh
 OUTER_UV_MIN_COVERAGE=0.65 ./run_infer.sh
 ```
 

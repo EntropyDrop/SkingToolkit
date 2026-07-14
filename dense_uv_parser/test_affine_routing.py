@@ -16,6 +16,7 @@ from SkingToolkit.dense_uv_parser.utils import (
     canonicalize_parser_render,
     canonicalize_tensor,
     classify_route_role,
+    conditioning_to_pred_uv,
     estimate_solid_background_foreground,
     fill_geometry_grid_debug,
     overlay_geometry_grid_debug,
@@ -75,6 +76,38 @@ def dense_targets(batch, height, width):
 
 
 class GlobalAffineRoutingTest(unittest.TestCase):
+    def test_conditioning_merges_to_preliminary_pred_uv(self):
+        conditioning = torch.full((1, 10, 2, 2), 0.5)
+        conditioning[:, 3] = 0.0
+        conditioning[:, 4] = 0.0
+        conditioning[:, 8] = 0.0
+        conditioning[:, 9] = 0.0
+
+        conditioning[0, 0:4, 0, 0] = torch.tensor([1.0, 0.0, 0.0, 1.0])
+        conditioning[0, 4, 0, 0] = 1.0
+        conditioning[0, 5:9, 0, 1] = torch.tensor([0.0, 0.0, 1.0, 1.0])
+        conditioning[0, 9, 0, 1] = 1.0
+        conditioning[0, 0:4, 1, 0] = torch.tensor([0.0, 1.0, 0.0, 1.0])
+        conditioning[0, 4, 1, 0] = 1.0
+        conditioning[0, 5:9, 1, 0] = torch.tensor([1.0, 1.0, 0.0, 1.0])
+        conditioning[0, 9, 1, 0] = 1.0
+
+        pred_uv = conditioning_to_pred_uv(conditioning)
+
+        self.assertEqual(tuple(pred_uv.shape), (1, 4, 2, 2))
+        self.assertTrue(
+            torch.equal(pred_uv[0, :, 0, 0], torch.tensor([1.0, 0.0, 0.0, 1.0]))
+        )
+        self.assertTrue(
+            torch.equal(pred_uv[0, :, 0, 1], torch.tensor([0.0, 0.0, 1.0, 1.0]))
+        )
+        self.assertTrue(
+            torch.equal(pred_uv[0, :, 1, 0], torch.tensor([1.0, 1.0, 0.0, 1.0]))
+        )
+        self.assertTrue(
+            torch.equal(pred_uv[0, :, 1, 1], torch.tensor([0.5, 0.5, 0.5, 0.0]))
+        )
+
     def test_training_defaults_keep_geometry_fixed(self):
         parser_args = parser_train.build_arg_parser().parse_args([])
         self.assertFalse(parser_args.augment)

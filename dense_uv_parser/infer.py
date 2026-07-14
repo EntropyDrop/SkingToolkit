@@ -31,6 +31,7 @@ from SkingToolkit.dense_uv_parser.utils import (  # noqa: E402
     colorize_labels,
     colorize_surface,
     colorize_uv,
+    conditioning_to_pred_uv,
     flat_uv_to_uv01,
     parse_views,
     prediction_uv01,
@@ -157,6 +158,28 @@ def save_conditioning_preview(conditioning, output_path):
     preview = torch.cat([inner_rgb, outer_rgb], dim=0)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     save_image(preview.clamp(0.0, 1.0), output_path, nrow=conditioning.shape[0])
+
+
+def save_parser_uv(
+    conditioning,
+    output_path,
+    alpha_threshold=0.5,
+    enforce_base_alpha=True,
+):
+    parser_uv = conditioning_to_pred_uv(conditioning)
+    if parser_uv.dim() != 4 or parser_uv.shape[0] != 1:
+        raise ValueError(
+            "Parser UV PNG output requires exactly one conditioning sample, "
+            f"got {tuple(parser_uv.shape)}."
+        )
+    parser_uv = finalize_minecraft_alpha(
+        parser_uv[0],
+        alpha_threshold=alpha_threshold,
+        enforce_base_alpha=enforce_base_alpha,
+    )
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    tensor_to_rgba_image(parser_uv.detach().cpu()).save(output_path)
+    print(f"Saved {output_path}")
 
 
 def save_debug_preview(
@@ -381,6 +404,11 @@ def build_arg_parser():
     parser.add_argument("--inpaint_checkpoint", default=None, help="Optional inverse_uv checkpoint used to inpaint final skin.")
     parser.add_argument("--output", default=None, help="Final RGBA UV PNG path; requires --inpaint_checkpoint.")
     parser.add_argument("--conditioning_output", default=None, help="Optional preview image for parser-splatted conditioning.")
+    parser.add_argument(
+        "--parser_uv_output",
+        default=None,
+        help="Optional preliminary RGBA skin merged directly from parser conditioning.",
+    )
     parser.add_argument("--debug_output", default=None, help="Optional path to write a debug preview grid of predictions.")
     parser.add_argument("--overlay_output", default=None, help="Optional path for segmentation overlays on canonicalized input views.")
     parser.add_argument("--overlay_alpha", type=float, default=0.45)
@@ -453,6 +481,7 @@ def main():
         (
             args.output,
             args.conditioning_output,
+            args.parser_uv_output,
             args.debug_output,
             args.overlay_output,
             args.inner_cutout_output,
@@ -469,7 +498,7 @@ def main():
         )
     ):
         raise ValueError(
-            "Provide --output, --conditioning_output, --debug_output, --overlay_output, "
+            "Provide --output, --conditioning_output, --parser_uv_output, --debug_output, --overlay_output, "
             "--inner_cutout_output, --outer_cutout_output, and/or --secondary_cutout_output."
         )
 
@@ -674,6 +703,14 @@ def main():
 
     if args.conditioning_output:
         save_conditioning_preview(conditioning.detach().cpu(), Path(args.conditioning_output))
+
+    if args.parser_uv_output:
+        save_parser_uv(
+            conditioning.detach().cpu(),
+            Path(args.parser_uv_output),
+            alpha_threshold=args.alpha_threshold,
+            enforce_base_alpha=not args.no_enforce_base_alpha,
+        )
 
     if args.output:
         inpaint_model, inpaint_args = load_inpaint(args.inpaint_checkpoint, device)

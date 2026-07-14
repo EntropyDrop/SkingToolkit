@@ -1938,6 +1938,40 @@ def splat_to_uv_conditioning(
     return layers.clamp(0.0, 1.0)
 
 
+def conditioning_to_pred_uv(conditioning):
+    """Merge two-layer parser conditioning into a preliminary RGBA skin atlas.
+
+    Conditioning stores ``inner RGBA + known`` followed by
+    ``outer RGBA + known``.  Their Minecraft UV rectangles normally do not
+    overlap, but outer data wins if both layers mark the same texel as known.
+    Unknown RGB retains the conditioning background as a useful placeholder;
+    unknown alpha remains transparent until Minecraft base-alpha finalization.
+    """
+    squeeze_batch = conditioning.dim() == 3
+    if squeeze_batch:
+        conditioning = conditioning.unsqueeze(0)
+    if conditioning.dim() != 4 or conditioning.shape[1] != 10:
+        raise ValueError(
+            "Expected conditioning with shape (N, 10, H, W) or (10, H, W), "
+            f"got {tuple(conditioning.shape)}."
+        )
+
+    inner_rgba = conditioning[:, 0:4]
+    inner_known = conditioning[:, 4:5] > 0.5
+    outer_rgba = conditioning[:, 5:9]
+    outer_known = conditioning[:, 9:10] > 0.5
+    known = inner_known | outer_known
+
+    rgba = torch.where(outer_known.expand_as(outer_rgba), outer_rgba, inner_rgba)
+    rgba[:, 3:4] = torch.where(
+        known,
+        rgba[:, 3:4],
+        torch.zeros_like(rgba[:, 3:4]),
+    )
+    rgba = rgba.clamp(0.0, 1.0)
+    return rgba[0] if squeeze_batch else rgba
+
+
 PART_PALETTE = (
     (239, 83, 80),
     (255, 202, 40),
