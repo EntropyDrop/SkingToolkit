@@ -90,7 +90,8 @@ ROUTE_CONFIDENCE_THRESHOLD="${ROUTE_CONFIDENCE_THRESHOLD:-0.0}"
 ROUTE_MARGIN_THRESHOLD="${ROUTE_MARGIN_THRESHOLD:-0.0}"
 OUTER_ROUTE_CONFIDENCE_THRESHOLD="${OUTER_ROUTE_CONFIDENCE_THRESHOLD:-0.55}"
 OUTER_ROUTE_MARGIN_THRESHOLD="${OUTER_ROUTE_MARGIN_THRESHOLD:-0.35}"
-OUTER_UV_MIN_COVERAGE="${OUTER_UV_MIN_COVERAGE:-0.65}"
+OUTER_UV_MIN_COVERAGE="${OUTER_UV_MIN_COVERAGE:-0.0}"
+GEOMETRY_ROUTE_TEXEL_CONSENSUS="${GEOMETRY_ROUTE_TEXEL_CONSENSUS:-false}"
 SPLAT_COLOR_AGGREGATION="${SPLAT_COLOR_AGGREGATION:-exact_mode}"
 ALLOW_SEMANTIC_FALLBACK="${ALLOW_SEMANTIC_FALLBACK:-false}"
 
@@ -170,6 +171,12 @@ fallback_args=()
 if [[ "$ALLOW_SEMANTIC_FALLBACK" == "true" ]]; then
   fallback_args=(--allow_semantic_fallback)
 fi
+routing_consensus_args=()
+if [[ "$GEOMETRY_ROUTE_TEXEL_CONSENSUS" == "true" ]]; then
+  routing_consensus_args=(--geometry_route_texel_consensus)
+else
+  routing_consensus_args=(--no_geometry_route_texel_consensus)
+fi
 cudnn_args=()
 if [[ "$CUDNN_BENCHMARK" == "true" ]]; then
   cudnn_args=(--cudnn_benchmark)
@@ -242,6 +249,7 @@ python train.py \
   "${semantic_gate_args[@]}" \
   "${affine_refine_args[@]}" \
   "${fallback_args[@]}" \
+  "${routing_consensus_args[@]}" \
   "${uv_class_args[@]}" \
   "${cudnn_args[@]}" \
   "${resume_args[@]}"

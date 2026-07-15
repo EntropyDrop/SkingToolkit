@@ -30,7 +30,12 @@ SkingToolkit/
     ├── losses.py
     ├── dataset.py
     ├── train.py
-    └── run_uv_inpainting_training.sh
+    ├── run_uv_inpainting_training.sh
+    ├── semantic_backbone.py
+    ├── semantic_model.py
+    ├── semantic_losses.py
+    ├── train_semantic_uv.py
+    └── run_semantic_uv_training.sh
 ```
 
 ## Components
@@ -51,6 +56,14 @@ The inpainting network receives the parser-generated partial UV conditioning and
 
 The public classes are `UVInpaintingNet`, `UVInpaintingDataset`, and `UVInpaintingLoss`. See [uv_inpainting/README.md](uv_inpainting/README.md) for all training options.
 
+The same directory includes `SemanticUVReconstructor`, an independent
+fixed-view training path that jointly encodes clean front/back renders and
+predicts the complete atlas directly. It fuses a high-resolution CNN with a
+frozen, language-aligned SigLIP2 vision tower, uses source-skin-derived
+structural attributes and differentiable pixel/semantic re-render losses, and
+has no finite garment concept table. This path does not require a parser
+checkpoint and currently applies no randomized render variation.
+
 ### `renderer.py`
 
 `DifferentiableRenderer` loads view mapping files and renders Minecraft skins through `torch.nn.functional.grid_sample` and alpha compositing. Both parser and inpainting losses use the same mappings as inference.
@@ -61,6 +74,12 @@ Install the core Python dependencies:
 
 ```bash
 pip install torch torchvision tqdm pillow numpy
+```
+
+The optional semantic fixed-view trainer additionally requires:
+
+```bash
+pip install -U transformers sentencepiece safetensors
 ```
 
 The skin dataset must contain standard 64×64 PNG files. Slim/Alex skins are normalized to the standard Steve layout when `mc_skin_utils` is available. Renderer mapping files must match the configured view names and image sizes.
@@ -79,6 +98,13 @@ Then train UV inpainting from the parser-generated conditioning:
 ```bash
 cd ../uv_inpainting
 ./run_uv_inpainting_training.sh
+```
+
+Or train the semantic fixed-view render-to-UV model directly from all source
+skins:
+
+```bash
+./run_semantic_uv_training.sh
 ```
 
 The inpainting launcher automatically selects the newest `dense_uv_parser_v*/best.pt` unless `PARSER_CHECKPOINT` is set explicitly.

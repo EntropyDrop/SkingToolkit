@@ -8,6 +8,10 @@ fixed-view render images -> dense parser UV conditioning -> complete 64x64 RGBA 
 
 It is the completion stage after `dense_uv_parser` and is trained from the same parser-generated conditioning used at inference.
 
+This directory also contains an experimental semantic, end-to-end alternative
+that learns `fixed front/back renders -> complete UV` directly from the source
+skins. It is described in [Semantic Fixed-View UV Reconstruction](#semantic-fixed-view-uv-reconstruction).
+
 ---
 
 ## 🧬 Working Principles & Core Architecture
@@ -96,7 +100,7 @@ Performance notes:
 
 - `run_uv_inpainting_training.sh` disables geometric augmentation by default: `AUGMENT=false`, `TRANSLATION_SCALE=0.0`, `SCALE_RANGE=0.0`, and `PERSPECTIVE_SCALE=0.0`.
 - Validation also uses fixed canonical geometry, and parser affine refinement is disabled. Pure solid-background randomization remains enabled.
-- Parser conditioning uses the same conservative outer gates as production inference: confidence `0.55`, relative margin `0.35`, and UV coverage `0.65`.
+- Parser conditioning uses the same semantic-first routing as production inference: semantic outer confidence `0.55`, relative margin `0.35`, projected-texel consensus disabled, and geometric UV coverage filtering disabled (`0`). The fixed grid assigns approximate UV coordinates but does not override the predicted inner/outer meaning.
 - For lower console overhead on fast GPUs, raise `LOG_EVERY` (for example `LOG_EVERY=100`).
 
 ### Train From Dense Parser Conditioning
@@ -135,6 +139,102 @@ FRONT=/path/to/front.png BACK=/path/to/back.png ./run_infer.sh
 ```
 
 `dense_uv_parser/infer.py` loads `UVInpaintingNet` after parser splatting, then writes the completed skin to `outputs/pred_uv.png`.
+
+## Semantic Fixed-View UV Reconstruction
+
+`train_semantic_uv.py` is a separate training framework for learning the inverse
+mapping directly from clean, fixed front/back renders. It does not consume
+`dense_uv_parser` conditioning and does not measure the rendered cuboid to decide
+the layer. Each view passes through two complementary branches:
+
+- a trainable high-resolution CNN that preserves grid edges, colors, and exact
+  local texture;
+- a frozen SigLIP2 vision tower that supplies continuous, language-aligned
+  patch and global features without defining a garment vocabulary.
+
+Learned UV queries jointly attend to both branches from both views, and the
+decoder predicts the complete 64x64 RGBA atlas. SigLIP2 is not used to generate
+captions or closed labels. Concepts such as caps, hoods, scarves, unusual
+costumes, and concepts absent from the skin dataset remain positions in the
+continuous pretrained embedding space rather than entries in a finite table.
+
+The default run intentionally has no render randomization:
+
+- the differentiable renderer produces only the configured canonical views;
+- no camera, perspective, translation, scale, body-part, or outer-thickness
+  perturbation is applied;
+- validation uses the same fixed rendering contract;
+- all source skins are used unless `MAX_SAMPLES` is explicitly set.
+
+Start training with:
+
+```bash
+./run_semantic_uv_training.sh
+```
+
+The semantic bottleneck has exact supervision that can be derived without
+manual labels:
+
+- occupied inner/outer UV texels grouped by six body parts;
+- outer-layer presence and coverage for head, torso, arms, and legs;
+- mean visible color for all twelve part/layer combinations;
+- full UV RGB and outer alpha;
+- differentiable front/back pixel/alpha re-render consistency;
+- cosine consistency between the frozen SigLIP2 embeddings of the input views
+  and the predicted UV's differentiable re-renders.
+
+The only finite default classes describe Minecraft's known atlas topology:
+transparent valid texel, six occupied inner body parts, and six occupied outer
+body parts. They are structural targets, not visual concepts such as `cap` or
+`scarf`.
+
+Dense teacher labels are single-channel 64x64 PNG files whose pixel values are
+class IDs and whose value `255` means ignore. Filenames must match the source
+skins. This extension is only for extra structural topology, never for a list
+of appearance concepts. Configure both the directory and structural class
+count:
+
+```bash
+SEMANTIC_LABELS_DIR=/path/to/semantic_uv_labels \
+SEMANTIC_CLASSES=24 \
+./run_semantic_uv_training.sh
+```
+
+Checkpoints and previews are written to `runs/semantic_uv_v*/`; preview rows are
+the input views, predicted UV, ground-truth UV, predicted outer alpha, and
+ground-truth outer alpha.
+
+### Remote training environment
+
+The default semantic backbone is the frozen FixRes checkpoint
+`google/siglip2-base-patch16-224`. FixRes is intentional: the implementation
+uses one differentiable aspect-preserving letterbox for source and predicted
+renders, so the semantic re-render loss can propagate into the UV decoder.
+NaFlex checkpoints are rejected by this adapter.
+
+Install the additional dependencies on the training computer:
+
+```bash
+pip install -U transformers sentencepiece safetensors
+```
+
+The first run downloads the Hugging Face checkpoint. To use an already cached
+copy on an offline training machine:
+
+```bash
+SIGLIP_LOCAL_FILES_ONLY=true ./run_semantic_uv_training.sh
+```
+
+The frozen SigLIP2 weights are deliberately excluded from each epoch
+checkpoint; resuming reloads them from the Hugging Face cache and restores only
+the trainable CNN, fusion, query, and decoder weights. The default batch size is
+4. If the extra semantic re-render pass exceeds available VRAM, first reduce
+`BATCH_SIZE`; as a fallback set `LAMBDA_SIGLIP_RENDER=0` while retaining SigLIP2
+tokens in the forward model. For a dependency-free structural ablation use:
+
+```bash
+SEMANTIC_BACKBONE=none LAMBDA_SIGLIP_RENDER=0 ./run_semantic_uv_training.sh
+```
 
 ## Generate Render Pairs
 

@@ -192,7 +192,8 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         self.assertEqual(parser_args.best_metric, "loss_hard_uv_selection")
         self.assertEqual(parser_args.outer_route_confidence_threshold, 0.55)
         self.assertEqual(parser_args.outer_route_margin_threshold, 0.35)
-        self.assertEqual(parser_args.outer_uv_min_coverage, 0.65)
+        self.assertEqual(parser_args.outer_uv_min_coverage, 0.0)
+        self.assertFalse(parser_args.geometry_route_texel_consensus)
 
         inpainting_args = inpainting_train.build_arg_parser().parse_args(
             ["--data_dir", "unused"]
@@ -204,7 +205,8 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         self.assertEqual(inpainting_args.perspective_scale, 0.0)
         self.assertEqual(inpainting_args.parser_outer_route_confidence_threshold, 0.55)
         self.assertEqual(inpainting_args.parser_outer_route_margin_threshold, 0.35)
-        self.assertEqual(inpainting_args.parser_outer_uv_min_coverage, 0.65)
+        self.assertIsNone(inpainting_args.parser_outer_uv_min_coverage)
+        self.assertIsNone(inpainting_args.parser_geometry_route_texel_consensus)
 
     def test_geometry_model_emits_exact_surface_head(self):
         model = DenseUVParserNet(
@@ -928,6 +930,20 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         self.assertEqual(int(routing["secondary"].sum()), 0)
         self.assertEqual(int(routing["foreground"].sum()), 4)
         self.assertTrue(torch.equal(routing["route_role"], torch.zeros_like(routing["route_role"])))
+
+        _, semantic_details = splat_parser_predictions_to_uv_conditioning(
+            rendered,
+            outputs,
+            renderer=renderer,
+            views=["front"],
+            group_size=1,
+            affine_refine=False,
+            geometry_route_texel_consensus=False,
+            return_details=True,
+        )
+        semantic_routing = semantic_details["routing"]
+        self.assertEqual(int((semantic_routing["raw_route_role"] == 2).sum()), 1)
+        self.assertEqual(int(semantic_routing["foreground"].sum()), 3)
 
     def test_geometry_secondary_requires_absolute_texel_majority(self):
         renderer = FakeRenderer(mask=torch.ones(1, 4))

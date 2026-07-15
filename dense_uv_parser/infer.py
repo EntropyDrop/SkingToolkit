@@ -451,8 +451,20 @@ def build_arg_parser():
     parser.add_argument(
         "--outer_uv_min_coverage",
         type=float,
-        default=0.65,
+        default=None,
         help="Reject outer UV texels supported by less than this fraction of their projected footprint.",
+    )
+    parser.add_argument(
+        "--geometry_route_texel_consensus",
+        dest="geometry_route_texel_consensus",
+        action="store_true",
+        default=None,
+        help="Use projected UV-cell voting instead of semantic-first per-pixel routing.",
+    )
+    parser.add_argument(
+        "--no_geometry_route_texel_consensus",
+        dest="geometry_route_texel_consensus",
+        action="store_false",
     )
     parser.add_argument(
         "--color_aggregation",
@@ -540,6 +552,16 @@ def main():
         if args.affine_refine_scale is not None
         else 0.0 if checkpoint_scale is None else checkpoint_scale
     )
+    geometry_route_texel_consensus = (
+        parser_args.get("geometry_route_texel_consensus", False)
+        if args.geometry_route_texel_consensus is None
+        else args.geometry_route_texel_consensus
+    )
+    outer_uv_min_coverage = (
+        parser_args.get("outer_uv_min_coverage", 0.0)
+        if args.outer_uv_min_coverage is None
+        else args.outer_uv_min_coverage
+    )
     rendered = load_view_images(args, views, renderer, bg_color=bg_color).to(device)
     view_ids = torch.arange(len(views), device=device)
     with torch.no_grad():
@@ -560,8 +582,9 @@ def main():
             route_margin_threshold=args.route_margin_threshold,
             outer_route_confidence_threshold=args.outer_route_confidence_threshold,
             outer_route_margin_threshold=args.outer_route_margin_threshold,
-            outer_uv_min_coverage=args.outer_uv_min_coverage,
+            outer_uv_min_coverage=outer_uv_min_coverage,
             color_aggregation=args.color_aggregation,
+            geometry_route_texel_consensus=geometry_route_texel_consensus,
             reject_semantic_fallback=not args.allow_semantic_fallback,
             return_details=True,
         )
@@ -579,7 +602,7 @@ def main():
         rejected_outer = routing["rejected"] & (routing["layer"] == 1)
         coverage_rejected_outer = raw_outer & (
             routing.get("outer_uv_coverage", torch.ones_like(routing["confidence"]))
-            < args.outer_uv_min_coverage
+            < outer_uv_min_coverage
         )
         secondary_count = int(routing.get("secondary", torch.zeros_like(raw_outer)).sum().item())
         routed_secondary_count = int(
@@ -763,11 +786,21 @@ def main():
             )
         expected_outer_coverage = inpaint_args.get("parser_outer_uv_min_coverage")
         if expected_outer_coverage is not None and abs(
-            float(expected_outer_coverage) - args.outer_uv_min_coverage
+            float(expected_outer_coverage) - outer_uv_min_coverage
         ) > 1e-9:
             raise ValueError(
                 "Parser outer UV coverage threshold does not match the uv_inpainting checkpoint: "
-                f"checkpoint={expected_outer_coverage}, requested={args.outer_uv_min_coverage}."
+                f"checkpoint={expected_outer_coverage}, requested={outer_uv_min_coverage}."
+            )
+        expected_consensus = inpaint_args.get("parser_geometry_route_texel_consensus")
+        if (
+            expected_consensus is not None
+            and bool(expected_consensus) != geometry_route_texel_consensus
+        ):
+            raise ValueError(
+                "Parser routing mode does not match the uv_inpainting checkpoint: "
+                f"checkpoint texel_consensus={bool(expected_consensus)}, "
+                f"requested={geometry_route_texel_consensus}."
             )
         expected_color_aggregation = inpaint_args.get("parser_splat_color_aggregation")
         if expected_color_aggregation is not None and expected_color_aggregation != args.color_aggregation:

@@ -455,6 +455,9 @@ def hard_uv_conditioning_metrics(
             outer_route_margin_threshold=args.outer_route_margin_threshold,
             outer_uv_min_coverage=args.outer_uv_min_coverage,
             color_aggregation=args.splat_color_aggregation,
+            geometry_route_texel_consensus=getattr(
+                args, "geometry_route_texel_consensus", False
+            ),
             observed_foreground=None,
             reject_semantic_fallback=not args.allow_semantic_fallback,
         )
@@ -702,6 +705,9 @@ def save_preview(model, renderer, loader, device, args, output_path, max_items=2
                 outer_route_margin_threshold=args.outer_route_margin_threshold,
                 outer_uv_min_coverage=args.outer_uv_min_coverage,
                 color_aggregation=args.splat_color_aggregation,
+                geometry_route_texel_consensus=getattr(
+                    args, "geometry_route_texel_consensus", False
+                ),
                 observed_foreground=None,
                 reject_semantic_fallback=not args.allow_semantic_fallback,
                 return_details=True,
@@ -976,7 +982,19 @@ def build_arg_parser():
     parser.add_argument("--route_margin_threshold", type=float, default=0.0)
     parser.add_argument("--outer_route_confidence_threshold", type=float, default=0.55)
     parser.add_argument("--outer_route_margin_threshold", type=float, default=0.35)
-    parser.add_argument("--outer_uv_min_coverage", type=float, default=0.65)
+    parser.add_argument("--outer_uv_min_coverage", type=float, default=0.0)
+    parser.add_argument(
+        "--geometry_route_texel_consensus",
+        dest="geometry_route_texel_consensus",
+        action="store_true",
+        default=False,
+        help="Let fixed projected UV cells override local semantic route-role predictions.",
+    )
+    parser.add_argument(
+        "--no_geometry_route_texel_consensus",
+        dest="geometry_route_texel_consensus",
+        action="store_false",
+    )
     parser.add_argument(
         "--splat_color_aggregation",
         choices=SPLAT_COLOR_AGGREGATIONS,
@@ -1270,6 +1288,7 @@ def main():
         "background_augment": args.background_augment,
         "background_augment_prob": args.background_augment_prob,
         "semantic_gate": args.semantic_gate,
+        "geometry_route_texel_consensus": args.geometry_route_texel_consensus,
         "affine_refine": args.affine_refine,
         "affine_refine_translation_px": args.affine_refine_translation_px,
         "affine_refine_scale": args.affine_refine_scale,

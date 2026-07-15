@@ -164,8 +164,9 @@ def build_dense_parser_conditioning(
     route_margin_threshold=0.0,
     outer_route_confidence_threshold=0.55,
     outer_route_margin_threshold=0.35,
-    outer_uv_min_coverage=0.65,
+    outer_uv_min_coverage=0.0,
     color_aggregation="exact_mode",
+    geometry_route_texel_consensus=False,
     reject_semantic_fallback=True,
     bg_color=(128, 128, 128),
     return_renders=False,
@@ -216,6 +217,7 @@ def build_dense_parser_conditioning(
             outer_route_margin_threshold=outer_route_margin_threshold,
             outer_uv_min_coverage=outer_uv_min_coverage,
             color_aggregation=color_aggregation,
+            geometry_route_texel_consensus=geometry_route_texel_consensus,
             observed_foreground=observed_foreground,
             reject_semantic_fallback=reject_semantic_fallback,
         )
@@ -244,8 +246,9 @@ def build_training_conditioning(
     parser_route_margin_threshold=0.0,
     parser_outer_route_confidence_threshold=0.55,
     parser_outer_route_margin_threshold=0.35,
-    parser_outer_uv_min_coverage=0.65,
+    parser_outer_uv_min_coverage=0.0,
     parser_splat_color_aggregation="exact_mode",
+    parser_geometry_route_texel_consensus=False,
     parser_reject_semantic_fallback=True,
     bg_color=(128, 128, 128),
     return_renders=False,
@@ -271,6 +274,7 @@ def build_training_conditioning(
         outer_route_margin_threshold=parser_outer_route_margin_threshold,
         outer_uv_min_coverage=parser_outer_uv_min_coverage,
         color_aggregation=parser_splat_color_aggregation,
+        geometry_route_texel_consensus=parser_geometry_route_texel_consensus,
         reject_semantic_fallback=parser_reject_semantic_fallback,
         bg_color=bg_color,
         return_renders=return_renders,
@@ -301,8 +305,9 @@ def run_epoch(
     parser_route_margin_threshold=0.0,
     parser_outer_route_confidence_threshold=0.55,
     parser_outer_route_margin_threshold=0.35,
-    parser_outer_uv_min_coverage=0.65,
+    parser_outer_uv_min_coverage=0.0,
     parser_splat_color_aggregation="exact_mode",
+    parser_geometry_route_texel_consensus=False,
     parser_reject_semantic_fallback=True,
     bg_color=(128, 128, 128),
     log_every=50,
@@ -343,6 +348,7 @@ def run_epoch(
                 parser_outer_route_margin_threshold=parser_outer_route_margin_threshold,
                 parser_outer_uv_min_coverage=parser_outer_uv_min_coverage,
                 parser_splat_color_aggregation=parser_splat_color_aggregation,
+                parser_geometry_route_texel_consensus=parser_geometry_route_texel_consensus,
                 parser_reject_semantic_fallback=parser_reject_semantic_fallback,
                 bg_color=bg_color,
                 return_renders=True,
@@ -547,7 +553,18 @@ def build_arg_parser():
     parser.add_argument("--parser_route_margin_threshold", type=float, default=0.0)
     parser.add_argument("--parser_outer_route_confidence_threshold", type=float, default=0.55)
     parser.add_argument("--parser_outer_route_margin_threshold", type=float, default=0.35)
-    parser.add_argument("--parser_outer_uv_min_coverage", type=float, default=0.65)
+    parser.add_argument("--parser_outer_uv_min_coverage", type=float, default=None)
+    parser.add_argument(
+        "--parser_geometry_route_texel_consensus",
+        dest="parser_geometry_route_texel_consensus",
+        action="store_true",
+        default=None,
+    )
+    parser.add_argument(
+        "--no_parser_geometry_route_texel_consensus",
+        dest="parser_geometry_route_texel_consensus",
+        action="store_false",
+    )
     parser.add_argument(
         "--parser_splat_color_aggregation",
         choices=SPLAT_COLOR_AGGREGATIONS,
@@ -629,6 +646,14 @@ def main():
     if args.parser_affine_refine_scale is None:
         checkpoint_scale = parser_checkpoint_args.get("affine_refine_scale")
         args.parser_affine_refine_scale = 0.0 if checkpoint_scale is None else checkpoint_scale
+    if args.parser_geometry_route_texel_consensus is None:
+        args.parser_geometry_route_texel_consensus = parser_checkpoint_args.get(
+            "geometry_route_texel_consensus", False
+        )
+    if args.parser_outer_uv_min_coverage is None:
+        args.parser_outer_uv_min_coverage = parser_checkpoint_args.get(
+            "outer_uv_min_coverage", 0.0
+        )
     parser_views = parse_views(parser_checkpoint_args.get("views", ""))
     if parser_views and parser_views != parse_views(args.views):
         raise ValueError(
@@ -830,6 +855,7 @@ def main():
             parser_outer_route_margin_threshold=args.parser_outer_route_margin_threshold,
             parser_outer_uv_min_coverage=args.parser_outer_uv_min_coverage,
             parser_splat_color_aggregation=args.parser_splat_color_aggregation,
+            parser_geometry_route_texel_consensus=args.parser_geometry_route_texel_consensus,
             parser_reject_semantic_fallback=not args.parser_allow_semantic_fallback,
             bg_color=dataset.bg_color, log_every=args.log_every,
         )
@@ -861,6 +887,7 @@ def main():
                     parser_outer_route_margin_threshold=args.parser_outer_route_margin_threshold,
                     parser_outer_uv_min_coverage=args.parser_outer_uv_min_coverage,
                     parser_splat_color_aggregation=args.parser_splat_color_aggregation,
+                    parser_geometry_route_texel_consensus=args.parser_geometry_route_texel_consensus,
                     parser_reject_semantic_fallback=not args.parser_allow_semantic_fallback,
                     bg_color=dataset.bg_color, log_every=args.log_every,
                 )
@@ -903,6 +930,7 @@ def main():
                     parser_outer_route_margin_threshold=args.parser_outer_route_margin_threshold,
                     parser_outer_uv_min_coverage=args.parser_outer_uv_min_coverage,
                     parser_splat_color_aggregation=args.parser_splat_color_aggregation,
+                    parser_geometry_route_texel_consensus=args.parser_geometry_route_texel_consensus,
                     parser_reject_semantic_fallback=not args.parser_allow_semantic_fallback,
                     bg_color=dataset.bg_color,
                 )
