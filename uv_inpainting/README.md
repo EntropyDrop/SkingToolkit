@@ -96,6 +96,7 @@ Performance notes:
 
 - `run_uv_inpainting_training.sh` disables geometric augmentation by default: `AUGMENT=false`, `TRANSLATION_SCALE=0.0`, `SCALE_RANGE=0.0`, and `PERSPECTIVE_SCALE=0.0`.
 - Validation also uses fixed canonical geometry, and parser affine refinement is disabled. Pure solid-background randomization remains enabled.
+- Parser conditioning uses the same conservative outer gates as production inference: confidence `0.55`, relative margin `0.35`, and UV coverage `0.65`.
 - For lower console overhead on fast GPUs, raise `LOG_EVERY` (for example `LOG_EVERY=100`).
 
 ### Train From Dense Parser Conditioning

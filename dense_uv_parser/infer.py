@@ -443,12 +443,12 @@ def build_arg_parser():
     parser.add_argument("--fg_threshold", type=float, default=0.5)
     parser.add_argument("--route_confidence_threshold", type=float, default=0.0)
     parser.add_argument("--route_margin_threshold", type=float, default=0.0)
-    parser.add_argument("--outer_route_confidence_threshold", type=float, default=0.10)
-    parser.add_argument("--outer_route_margin_threshold", type=float, default=0.20)
+    parser.add_argument("--outer_route_confidence_threshold", type=float, default=0.55)
+    parser.add_argument("--outer_route_margin_threshold", type=float, default=0.35)
     parser.add_argument(
         "--outer_uv_min_coverage",
         type=float,
-        default=0.5,
+        default=0.65,
         help="Reject outer UV texels supported by less than this fraction of their projected footprint.",
     )
     parser.add_argument(

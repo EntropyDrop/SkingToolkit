@@ -56,17 +56,27 @@ Training previews are saved under `runs/<run>/previews`:
 - `epoch_XXXX.png`: predicted inner/outer RGB rows, followed by GT inner/outer RGB rows.
 - `epoch_XXXX_debug.png`: semantic diagnostics plus fitted inner/outer grids and RGB-filled grid previews.
 
-For good parser splatting, watch `precision_outer`, `recall_outer`, `precision_secondary`, `recall_secondary`, `acc_route_role`, `err_affine_translation_px`, and `err_affine_scale_pct`. `best.pt` defaults to the lowest `loss_geometry`.
+For good parser splatting, watch `precision_outer`, `recall_outer`, `iou_outer`, `loss_outer_false_positive`, `precision_secondary`, `recall_secondary`, `acc_route_role`, `err_affine_translation_px`, and `err_affine_scale_pct`. `best.pt` defaults to the lowest `loss_outer_selection`, defined as `loss_geometry + (1 - precision_outer) + 0.5 * (1 - iou_outer)`. TP/FP/FN are accumulated over the complete validation set before this metric is calculated.
+
+Route-role training is deliberately asymmetric. A focal negative term strongly penalizes high-confidence outer predictions on GT inner/secondary pixels. The abundant inner class has a minimum balanced weight of `0.75`, while automatic balancing cannot raise the outer target class above `1.0`. These defaults improve outer precision without removing secondary-class balancing:
+
+```bash
+LAMBDA_OUTER_FALSE_POSITIVE=0.75 \
+OUTER_FALSE_POSITIVE_GAMMA=2.0 \
+ROUTE_CLASS_WEIGHT_FLOOR=0.75 \
+ROUTE_OUTER_CLASS_WEIGHT_CAP=1.0 \
+./run_dense_uv_parser_training.sh
+```
 
 `geometry_fit` training also uses a differentiable photometric branch. Route-role and surface logits are converted to probabilities, softly splatted through the fixed renderer UV candidates, and merged into a provisional skin. That skin is rendered back through the direct inner/outer cuboids for every configured view. Soft-UV RGB/alpha errors and multi-view render RGB/alpha errors are added to the supervised classification losses, so wrong inner/outer or exact-surface choices receive color and silhouette gradients in addition to cross-entropy. Inference remains hard-routed and continues to use exact-color aggregation.
 
-The default auxiliary weights are conservative:
+Alpha consistency is weighted more strongly than RGB consistency because a wrong opaque outer texel is more damaging than leaving an uncertain texel for inpainting:
 
 ```bash
 LAMBDA_SOFT_UV_RGB=0.25 \
-LAMBDA_SOFT_UV_ALPHA=0.10 \
+LAMBDA_SOFT_UV_ALPHA=0.35 \
 LAMBDA_RENDER_RGB=0.20 \
-LAMBDA_RENDER_ALPHA=0.10 \
+LAMBDA_RENDER_ALPHA=0.25 \
 ./run_dense_uv_parser_training.sh
 ```
 
@@ -126,4 +136,4 @@ python infer.py \
   --conditioning_output parser_conditioning.png
 ```
 
-The conditioning preview shows the predicted inner-layer RGB row and outer-layer RGB row. Outer texels must cover at least half of their projected geometry footprint by default, which removes isolated edge splats without filtering inner details. Raise `OUTER_UV_MIN_COVERAGE` to reject more outer noise, lower it to retain partial outer texels, or set it to `0` to disable this filter.
+The conditioning preview shows the predicted inner-layer RGB row and outer-layer RGB row. Outer routing defaults to confidence `0.55`, relative margin `0.35`, and projected-footprint coverage `0.65`. These gates remove uncertain and isolated outer splats without filtering inner details. Raise `OUTER_UV_MIN_COVERAGE` to reject more outer noise, lower it to retain partial outer texels, or set it to `0` to disable the coverage filter.

@@ -7,7 +7,11 @@ from unittest.mock import patch
 import torch
 import torch.nn as nn
 
-from SkingToolkit.dense_uv_parser.losses import DenseUVParserLoss, _balanced_cross_entropy
+from SkingToolkit.dense_uv_parser.losses import (
+    DenseUVParserLoss,
+    _balanced_cross_entropy,
+    outer_false_positive_loss,
+)
 from SkingToolkit.dense_uv_parser.model import DenseUVParserNet
 from SkingToolkit.dense_uv_parser import train as parser_train
 from SkingToolkit.uv_inpainting import train as inpainting_train
@@ -170,6 +174,15 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         self.assertEqual(parser_args.affine_refine_translation_px, 0.0)
         self.assertGreater(parser_args.lambda_soft_uv_rgb, 0.0)
         self.assertGreater(parser_args.lambda_render_rgb, 0.0)
+        self.assertEqual(parser_args.lambda_soft_uv_alpha, 0.35)
+        self.assertEqual(parser_args.lambda_render_alpha, 0.25)
+        self.assertGreater(parser_args.lambda_outer_false_positive, 0.0)
+        self.assertEqual(parser_args.route_class_weight_floor, 0.75)
+        self.assertEqual(parser_args.route_outer_class_weight_cap, 1.0)
+        self.assertEqual(parser_args.best_metric, "loss_outer_selection")
+        self.assertEqual(parser_args.outer_route_confidence_threshold, 0.55)
+        self.assertEqual(parser_args.outer_route_margin_threshold, 0.35)
+        self.assertEqual(parser_args.outer_uv_min_coverage, 0.65)
 
         inpainting_args = inpainting_train.build_arg_parser().parse_args(
             ["--data_dir", "unused"]
@@ -179,6 +192,9 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         self.assertEqual(inpainting_args.translation_scale, 0.0)
         self.assertEqual(inpainting_args.scale_range, 0.0)
         self.assertEqual(inpainting_args.perspective_scale, 0.0)
+        self.assertEqual(inpainting_args.parser_outer_route_confidence_threshold, 0.55)
+        self.assertEqual(inpainting_args.parser_outer_route_margin_threshold, 0.35)
+        self.assertEqual(inpainting_args.parser_outer_uv_min_coverage, 0.65)
 
     def test_geometry_model_emits_exact_surface_head(self):
         model = DenseUVParserNet(
@@ -516,6 +532,56 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         loss = _balanced_cross_entropy(logits, target)
         self.assertTrue(torch.isfinite(loss))
         self.assertEqual(loss.dtype, torch.float32)
+
+    def test_route_class_balancing_caps_outer_and_protects_inner_weight(self):
+        logits = torch.zeros(1, 3, 1, 10)
+        target = torch.tensor([[[0, 0, 0, 0, 0, 0, 0, 0, 0, 1]]])
+        with patch(
+            "SkingToolkit.dense_uv_parser.losses.F.cross_entropy",
+            return_value=torch.tensor(0.0),
+        ) as cross_entropy:
+            _balanced_cross_entropy(
+                logits,
+                target,
+                min_weight=0.75,
+                class_weight_caps=(float("inf"), 1.0, float("inf")),
+            )
+        weights = cross_entropy.call_args.kwargs["weight"]
+        self.assertGreaterEqual(float(weights[0]), 0.75)
+        self.assertLessEqual(float(weights[1]), 1.0)
+
+    def test_outer_false_positive_loss_targets_confident_wrong_outer(self):
+        target = torch.zeros(1, 1, 1, dtype=torch.long)
+        low_outer = torch.tensor([[[[4.0]], [[-4.0]], [[-4.0]]]])
+        high_outer = torch.tensor([[[[-4.0]], [[4.0]], [[-4.0]]]], requires_grad=True)
+
+        low_loss = outer_false_positive_loss(low_outer, target)
+        high_loss = outer_false_positive_loss(high_outer, target)
+        high_loss.backward()
+
+        self.assertGreater(
+            float(high_loss.detach()),
+            float(low_loss.detach()) * 100.0,
+        )
+        self.assertGreater(float(high_outer.grad[0, 1, 0, 0]), 0.0)
+
+    def test_outer_selection_metric_uses_global_precision_and_iou(self):
+        metrics = parser_train.format_metrics(
+            {
+                "loss_geometry": torch.tensor(20.0),
+                "count_outer_tp": torch.tensor(8.0),
+                "count_outer_fp": torch.tensor(2.0),
+                "count_outer_fn": torch.tensor(2.0),
+            },
+            count=10,
+            outer_precision_weight=1.0,
+            outer_iou_weight=0.5,
+        )
+
+        self.assertAlmostEqual(metrics["loss_geometry"], 2.0)
+        self.assertAlmostEqual(metrics["precision_outer"], 0.8)
+        self.assertAlmostEqual(metrics["iou_outer"], 2.0 / 3.0)
+        self.assertAlmostEqual(metrics["loss_outer_selection"], 2.0 + 0.2 + 1.0 / 6.0)
 
     def test_global_model_emits_surface_and_affine_losses(self):
         rendered = torch.rand(1, 4, 32, 32)

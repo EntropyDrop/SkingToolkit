@@ -78,11 +78,37 @@ def configure_torch(args, device):
         torch.backends.cudnn.benchmark = args.cudnn_benchmark
 
 
-def format_metrics(metric_sums, count):
-    return {
-        name: float((value / max(count, 1)).detach().cpu()) if torch.is_tensor(value) else value / max(count, 1)
-        for name, value in metric_sums.items()
-    }
+def format_metrics(
+    metric_sums,
+    count,
+    outer_precision_weight=1.0,
+    outer_iou_weight=0.5,
+):
+    result = {}
+    for name, value in metric_sums.items():
+        denominator = 1 if name.startswith("count_") else max(count, 1)
+        averaged = value / denominator
+        result[name] = (
+            float(averaged.detach().cpu())
+            if torch.is_tensor(averaged)
+            else averaged
+        )
+
+    count_names = ("count_outer_tp", "count_outer_fp", "count_outer_fn")
+    if all(name in result for name in count_names):
+        outer_tp = result["count_outer_tp"]
+        outer_fp = result["count_outer_fp"]
+        outer_fn = result["count_outer_fn"]
+        result["precision_outer"] = outer_tp / max(outer_tp + outer_fp, 1.0)
+        result["recall_outer"] = outer_tp / max(outer_tp + outer_fn, 1.0)
+        result["iou_outer"] = outer_tp / max(outer_tp + outer_fp + outer_fn, 1.0)
+        if "loss_geometry" in result:
+            result["loss_outer_selection"] = (
+                result["loss_geometry"]
+                + outer_precision_weight * (1.0 - result["precision_outer"])
+                + outer_iou_weight * (1.0 - result["iou_outer"])
+            )
+    return result
 
 
 def move_batch(batch, device):
@@ -312,10 +338,19 @@ def run_epoch(model, criterion, renderer, loader, optimizer, scaler, device, pre
         sample_count += parser_samples
         for name, value in losses.items():
             detached = value.detach()
-            metric_sums[name] = metric_sums.get(name, detached.new_zeros(())) + detached * parser_samples
+            metric_weight = 1 if name.startswith("count_") else parser_samples
+            metric_sums[name] = (
+                metric_sums.get(name, detached.new_zeros(()))
+                + detached * metric_weight
+            )
 
         if tqdm is not None and args.log_every > 0 and sample_count % (args.log_every * parser_samples) == 0:
-            avg = format_metrics(metric_sums, sample_count)
+            avg = format_metrics(
+                metric_sums,
+                sample_count,
+                outer_precision_weight=args.outer_selection_precision_weight,
+                outer_iou_weight=args.outer_selection_iou_weight,
+            )
             postfix = {
                 "total": f"{avg['loss_total']:.4f}",
                 "fg": f"{avg.get('recall_foreground', avg['acc_foreground']):.3f}",
@@ -336,7 +371,12 @@ def run_epoch(model, criterion, renderer, loader, optimizer, scaler, device, pre
                 **postfix,
             )
 
-    return format_metrics(metric_sums, sample_count)
+    return format_metrics(
+        metric_sums,
+        sample_count,
+        outer_precision_weight=args.outer_selection_precision_weight,
+        outer_iou_weight=args.outer_selection_iou_weight,
+    )
 
 
 
@@ -630,9 +670,9 @@ def build_arg_parser():
     parser.add_argument("--affine_refine_scale", type=float, default=0.0)
     parser.add_argument("--route_confidence_threshold", type=float, default=0.0)
     parser.add_argument("--route_margin_threshold", type=float, default=0.0)
-    parser.add_argument("--outer_route_confidence_threshold", type=float, default=0.10)
-    parser.add_argument("--outer_route_margin_threshold", type=float, default=0.20)
-    parser.add_argument("--outer_uv_min_coverage", type=float, default=0.5)
+    parser.add_argument("--outer_route_confidence_threshold", type=float, default=0.55)
+    parser.add_argument("--outer_route_margin_threshold", type=float, default=0.35)
+    parser.add_argument("--outer_uv_min_coverage", type=float, default=0.65)
     parser.add_argument(
         "--splat_color_aggregation",
         choices=SPLAT_COLOR_AGGREGATIONS,
@@ -659,10 +699,16 @@ def build_arg_parser():
     parser.add_argument("--lambda_uv_class", type=float, default=1.0)
     parser.add_argument("--lambda_affine", type=float, default=1.0)
     parser.add_argument("--lambda_surface", type=float, default=1.0)
+    parser.add_argument("--lambda_outer_false_positive", type=float, default=0.75)
+    parser.add_argument("--outer_false_positive_gamma", type=float, default=2.0)
+    parser.add_argument("--route_class_weight_floor", type=float, default=0.75)
+    parser.add_argument("--route_outer_class_weight_cap", type=float, default=1.0)
     parser.add_argument("--lambda_soft_uv_rgb", type=float, default=0.25)
-    parser.add_argument("--lambda_soft_uv_alpha", type=float, default=0.10)
+    parser.add_argument("--lambda_soft_uv_alpha", type=float, default=0.35)
     parser.add_argument("--lambda_render_rgb", type=float, default=0.20)
-    parser.add_argument("--lambda_render_alpha", type=float, default=0.10)
+    parser.add_argument("--lambda_render_alpha", type=float, default=0.25)
+    parser.add_argument("--outer_selection_precision_weight", type=float, default=1.0)
+    parser.add_argument("--outer_selection_iou_weight", type=float, default=0.5)
     parser.add_argument(
         "--render_softmax_temperature",
         type=float,
@@ -684,8 +730,9 @@ def build_arg_parser():
             "loss_surface",
             "loss_uv_class",
             "loss_differentiable",
+            "loss_outer_selection",
         ],
-        default="loss_total",
+        default="loss_outer_selection",
     )
     return parser
 
@@ -703,6 +750,16 @@ def main():
     )
     if any(weight < 0 for weight in differentiable_weights):
         raise ValueError("Differentiable parser loss weights must be non-negative.")
+    if args.lambda_outer_false_positive < 0:
+        raise ValueError("--lambda_outer_false_positive must be non-negative.")
+    if args.outer_false_positive_gamma < 0:
+        raise ValueError("--outer_false_positive_gamma must be non-negative.")
+    if not 0 <= args.route_class_weight_floor <= 4.0:
+        raise ValueError("--route_class_weight_floor must be in [0, 4].")
+    if args.route_outer_class_weight_cap <= 0:
+        raise ValueError("--route_outer_class_weight_cap must be positive.")
+    if args.outer_selection_precision_weight < 0 or args.outer_selection_iou_weight < 0:
+        raise ValueError("Outer checkpoint-selection weights must be non-negative.")
     if args.render_softmax_temperature <= 0:
         raise ValueError("--render_softmax_temperature must be positive.")
     device = get_device(args.device)
@@ -773,6 +830,10 @@ def main():
         lambda_uv_class=args.lambda_uv_class,
         lambda_affine=args.lambda_affine,
         lambda_surface=args.lambda_surface,
+        lambda_outer_false_positive=args.lambda_outer_false_positive,
+        outer_false_positive_gamma=args.outer_false_positive_gamma,
+        route_class_weight_floor=args.route_class_weight_floor,
+        route_outer_class_weight_cap=args.route_outer_class_weight_cap,
         uv_size=UV_SIZE,
         use_uv=(not affine_mode) or model.uv_classification,
         affine_translation_limit=model.affine_translation_limit if affine_mode else 1.0,
@@ -821,11 +882,13 @@ def main():
         checkpoint_args = checkpoint.get("args", {})
         checkpoint_best_metric = checkpoint_args.get("best_metric", "loss_total")
         if checkpoint_best_metric != args.best_metric:
-            raise ValueError(
-                "Cannot resume with a different best metric: "
+            print(
+                "Resetting best-metric history because checkpoint selection changed: "
                 f"checkpoint={checkpoint_best_metric!r}, requested={args.best_metric!r}."
             )
-        best_metric = float(checkpoint.get("best_metric", float("inf")))
+            best_metric = float("inf")
+        else:
+            best_metric = float(checkpoint.get("best_metric", float("inf")))
         if start_epoch > args.epochs:
             raise ValueError(
                 f"Checkpoint is already at epoch {checkpoint_epoch}; set --epochs above {checkpoint_epoch}."
@@ -873,6 +936,12 @@ def main():
         "lambda_soft_uv_alpha": args.lambda_soft_uv_alpha,
         "lambda_render_rgb": args.lambda_render_rgb,
         "lambda_render_alpha": args.lambda_render_alpha,
+        "lambda_outer_false_positive": args.lambda_outer_false_positive,
+        "outer_false_positive_gamma": args.outer_false_positive_gamma,
+        "route_class_weight_floor": args.route_class_weight_floor,
+        "route_outer_class_weight_cap": args.route_outer_class_weight_cap,
+        "outer_selection_precision_weight": args.outer_selection_precision_weight,
+        "outer_selection_iou_weight": args.outer_selection_iou_weight,
         "render_softmax_temperature": args.render_softmax_temperature,
     }
     with open(output_dir / "config.json", "w", encoding="utf-8") as handle:

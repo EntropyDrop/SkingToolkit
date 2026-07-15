@@ -162,9 +162,9 @@ def build_dense_parser_conditioning(
     affine_refine_scale=0.0,
     route_confidence_threshold=0.0,
     route_margin_threshold=0.0,
-    outer_route_confidence_threshold=0.10,
-    outer_route_margin_threshold=0.20,
-    outer_uv_min_coverage=0.5,
+    outer_route_confidence_threshold=0.55,
+    outer_route_margin_threshold=0.35,
+    outer_uv_min_coverage=0.65,
     color_aggregation="exact_mode",
     reject_semantic_fallback=True,
     bg_color=(128, 128, 128),
@@ -242,9 +242,9 @@ def build_training_conditioning(
     parser_affine_refine_scale=0.0,
     parser_route_confidence_threshold=0.0,
     parser_route_margin_threshold=0.0,
-    parser_outer_route_confidence_threshold=0.10,
-    parser_outer_route_margin_threshold=0.20,
-    parser_outer_uv_min_coverage=0.5,
+    parser_outer_route_confidence_threshold=0.55,
+    parser_outer_route_margin_threshold=0.35,
+    parser_outer_uv_min_coverage=0.65,
     parser_splat_color_aggregation="exact_mode",
     parser_reject_semantic_fallback=True,
     bg_color=(128, 128, 128),
@@ -299,9 +299,9 @@ def run_epoch(
     parser_affine_refine_scale=0.0,
     parser_route_confidence_threshold=0.0,
     parser_route_margin_threshold=0.0,
-    parser_outer_route_confidence_threshold=0.10,
-    parser_outer_route_margin_threshold=0.20,
-    parser_outer_uv_min_coverage=0.5,
+    parser_outer_route_confidence_threshold=0.55,
+    parser_outer_route_margin_threshold=0.35,
+    parser_outer_uv_min_coverage=0.65,
     parser_splat_color_aggregation="exact_mode",
     parser_reject_semantic_fallback=True,
     bg_color=(128, 128, 128),
@@ -545,9 +545,9 @@ def build_arg_parser():
     parser.add_argument("--parser_affine_refine_scale", type=float, default=None)
     parser.add_argument("--parser_route_confidence_threshold", type=float, default=0.0)
     parser.add_argument("--parser_route_margin_threshold", type=float, default=0.0)
-    parser.add_argument("--parser_outer_route_confidence_threshold", type=float, default=0.10)
-    parser.add_argument("--parser_outer_route_margin_threshold", type=float, default=0.20)
-    parser.add_argument("--parser_outer_uv_min_coverage", type=float, default=0.5)
+    parser.add_argument("--parser_outer_route_confidence_threshold", type=float, default=0.55)
+    parser.add_argument("--parser_outer_route_margin_threshold", type=float, default=0.35)
+    parser.add_argument("--parser_outer_uv_min_coverage", type=float, default=0.65)
     parser.add_argument(
         "--parser_splat_color_aggregation",
         choices=SPLAT_COLOR_AGGREGATIONS,

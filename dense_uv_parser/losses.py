@@ -5,8 +5,16 @@ import torch.nn.functional as F
 from SkingToolkit.dense_uv_parser.utils import IGNORE_INDEX, combine_layer_face
 
 
-def _balanced_cross_entropy(logits, target, max_weight=4.0):
+def _balanced_cross_entropy(
+    logits,
+    target,
+    max_weight=4.0,
+    min_weight=0.0,
+    class_weight_caps=None,
+):
     """Give small projected faces useful gradient without letting them dominate."""
+    if min_weight < 0 or max_weight < min_weight:
+        raise ValueError("Class weights require 0 <= min_weight <= max_weight.")
     valid = target != IGNORE_INDEX
     if not valid.any():
         return logits.new_tensor(0.0)
@@ -14,8 +22,42 @@ def _balanced_cross_entropy(logits, target, max_weight=4.0):
     active = counts > 0
     weights = torch.where(active, counts.clamp_min(1.0).rsqrt(), torch.zeros_like(counts))
     weights[active] /= weights[active].mean().clamp_min(1e-6)
-    weights.clamp_(max=max_weight)
+    weights[active] = weights[active].clamp(min=min_weight, max=max_weight)
+    if class_weight_caps is not None:
+        caps = torch.as_tensor(
+            class_weight_caps,
+            device=weights.device,
+            dtype=weights.dtype,
+        )
+        if caps.numel() != logits.shape[1]:
+            raise ValueError(
+                f"Expected {logits.shape[1]} class-weight caps, got {caps.numel()}."
+            )
+        if (caps < 0).any():
+            raise ValueError("Class-weight caps must be non-negative.")
+        weights = torch.minimum(weights, caps)
     return F.cross_entropy(logits.float(), target, weight=weights, ignore_index=IGNORE_INDEX)
+
+
+def outer_false_positive_loss(logits, target, outer_index=1, gamma=2.0):
+    """Focal negative loss for non-outer pixels assigned outer probability.
+
+    Ordinary class-balanced cross entropy can underweight abundant inner pixels
+    while increasing the rare outer target weight.  This term restores the
+    asymmetric cost that matters for UV reconstruction: confidently inventing
+    an outer texel is worse than leaving an uncertain outer texel unknown.
+    """
+    if gamma < 0:
+        raise ValueError("gamma must be non-negative.")
+    if not 0 <= outer_index < logits.shape[1]:
+        raise ValueError(f"outer_index={outer_index} is invalid for {logits.shape[1]} classes.")
+    negative = (target != IGNORE_INDEX) & (target != outer_index)
+    if not negative.any():
+        return logits.new_zeros((), dtype=torch.float32)
+    outer_probability = torch.softmax(logits.float(), dim=1)[:, outer_index]
+    outer_probability = outer_probability.clamp(1e-6, 1.0 - 1e-6)
+    focal_negative = outer_probability.pow(gamma) * (-torch.log1p(-outer_probability))
+    return focal_negative[negative].mean()
 
 
 class DenseUVParserLoss(nn.Module):
@@ -30,6 +72,10 @@ class DenseUVParserLoss(nn.Module):
         lambda_uv_class=1.0,
         lambda_affine=1.0,
         lambda_surface=1.0,
+        lambda_outer_false_positive=0.75,
+        outer_false_positive_gamma=2.0,
+        route_class_weight_floor=0.75,
+        route_outer_class_weight_cap=1.0,
         uv_size=64,
         foreground_pos_weight_max=20.0,
         use_uv=True,
@@ -46,6 +92,10 @@ class DenseUVParserLoss(nn.Module):
         self.lambda_uv_class = lambda_uv_class
         self.lambda_affine = lambda_affine
         self.lambda_surface = lambda_surface
+        self.lambda_outer_false_positive = lambda_outer_false_positive
+        self.outer_false_positive_gamma = outer_false_positive_gamma
+        self.route_class_weight_floor = route_class_weight_floor
+        self.route_outer_class_weight_cap = route_outer_class_weight_cap
         self.uv_size = uv_size
         self.foreground_pos_weight_max = foreground_pos_weight_max
         self.use_uv = bool(use_uv)
@@ -71,9 +121,30 @@ class DenseUVParserLoss(nn.Module):
         geometry_route_roles = outputs["layer"].shape[1] == 3 and "route_role" in targets
         layer_target = targets["route_role"] if geometry_route_roles else targets["layer"]
         loss_layer = (
-            _balanced_cross_entropy(outputs["layer"], layer_target)
+            _balanced_cross_entropy(
+                outputs["layer"],
+                layer_target,
+                min_weight=self.route_class_weight_floor,
+                class_weight_caps=(
+                    float("inf"),
+                    self.route_outer_class_weight_cap,
+                    float("inf"),
+                ),
+            )
             if geometry_route_roles
             else F.cross_entropy(outputs["layer"], layer_target, ignore_index=IGNORE_INDEX)
+        )
+        loss_outer_false_positive = (
+            outer_false_positive_loss(
+                outputs["layer"],
+                layer_target,
+                gamma=self.outer_false_positive_gamma,
+            )
+            if geometry_route_roles
+            else zero
+        )
+        weighted_outer_false_positive = (
+            self.lambda_outer_false_positive * loss_outer_false_positive
         )
         loss_part = (
             F.cross_entropy(outputs["part"], targets["part"], ignore_index=IGNORE_INDEX)
@@ -147,13 +218,13 @@ class DenseUVParserLoss(nn.Module):
 
         geometry_route_roles = outputs["layer"].shape[1] == 3 and "route_role" in targets
         loss_routing = (
-            loss_layer + loss_affine + loss_surface
+            loss_layer + loss_affine + loss_surface + weighted_outer_false_positive
             if geometry_route_roles
             else loss_surface + loss_uv_class + loss_layer_face
         )
         loss_geometry = loss_foreground + loss_layer + loss_affine + (
             loss_surface if geometry_route_roles else zero
-        )
+        ) + weighted_outer_false_positive
 
         loss_total = (
             self.lambda_foreground * loss_foreground
@@ -165,6 +236,7 @@ class DenseUVParserLoss(nn.Module):
             + self.lambda_uv_class * loss_uv_class
             + self.lambda_affine * loss_affine
             + self.lambda_surface * loss_surface
+            + weighted_outer_false_positive
         )
 
         metrics = {
@@ -187,6 +259,8 @@ class DenseUVParserLoss(nn.Module):
             "err_affine_translation_px": err_affine_translation_px,
             "err_affine_scale_pct": err_affine_scale_pct,
             "loss_surface": loss_surface,
+            "loss_outer_false_positive": loss_outer_false_positive,
+            "loss_outer_false_positive_weighted": weighted_outer_false_positive,
             "loss_routing": loss_routing,
             "loss_geometry": loss_geometry,
             "acc_surface": acc_surface,
@@ -244,6 +318,10 @@ def classification_metrics(outputs, targets, uv_size, use_uv=True):
             metrics[f"precision_{name}"] = role_tp / (role_tp + role_fp).clamp_min(1.0)
             metrics[f"recall_{name}"] = role_tp / (role_tp + role_fn).clamp_min(1.0)
             metrics[f"iou_{name}"] = role_tp / (role_tp + role_fp + role_fn).clamp_min(1.0)
+            if name == "outer":
+                metrics["count_outer_tp"] = role_tp
+                metrics["count_outer_fp"] = role_fp
+                metrics["count_outer_fn"] = role_fn
         valid_layer = torch.zeros_like(valid_role)
     else:
         valid_layer = targets["layer"] != IGNORE_INDEX
@@ -258,6 +336,9 @@ def classification_metrics(outputs, targets, uv_size, use_uv=True):
                 "precision_outer": outer_tp / (outer_tp + outer_fp).clamp_min(1.0),
                 "recall_outer": outer_tp / (outer_tp + outer_fn).clamp_min(1.0),
                 "iou_outer": outer_tp / (outer_tp + outer_fp + outer_fn).clamp_min(1.0),
+                "count_outer_tp": outer_tp,
+                "count_outer_fp": outer_fp,
+                "count_outer_fn": outer_fn,
             }
         )
     if "part" in outputs:
