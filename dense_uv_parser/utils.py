@@ -1600,6 +1600,9 @@ def soft_splat_geometry_predictions_to_uv(
             "layer_weight": stacked_weight_sum.reshape(
                 groups, LAYER_CLASSES, UV_SIZE, UV_SIZE
             ),
+            "layer_alpha": layer_alpha.reshape(
+                groups, LAYER_CLASSES, UV_SIZE, UV_SIZE
+            ),
             "canonical_rendered": canonical_rendered,
             "canonical_outputs": canonical_outputs,
         }

@@ -10,12 +10,14 @@ import torch.nn as nn
 from SkingToolkit.dense_uv_parser.losses import (
     DenseUVParserLoss,
     _balanced_cross_entropy,
+    outer_false_negative_loss,
     outer_false_positive_loss,
 )
 from SkingToolkit.dense_uv_parser.model import DenseUVParserNet
 from SkingToolkit.dense_uv_parser import train as parser_train
 from SkingToolkit.uv_inpainting import train as inpainting_train
 from SkingToolkit.dense_uv_parser.utils import (
+    IGNORE_INDEX,
     augment_dense_batch,
     canonicalize_parser_render,
     canonicalize_tensor,
@@ -177,6 +179,8 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         self.assertEqual(parser_args.lambda_soft_uv_alpha, 0.35)
         self.assertEqual(parser_args.lambda_render_alpha, 0.25)
         self.assertGreater(parser_args.lambda_outer_false_positive, 0.0)
+        self.assertGreater(parser_args.lambda_outer_false_negative, 0.0)
+        self.assertEqual(parser_args.lambda_soft_uv_outer_recall, 0.50)
         self.assertEqual(parser_args.route_class_weight_floor, 0.75)
         self.assertEqual(parser_args.route_outer_class_weight_cap, 1.0)
         self.assertEqual(parser_args.best_metric, "loss_outer_selection")
@@ -565,6 +569,58 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         )
         self.assertGreater(float(high_outer.grad[0, 1, 0, 0]), 0.0)
 
+    def test_outer_false_negative_loss_targets_confident_missed_outer(self):
+        target = torch.ones(1, 1, 1, dtype=torch.long)
+        correct_outer = torch.tensor([[[[-4.0]], [[4.0]], [[-4.0]]]])
+        missed_outer = torch.tensor([[[[4.0]], [[-4.0]], [[-4.0]]]], requires_grad=True)
+
+        correct_loss = outer_false_negative_loss(correct_outer, target)
+        missed_loss = outer_false_negative_loss(missed_outer, target)
+        missed_loss.backward()
+
+        self.assertGreater(
+            float(missed_loss.detach()),
+            float(correct_loss.detach()) * 100.0,
+        )
+        self.assertLess(float(missed_outer.grad[0, 1, 0, 0]), 0.0)
+
+    def test_soft_uv_outer_recall_backpropagates_when_outer_is_routed_inner(self):
+        renderer = FakeRenderer(valid_pixels=1)
+        renderer.front_outer_mask.copy_(renderer.front_inner_mask)
+        rendered = torch.zeros(1, 4, 8, 8)
+        rendered[:, 0, 0, 0] = 1.0
+        rendered[:, 3] = 1.0
+        role_logits = torch.full((1, 3, 8, 8), -5.0)
+        role_logits[:, 0] = 5.0
+        role_logits.requires_grad_()
+        outputs = {
+            "foreground": torch.full((1, 1, 8, 8), 10.0),
+            "layer": role_logits,
+            "surface": torch.zeros(1, 2, 8, 8),
+            "affine": torch.zeros(1, 3),
+        }
+        targets = {
+            "layer": torch.full((1, 8, 8), IGNORE_INDEX, dtype=torch.long),
+            "uv": torch.zeros(1, 2, 8, 8),
+        }
+        targets["layer"][0, 0, 0] = 1
+        gt_uv = torch.zeros(1, 4, 64, 64)
+        gt_uv[0, 3, 0, 0] = 1.0
+
+        losses = parser_train.differentiable_geometry_losses(
+            rendered,
+            gt_uv,
+            outputs,
+            targets,
+            renderer,
+            ["front"],
+            canonicalize=False,
+        )
+        losses["loss_soft_uv_outer_recall"].backward()
+
+        self.assertGreater(float(losses["loss_soft_uv_outer_recall"].detach()), 0.9)
+        self.assertLess(float(role_logits.grad[0, 1, 0, 0]), 0.0)
+
     def test_outer_selection_metric_uses_global_precision_and_iou(self):
         metrics = parser_train.format_metrics(
             {
@@ -574,14 +630,18 @@ class GlobalAffineRoutingTest(unittest.TestCase):
                 "count_outer_fn": torch.tensor(2.0),
             },
             count=10,
-            outer_precision_weight=1.0,
+            outer_precision_weight=0.75,
+            outer_recall_weight=0.75,
             outer_iou_weight=0.5,
         )
 
         self.assertAlmostEqual(metrics["loss_geometry"], 2.0)
         self.assertAlmostEqual(metrics["precision_outer"], 0.8)
         self.assertAlmostEqual(metrics["iou_outer"], 2.0 / 3.0)
-        self.assertAlmostEqual(metrics["loss_outer_selection"], 2.0 + 0.2 + 1.0 / 6.0)
+        self.assertAlmostEqual(
+            metrics["loss_outer_selection"],
+            2.0 + 0.15 + 0.15 + 1.0 / 6.0,
+        )
 
     def test_global_model_emits_surface_and_affine_losses(self):
         rendered = torch.rand(1, 4, 32, 32)

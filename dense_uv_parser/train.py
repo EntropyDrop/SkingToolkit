@@ -81,7 +81,8 @@ def configure_torch(args, device):
 def format_metrics(
     metric_sums,
     count,
-    outer_precision_weight=1.0,
+    outer_precision_weight=0.75,
+    outer_recall_weight=0.75,
     outer_iou_weight=0.5,
 ):
     result = {}
@@ -106,6 +107,7 @@ def format_metrics(
             result["loss_outer_selection"] = (
                 result["loss_geometry"]
                 + outer_precision_weight * (1.0 - result["precision_outer"])
+                + outer_recall_weight * (1.0 - result["recall_outer"])
                 + outer_iou_weight * (1.0 - result["iou_outer"])
             )
     return result
@@ -173,10 +175,43 @@ def build_parser_inputs(batch_uv, renderer, views, train, args, apply_augment=No
     return rendered, targets, V, view_ids
 
 
+def visible_target_layer_uv_mask(targets, layer_index, group_size):
+    """Scatter visible GT pixels of one skin layer into a grouped UV mask."""
+    layer = targets["layer"]
+    uv = targets["uv"]
+    if layer.dim() != 3 or uv.dim() != 4 or uv.shape[1] != 2:
+        raise ValueError("Expected layer NHW and UV N2HW targets.")
+    if layer.shape[0] % group_size != 0:
+        raise ValueError(
+            f"Target batch {layer.shape[0]} must be divisible by group_size={group_size}."
+        )
+
+    group_count = layer.shape[0] // group_size
+    x = (uv[:, 0].clamp(0.0, 1.0) * (UV_SIZE - 1)).round().long()
+    y = (uv[:, 1].clamp(0.0, 1.0) * (UV_SIZE - 1)).round().long()
+    flat_uv = y * UV_SIZE + x
+    item_group = (
+        torch.arange(layer.shape[0], device=layer.device)
+        .div(group_size, rounding_mode="floor")
+        .view(-1, 1, 1)
+    )
+    grouped_uv = flat_uv + item_group * (UV_SIZE * UV_SIZE)
+    visible = layer == layer_index
+    counts = uv.new_zeros(group_count * UV_SIZE * UV_SIZE)
+    selected_uv = grouped_uv[visible]
+    counts.scatter_add_(
+        0,
+        selected_uv,
+        torch.ones(selected_uv.shape[0], device=uv.device, dtype=uv.dtype),
+    )
+    return (counts > 0).to(dtype=uv.dtype).reshape(group_count, 1, UV_SIZE, UV_SIZE)
+
+
 def differentiable_geometry_losses(
     rendered,
     gt_uv,
     outputs,
+    targets,
     renderer,
     views,
     temperature=1.0,
@@ -213,6 +248,20 @@ def differentiable_geometry_losses(
         .div(alpha_denom)
         .mean()
     )
+    visible_outer_uv = visible_target_layer_uv_mask(
+        targets,
+        layer_index=1,
+        group_size=len(views),
+    ).to(dtype=pred_uv.dtype)
+    visible_outer_uv = visible_outer_uv * gt_alpha
+    pred_outer_alpha = soft_details["layer_alpha"][:, 1:2]
+    outer_recall_denom = visible_outer_uv.sum(dim=(1, 2, 3)).clamp_min(1.0)
+    loss_soft_uv_outer_recall = (
+        ((1.0 - pred_outer_alpha) * visible_outer_uv)
+        .sum(dim=(1, 2, 3))
+        .div(outer_recall_denom)
+        .mean()
+    )
 
     render_rgb_total = pred_uv.new_zeros(())
     render_alpha_total = pred_uv.new_zeros(())
@@ -243,8 +292,10 @@ def differentiable_geometry_losses(
     return {
         "loss_soft_uv_rgb": loss_soft_uv_rgb,
         "loss_soft_uv_alpha": loss_soft_uv_alpha,
+        "loss_soft_uv_outer_recall": loss_soft_uv_outer_recall,
         "loss_render_rgb": render_rgb_total / view_count,
         "loss_render_alpha": render_alpha_total / view_count,
+        "visible_outer_uv_percent": visible_outer_uv.float().mean() * 100.0,
         "soft_uv_known_percent": (
             (soft_details["support"] > 0.05).float().mean() * 100.0
         ),
@@ -287,6 +338,7 @@ def run_epoch(model, criterion, renderer, loader, optimizer, scaler, device, pre
                     for weight in (
                         args.lambda_soft_uv_rgb,
                         args.lambda_soft_uv_alpha,
+                        args.lambda_soft_uv_outer_recall,
                         args.lambda_render_rgb,
                         args.lambda_render_alpha,
                     )
@@ -296,6 +348,7 @@ def run_epoch(model, criterion, renderer, loader, optimizer, scaler, device, pre
                         rendered,
                         batch["uv"],
                         outputs,
+                        targets,
                         renderer,
                         views,
                         temperature=args.render_softmax_temperature,
@@ -305,13 +358,17 @@ def run_epoch(model, criterion, renderer, loader, optimizer, scaler, device, pre
                     auxiliary = {
                         "loss_soft_uv_rgb": zero,
                         "loss_soft_uv_alpha": zero,
+                        "loss_soft_uv_outer_recall": zero,
                         "loss_render_rgb": zero,
                         "loss_render_alpha": zero,
                         "soft_uv_known_percent": zero,
+                        "visible_outer_uv_percent": zero,
                     }
                 weighted_auxiliary = (
                     args.lambda_soft_uv_rgb * auxiliary["loss_soft_uv_rgb"]
                     + args.lambda_soft_uv_alpha * auxiliary["loss_soft_uv_alpha"]
+                    + args.lambda_soft_uv_outer_recall
+                    * auxiliary["loss_soft_uv_outer_recall"]
                     + args.lambda_render_rgb * auxiliary["loss_render_rgb"]
                     + args.lambda_render_alpha * auxiliary["loss_render_alpha"]
                 )
@@ -349,6 +406,7 @@ def run_epoch(model, criterion, renderer, loader, optimizer, scaler, device, pre
                 metric_sums,
                 sample_count,
                 outer_precision_weight=args.outer_selection_precision_weight,
+                outer_recall_weight=args.outer_selection_recall_weight,
                 outer_iou_weight=args.outer_selection_iou_weight,
             )
             postfix = {
@@ -375,6 +433,7 @@ def run_epoch(model, criterion, renderer, loader, optimizer, scaler, device, pre
         metric_sums,
         sample_count,
         outer_precision_weight=args.outer_selection_precision_weight,
+        outer_recall_weight=args.outer_selection_recall_weight,
         outer_iou_weight=args.outer_selection_iou_weight,
     )
 
@@ -700,14 +759,18 @@ def build_arg_parser():
     parser.add_argument("--lambda_affine", type=float, default=1.0)
     parser.add_argument("--lambda_surface", type=float, default=1.0)
     parser.add_argument("--lambda_outer_false_positive", type=float, default=0.75)
+    parser.add_argument("--lambda_outer_false_negative", type=float, default=0.75)
     parser.add_argument("--outer_false_positive_gamma", type=float, default=2.0)
+    parser.add_argument("--outer_false_negative_gamma", type=float, default=2.0)
     parser.add_argument("--route_class_weight_floor", type=float, default=0.75)
     parser.add_argument("--route_outer_class_weight_cap", type=float, default=1.0)
     parser.add_argument("--lambda_soft_uv_rgb", type=float, default=0.25)
     parser.add_argument("--lambda_soft_uv_alpha", type=float, default=0.35)
+    parser.add_argument("--lambda_soft_uv_outer_recall", type=float, default=0.50)
     parser.add_argument("--lambda_render_rgb", type=float, default=0.20)
     parser.add_argument("--lambda_render_alpha", type=float, default=0.25)
-    parser.add_argument("--outer_selection_precision_weight", type=float, default=1.0)
+    parser.add_argument("--outer_selection_precision_weight", type=float, default=0.75)
+    parser.add_argument("--outer_selection_recall_weight", type=float, default=0.75)
     parser.add_argument("--outer_selection_iou_weight", type=float, default=0.5)
     parser.add_argument(
         "--render_softmax_temperature",
@@ -745,6 +808,7 @@ def main():
     differentiable_weights = (
         args.lambda_soft_uv_rgb,
         args.lambda_soft_uv_alpha,
+        args.lambda_soft_uv_outer_recall,
         args.lambda_render_rgb,
         args.lambda_render_alpha,
     )
@@ -752,13 +816,21 @@ def main():
         raise ValueError("Differentiable parser loss weights must be non-negative.")
     if args.lambda_outer_false_positive < 0:
         raise ValueError("--lambda_outer_false_positive must be non-negative.")
+    if args.lambda_outer_false_negative < 0:
+        raise ValueError("--lambda_outer_false_negative must be non-negative.")
     if args.outer_false_positive_gamma < 0:
         raise ValueError("--outer_false_positive_gamma must be non-negative.")
+    if args.outer_false_negative_gamma < 0:
+        raise ValueError("--outer_false_negative_gamma must be non-negative.")
     if not 0 <= args.route_class_weight_floor <= 4.0:
         raise ValueError("--route_class_weight_floor must be in [0, 4].")
     if args.route_outer_class_weight_cap <= 0:
         raise ValueError("--route_outer_class_weight_cap must be positive.")
-    if args.outer_selection_precision_weight < 0 or args.outer_selection_iou_weight < 0:
+    if (
+        args.outer_selection_precision_weight < 0
+        or args.outer_selection_recall_weight < 0
+        or args.outer_selection_iou_weight < 0
+    ):
         raise ValueError("Outer checkpoint-selection weights must be non-negative.")
     if args.render_softmax_temperature <= 0:
         raise ValueError("--render_softmax_temperature must be positive.")
@@ -831,7 +903,9 @@ def main():
         lambda_affine=args.lambda_affine,
         lambda_surface=args.lambda_surface,
         lambda_outer_false_positive=args.lambda_outer_false_positive,
+        lambda_outer_false_negative=args.lambda_outer_false_negative,
         outer_false_positive_gamma=args.outer_false_positive_gamma,
+        outer_false_negative_gamma=args.outer_false_negative_gamma,
         route_class_weight_floor=args.route_class_weight_floor,
         route_outer_class_weight_cap=args.route_outer_class_weight_cap,
         uv_size=UV_SIZE,
@@ -934,13 +1008,17 @@ def main():
         "affine_refine_scale": args.affine_refine_scale,
         "lambda_soft_uv_rgb": args.lambda_soft_uv_rgb,
         "lambda_soft_uv_alpha": args.lambda_soft_uv_alpha,
+        "lambda_soft_uv_outer_recall": args.lambda_soft_uv_outer_recall,
         "lambda_render_rgb": args.lambda_render_rgb,
         "lambda_render_alpha": args.lambda_render_alpha,
         "lambda_outer_false_positive": args.lambda_outer_false_positive,
+        "lambda_outer_false_negative": args.lambda_outer_false_negative,
         "outer_false_positive_gamma": args.outer_false_positive_gamma,
+        "outer_false_negative_gamma": args.outer_false_negative_gamma,
         "route_class_weight_floor": args.route_class_weight_floor,
         "route_outer_class_weight_cap": args.route_outer_class_weight_cap,
         "outer_selection_precision_weight": args.outer_selection_precision_weight,
+        "outer_selection_recall_weight": args.outer_selection_recall_weight,
         "outer_selection_iou_weight": args.outer_selection_iou_weight,
         "render_softmax_temperature": args.render_softmax_temperature,
     }

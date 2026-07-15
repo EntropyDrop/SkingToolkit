@@ -60,6 +60,21 @@ def outer_false_positive_loss(logits, target, outer_index=1, gamma=2.0):
     return focal_negative[negative].mean()
 
 
+def outer_false_negative_loss(logits, target, outer_index=1, gamma=2.0):
+    """Focal positive loss for visible outer pixels assigned too little outer probability."""
+    if gamma < 0:
+        raise ValueError("gamma must be non-negative.")
+    if not 0 <= outer_index < logits.shape[1]:
+        raise ValueError(f"outer_index={outer_index} is invalid for {logits.shape[1]} classes.")
+    positive = target == outer_index
+    if not positive.any():
+        return logits.new_zeros((), dtype=torch.float32)
+    outer_probability = torch.softmax(logits.float(), dim=1)[:, outer_index]
+    outer_probability = outer_probability.clamp(1e-6, 1.0 - 1e-6)
+    focal_positive = (1.0 - outer_probability).pow(gamma) * (-outer_probability.log())
+    return focal_positive[positive].mean()
+
+
 class DenseUVParserLoss(nn.Module):
     def __init__(
         self,
@@ -73,7 +88,9 @@ class DenseUVParserLoss(nn.Module):
         lambda_affine=1.0,
         lambda_surface=1.0,
         lambda_outer_false_positive=0.75,
+        lambda_outer_false_negative=0.75,
         outer_false_positive_gamma=2.0,
+        outer_false_negative_gamma=2.0,
         route_class_weight_floor=0.75,
         route_outer_class_weight_cap=1.0,
         uv_size=64,
@@ -93,7 +110,9 @@ class DenseUVParserLoss(nn.Module):
         self.lambda_affine = lambda_affine
         self.lambda_surface = lambda_surface
         self.lambda_outer_false_positive = lambda_outer_false_positive
+        self.lambda_outer_false_negative = lambda_outer_false_negative
         self.outer_false_positive_gamma = outer_false_positive_gamma
+        self.outer_false_negative_gamma = outer_false_negative_gamma
         self.route_class_weight_floor = route_class_weight_floor
         self.route_outer_class_weight_cap = route_outer_class_weight_cap
         self.uv_size = uv_size
@@ -145,6 +164,18 @@ class DenseUVParserLoss(nn.Module):
         )
         weighted_outer_false_positive = (
             self.lambda_outer_false_positive * loss_outer_false_positive
+        )
+        loss_outer_false_negative = (
+            outer_false_negative_loss(
+                outputs["layer"],
+                layer_target,
+                gamma=self.outer_false_negative_gamma,
+            )
+            if geometry_route_roles
+            else zero
+        )
+        weighted_outer_false_negative = (
+            self.lambda_outer_false_negative * loss_outer_false_negative
         )
         loss_part = (
             F.cross_entropy(outputs["part"], targets["part"], ignore_index=IGNORE_INDEX)
@@ -218,13 +249,17 @@ class DenseUVParserLoss(nn.Module):
 
         geometry_route_roles = outputs["layer"].shape[1] == 3 and "route_role" in targets
         loss_routing = (
-            loss_layer + loss_affine + loss_surface + weighted_outer_false_positive
+            loss_layer
+            + loss_affine
+            + loss_surface
+            + weighted_outer_false_positive
+            + weighted_outer_false_negative
             if geometry_route_roles
             else loss_surface + loss_uv_class + loss_layer_face
         )
         loss_geometry = loss_foreground + loss_layer + loss_affine + (
             loss_surface if geometry_route_roles else zero
-        ) + weighted_outer_false_positive
+        ) + weighted_outer_false_positive + weighted_outer_false_negative
 
         loss_total = (
             self.lambda_foreground * loss_foreground
@@ -237,6 +272,7 @@ class DenseUVParserLoss(nn.Module):
             + self.lambda_affine * loss_affine
             + self.lambda_surface * loss_surface
             + weighted_outer_false_positive
+            + weighted_outer_false_negative
         )
 
         metrics = {
@@ -261,6 +297,8 @@ class DenseUVParserLoss(nn.Module):
             "loss_surface": loss_surface,
             "loss_outer_false_positive": loss_outer_false_positive,
             "loss_outer_false_positive_weighted": weighted_outer_false_positive,
+            "loss_outer_false_negative": loss_outer_false_negative,
+            "loss_outer_false_negative_weighted": weighted_outer_false_negative,
             "loss_routing": loss_routing,
             "loss_geometry": loss_geometry,
             "acc_surface": acc_surface,
