@@ -10,7 +10,7 @@ WORKSPACE_ROOT = TOOLKIT_ROOT.parent
 if str(WORKSPACE_ROOT) not in sys.path:
     sys.path.insert(0, str(WORKSPACE_ROOT))
 
-from SkingToolkit.uv_inpainting.losses import minecraft_layer_rects  # noqa: E402
+from SkingToolkit.semantic_uv_reconstruction.losses import minecraft_layer_rects  # noqa: E402
 
 IGNORE_INDEX = 255
 PART_CLASSES = 6
@@ -1921,7 +1921,7 @@ def splat_predictions_to_uv_conditioning(
     fg_threshold=0.5,
     bg_color=(128, 128, 128),
 ):
-    """Splat parser predictions back to the 10-channel uv_inpainting conditioning layout."""
+    """Splat parser predictions back to the 10-channel semantic_uv_reconstruction conditioning layout."""
     foreground_prob = torch.sigmoid(outputs["foreground"])[:, 0]
     fg = foreground_prob > fg_threshold
     fg = fg & (rendered[:, 3] > 1e-4)

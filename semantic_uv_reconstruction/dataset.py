@@ -249,10 +249,10 @@ def _uv_indices_from_grid(grid, mask):
 
 
 def _get_unprojection_view_cache(renderer, view, device):
-    cache = getattr(renderer, "_uv_inpainting_unprojection_cache", None)
+    cache = getattr(renderer, "_semantic_uv_reconstruction_unprojection_cache", None)
     if cache is None:
         cache = {}
-        setattr(renderer, "_uv_inpainting_unprojection_cache", cache)
+        setattr(renderer, "_semantic_uv_reconstruction_unprojection_cache", cache)
 
     key = (view, device.type, device.index)
     if key in cache:

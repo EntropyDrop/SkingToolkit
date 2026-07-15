@@ -15,9 +15,9 @@ WORKSPACE_ROOT = TOOLKIT_ROOT.parent
 if str(WORKSPACE_ROOT) not in sys.path:
     sys.path.insert(0, str(WORKSPACE_ROOT))
 
-from SkingToolkit.uv_inpainting.dataset import UVInpaintingDataset, finalize_minecraft_alpha, RenderAugmenter, parse_views  # noqa: E402
-from SkingToolkit.uv_inpainting.losses import UVInpaintingLoss  # noqa: E402
-from SkingToolkit.uv_inpainting.model import UVInpaintingNet, PatchGANDiscriminator, count_parameters  # noqa: E402
+from SkingToolkit.semantic_uv_reconstruction.dataset import UVInpaintingDataset, finalize_minecraft_alpha, RenderAugmenter, parse_views  # noqa: E402
+from SkingToolkit.semantic_uv_reconstruction.losses import UVInpaintingLoss  # noqa: E402
+from SkingToolkit.semantic_uv_reconstruction.model import UVInpaintingNet, PatchGANDiscriminator, count_parameters  # noqa: E402
 from SkingToolkit.dense_uv_parser.model import DenseUVParserNet  # noqa: E402
 from SkingToolkit.dense_uv_parser.utils import (  # noqa: E402
     SPLAT_COLOR_AGGREGATIONS,
@@ -120,7 +120,7 @@ def load_dense_parser(checkpoint_path, device):
     if geometry_only and layer_classes != 3:
         raise ValueError(
             "This geometry parser predates the secondary/backface route class. "
-            "Train a new dense_uv_parser checkpoint before uv_inpainting training."
+            "Train a new dense_uv_parser checkpoint before semantic_uv_reconstruction training."
         )
     model = DenseUVParserNet(
         base_channels=model_config.get("base_channels", checkpoint_args.get("base_channels", 32)),
@@ -171,7 +171,7 @@ def build_dense_parser_conditioning(
     bg_color=(128, 128, 128),
     return_renders=False,
 ):
-    """Build uv_inpainting conditioning through the same parser+splat path used at inference."""
+    """Build semantic_uv_reconstruction conditioning through the same parser+splat path used at inference."""
     is_batched = skin.dim() == 4
     skin_batch = skin if is_batched else skin.unsqueeze(0)
 
@@ -466,9 +466,9 @@ def build_grad_scaler(device, precision):
 
 
 def build_arg_parser():
-    parser = argparse.ArgumentParser(description="Train the Minecraft skin UV inpainting model.")
+    parser = argparse.ArgumentParser(description="Train the Minecraft skin Semantic UV reconstruction model.")
     parser.add_argument("--data_dir", required=True, help="Folder containing GT 64x64 RGBA skin PNGs.")
-    parser.add_argument("--output_dir", default="uv_inpainting_runs/default", help="Checkpoint/output folder.")
+    parser.add_argument("--output_dir", default="semantic_uv_reconstruction_runs/default", help="Checkpoint/output folder.")
     parser.add_argument(
         "--preserve_known",
         dest="preserve_known",
@@ -632,7 +632,7 @@ def main():
     device = get_device(args.device)
     configure_torch(args, device)
     if not args.parser_checkpoint:
-        raise ValueError("--parser_checkpoint is required for UV inpainting training.")
+        raise ValueError("--parser_checkpoint is required for Semantic UV reconstruction training.")
     dense_parser, parser_checkpoint_args = load_dense_parser(args.parser_checkpoint, device)
     if args.parser_semantic_gate is None:
         args.parser_semantic_gate = parser_checkpoint_args.get("semantic_gate", True)
@@ -657,8 +657,8 @@ def main():
     parser_views = parse_views(parser_checkpoint_args.get("views", ""))
     if parser_views and parser_views != parse_views(args.views):
         raise ValueError(
-            "Parser checkpoint views do not match uv_inpainting training views: "
-            f"parser={parser_views}, uv_inpainting={parse_views(args.views)}"
+            "Parser checkpoint views do not match semantic_uv_reconstruction training views: "
+            f"parser={parser_views}, semantic_uv_reconstruction={parse_views(args.views)}"
         )
 
     dataset = UVInpaintingDataset(

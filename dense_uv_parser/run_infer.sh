@@ -48,8 +48,8 @@ if [[ -z "$PARSER_CHECKPOINT" ]]; then
 fi
 
 INPAINT_MODEL="${INPAINT_MODEL:-full}"
-INPAINT_RUNS_DIR="${INPAINT_RUNS_DIR:-../uv_inpainting/runs}"
-INPAINT_RUN_PREFIX="${INPAINT_RUN_PREFIX:-uv_inpainting_${INPAINT_MODEL}_v}"
+INPAINT_RUNS_DIR="${INPAINT_RUNS_DIR:-../semantic_uv_reconstruction/runs}"
+INPAINT_RUN_PREFIX="${INPAINT_RUN_PREFIX:-semantic_uv_reconstruction_${INPAINT_MODEL}_v}"
 INPAINT_CHECKPOINT_NAME="${INPAINT_CHECKPOINT_NAME:-best.pt}"
 INPAINT_CHECKPOINT="${INPAINT_CHECKPOINT:-}"
 if [[ "$INPAINT_CHECKPOINT" == "none" ]]; then
@@ -216,7 +216,7 @@ if [[ -n "$OUTPUT" ]]; then
     echo "Set INPAINT_CHECKPOINT=/path/to/best.pt, or set OUTPUT= to write only parser conditioning." >&2
     exit 1
   else
-    echo "No uv_inpainting checkpoint found under ${INPAINT_RUNS_DIR}/${INPAINT_RUN_PREFIX}*/${INPAINT_CHECKPOINT_NAME}; writing conditioning only." >&2
+    echo "No semantic_uv_reconstruction checkpoint found under ${INPAINT_RUNS_DIR}/${INPAINT_RUN_PREFIX}*/${INPAINT_CHECKPOINT_NAME}; writing conditioning only." >&2
   fi
 fi
 

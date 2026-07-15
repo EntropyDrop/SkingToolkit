@@ -15,7 +15,7 @@ from SkingToolkit.dense_uv_parser.losses import (
 )
 from SkingToolkit.dense_uv_parser.model import DenseUVParserNet
 from SkingToolkit.dense_uv_parser import train as parser_train
-from SkingToolkit.uv_inpainting import train as inpainting_train
+from SkingToolkit.semantic_uv_reconstruction import train as inpainting_train
 from SkingToolkit.dense_uv_parser.utils import (
     IGNORE_INDEX,
     augment_dense_batch,

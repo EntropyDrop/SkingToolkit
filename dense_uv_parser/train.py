@@ -49,8 +49,8 @@ from SkingToolkit.dense_uv_parser.utils import (  # noqa: E402
     splat_targets_to_uv_conditioning,
     surface_class_count,
 )
-from SkingToolkit.uv_inpainting.dataset import UVInpaintingDataset  # noqa: E402
-from SkingToolkit.uv_inpainting.train import get_device  # noqa: E402
+from SkingToolkit.semantic_uv_reconstruction.dataset import UVInpaintingDataset  # noqa: E402
+from SkingToolkit.semantic_uv_reconstruction.train import get_device  # noqa: E402
 from SkingToolkit.renderer import DifferentiableRenderer  # noqa: E402
 
 try:

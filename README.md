@@ -6,7 +6,7 @@
 front/back renders
   → dense_uv_parser
   → partial inner/outer UV conditioning
-  → uv_inpainting
+  → semantic_uv_reconstruction
   → complete 64×64 RGBA skin
 ```
 
@@ -25,17 +25,17 @@ SkingToolkit/
 │   ├── infer.py
 │   ├── run_dense_uv_parser_training.sh
 │   └── run_infer.sh
-└── uv_inpainting/
+└── semantic_uv_reconstruction/
     ├── model.py
     ├── losses.py
     ├── dataset.py
     ├── train.py
-    ├── run_uv_inpainting_training.sh
+    ├── run_parser_conditioned_training.sh
     ├── semantic_backbone.py
     ├── semantic_model.py
     ├── semantic_losses.py
-    ├── train_semantic_uv.py
-    └── run_semantic_uv_training.sh
+    ├── train_semantic_uv_reconstruction.py
+    └── run_semantic_uv_reconstruction_training.sh
 ```
 
 ## Components
@@ -50,11 +50,14 @@ The parser classifies render pixels as background, directly visible inner skin, 
 
 Training includes supervised routing losses plus a differentiable soft-UV and multi-view rendering branch. See [dense_uv_parser/README.md](dense_uv_parser/README.md) for configuration and diagnostics.
 
-### `uv_inpainting`
+### `semantic_uv_reconstruction`
 
-The inpainting network receives the parser-generated partial UV conditioning and predicts the missing or ambiguous texels. Trusted visible texels can be copied directly into the result, while reconstruction, alpha, edge, adversarial, and differentiable render losses supervise unknown regions.
+The module's primary model reconstructs a complete atlas directly from fixed
+front/back renders by fusing a high-resolution CNN with frozen SigLIP2
+semantics. It also retains the parser-conditioned completion model for existing
+checkpoints and production inference.
 
-The public classes are `UVInpaintingNet`, `UVInpaintingDataset`, and `UVInpaintingLoss`. See [uv_inpainting/README.md](uv_inpainting/README.md) for all training options.
+The public classes are `UVInpaintingNet`, `UVInpaintingDataset`, and `UVInpaintingLoss`. See [semantic_uv_reconstruction/README.md](semantic_uv_reconstruction/README.md) for all training options.
 
 The same directory includes `SemanticUVReconstructor`, an independent
 fixed-view training path that jointly encodes clean front/back renders and
@@ -93,21 +96,22 @@ cd SkingToolkit/dense_uv_parser
 ./run_dense_uv_parser_training.sh
 ```
 
-Then train UV inpainting from the parser-generated conditioning:
+Then train Semantic UV reconstruction from the parser-generated conditioning:
 
 ```bash
-cd ../uv_inpainting
-./run_uv_inpainting_training.sh
+cd ../semantic_uv_reconstruction
+./run_parser_conditioned_training.sh
 ```
 
 Or train the semantic fixed-view render-to-UV model directly from all source
 skins:
 
 ```bash
-./run_semantic_uv_training.sh
+./run_semantic_uv_reconstruction_training.sh
 ```
 
-The inpainting launcher automatically selects the newest `dense_uv_parser_v*/best.pt` unless `PARSER_CHECKPOINT` is set explicitly.
+The parser-conditioned launcher automatically selects the newest
+`dense_uv_parser_v*/best.pt` unless `PARSER_CHECKPOINT` is set explicitly.
 
 ## Inference
 
@@ -118,7 +122,7 @@ cd SkingToolkit/dense_uv_parser
 FRONT=/path/to/front.png BACK=/path/to/back.png ./run_infer.sh
 ```
 
-By default the launcher selects the newest parser checkpoint and the newest `../uv_inpainting/runs/uv_inpainting_full_v*/best.pt`. Important outputs include:
+By default the launcher selects the newest parser checkpoint and the newest `../semantic_uv_reconstruction/runs/semantic_uv_reconstruction_full_v*/best.pt`. Important outputs include:
 
 - `outputs/parser_pred_uv.png`: preliminary UV assembled from parser-visible texels.
 - `outputs/parser_conditioning.png`: inner/outer conditioning preview.
@@ -129,7 +133,7 @@ You can override checkpoint selection explicitly:
 
 ```bash
 PARSER_CHECKPOINT=runs/dense_uv_parser_v3/best.pt \
-INPAINT_CHECKPOINT=../uv_inpainting/runs/uv_inpainting_full_v4/best.pt \
+INPAINT_CHECKPOINT=../semantic_uv_reconstruction/runs/semantic_uv_reconstruction_full_v4/best.pt \
 ./run_infer.sh
 ```
 

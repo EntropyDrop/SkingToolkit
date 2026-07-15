@@ -1,25 +1,35 @@
-# UV Inpainting Development Guide
+# Semantic UV Reconstruction Development Guide
 
 ## Overview
 
-`uv_inpainting` is the second stage of the SkingToolkit reconstruction pipeline. A frozen `dense_uv_parser` converts fixed-view renders into partial inner/outer UV observations, and `UVInpaintingNet` completes the missing or ambiguous texels of the 64×64 RGBA Minecraft skin.
+`semantic_uv_reconstruction` contains the primary open-semantic fixed-view
+render-to-UV trainer and the compatible parser-conditioned completion trainer.
+The former fuses a high-resolution CNN with frozen SigLIP2 features; the latter
+retains `UVInpaintingNet` so existing checkpoints remain usable.
 
 ## Commands
 
 From the workspace root:
 
 ```bash
-python SkingToolkit/uv_inpainting/train.py \
+cd SkingToolkit/semantic_uv_reconstruction
+./run_semantic_uv_reconstruction_training.sh
+```
+
+For the parser-conditioned compatibility path:
+
+```bash
+python SkingToolkit/semantic_uv_reconstruction/train.py \
   --data_dir /path/to/skins \
   --parser_checkpoint SkingToolkit/dense_uv_parser/runs/dense_uv_parser_v1/best.pt \
-  --output_dir SkingToolkit/uv_inpainting/runs/uv_inpainting_full_v1
+  --output_dir SkingToolkit/semantic_uv_reconstruction/runs/semantic_uv_reconstruction_full_v1
 ```
 
 The launcher is preferred because it selects the newest parser checkpoint and assigns a versioned run directory:
 
 ```bash
-cd SkingToolkit/uv_inpainting
-./run_uv_inpainting_training.sh
+cd SkingToolkit/semantic_uv_reconstruction
+./run_parser_conditioned_training.sh
 ```
 
 The full production inference path starts in the parser module:
@@ -29,7 +39,7 @@ cd SkingToolkit/dense_uv_parser
 FRONT=/path/to/front.png BACK=/path/to/back.png ./run_infer.sh
 ```
 
-## Data Flow
+## Parser-Conditioned Data Flow
 
 ```text
 GT skin (64×64 RGBA)
@@ -68,7 +78,7 @@ Inner texels covered by opaque outer-layer texels are ignored by default because
 
 Checkpoints contain a plain model `state_dict`, optimizer state, arguments, and metrics. Renaming the Python package or model class does not change parameter keys, so checkpoints produced under the former package name remain loadable when their path is supplied explicitly.
 
-The launcher creates run directories named `runs/uv_inpainting_<model>_vN`. `best.pt` defaults to the lowest `loss_recon_total`, keeping checkpoint selection independent of optional GAN oscillation.
+The launcher creates run directories named `runs/semantic_uv_reconstruction_<model>_vN`. `best.pt` defaults to the lowest `loss_recon_total`, keeping checkpoint selection independent of optional GAN oscillation.
 
 ## Important Files
 
@@ -76,6 +86,8 @@ The launcher creates run directories named `runs/uv_inpainting_<model>_vN`. `bes
 - `model.py`: `UVInpaintingNet` and `PatchGANDiscriminator`.
 - `losses.py`: UV, alpha, edge, render, and GAN losses.
 - `train.py`: parser-conditioned training and checkpointing.
-- `run_uv_inpainting_training.sh`: standard training configuration.
+- `train_semantic_uv_reconstruction.py`: open-semantic direct reconstruction.
+- `run_parser_conditioned_training.sh`: standard training configuration.
+- `run_semantic_uv_reconstruction_training.sh`: primary direct training entry.
 
 `dense_uv_parser/infer.py` is the only inference entry point, ensuring input construction exactly matches training.

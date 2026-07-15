@@ -1,4 +1,4 @@
-"""Parser-conditioned Minecraft skin UV inpainting utilities."""
+"""Semantic fixed-view Minecraft skin UV reconstruction utilities."""
 
 from .model import UVInpaintingNet
 LightUVInpaintingNet = UVInpaintingNet

@@ -38,9 +38,9 @@ from SkingToolkit.dense_uv_parser.utils import (  # noqa: E402
     splat_parser_predictions_to_uv_conditioning,
     surface_class_count,
 )
-from SkingToolkit.uv_inpainting.dataset import finalize_minecraft_alpha, tensor_to_rgba_image, view_native_size  # noqa: E402
-from SkingToolkit.uv_inpainting.model import UVInpaintingNet  # noqa: E402
-from SkingToolkit.uv_inpainting.train import get_device  # noqa: E402
+from SkingToolkit.semantic_uv_reconstruction.dataset import finalize_minecraft_alpha, tensor_to_rgba_image, view_native_size  # noqa: E402
+from SkingToolkit.semantic_uv_reconstruction.model import UVInpaintingNet  # noqa: E402
+from SkingToolkit.semantic_uv_reconstruction.train import get_device  # noqa: E402
 from SkingToolkit.renderer import DifferentiableRenderer  # noqa: E402
 
 
@@ -404,7 +404,7 @@ def save_debug_preview(
 def build_arg_parser():
     parser = argparse.ArgumentParser(description="Infer UV conditioning with a dense UV parser.")
     parser.add_argument("--parser_checkpoint", required=True)
-    parser.add_argument("--inpaint_checkpoint", default=None, help="Optional uv_inpainting checkpoint used to inpaint final skin.")
+    parser.add_argument("--inpaint_checkpoint", default=None, help="Optional semantic_uv_reconstruction checkpoint used to inpaint final skin.")
     parser.add_argument("--output", default=None, help="Final RGBA UV PNG path; requires --inpaint_checkpoint.")
     parser.add_argument("--conditioning_output", default=None, help="Optional preview image for parser-splatted conditioning.")
     parser.add_argument(
@@ -756,13 +756,13 @@ def main():
         expected_parser = inpaint_args.get("parser_checkpoint")
         if expected_parser and checkpoint_run_id(expected_parser) != checkpoint_run_id(args.parser_checkpoint):
             raise ValueError(
-                "The uv_inpainting checkpoint was trained with a different parser: "
+                "The semantic_uv_reconstruction checkpoint was trained with a different parser: "
                 f"expected {checkpoint_run_id(expected_parser)}, got {checkpoint_run_id(args.parser_checkpoint)}."
             )
         expected_refine = inpaint_args.get("parser_affine_refine")
         if expected_refine is not None and bool(expected_refine) != affine_refine:
             raise ValueError(
-                "Parser affine-refinement setting does not match the uv_inpainting checkpoint: "
+                "Parser affine-refinement setting does not match the semantic_uv_reconstruction checkpoint: "
                 f"checkpoint={expected_refine}, requested={affine_refine}."
             )
         expected_translation_px = inpaint_args.get("parser_affine_refine_translation_px")
@@ -781,7 +781,7 @@ def main():
         expected_scale = inpaint_args.get("parser_affine_refine_scale")
         if expected_scale is not None and abs(float(expected_scale) - affine_refine_scale) > 1e-9:
             raise ValueError(
-                "Parser affine-refinement scale range does not match the uv_inpainting checkpoint: "
+                "Parser affine-refinement scale range does not match the semantic_uv_reconstruction checkpoint: "
                 f"checkpoint={expected_scale}, requested={affine_refine_scale}."
             )
         expected_outer_coverage = inpaint_args.get("parser_outer_uv_min_coverage")
@@ -789,7 +789,7 @@ def main():
             float(expected_outer_coverage) - outer_uv_min_coverage
         ) > 1e-9:
             raise ValueError(
-                "Parser outer UV coverage threshold does not match the uv_inpainting checkpoint: "
+                "Parser outer UV coverage threshold does not match the semantic_uv_reconstruction checkpoint: "
                 f"checkpoint={expected_outer_coverage}, requested={outer_uv_min_coverage}."
             )
         expected_consensus = inpaint_args.get("parser_geometry_route_texel_consensus")
@@ -798,14 +798,14 @@ def main():
             and bool(expected_consensus) != geometry_route_texel_consensus
         ):
             raise ValueError(
-                "Parser routing mode does not match the uv_inpainting checkpoint: "
+                "Parser routing mode does not match the semantic_uv_reconstruction checkpoint: "
                 f"checkpoint texel_consensus={bool(expected_consensus)}, "
                 f"requested={geometry_route_texel_consensus}."
             )
         expected_color_aggregation = inpaint_args.get("parser_splat_color_aggregation")
         if expected_color_aggregation is not None and expected_color_aggregation != args.color_aggregation:
             raise ValueError(
-                "Parser color aggregation does not match the uv_inpainting checkpoint: "
+                "Parser color aggregation does not match the semantic_uv_reconstruction checkpoint: "
                 f"checkpoint={expected_color_aggregation}, requested={args.color_aggregation}."
             )
         with torch.no_grad():

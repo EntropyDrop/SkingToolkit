@@ -1,16 +1,21 @@
-# UV Inpainting Training
+# Semantic UV Reconstruction Training
 
-This module trains a supervised inpainting model for:
+This module contains two reconstruction paths. The new primary path learns:
 
 ```text
-fixed-view render images -> dense parser UV conditioning -> complete 64x64 RGBA Minecraft skin UV
+fixed front/back renders -> CNN + frozen SigLIP2 semantics -> complete 64x64 RGBA UV
 ```
 
-It is the completion stage after `dense_uv_parser` and is trained from the same parser-generated conditioning used at inference.
+Start it with `./run_semantic_uv_reconstruction_training.sh`. It does not need a
+parser checkpoint or a finite garment concept table.
 
-This directory also contains an experimental semantic, end-to-end alternative
-that learns `fixed front/back renders -> complete UV` directly from the source
-skins. It is described in [Semantic Fixed-View UV Reconstruction](#semantic-fixed-view-uv-reconstruction).
+The directory also retains the compatible parser-conditioned completion path:
+
+```text
+fixed-view renders -> dense parser UV conditioning -> complete 64x64 RGBA UV
+```
+
+Start that legacy-compatible path with `./run_parser_conditioned_training.sh`.
 
 ---
 
@@ -18,7 +23,7 @@ skins. It is described in [Semantic Fixed-View UV Reconstruction](#semantic-fixe
 
 Reconstructing a flat 64x64 Minecraft skin layout from 2D camera renders is a difficult spatial mapping problem. A convolutional network should not have to rediscover the camera-to-UV geometry while also learning how to fill invisible texture regions.
 
-To solve this, `dense_uv_parser` performs coordinate-guided routing first and `uv_inpainting` concentrates on UV-space completion:
+To solve this, `dense_uv_parser` performs coordinate-guided routing first and `semantic_uv_reconstruction` concentrates on UV-space completion:
 
 ### 1. Dense Parser Conditioning
 * The frozen parser classifies visible pixels as inner, outer, or secondary/deeper surfaces.
@@ -47,7 +52,7 @@ To guarantee both flat UV accuracy and visual rendering consistency, training op
 Recommended first-stage training is color-first and edge-heavy:
 
 ```bash
-./run_uv_inpainting_training.sh
+./run_parser_conditioned_training.sh
 ```
 
 The shell script defaults to the original two fixed `view_images`:
@@ -61,15 +66,15 @@ Geometric augmentation is disabled by default to preserve fixed-view pixel align
 For a short sharpening finetune after the first run, resume from the best checkpoint with a very small GAN weight:
 
 ```bash
-RESUME=runs/uv_inpainting_full_v1/best.pt RESUME_LR=5e-5 EPOCHS=15 LAMBDA_GAN=0.005 ./run_uv_inpainting_training.sh
+RESUME=runs/semantic_uv_reconstruction_full_v1/best.pt RESUME_LR=5e-5 EPOCHS=15 LAMBDA_GAN=0.005 ./run_parser_conditioned_training.sh
 ```
 
 Use the actual run folder name in `RESUME`. Avoid jumping straight back to `LAMBDA_GAN=0.03` unless the colors are already stable.
 
 ```bash
-python SkingToolkit/uv_inpainting/train.py \
+python SkingToolkit/semantic_uv_reconstruction/train.py \
   --data_dir /path/to/gt_skins \
-  --output_dir runs/uv_inpainting_static \
+  --output_dir runs/semantic_uv_reconstruction_static \
   --parser_checkpoint ../dense_uv_parser/runs/dense_uv_parser_v1/best.pt \
   --views static_front,static_back,top_front_45,top_back_45 \
   --batch_size 16 \
@@ -98,40 +103,40 @@ Useful knobs:
 
 Performance notes:
 
-- `run_uv_inpainting_training.sh` disables geometric augmentation by default: `AUGMENT=false`, `TRANSLATION_SCALE=0.0`, `SCALE_RANGE=0.0`, and `PERSPECTIVE_SCALE=0.0`.
+- `run_parser_conditioned_training.sh` disables geometric augmentation by default: `AUGMENT=false`, `TRANSLATION_SCALE=0.0`, `SCALE_RANGE=0.0`, and `PERSPECTIVE_SCALE=0.0`.
 - Validation also uses fixed canonical geometry, and parser affine refinement is disabled. Pure solid-background randomization remains enabled.
 - Parser conditioning uses the same semantic-first routing as production inference: semantic outer confidence `0.55`, relative margin `0.35`, projected-texel consensus disabled, and geometric UV coverage filtering disabled (`0`). The fixed grid assigns approximate UV coordinates but does not override the predicted inner/outer meaning.
 - For lower console overhead on fast GPUs, raise `LOG_EVERY` (for example `LOG_EVERY=100`).
 
 ### Train From Dense Parser Conditioning
 
-UV Inpainting training always uses parser-generated conditioning, matching `dense_uv_parser/infer.py` at inference time:
+Semantic UV Reconstruction training always uses parser-generated conditioning, matching `dense_uv_parser/infer.py` at inference time:
 
 ```bash
-./run_uv_inpainting_training.sh
+./run_parser_conditioned_training.sh
 ```
 
-This automatically finds the newest `../dense_uv_parser/runs/dense_uv_parser_v*/best.pt`. Its frozen parser also sees the same randomized solid-color RGB backgrounds used for parser training, so UV inpainting learns to complete parser conditioning from arbitrary-solid-background inputs. To finetune from an existing `uv_inpainting` checkpoint:
+This automatically finds the newest `../dense_uv_parser/runs/dense_uv_parser_v*/best.pt`. Its frozen parser also sees the same randomized solid-color RGB backgrounds used for parser training, so Semantic UV reconstruction learns to complete parser conditioning from arbitrary-solid-background inputs. To finetune from an existing `semantic_uv_reconstruction` checkpoint:
 
 Visible UV texels recovered by the parser are copied directly into the final output; the inpaint network only determines unknown texels. This prevents already observed colors from being blurred by reconstruction.
 
 ```bash
-RESUME=runs/uv_inpainting_full_v34/best.pt \
+RESUME=runs/semantic_uv_reconstruction_full_v34/best.pt \
 RESUME_LR=5e-5 \
 EPOCHS=15 \
-./run_uv_inpainting_training.sh
+./run_parser_conditioned_training.sh
 ```
 
 Override parser selection with:
 
 ```bash
 PARSER_CHECKPOINT=../dense_uv_parser/runs/dense_uv_parser_v3/best.pt \
-./run_uv_inpainting_training.sh
+./run_parser_conditioned_training.sh
 ```
 
 ## Inference
 
-UV inpainting does not expose a standalone inference entry point. Production inference must first build conditioning with the same dense parser used during training:
+Semantic UV reconstruction does not expose a standalone inference entry point. Production inference must first build conditioning with the same dense parser used during training:
 
 ```bash
 cd SkingToolkit/dense_uv_parser
@@ -142,7 +147,7 @@ FRONT=/path/to/front.png BACK=/path/to/back.png ./run_infer.sh
 
 ## Semantic Fixed-View UV Reconstruction
 
-`train_semantic_uv.py` is a separate training framework for learning the inverse
+`train_semantic_uv_reconstruction.py` is a separate training framework for learning the inverse
 mapping directly from clean, fixed front/back renders. It does not consume
 `dense_uv_parser` conditioning and does not measure the rendered cuboid to decide
 the layer. Each view passes through two complementary branches:
@@ -169,7 +174,7 @@ The default run intentionally has no render randomization:
 Start training with:
 
 ```bash
-./run_semantic_uv_training.sh
+./run_semantic_uv_reconstruction_training.sh
 ```
 
 The semantic bottleneck has exact supervision that can be derived without
@@ -197,10 +202,11 @@ count:
 ```bash
 SEMANTIC_LABELS_DIR=/path/to/semantic_uv_labels \
 SEMANTIC_CLASSES=24 \
-./run_semantic_uv_training.sh
+./run_semantic_uv_reconstruction_training.sh
 ```
 
-Checkpoints and previews are written to `runs/semantic_uv_v*/`; preview rows are
+Checkpoints and previews are written to `runs/semantic_uv_reconstruction_v*/`;
+preview rows are
 the input views, predicted UV, ground-truth UV, predicted outer alpha, and
 ground-truth outer alpha.
 
@@ -222,7 +228,7 @@ The first run downloads the Hugging Face checkpoint. To use an already cached
 copy on an offline training machine:
 
 ```bash
-SIGLIP_LOCAL_FILES_ONLY=true ./run_semantic_uv_training.sh
+SIGLIP_LOCAL_FILES_ONLY=true ./run_semantic_uv_reconstruction_training.sh
 ```
 
 The frozen SigLIP2 weights are deliberately excluded from each epoch
@@ -233,13 +239,13 @@ the trainable CNN, fusion, query, and decoder weights. The default batch size is
 tokens in the forward model. For a dependency-free structural ablation use:
 
 ```bash
-SEMANTIC_BACKBONE=none LAMBDA_SIGLIP_RENDER=0 ./run_semantic_uv_training.sh
+SEMANTIC_BACKBONE=none LAMBDA_SIGLIP_RENDER=0 ./run_semantic_uv_reconstruction_training.sh
 ```
 
 ## Generate Render Pairs
 
 ```bash
-python SkingToolkit/uv_inpainting/generate_pairs.py \
+python SkingToolkit/semantic_uv_reconstruction/generate_pairs.py \
   --data_dir /path/to/gt_skins \
   --output_dir /path/to/render_pairs \
   --views static_front,static_back,top_front_45,top_back_45 \

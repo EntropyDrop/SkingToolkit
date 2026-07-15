@@ -2,7 +2,7 @@ import unittest
 
 import torch
 
-from SkingToolkit.uv_inpainting.model import UVInpaintingNet
+from SkingToolkit.semantic_uv_reconstruction.model import UVInpaintingNet
 
 
 class UVInpaintingKnownPixelTest(unittest.TestCase):

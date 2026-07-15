@@ -16,7 +16,7 @@ WORKSPACE_ROOT = TOOLKIT_ROOT.parent
 if str(WORKSPACE_ROOT) not in sys.path:
     sys.path.insert(0, str(WORKSPACE_ROOT))
 
-from SkingToolkit.uv_inpainting.dataset import RenderAugmenter  # noqa: E402
+from SkingToolkit.semantic_uv_reconstruction.dataset import RenderAugmenter  # noqa: E402
 
 
 def main():
