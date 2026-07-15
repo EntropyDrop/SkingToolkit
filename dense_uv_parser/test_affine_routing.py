@@ -1039,6 +1039,48 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         recovered = canonicalize_tensor(augmented, targets["affine"])
         self.assertLess((recovered[:, :3] - rendered[:, :3]).abs().mean().item(), 0.03)
 
+    def test_canonicalize_tensor_matches_float_input_with_bfloat16_affine(self):
+        tensor = torch.rand(1, 4, 8, 8, dtype=torch.float32)
+        affine = torch.zeros(1, 3, dtype=torch.bfloat16)
+
+        canonical = canonicalize_tensor(tensor, affine)
+
+        self.assertEqual(canonical.dtype, torch.float32)
+        self.assertTrue(torch.allclose(canonical, tensor, atol=1e-6))
+
+    def test_hard_uv_metrics_cast_bfloat16_outputs_to_render_dtype(self):
+        renderer = FakeRenderer(valid_pixels=1)
+        rendered = torch.zeros(1, 4, 8, 8, dtype=torch.float32)
+        rendered[:, 0, 0, 0] = 1.0
+        rendered[:, 3] = 1.0
+        outputs = {
+            "foreground": torch.full((1, 1, 8, 8), 10.0, dtype=torch.bfloat16),
+            "layer": torch.cat(
+                [
+                    torch.full((1, 1, 8, 8), 10.0, dtype=torch.bfloat16),
+                    torch.full((1, 2, 8, 8), -10.0, dtype=torch.bfloat16),
+                ],
+                dim=1,
+            ),
+            "surface": torch.zeros(1, 2, 8, 8, dtype=torch.bfloat16),
+            "affine": torch.zeros(1, 3, dtype=torch.bfloat16),
+        }
+        targets = dense_targets(1, 8, 8)
+        targets["affine"] = torch.zeros(1, 3)
+        args = parser_train.build_arg_parser().parse_args([])
+        args.bg_color = (128, 128, 128)
+
+        metrics = parser_train.hard_uv_conditioning_metrics(
+            rendered,
+            outputs,
+            targets,
+            renderer,
+            ["front"],
+            args,
+        )
+
+        self.assertIn("count_hard_inner_tp", metrics)
+
     def test_color_canonicalization_uses_nearest_texels(self):
         height = width = 64
         rendered = torch.zeros(1, 4, height, width)

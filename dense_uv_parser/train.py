@@ -428,10 +428,18 @@ def hard_uv_conditioning_metrics(
 ):
     """Measure known-texel precision/recall through the exact hard inference route."""
     group_size = len(views)
+    hard_outputs = {
+        name: (
+            value.to(dtype=rendered.dtype)
+            if torch.is_tensor(value) and value.is_floating_point()
+            else value
+        )
+        for name, value in outputs.items()
+    }
     if "affine" in outputs:
         predicted = splat_parser_predictions_to_uv_conditioning(
             rendered,
-            outputs,
+            hard_outputs,
             renderer=renderer,
             views=views,
             group_size=group_size,
@@ -461,7 +469,7 @@ def hard_uv_conditioning_metrics(
     else:
         predicted = splat_predictions_to_uv_conditioning(
             rendered,
-            outputs,
+            hard_outputs,
             group_size=group_size,
             fg_threshold=args.splat_fg_threshold,
             bg_color=args.bg_color,

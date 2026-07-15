@@ -512,6 +512,7 @@ def affine_to_canonical_grid(affine, output_shape):
 
 def canonicalize_tensor(tensor, affine, mode="bilinear"):
     """Undo the parser's predicted global translation/scale for an NCHW tensor."""
+    affine = affine.to(device=tensor.device, dtype=tensor.dtype)
     grid = affine_to_canonical_grid(affine, tensor.shape)
     return F.grid_sample(
         tensor,
@@ -526,6 +527,7 @@ def canonicalize_index_tensor(index, affine):
     """Undo a global transform while preserving IGNORE_INDEX outside valid labels."""
     valid = (index != IGNORE_INDEX).unsqueeze(1).float()
     values = index.masked_fill(index == IGNORE_INDEX, 0).float().unsqueeze(1)
+    affine = affine.to(device=values.device, dtype=values.dtype)
     grid = affine_to_canonical_grid(affine, values.shape)
     sampled_valid = F.grid_sample(
         valid,
