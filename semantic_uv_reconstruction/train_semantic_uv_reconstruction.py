@@ -323,6 +323,11 @@ def main():
     views = parse_views(args.views)
     if len(views) < 2:
         raise ValueError("Semantic UV reconstruction expects at least front and back views.")
+    if args.mappings_dir is not None and not Path(args.mappings_dir).is_dir():
+        raise FileNotFoundError(
+            f"Renderer mappings directory does not exist: {args.mappings_dir}. "
+            "Set MAPPINGS_DIR to the directory containing <view>_mapping.pt files."
+        )
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "previews").mkdir(exist_ok=True)
@@ -360,7 +365,11 @@ def main():
     renderer = DifferentiableRenderer(mappings_dir=args.mappings_dir).to(device)
     missing_views = [view for view in views if view not in renderer.views]
     if missing_views:
-        raise ValueError(f"Unknown renderer views {missing_views}. Available views: {renderer.views}")
+        raise ValueError(
+            f"Renderer mappings are missing views {missing_views}. "
+            f"Available views in {args.mappings_dir!r}: {renderer.views}. "
+            "Regenerate mappings for the configured VIEWS or select a matching MAPPINGS_DIR."
+        )
     renderer.eval()
     for parameter in renderer.parameters():
         parameter.requires_grad_(False)

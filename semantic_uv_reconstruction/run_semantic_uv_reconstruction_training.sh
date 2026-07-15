@@ -28,8 +28,67 @@ fi
 
 DATA_DIR="${DATA_DIR:-../skins}"
 MAPPINGS_SIZE="${MAPPINGS_SIZE:-256x512}"
-MAPPINGS_DIR="${MAPPINGS_DIR:-../../differentiable_minecraft_renderer/mappings_${MAPPINGS_SIZE}}"
 VIEWS="${VIEWS:-walk_front_both_layer_ortho,walk_back_both_layer_ortho}"
+
+resolve_mappings_dir() {
+  local requested="${MAPPINGS_DIR:-}"
+  local name="mappings_${MAPPINGS_SIZE}"
+  local candidate=""
+  local discovered=""
+
+  if [[ -n "$requested" ]]; then
+    if [[ ! -d "$requested" ]]; then
+      echo "MAPPINGS_DIR does not exist: $requested" >&2
+      return 1
+    fi
+    MAPPINGS_DIR="$requested"
+    return 0
+  fi
+
+  # Support both layouts commonly used by this project:
+  #   llms/{SkingToolkit,differentiable_minecraft_renderer}
+  #   llms/SkingToolkit/{semantic_uv_reconstruction,differentiable_minecraft_renderer}
+  for candidate in \
+    "../differentiable_minecraft_renderer/$name" \
+    "../../differentiable_minecraft_renderer/$name" \
+    "../../github/differentiable_minecraft_renderer/$name" \
+    "../$name"; do
+    if [[ -d "$candidate" ]]; then
+      MAPPINGS_DIR="$candidate"
+      return 0
+    fi
+  done
+
+  discovered="$(find ../.. -maxdepth 5 -type d -name "$name" -print -quit 2>/dev/null || true)"
+  if [[ -n "$discovered" ]]; then
+    MAPPINGS_DIR="$discovered"
+    return 0
+  fi
+
+  echo "Could not find $name from $(pwd)." >&2
+  echo "Locate it with: find ~/llms -type d -name '$name'" >&2
+  echo "Then run: MAPPINGS_DIR=/absolute/path/to/$name ./run_semantic_uv_reconstruction_training.sh" >&2
+  echo "If mappings have not been generated, run generate_mappings.py in differentiable_minecraft_renderer first." >&2
+  return 1
+}
+
+resolve_mappings_dir
+
+IFS=',' read -r -a configured_views <<< "$VIEWS"
+missing_mapping_files=()
+for view in "${configured_views[@]}"; do
+  view="${view//[[:space:]]/}"
+  if [[ -n "$view" && ! -f "$MAPPINGS_DIR/${view}_mapping.pt" ]]; then
+    missing_mapping_files+=("${view}_mapping.pt")
+  fi
+done
+if (( ${#missing_mapping_files[@]} > 0 )); then
+  echo "MAPPINGS_DIR=$MAPPINGS_DIR is missing required files:" >&2
+  printf '  %s\n' "${missing_mapping_files[@]}" >&2
+  echo "Generate them with: python generate_mappings.py --views '$VIEWS' --sizes '$MAPPINGS_SIZE'" >&2
+  exit 1
+fi
+
 MAX_SAMPLES="${MAX_SAMPLES:-}"
 SEMANTIC_LABELS_DIR="${SEMANTIC_LABELS_DIR:-}"
 SEMANTIC_CLASSES="${SEMANTIC_CLASSES:-13}"

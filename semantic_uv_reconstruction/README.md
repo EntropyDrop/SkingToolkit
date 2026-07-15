@@ -177,6 +177,27 @@ Start training with:
 ./run_semantic_uv_reconstruction_training.sh
 ```
 
+The launcher auto-detects `mappings_256x512` whether
+`differentiable_minecraft_renderer` is inside `SkingToolkit`, beside it, or
+under the legacy `github/` workspace directory. Override detection when the
+renderer lives elsewhere:
+
+```bash
+MAPPINGS_DIR=/absolute/path/to/mappings_256x512 \
+./run_semantic_uv_reconstruction_training.sh
+```
+
+The selected directory must contain
+`walk_front_both_layer_ortho_mapping.pt` and
+`walk_back_both_layer_ortho_mapping.pt`. If they do not exist, generate them
+from the renderer repository:
+
+```bash
+python generate_mappings.py \
+  --views walk_front_both_layer_ortho,walk_back_both_layer_ortho \
+  --sizes 256x512
+```
+
 The semantic bottleneck has exact supervision that can be derived without
 manual labels:
 
