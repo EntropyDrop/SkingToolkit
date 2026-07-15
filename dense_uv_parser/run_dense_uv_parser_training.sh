@@ -62,6 +62,7 @@ VIEWS="${VIEWS:-walk_front_both_layer_ortho,walk_back_both_layer_ortho}"
 PARSER_MODE="${PARSER_MODE:-geometry_fit}"
 MAX_SAMPLES="${MAX_SAMPLES:-30000}"
 BASE_CHANNELS="${BASE_CHANNELS:-32}"
+FEATURE_DROPOUT="${FEATURE_DROPOUT:-0.10}"
 BATCH_SIZE="${BATCH_SIZE:-32}"
 NUM_WORKERS="${NUM_WORKERS:-16}"
 PREFETCH_FACTOR="${PREFETCH_FACTOR:-4}"
@@ -73,7 +74,7 @@ MIXED_PRECISION="${MIXED_PRECISION:-bf16}"
 MATMUL_PRECISION="${MATMUL_PRECISION:-high}"
 CUDNN_BENCHMARK="${CUDNN_BENCHMARK:-true}"
 LOG_EVERY="${LOG_EVERY:-50}"
-BEST_METRIC="${BEST_METRIC:-loss_outer_selection}"
+BEST_METRIC="${BEST_METRIC:-loss_hard_uv_selection}"
 
 AUGMENT="${AUGMENT:-false}"
 AUGMENT_VALIDATION="${AUGMENT_VALIDATION:-false}"
@@ -112,6 +113,8 @@ LAMBDA_SOFT_UV_RGB="${LAMBDA_SOFT_UV_RGB:-0.25}"
 LAMBDA_SOFT_UV_ALPHA="${LAMBDA_SOFT_UV_ALPHA:-0.35}"
 LAMBDA_SOFT_UV_INNER_RECALL="${LAMBDA_SOFT_UV_INNER_RECALL:-0.50}"
 LAMBDA_SOFT_UV_OUTER_RECALL="${LAMBDA_SOFT_UV_OUTER_RECALL:-0.50}"
+SOFT_UV_RECALL_HARD_FRACTION="${SOFT_UV_RECALL_HARD_FRACTION:-0.10}"
+SOFT_UV_RECALL_HARD_WEIGHT="${SOFT_UV_RECALL_HARD_WEIGHT:-0.50}"
 LAMBDA_RENDER_RGB="${LAMBDA_RENDER_RGB:-0.20}"
 LAMBDA_RENDER_ALPHA="${LAMBDA_RENDER_ALPHA:-0.25}"
 OUTER_SELECTION_PRECISION_WEIGHT="${OUTER_SELECTION_PRECISION_WEIGHT:-0.75}"
@@ -186,6 +189,7 @@ python train.py \
   --parser_mode "$PARSER_MODE" \
   --max_samples "$MAX_SAMPLES" \
   --base_channels "$BASE_CHANNELS" \
+  --feature_dropout "$FEATURE_DROPOUT" \
   --batch_size "$BATCH_SIZE" \
   --num_workers "$NUM_WORKERS" \
   --prefetch_factor "$PREFETCH_FACTOR" \
@@ -216,6 +220,8 @@ python train.py \
   --lambda_soft_uv_alpha "$LAMBDA_SOFT_UV_ALPHA" \
   --lambda_soft_uv_inner_recall "$LAMBDA_SOFT_UV_INNER_RECALL" \
   --lambda_soft_uv_outer_recall "$LAMBDA_SOFT_UV_OUTER_RECALL" \
+  --soft_uv_recall_hard_fraction "$SOFT_UV_RECALL_HARD_FRACTION" \
+  --soft_uv_recall_hard_weight "$SOFT_UV_RECALL_HARD_WEIGHT" \
   --lambda_render_rgb "$LAMBDA_RENDER_RGB" \
   --lambda_render_alpha "$LAMBDA_RENDER_ALPHA" \
   --outer_selection_precision_weight "$OUTER_SELECTION_PRECISION_WEIGHT" \

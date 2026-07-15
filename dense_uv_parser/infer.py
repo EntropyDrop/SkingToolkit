@@ -100,6 +100,9 @@ def load_parser(checkpoint_path, device):
             checkpoint_args.get("surface_classes", 0 if geometry_only else 2 if predict_affine else 0),
         ),
         geometry_only=geometry_only,
+        feature_dropout=model_config.get(
+            "feature_dropout", checkpoint_args.get("feature_dropout", 0.0)
+        ),
     ).to(device)
     model.load_state_dict(state_dict)
     model.eval()

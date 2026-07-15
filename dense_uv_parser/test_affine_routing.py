@@ -168,6 +168,7 @@ class GlobalAffineRoutingTest(unittest.TestCase):
 
     def test_training_defaults_keep_geometry_fixed(self):
         parser_args = parser_train.build_arg_parser().parse_args([])
+        self.assertEqual(parser_args.feature_dropout, 0.10)
         self.assertFalse(parser_args.augment)
         self.assertFalse(parser_args.augment_validation)
         self.assertEqual(parser_args.translation_scale, 0.0)
@@ -182,11 +183,13 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         self.assertGreater(parser_args.lambda_outer_false_negative, 0.0)
         self.assertEqual(parser_args.lambda_soft_uv_inner_recall, 0.50)
         self.assertEqual(parser_args.lambda_soft_uv_outer_recall, 0.50)
+        self.assertEqual(parser_args.soft_uv_recall_hard_fraction, 0.10)
+        self.assertEqual(parser_args.soft_uv_recall_hard_weight, 0.50)
         self.assertEqual(parser_args.lr_schedule, "cosine")
         self.assertEqual(parser_args.min_lr_ratio, 0.05)
         self.assertEqual(parser_args.route_class_weight_floor, 0.75)
         self.assertEqual(parser_args.route_outer_class_weight_cap, 1.0)
-        self.assertEqual(parser_args.best_metric, "loss_outer_selection")
+        self.assertEqual(parser_args.best_metric, "loss_hard_uv_selection")
         self.assertEqual(parser_args.outer_route_confidence_threshold, 0.55)
         self.assertEqual(parser_args.outer_route_margin_threshold, 0.35)
         self.assertEqual(parser_args.outer_uv_min_coverage, 0.65)
@@ -671,6 +674,23 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         self.assertGreater(middle, last)
         self.assertAlmostEqual(last, 1e-5)
 
+    def test_focused_visible_recall_uses_visible_counts_and_worst_texels(self):
+        predicted = torch.tensor([[[[2.0, 1.0, 1.0, 0.0]]]], requires_grad=True)
+        visible_counts = torch.tensor([[[[2.0, 1.0, 1.0, 1.0]]]])
+
+        combined, mean_loss, hard_loss = parser_train.focused_visible_layer_recall_loss(
+            predicted,
+            visible_counts,
+            hard_fraction=0.25,
+            hard_weight=0.50,
+        )
+        combined.backward()
+
+        self.assertAlmostEqual(float(mean_loss.detach()), 0.25)
+        self.assertAlmostEqual(float(hard_loss.detach()), 1.0)
+        self.assertAlmostEqual(float(combined.detach()), 0.625)
+        self.assertLess(float(predicted.grad[0, 0, 0, 3]), 0.0)
+
     def test_outer_selection_metric_uses_global_precision_and_iou(self):
         metrics = parser_train.format_metrics(
             {
@@ -681,6 +701,12 @@ class GlobalAffineRoutingTest(unittest.TestCase):
                 "count_outer_tp": torch.tensor(8.0),
                 "count_outer_fp": torch.tensor(2.0),
                 "count_outer_fn": torch.tensor(2.0),
+                "count_hard_inner_tp": torch.tensor(8.0),
+                "count_hard_inner_fp": torch.tensor(1.0),
+                "count_hard_inner_fn": torch.tensor(2.0),
+                "count_hard_outer_tp": torch.tensor(6.0),
+                "count_hard_outer_fp": torch.tensor(2.0),
+                "count_hard_outer_fn": torch.tensor(4.0),
             },
             count=10,
             inner_recall_weight=0.5,
@@ -696,6 +722,16 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         self.assertAlmostEqual(
             metrics["loss_outer_selection"],
             2.0 + 0.05 + 0.15 + 0.15 + 1.0 / 6.0,
+        )
+        self.assertAlmostEqual(metrics["hard_iou_inner"], 8.0 / 11.0)
+        self.assertAlmostEqual(metrics["hard_precision_outer"], 0.75)
+        self.assertAlmostEqual(metrics["hard_recall_outer"], 0.6)
+        self.assertAlmostEqual(
+            metrics["loss_hard_uv_selection"],
+            0.5 * (1.0 - 8.0 / 11.0)
+            + 0.75 * 0.25
+            + 0.75 * 0.4
+            + 0.5 * 0.5,
         )
 
     def test_global_model_emits_surface_and_affine_losses(self):

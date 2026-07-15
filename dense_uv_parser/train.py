@@ -112,23 +112,25 @@ def format_metrics(
             else averaged
         )
 
-    for role_name in ("inner", "outer"):
-        count_names = tuple(
-            f"count_{role_name}_{suffix}" for suffix in ("tp", "fp", "fn")
-        )
-        if all(name in result for name in count_names):
-            role_tp = result[f"count_{role_name}_tp"]
-            role_fp = result[f"count_{role_name}_fp"]
-            role_fn = result[f"count_{role_name}_fn"]
-            result[f"precision_{role_name}"] = role_tp / max(
-                role_tp + role_fp, 1.0
+    for family in ("", "hard_"):
+        for role_name in ("inner", "outer"):
+            count_names = tuple(
+                f"count_{family}{role_name}_{suffix}"
+                for suffix in ("tp", "fp", "fn")
             )
-            result[f"recall_{role_name}"] = role_tp / max(
-                role_tp + role_fn, 1.0
-            )
-            result[f"iou_{role_name}"] = role_tp / max(
-                role_tp + role_fp + role_fn, 1.0
-            )
+            if all(name in result for name in count_names):
+                role_tp = result[f"count_{family}{role_name}_tp"]
+                role_fp = result[f"count_{family}{role_name}_fp"]
+                role_fn = result[f"count_{family}{role_name}_fn"]
+                result[f"{family}precision_{role_name}"] = role_tp / max(
+                    role_tp + role_fp, 1.0
+                )
+                result[f"{family}recall_{role_name}"] = role_tp / max(
+                    role_tp + role_fn, 1.0
+                )
+                result[f"{family}iou_{role_name}"] = role_tp / max(
+                    role_tp + role_fp + role_fn, 1.0
+                )
 
     if "recall_outer" in result:
         if "loss_geometry" in result:
@@ -139,6 +141,13 @@ def format_metrics(
                 + outer_recall_weight * (1.0 - result["recall_outer"])
                 + outer_iou_weight * (1.0 - result["iou_outer"])
             )
+    if "hard_recall_outer" in result:
+        result["loss_hard_uv_selection"] = (
+            0.5 * (1.0 - result["hard_iou_inner"])
+            + 0.75 * (1.0 - result["hard_precision_outer"])
+            + 0.75 * (1.0 - result["hard_recall_outer"])
+            + 0.5 * (1.0 - result["hard_iou_outer"])
+        )
     return result
 
 
@@ -204,12 +213,14 @@ def build_parser_inputs(batch_uv, renderer, views, train, args, apply_augment=No
     return rendered, targets, V, view_ids
 
 
-def visible_target_layer_uv_mask(targets, layer_index, group_size):
-    """Scatter visible GT pixels of one skin layer into a grouped UV mask."""
+def visible_target_layer_uv_counts(targets, layer_index, group_size):
+    """Count visible GT projections of one skin layer in each grouped UV texel."""
     layer = targets["layer"]
     uv = targets["uv"]
     if layer.dim() != 3 or uv.dim() != 4 or uv.shape[1] != 2:
         raise ValueError("Expected layer NHW and UV N2HW targets.")
+    if group_size <= 0:
+        raise ValueError("group_size must be positive.")
     if layer.shape[0] % group_size != 0:
         raise ValueError(
             f"Target batch {layer.shape[0]} must be divisible by group_size={group_size}."
@@ -233,7 +244,54 @@ def visible_target_layer_uv_mask(targets, layer_index, group_size):
         selected_uv,
         torch.ones(selected_uv.shape[0], device=uv.device, dtype=uv.dtype),
     )
-    return (counts > 0).to(dtype=uv.dtype).reshape(group_count, 1, UV_SIZE, UV_SIZE)
+    return counts.reshape(group_count, 1, UV_SIZE, UV_SIZE)
+
+
+def visible_target_layer_uv_mask(targets, layer_index, group_size):
+    return (
+        visible_target_layer_uv_counts(targets, layer_index, group_size) > 0
+    ).to(dtype=targets["uv"].dtype)
+
+
+def focused_visible_layer_recall_loss(
+    predicted_weight,
+    visible_counts,
+    hard_fraction=0.10,
+    hard_weight=0.50,
+):
+    """Combine mean recall with the worst visible texels for small-detail protection."""
+    if not 0.0 < hard_fraction <= 1.0:
+        raise ValueError("hard_fraction must be in (0, 1].")
+    if not 0.0 <= hard_weight <= 1.0:
+        raise ValueError("hard_weight must be in [0, 1].")
+    if predicted_weight.shape != visible_counts.shape:
+        raise ValueError(
+            "predicted_weight and visible_counts must have identical shapes, got "
+            f"{tuple(predicted_weight.shape)} and {tuple(visible_counts.shape)}."
+        )
+
+    visible = visible_counts > 0
+    visible_probability = (
+        predicted_weight / visible_counts.clamp_min(1.0)
+    ).clamp(0.0, 1.0)
+    deficit = 1.0 - visible_probability
+    mean_losses = []
+    hard_losses = []
+    for item in range(deficit.shape[0]):
+        item_deficit = deficit[item][visible[item]]
+        if item_deficit.numel() == 0:
+            zero = predicted_weight[item].sum() * 0.0
+            mean_losses.append(zero)
+            hard_losses.append(zero)
+            continue
+        mean_losses.append(item_deficit.mean())
+        hard_count = max(1, math.ceil(item_deficit.numel() * hard_fraction))
+        hard_losses.append(item_deficit.topk(hard_count, sorted=False).values.mean())
+
+    mean_loss = torch.stack(mean_losses).mean()
+    hard_loss = torch.stack(hard_losses).mean()
+    combined = (1.0 - hard_weight) * mean_loss + hard_weight * hard_loss
+    return combined, mean_loss, hard_loss
 
 
 def differentiable_geometry_losses(
@@ -245,6 +303,8 @@ def differentiable_geometry_losses(
     views,
     temperature=1.0,
     canonicalize=True,
+    recall_hard_fraction=0.10,
+    recall_hard_weight=0.50,
 ):
     """Photometric UV and multi-view render losses for geometry-parser logits."""
     views = parse_views(views)
@@ -277,34 +337,40 @@ def differentiable_geometry_losses(
         .div(alpha_denom)
         .mean()
     )
-    visible_inner_uv = visible_target_layer_uv_mask(
+    visible_inner_counts = visible_target_layer_uv_counts(
         targets,
         layer_index=0,
         group_size=len(views),
     ).to(dtype=pred_uv.dtype)
-    visible_inner_uv = visible_inner_uv * gt_alpha
-    pred_inner_alpha = soft_details["layer_alpha"][:, 0:1]
-    inner_recall_denom = visible_inner_uv.sum(dim=(1, 2, 3)).clamp_min(1.0)
-    loss_soft_uv_inner_recall = (
-        ((1.0 - pred_inner_alpha) * visible_inner_uv)
-        .sum(dim=(1, 2, 3))
-        .div(inner_recall_denom)
-        .mean()
+    visible_inner_counts = visible_inner_counts * gt_alpha
+    visible_inner_uv = (visible_inner_counts > 0).to(dtype=pred_uv.dtype)
+    (
+        loss_soft_uv_inner_recall,
+        loss_soft_uv_inner_recall_mean,
+        loss_soft_uv_inner_recall_hard,
+    ) = focused_visible_layer_recall_loss(
+        soft_details["layer_weight"][:, 0:1],
+        visible_inner_counts,
+        hard_fraction=recall_hard_fraction,
+        hard_weight=recall_hard_weight,
     )
 
-    visible_outer_uv = visible_target_layer_uv_mask(
+    visible_outer_counts = visible_target_layer_uv_counts(
         targets,
         layer_index=1,
         group_size=len(views),
     ).to(dtype=pred_uv.dtype)
-    visible_outer_uv = visible_outer_uv * gt_alpha
-    pred_outer_alpha = soft_details["layer_alpha"][:, 1:2]
-    outer_recall_denom = visible_outer_uv.sum(dim=(1, 2, 3)).clamp_min(1.0)
-    loss_soft_uv_outer_recall = (
-        ((1.0 - pred_outer_alpha) * visible_outer_uv)
-        .sum(dim=(1, 2, 3))
-        .div(outer_recall_denom)
-        .mean()
+    visible_outer_counts = visible_outer_counts * gt_alpha
+    visible_outer_uv = (visible_outer_counts > 0).to(dtype=pred_uv.dtype)
+    (
+        loss_soft_uv_outer_recall,
+        loss_soft_uv_outer_recall_mean,
+        loss_soft_uv_outer_recall_hard,
+    ) = focused_visible_layer_recall_loss(
+        soft_details["layer_weight"][:, 1:2],
+        visible_outer_counts,
+        hard_fraction=recall_hard_fraction,
+        hard_weight=recall_hard_weight,
     )
 
     render_rgb_total = pred_uv.new_zeros(())
@@ -337,7 +403,11 @@ def differentiable_geometry_losses(
         "loss_soft_uv_rgb": loss_soft_uv_rgb,
         "loss_soft_uv_alpha": loss_soft_uv_alpha,
         "loss_soft_uv_inner_recall": loss_soft_uv_inner_recall,
+        "loss_soft_uv_inner_recall_mean": loss_soft_uv_inner_recall_mean,
+        "loss_soft_uv_inner_recall_hard": loss_soft_uv_inner_recall_hard,
         "loss_soft_uv_outer_recall": loss_soft_uv_outer_recall,
+        "loss_soft_uv_outer_recall_mean": loss_soft_uv_outer_recall_mean,
+        "loss_soft_uv_outer_recall_hard": loss_soft_uv_outer_recall_hard,
         "loss_render_rgb": render_rgb_total / view_count,
         "loss_render_alpha": render_alpha_total / view_count,
         "visible_inner_uv_percent": visible_inner_uv.float().mean() * 100.0,
@@ -348,7 +418,90 @@ def differentiable_geometry_losses(
     }
 
 
-def run_epoch(model, criterion, renderer, loader, optimizer, scaler, device, precision, args, train=True):
+def hard_uv_conditioning_metrics(
+    rendered,
+    outputs,
+    targets,
+    renderer,
+    views,
+    args,
+):
+    """Measure known-texel precision/recall through the exact hard inference route."""
+    group_size = len(views)
+    if "affine" in outputs:
+        predicted = splat_parser_predictions_to_uv_conditioning(
+            rendered,
+            outputs,
+            renderer=renderer,
+            views=views,
+            group_size=group_size,
+            fg_threshold=args.splat_fg_threshold,
+            bg_color=args.bg_color,
+            semantic_gate=args.semantic_gate,
+            affine_refine=args.affine_refine,
+            affine_refine_translation_px=args.affine_refine_translation_px,
+            affine_refine_scale=args.affine_refine_scale,
+            route_confidence_threshold=args.route_confidence_threshold,
+            route_margin_threshold=args.route_margin_threshold,
+            outer_route_confidence_threshold=args.outer_route_confidence_threshold,
+            outer_route_margin_threshold=args.outer_route_margin_threshold,
+            outer_uv_min_coverage=args.outer_uv_min_coverage,
+            color_aggregation=args.splat_color_aggregation,
+            observed_foreground=None,
+            reject_semantic_fallback=not args.allow_semantic_fallback,
+        )
+        expected = splat_deterministic_targets_to_uv_conditioning(
+            rendered,
+            targets,
+            renderer=renderer,
+            views=views,
+            group_size=group_size,
+            bg_color=args.bg_color,
+        )
+    else:
+        predicted = splat_predictions_to_uv_conditioning(
+            rendered,
+            outputs,
+            group_size=group_size,
+            fg_threshold=args.splat_fg_threshold,
+            bg_color=args.bg_color,
+        )
+        expected = splat_targets_to_uv_conditioning(
+            rendered,
+            targets,
+            group_size=group_size,
+            bg_color=args.bg_color,
+        )
+
+    metrics = {}
+    for role_name, known_channel in (("inner", 4), ("outer", 9)):
+        predicted_known = predicted[:, known_channel] > 0.5
+        expected_known = expected[:, known_channel] > 0.5
+        metrics[f"count_hard_{role_name}_tp"] = (
+            predicted_known & expected_known
+        ).sum().float()
+        metrics[f"count_hard_{role_name}_fp"] = (
+            predicted_known & ~expected_known
+        ).sum().float()
+        metrics[f"count_hard_{role_name}_fn"] = (
+            ~predicted_known & expected_known
+        ).sum().float()
+    return metrics
+
+
+def run_epoch(
+    model,
+    criterion,
+    renderer,
+    loader,
+    optimizer,
+    scaler,
+    device,
+    precision,
+    args,
+    train=True,
+    compute_hard_metrics=False,
+):
     model.train(train)
     views = parse_views(args.views)
     metric_sums = {}
@@ -400,13 +553,19 @@ def run_epoch(model, criterion, renderer, loader, optimizer, scaler, device, pre
                         views,
                         temperature=args.render_softmax_temperature,
                         canonicalize=apply_augment,
+                        recall_hard_fraction=args.soft_uv_recall_hard_fraction,
+                        recall_hard_weight=args.soft_uv_recall_hard_weight,
                     )
                 else:
                     auxiliary = {
                         "loss_soft_uv_rgb": zero,
                         "loss_soft_uv_alpha": zero,
                         "loss_soft_uv_inner_recall": zero,
+                        "loss_soft_uv_inner_recall_mean": zero,
+                        "loss_soft_uv_inner_recall_hard": zero,
                         "loss_soft_uv_outer_recall": zero,
+                        "loss_soft_uv_outer_recall_mean": zero,
+                        "loss_soft_uv_outer_recall_hard": zero,
                         "loss_render_rgb": zero,
                         "loss_render_alpha": zero,
                         "soft_uv_known_percent": zero,
@@ -442,6 +601,19 @@ def run_epoch(model, criterion, renderer, loader, optimizer, scaler, device, pre
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
                 optimizer.step()
+
+        if compute_hard_metrics:
+            with torch.no_grad():
+                losses.update(
+                    hard_uv_conditioning_metrics(
+                        rendered,
+                        outputs,
+                        targets,
+                        renderer,
+                        views,
+                        args,
+                    )
+                )
 
         sample_count += parser_samples
         for name, value in losses.items():
@@ -522,7 +694,7 @@ def save_preview(model, renderer, loader, device, args, output_path, max_items=2
                 outer_route_margin_threshold=args.outer_route_margin_threshold,
                 outer_uv_min_coverage=args.outer_uv_min_coverage,
                 color_aggregation=args.splat_color_aggregation,
-                observed_foreground=targets["foreground"][:, 0] > 0.5,
+                observed_foreground=None,
                 reject_semantic_fallback=not args.allow_semantic_fallback,
                 return_details=True,
             )
@@ -740,10 +912,14 @@ def save_checkpoint(path, model, optimizer, scaler, epoch, args, metrics, best_m
             "route_role_classes": model.layer_classes if model.geometry_only else 0,
             "layer_face_classes": 0 if model.geometry_only else 12,
             "geometry_only": model.geometry_only,
+            "feature_dropout": model.feature_dropout_probability,
             "arm_model": "steve",
         },
     }
-    torch.save(checkpoint, path)
+    path = Path(path)
+    temporary_path = path.with_name(f".{path.name}.tmp")
+    torch.save(checkpoint, temporary_path)
+    os.replace(temporary_path, path)
 
 
 def build_arg_parser():
@@ -763,6 +939,7 @@ def build_arg_parser():
     parser.add_argument("--val_split", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument("--base_channels", type=int, default=32)
+    parser.add_argument("--feature_dropout", type=float, default=0.10)
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--num_workers", type=int, default=8)
     parser.add_argument("--prefetch_factor", type=int, default=4)
@@ -828,6 +1005,8 @@ def build_arg_parser():
     parser.add_argument("--lambda_soft_uv_alpha", type=float, default=0.35)
     parser.add_argument("--lambda_soft_uv_inner_recall", type=float, default=0.50)
     parser.add_argument("--lambda_soft_uv_outer_recall", type=float, default=0.50)
+    parser.add_argument("--soft_uv_recall_hard_fraction", type=float, default=0.10)
+    parser.add_argument("--soft_uv_recall_hard_weight", type=float, default=0.50)
     parser.add_argument("--lambda_render_rgb", type=float, default=0.20)
     parser.add_argument("--lambda_render_alpha", type=float, default=0.25)
     parser.add_argument("--outer_selection_precision_weight", type=float, default=0.75)
@@ -856,8 +1035,9 @@ def build_arg_parser():
             "loss_uv_class",
             "loss_differentiable",
             "loss_outer_selection",
+            "loss_hard_uv_selection",
         ],
-        default="loss_outer_selection",
+        default="loss_hard_uv_selection",
     )
     return parser
 
@@ -867,6 +1047,8 @@ def main():
     args.bg_color = (128, 128, 128)
     if args.scale_range < 0 or args.scale_range >= 1:
         raise ValueError("--scale_range must be in [0, 1).")
+    if not 0.0 <= args.feature_dropout < 1.0:
+        raise ValueError("--feature_dropout must be in [0, 1).")
     differentiable_weights = (
         args.lambda_soft_uv_rgb,
         args.lambda_soft_uv_alpha,
@@ -881,6 +1063,10 @@ def main():
         raise ValueError("--lr must be positive.")
     if not 0.0 <= args.min_lr_ratio <= 1.0:
         raise ValueError("--min_lr_ratio must be in [0, 1].")
+    if not 0.0 < args.soft_uv_recall_hard_fraction <= 1.0:
+        raise ValueError("--soft_uv_recall_hard_fraction must be in (0, 1].")
+    if not 0.0 <= args.soft_uv_recall_hard_weight <= 1.0:
+        raise ValueError("--soft_uv_recall_hard_weight must be in [0, 1].")
     if args.lambda_outer_false_positive < 0:
         raise ValueError("--lambda_outer_false_positive must be non-negative.")
     if args.lambda_outer_false_negative < 0:
@@ -959,6 +1145,7 @@ def main():
         affine_scale_range=args.scale_range,
         surface_classes=surface_classes,
         geometry_only=geometry_only,
+        feature_dropout=args.feature_dropout,
     ).to(device)
     criterion = DenseUVParserLoss(
         lambda_foreground=args.lambda_foreground,
@@ -1056,6 +1243,7 @@ def main():
         "val_samples": len(val_dataset) if val_dataset is not None else 0,
         "views": parse_views(args.views),
         "parameters": count_parameters(model),
+        "feature_dropout": args.feature_dropout,
         "device": str(device),
         "parser_mode": args.parser_mode,
         "uv_classification": model.uv_classification,
@@ -1081,6 +1269,8 @@ def main():
         "lambda_soft_uv_alpha": args.lambda_soft_uv_alpha,
         "lambda_soft_uv_inner_recall": args.lambda_soft_uv_inner_recall,
         "lambda_soft_uv_outer_recall": args.lambda_soft_uv_outer_recall,
+        "soft_uv_recall_hard_fraction": args.soft_uv_recall_hard_fraction,
+        "soft_uv_recall_hard_weight": args.soft_uv_recall_hard_weight,
         "lambda_render_rgb": args.lambda_render_rgb,
         "lambda_render_alpha": args.lambda_render_alpha,
         "lambda_outer_false_positive": args.lambda_outer_false_positive,
@@ -1110,7 +1300,19 @@ def main():
         for param_group in optimizer.param_groups:
             param_group["lr"] = epoch_lr
         train_metrics = run_epoch(
-            model, criterion, renderer, train_loader, optimizer, scaler, device, args.mixed_precision, args, train=True
+            model,
+            criterion,
+            renderer,
+            train_loader,
+            optimizer,
+            scaler,
+            device,
+            args.mixed_precision,
+            args,
+            train=True,
+            compute_hard_metrics=(
+                val_loader is None and args.best_metric == "loss_hard_uv_selection"
+            ),
         )
         train_metrics["learning_rate"] = epoch_lr
         metrics = {"train": train_metrics}
@@ -1118,7 +1320,17 @@ def main():
         if val_loader is not None:
             with torch.no_grad():
                 val_metrics = run_epoch(
-                    model, criterion, renderer, val_loader, optimizer, scaler, device, args.mixed_precision, args, train=False
+                    model,
+                    criterion,
+                    renderer,
+                    val_loader,
+                    optimizer,
+                    scaler,
+                    device,
+                    args.mixed_precision,
+                    args,
+                    train=False,
+                    compute_hard_metrics=True,
                 )
             metrics["val"] = val_metrics
             metric_source = val_metrics

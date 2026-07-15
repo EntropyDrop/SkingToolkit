@@ -67,6 +67,7 @@ class DenseUVParserNet(nn.Module):
         affine_scale_range=0.0,
         surface_classes=0,
         geometry_only=False,
+        feature_dropout=0.0,
     ):
         super().__init__()
         self.geometry_only = bool(geometry_only)
@@ -79,6 +80,9 @@ class DenseUVParserNet(nn.Module):
         self.affine_translation_scale = float(affine_translation_scale)
         self.affine_scale_range = float(affine_scale_range)
         self.surface_classes = int(surface_classes)
+        self.feature_dropout_probability = float(feature_dropout)
+        if not 0.0 <= self.feature_dropout_probability < 1.0:
+            raise ValueError("feature_dropout must be in [0, 1).")
         c = base_channels
         self.stem = ConvBlock(input_channels + self.view_classes, c)
         self.down1 = DownBlock(c, c * 2)
@@ -92,6 +96,7 @@ class DenseUVParserNet(nn.Module):
             nn.Conv2d(c, c, kernel_size=3, padding=1),
             nn.SiLU(inplace=True),
         )
+        self.feature_dropout = nn.Dropout2d(self.feature_dropout_probability)
         self.foreground = nn.Conv2d(c, 1, kernel_size=1)
         self.layer = nn.Conv2d(c, self.layer_classes, kernel_size=1)
         if not self.geometry_only:
@@ -165,6 +170,7 @@ class DenseUVParserNet(nn.Module):
         x = self.up1(x, s1)
         x = self.up0(x, s0)
         x = self.features(x)
+        x = self.feature_dropout(x)
         outputs = {
             "foreground": self.foreground(x),
             "layer": self.layer(x),
