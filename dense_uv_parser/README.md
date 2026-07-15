@@ -56,7 +56,7 @@ Training previews are saved under `runs/<run>/previews`:
 - `epoch_XXXX.png`: predicted inner/outer RGB rows, followed by GT inner/outer RGB rows.
 - `epoch_XXXX_debug.png`: semantic diagnostics plus fitted inner/outer grids and RGB-filled grid previews.
 
-For good parser splatting, watch `precision_outer`, `recall_outer`, `iou_outer`, `loss_outer_false_positive`, `loss_outer_false_negative`, `loss_soft_uv_outer_recall`, `precision_secondary`, `recall_secondary`, `acc_route_role`, `err_affine_translation_px`, and `err_affine_scale_pct`. `best.pt` defaults to the lowest `loss_outer_selection`, defined as `loss_geometry + 0.75 * (1 - precision_outer) + 0.75 * (1 - recall_outer) + 0.5 * (1 - iou_outer)`. TP/FP/FN are accumulated over the complete validation set before this metric is calculated, so checkpoint selection balances outer precision and recall instead of preferring a parser that suppresses outer skin.
+For good parser splatting, watch `recall_inner`, `precision_outer`, `recall_outer`, `iou_outer`, `loss_outer_false_positive`, `loss_outer_false_negative`, `loss_soft_uv_inner_recall`, `loss_soft_uv_outer_recall`, `precision_secondary`, `recall_secondary`, `acc_route_role`, `err_affine_translation_px`, and `err_affine_scale_pct`. `best.pt` defaults to the lowest `loss_outer_selection`, defined as `loss_geometry + 0.5 * (1 - recall_inner) + 0.75 * (1 - precision_outer) + 0.75 * (1 - recall_outer) + 0.5 * (1 - iou_outer)`. TP/FP/FN are accumulated over the complete validation set before this metric is calculated, so checkpoint selection cannot improve outer scores by deleting small but real inner-layer regions such as eyes and exposed face pixels.
 
 Route-role training uses complementary focal terms. The false-positive term penalizes high-confidence outer predictions on GT inner/secondary pixels, while the false-negative term penalizes visible GT outer pixels that receive too little outer probability. The abundant inner class has a minimum balanced weight of `0.75`, while automatic balancing cannot raise the outer target class above `1.0`. These defaults prevent both fabricated outer skin and systematic loss of real clothing/hat layers without removing secondary-class balancing:
 
@@ -72,18 +72,30 @@ ROUTE_OUTER_CLASS_WEIGHT_CAP=1.0 \
 
 `geometry_fit` training also uses a differentiable photometric branch. Route-role and surface logits are converted to probabilities, softly splatted through the fixed renderer UV candidates, and merged into a provisional skin. That skin is rendered back through the direct inner/outer cuboids for every configured view. Soft-UV RGB/alpha errors and multi-view render RGB/alpha errors are added to the supervised classification losses, so wrong inner/outer or exact-surface choices receive color and silhouette gradients in addition to cross-entropy. Inference remains hard-routed and continues to use exact-color aggregation.
 
-Alpha consistency is weighted more strongly than RGB consistency because a wrong opaque outer texel is more damaging than leaving an uncertain texel for inpainting. In addition, `loss_soft_uv_outer_recall` scatters the visible GT outer pixels into a target outer-layer UV mask and requires the predicted outer-layer alpha to cover it. This supplies a layer-specific gradient where opaque outer clothing lies over opaque inner skin and ordinary render alpha is unchanged:
+Alpha consistency is weighted more strongly than RGB consistency because a wrong opaque outer texel is more damaging than leaving an uncertain texel for inpainting. In addition, the layer-recall losses scatter visible GT inner and outer pixels into separate target UV masks and require the corresponding predicted layer alpha to cover them. `loss_soft_uv_outer_recall` catches opaque clothing routed to inner skin, while `loss_soft_uv_inner_recall` prevents eyes, exposed face pixels, and other small inner regions from drifting into an unusable outer/secondary route. Both supply layer-specific gradients where ordinary merged render alpha is unchanged:
 
 ```bash
 LAMBDA_SOFT_UV_RGB=0.25 \
 LAMBDA_SOFT_UV_ALPHA=0.35 \
+LAMBDA_SOFT_UV_INNER_RECALL=0.50 \
 LAMBDA_SOFT_UV_OUTER_RECALL=0.50 \
 LAMBDA_RENDER_RGB=0.20 \
 LAMBDA_RENDER_ALPHA=0.25 \
 ./run_dense_uv_parser_training.sh
 ```
 
-Set all five values to `0` to recover classification-only training. `loss_differentiable`, `loss_soft_uv_rgb`, `loss_soft_uv_alpha`, `loss_soft_uv_outer_recall`, `loss_render_rgb`, `loss_render_alpha`, `visible_outer_uv_percent`, and `soft_uv_known_percent` are recorded in epoch metrics. The differentiable branch shares one UV atlas across all configured views, providing multi-view consistency without changing the checkpoint architecture.
+Set all six values to `0` to recover classification-only training. `loss_differentiable`, `loss_soft_uv_rgb`, `loss_soft_uv_alpha`, `loss_soft_uv_inner_recall`, `loss_soft_uv_outer_recall`, `loss_render_rgb`, `loss_render_alpha`, `visible_inner_uv_percent`, `visible_outer_uv_percent`, and `soft_uv_known_percent` are recorded in epoch metrics. The differentiable branch shares one UV atlas across all configured views, providing multi-view consistency without changing the checkpoint architecture.
+
+The training wrapper uses an absolute-epoch cosine learning-rate schedule by default. It starts from `LR=2e-4` and reaches `5%` of that value at the final epoch, reducing late-epoch drift after the geometry has already converged. Because the rate is calculated from the checkpoint epoch rather than stored scheduler state, existing checkpoints can resume safely:
+
+```bash
+LR=2e-4 \
+LR_SCHEDULE=cosine \
+MIN_LR_RATIO=0.05 \
+./run_dense_uv_parser_training.sh
+```
+
+Set `LR_SCHEDULE=constant` only for comparison with the former behavior. Inference should use `best.pt`, not `latest.pt`; later preview epochs are diagnostic and are not assumed to improve monotonically.
 
 Predicted geometry routing first estimates a border-connected solid-background mask, then decides the inner/outer/secondary route role with projected-texel consensus. It ranks only the physically valid renderer surface slots that implement the selected role, so a wrong surface logit cannot turn an inner pixel into outer skin or a secondary/back-facing surface. Surface evidence is aggregated inside each projected Minecraft UV texel and blended only into low-margin local decisions; confident pixels remain untouched so real occlusion boundaries are preserved, while isolated ambiguous pixels cannot easily split a face, hat brim, or other texture block between inner and outer layers. Direct inner/outer pixels retain their fixed cuboid mapping, while secondary/deeper pixels use the selected composite or geometry surface mapping. Outer coverage is measured within the direct outer view/surface/UV cell rather than against unrelated surfaces. Composite and geometry slots can be partially occluded, so they rely on exact slot classification and texel consensus instead of an invalid full-mask coverage denominator. For each resulting layer/UV texel it uses the most frequent exact 8-bit RGB value and returns a real source pixel of that color; it never averages colors. Use `COLOR_AGGREGATION=best` during inference only as a diagnostic comparison with the former highest-confidence single-pixel strategy.
 

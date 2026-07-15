@@ -347,7 +347,7 @@ def classification_metrics(outputs, targets, uv_size, use_uv=True):
         metrics["acc_route_role"] = metrics["acc_layer"]
         valid_role = layer_target != IGNORE_INDEX
         pred_role = outputs["layer"].argmax(dim=1)
-        for name, role in (("outer", 1), ("secondary", 2)):
+        for name, role in (("inner", 0), ("outer", 1), ("secondary", 2)):
             target_role = layer_target == role
             predicted_role = pred_role == role
             role_tp = (predicted_role & target_role & valid_role).sum().float()
@@ -356,10 +356,10 @@ def classification_metrics(outputs, targets, uv_size, use_uv=True):
             metrics[f"precision_{name}"] = role_tp / (role_tp + role_fp).clamp_min(1.0)
             metrics[f"recall_{name}"] = role_tp / (role_tp + role_fn).clamp_min(1.0)
             metrics[f"iou_{name}"] = role_tp / (role_tp + role_fp + role_fn).clamp_min(1.0)
-            if name == "outer":
-                metrics["count_outer_tp"] = role_tp
-                metrics["count_outer_fp"] = role_fp
-                metrics["count_outer_fn"] = role_fn
+            if name in ("inner", "outer"):
+                metrics[f"count_{name}_tp"] = role_tp
+                metrics[f"count_{name}_fp"] = role_fp
+                metrics[f"count_{name}_fn"] = role_fn
         valid_layer = torch.zeros_like(valid_role)
     else:
         valid_layer = targets["layer"] != IGNORE_INDEX

@@ -1,5 +1,6 @@
 import argparse
 import json
+import math
 import os
 import sys
 from contextlib import nullcontext
@@ -78,9 +79,25 @@ def configure_torch(args, device):
         torch.backends.cudnn.benchmark = args.cudnn_benchmark
 
 
+def learning_rate_for_epoch(base_lr, epoch, epochs, schedule="cosine", min_lr_ratio=0.05):
+    """Return an absolute-epoch LR so old checkpoints can resume without scheduler state."""
+    if base_lr <= 0:
+        raise ValueError("base_lr must be positive.")
+    if not 0.0 <= min_lr_ratio <= 1.0:
+        raise ValueError("min_lr_ratio must be in [0, 1].")
+    if schedule == "constant" or epochs <= 1:
+        return float(base_lr)
+    if schedule != "cosine":
+        raise ValueError(f"Unsupported learning-rate schedule {schedule!r}.")
+    progress = min(max((epoch - 1) / max(epochs - 1, 1), 0.0), 1.0)
+    cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
+    return float(base_lr) * (min_lr_ratio + (1.0 - min_lr_ratio) * cosine)
+
+
 def format_metrics(
     metric_sums,
     count,
+    inner_recall_weight=0.5,
     outer_precision_weight=0.75,
     outer_recall_weight=0.75,
     outer_iou_weight=0.5,
@@ -95,17 +112,29 @@ def format_metrics(
             else averaged
         )
 
-    count_names = ("count_outer_tp", "count_outer_fp", "count_outer_fn")
-    if all(name in result for name in count_names):
-        outer_tp = result["count_outer_tp"]
-        outer_fp = result["count_outer_fp"]
-        outer_fn = result["count_outer_fn"]
-        result["precision_outer"] = outer_tp / max(outer_tp + outer_fp, 1.0)
-        result["recall_outer"] = outer_tp / max(outer_tp + outer_fn, 1.0)
-        result["iou_outer"] = outer_tp / max(outer_tp + outer_fp + outer_fn, 1.0)
+    for role_name in ("inner", "outer"):
+        count_names = tuple(
+            f"count_{role_name}_{suffix}" for suffix in ("tp", "fp", "fn")
+        )
+        if all(name in result for name in count_names):
+            role_tp = result[f"count_{role_name}_tp"]
+            role_fp = result[f"count_{role_name}_fp"]
+            role_fn = result[f"count_{role_name}_fn"]
+            result[f"precision_{role_name}"] = role_tp / max(
+                role_tp + role_fp, 1.0
+            )
+            result[f"recall_{role_name}"] = role_tp / max(
+                role_tp + role_fn, 1.0
+            )
+            result[f"iou_{role_name}"] = role_tp / max(
+                role_tp + role_fp + role_fn, 1.0
+            )
+
+    if "recall_outer" in result:
         if "loss_geometry" in result:
             result["loss_outer_selection"] = (
                 result["loss_geometry"]
+                + inner_recall_weight * (1.0 - result.get("recall_inner", 1.0))
                 + outer_precision_weight * (1.0 - result["precision_outer"])
                 + outer_recall_weight * (1.0 - result["recall_outer"])
                 + outer_iou_weight * (1.0 - result["iou_outer"])
@@ -248,6 +277,21 @@ def differentiable_geometry_losses(
         .div(alpha_denom)
         .mean()
     )
+    visible_inner_uv = visible_target_layer_uv_mask(
+        targets,
+        layer_index=0,
+        group_size=len(views),
+    ).to(dtype=pred_uv.dtype)
+    visible_inner_uv = visible_inner_uv * gt_alpha
+    pred_inner_alpha = soft_details["layer_alpha"][:, 0:1]
+    inner_recall_denom = visible_inner_uv.sum(dim=(1, 2, 3)).clamp_min(1.0)
+    loss_soft_uv_inner_recall = (
+        ((1.0 - pred_inner_alpha) * visible_inner_uv)
+        .sum(dim=(1, 2, 3))
+        .div(inner_recall_denom)
+        .mean()
+    )
+
     visible_outer_uv = visible_target_layer_uv_mask(
         targets,
         layer_index=1,
@@ -292,9 +336,11 @@ def differentiable_geometry_losses(
     return {
         "loss_soft_uv_rgb": loss_soft_uv_rgb,
         "loss_soft_uv_alpha": loss_soft_uv_alpha,
+        "loss_soft_uv_inner_recall": loss_soft_uv_inner_recall,
         "loss_soft_uv_outer_recall": loss_soft_uv_outer_recall,
         "loss_render_rgb": render_rgb_total / view_count,
         "loss_render_alpha": render_alpha_total / view_count,
+        "visible_inner_uv_percent": visible_inner_uv.float().mean() * 100.0,
         "visible_outer_uv_percent": visible_outer_uv.float().mean() * 100.0,
         "soft_uv_known_percent": (
             (soft_details["support"] > 0.05).float().mean() * 100.0
@@ -338,6 +384,7 @@ def run_epoch(model, criterion, renderer, loader, optimizer, scaler, device, pre
                     for weight in (
                         args.lambda_soft_uv_rgb,
                         args.lambda_soft_uv_alpha,
+                        args.lambda_soft_uv_inner_recall,
                         args.lambda_soft_uv_outer_recall,
                         args.lambda_render_rgb,
                         args.lambda_render_alpha,
@@ -358,15 +405,19 @@ def run_epoch(model, criterion, renderer, loader, optimizer, scaler, device, pre
                     auxiliary = {
                         "loss_soft_uv_rgb": zero,
                         "loss_soft_uv_alpha": zero,
+                        "loss_soft_uv_inner_recall": zero,
                         "loss_soft_uv_outer_recall": zero,
                         "loss_render_rgb": zero,
                         "loss_render_alpha": zero,
                         "soft_uv_known_percent": zero,
+                        "visible_inner_uv_percent": zero,
                         "visible_outer_uv_percent": zero,
                     }
                 weighted_auxiliary = (
                     args.lambda_soft_uv_rgb * auxiliary["loss_soft_uv_rgb"]
                     + args.lambda_soft_uv_alpha * auxiliary["loss_soft_uv_alpha"]
+                    + args.lambda_soft_uv_inner_recall
+                    * auxiliary["loss_soft_uv_inner_recall"]
                     + args.lambda_soft_uv_outer_recall
                     * auxiliary["loss_soft_uv_outer_recall"]
                     + args.lambda_render_rgb * auxiliary["loss_render_rgb"]
@@ -405,6 +456,7 @@ def run_epoch(model, criterion, renderer, loader, optimizer, scaler, device, pre
             avg = format_metrics(
                 metric_sums,
                 sample_count,
+                inner_recall_weight=args.inner_selection_recall_weight,
                 outer_precision_weight=args.outer_selection_precision_weight,
                 outer_recall_weight=args.outer_selection_recall_weight,
                 outer_iou_weight=args.outer_selection_iou_weight,
@@ -432,6 +484,7 @@ def run_epoch(model, criterion, renderer, loader, optimizer, scaler, device, pre
     return format_metrics(
         metric_sums,
         sample_count,
+        inner_recall_weight=args.inner_selection_recall_weight,
         outer_precision_weight=args.outer_selection_precision_weight,
         outer_recall_weight=args.outer_selection_recall_weight,
         outer_iou_weight=args.outer_selection_iou_weight,
@@ -715,6 +768,13 @@ def build_arg_parser():
     parser.add_argument("--prefetch_factor", type=int, default=4)
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument(
+        "--lr_schedule",
+        choices=["constant", "cosine"],
+        default="cosine",
+        help="Absolute-epoch schedule; cosine is resume-safe and reduces late-epoch drift.",
+    )
+    parser.add_argument("--min_lr_ratio", type=float, default=0.05)
     parser.add_argument("--weight_decay", type=float, default=1e-4)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--mixed_precision", choices=["no", "fp16", "bf16"], default="bf16")
@@ -766,12 +826,14 @@ def build_arg_parser():
     parser.add_argument("--route_outer_class_weight_cap", type=float, default=1.0)
     parser.add_argument("--lambda_soft_uv_rgb", type=float, default=0.25)
     parser.add_argument("--lambda_soft_uv_alpha", type=float, default=0.35)
+    parser.add_argument("--lambda_soft_uv_inner_recall", type=float, default=0.50)
     parser.add_argument("--lambda_soft_uv_outer_recall", type=float, default=0.50)
     parser.add_argument("--lambda_render_rgb", type=float, default=0.20)
     parser.add_argument("--lambda_render_alpha", type=float, default=0.25)
     parser.add_argument("--outer_selection_precision_weight", type=float, default=0.75)
     parser.add_argument("--outer_selection_recall_weight", type=float, default=0.75)
     parser.add_argument("--outer_selection_iou_weight", type=float, default=0.5)
+    parser.add_argument("--inner_selection_recall_weight", type=float, default=0.5)
     parser.add_argument(
         "--render_softmax_temperature",
         type=float,
@@ -808,12 +870,17 @@ def main():
     differentiable_weights = (
         args.lambda_soft_uv_rgb,
         args.lambda_soft_uv_alpha,
+        args.lambda_soft_uv_inner_recall,
         args.lambda_soft_uv_outer_recall,
         args.lambda_render_rgb,
         args.lambda_render_alpha,
     )
     if any(weight < 0 for weight in differentiable_weights):
         raise ValueError("Differentiable parser loss weights must be non-negative.")
+    if args.lr <= 0:
+        raise ValueError("--lr must be positive.")
+    if not 0.0 <= args.min_lr_ratio <= 1.0:
+        raise ValueError("--min_lr_ratio must be in [0, 1].")
     if args.lambda_outer_false_positive < 0:
         raise ValueError("--lambda_outer_false_positive must be non-negative.")
     if args.lambda_outer_false_negative < 0:
@@ -830,6 +897,7 @@ def main():
         args.outer_selection_precision_weight < 0
         or args.outer_selection_recall_weight < 0
         or args.outer_selection_iou_weight < 0
+        or args.inner_selection_recall_weight < 0
     ):
         raise ValueError("Outer checkpoint-selection weights must be non-negative.")
     if args.render_softmax_temperature <= 0:
@@ -998,6 +1066,9 @@ def main():
         "geometry_only": geometry_only,
         "arm_model": "steve",
         "best_metric": args.best_metric,
+        "base_learning_rate": args.lr,
+        "lr_schedule": args.lr_schedule,
+        "min_lr_ratio": args.min_lr_ratio,
         "augment": args.augment,
         "augment_validation": args.augment_validation,
         "background_augment": args.background_augment,
@@ -1008,6 +1079,7 @@ def main():
         "affine_refine_scale": args.affine_refine_scale,
         "lambda_soft_uv_rgb": args.lambda_soft_uv_rgb,
         "lambda_soft_uv_alpha": args.lambda_soft_uv_alpha,
+        "lambda_soft_uv_inner_recall": args.lambda_soft_uv_inner_recall,
         "lambda_soft_uv_outer_recall": args.lambda_soft_uv_outer_recall,
         "lambda_render_rgb": args.lambda_render_rgb,
         "lambda_render_alpha": args.lambda_render_alpha,
@@ -1020,6 +1092,7 @@ def main():
         "outer_selection_precision_weight": args.outer_selection_precision_weight,
         "outer_selection_recall_weight": args.outer_selection_recall_weight,
         "outer_selection_iou_weight": args.outer_selection_iou_weight,
+        "inner_selection_recall_weight": args.inner_selection_recall_weight,
         "render_softmax_temperature": args.render_softmax_temperature,
     }
     with open(output_dir / "config.json", "w", encoding="utf-8") as handle:
@@ -1027,9 +1100,19 @@ def main():
     print(json.dumps(metadata, indent=2))
 
     for epoch in range(start_epoch, args.epochs + 1):
+        epoch_lr = learning_rate_for_epoch(
+            args.lr,
+            epoch,
+            args.epochs,
+            schedule=args.lr_schedule,
+            min_lr_ratio=args.min_lr_ratio,
+        )
+        for param_group in optimizer.param_groups:
+            param_group["lr"] = epoch_lr
         train_metrics = run_epoch(
             model, criterion, renderer, train_loader, optimizer, scaler, device, args.mixed_precision, args, train=True
         )
+        train_metrics["learning_rate"] = epoch_lr
         metrics = {"train": train_metrics}
         metric_source = train_metrics
         if val_loader is not None:

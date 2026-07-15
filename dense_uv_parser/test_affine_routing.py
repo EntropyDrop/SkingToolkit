@@ -180,7 +180,10 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         self.assertEqual(parser_args.lambda_render_alpha, 0.25)
         self.assertGreater(parser_args.lambda_outer_false_positive, 0.0)
         self.assertGreater(parser_args.lambda_outer_false_negative, 0.0)
+        self.assertEqual(parser_args.lambda_soft_uv_inner_recall, 0.50)
         self.assertEqual(parser_args.lambda_soft_uv_outer_recall, 0.50)
+        self.assertEqual(parser_args.lr_schedule, "cosine")
+        self.assertEqual(parser_args.min_lr_ratio, 0.05)
         self.assertEqual(parser_args.route_class_weight_floor, 0.75)
         self.assertEqual(parser_args.route_outer_class_weight_cap, 1.0)
         self.assertEqual(parser_args.best_metric, "loss_outer_selection")
@@ -621,26 +624,78 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         self.assertGreater(float(losses["loss_soft_uv_outer_recall"].detach()), 0.9)
         self.assertLess(float(role_logits.grad[0, 1, 0, 0]), 0.0)
 
+    def test_soft_uv_inner_recall_backpropagates_when_inner_is_routed_outer(self):
+        renderer = FakeRenderer(valid_pixels=1)
+        renderer.front_outer_mask.copy_(renderer.front_inner_mask)
+        rendered = torch.zeros(1, 4, 8, 8)
+        rendered[:, 0, 0, 0] = 1.0
+        rendered[:, 3] = 1.0
+        role_logits = torch.full((1, 3, 8, 8), -5.0)
+        role_logits[:, 1] = 5.0
+        role_logits.requires_grad_()
+        outputs = {
+            "foreground": torch.full((1, 1, 8, 8), 10.0),
+            "layer": role_logits,
+            "surface": torch.zeros(1, 2, 8, 8),
+            "affine": torch.zeros(1, 3),
+        }
+        targets = {
+            "layer": torch.full((1, 8, 8), IGNORE_INDEX, dtype=torch.long),
+            "uv": torch.zeros(1, 2, 8, 8),
+        }
+        targets["layer"][0, 0, 0] = 0
+        gt_uv = torch.zeros(1, 4, 64, 64)
+        gt_uv[0, 3, 0, 0] = 1.0
+
+        losses = parser_train.differentiable_geometry_losses(
+            rendered,
+            gt_uv,
+            outputs,
+            targets,
+            renderer,
+            ["front"],
+            canonicalize=False,
+        )
+        losses["loss_soft_uv_inner_recall"].backward()
+
+        self.assertGreater(float(losses["loss_soft_uv_inner_recall"].detach()), 0.9)
+        self.assertLess(float(role_logits.grad[0, 0, 0, 0]), 0.0)
+
+    def test_cosine_learning_rate_reduces_late_epoch_updates(self):
+        first = parser_train.learning_rate_for_epoch(2e-4, 1, 30)
+        middle = parser_train.learning_rate_for_epoch(2e-4, 18, 30)
+        last = parser_train.learning_rate_for_epoch(2e-4, 30, 30)
+
+        self.assertAlmostEqual(first, 2e-4)
+        self.assertGreater(first, middle)
+        self.assertGreater(middle, last)
+        self.assertAlmostEqual(last, 1e-5)
+
     def test_outer_selection_metric_uses_global_precision_and_iou(self):
         metrics = parser_train.format_metrics(
             {
                 "loss_geometry": torch.tensor(20.0),
+                "count_inner_tp": torch.tensor(9.0),
+                "count_inner_fp": torch.tensor(1.0),
+                "count_inner_fn": torch.tensor(1.0),
                 "count_outer_tp": torch.tensor(8.0),
                 "count_outer_fp": torch.tensor(2.0),
                 "count_outer_fn": torch.tensor(2.0),
             },
             count=10,
+            inner_recall_weight=0.5,
             outer_precision_weight=0.75,
             outer_recall_weight=0.75,
             outer_iou_weight=0.5,
         )
 
         self.assertAlmostEqual(metrics["loss_geometry"], 2.0)
+        self.assertAlmostEqual(metrics["recall_inner"], 0.9)
         self.assertAlmostEqual(metrics["precision_outer"], 0.8)
         self.assertAlmostEqual(metrics["iou_outer"], 2.0 / 3.0)
         self.assertAlmostEqual(
             metrics["loss_outer_selection"],
-            2.0 + 0.15 + 0.15 + 1.0 / 6.0,
+            2.0 + 0.05 + 0.15 + 0.15 + 1.0 / 6.0,
         )
 
     def test_global_model_emits_surface_and_affine_losses(self):
