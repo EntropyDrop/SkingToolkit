@@ -20,7 +20,7 @@ class ResidualDownBlock(nn.Module):
 
 
 class FixedViewEncoder(nn.Module):
-    """Shared encoder for each fixed render view."""
+    """Shared encoder returning both texel-detail and semantic feature maps."""
 
     def __init__(self, base_channels=32, token_channels=128):
         super().__init__()
@@ -43,8 +43,9 @@ class FixedViewEncoder(nn.Module):
         features = torch.cat([image, coords], dim=1)
         features = self.stem(features)
         features = self.down1(features)
-        features = self.down2(features)
-        return self.down3(features)
+        detail_features = self.down2(features)
+        coarse_features = self.down3(detail_features)
+        return coarse_features, detail_features
 
 
 class UVQueryBlock(nn.Module):
@@ -83,12 +84,21 @@ class UVQueryBlock(nn.Module):
 
 
 class UVUpsampleBlock(nn.Module):
+    """Learn a separate feature vector for every 2x2 output texel block.
+
+    Bilinear interpolation irreversibly averages neighboring UV query features,
+    which is especially damaging for Minecraft pixel art. PixelShuffle lets each
+    coarse query decode four distinct child texels without interpolation blur.
+    """
+
     def __init__(self, in_channels, out_channels):
         super().__init__()
-        self.block = ConvBlock(in_channels, out_channels)
+        self.expand = nn.Conv2d(in_channels, out_channels * 4, kernel_size=3, padding=1)
+        self.shuffle = nn.PixelShuffle(2)
+        self.block = ConvBlock(out_channels, out_channels)
 
     def forward(self, x):
-        x = F.interpolate(x, scale_factor=2.0, mode="bilinear", align_corners=False)
+        x = self.shuffle(self.expand(x))
         return self.block(x)
 
 
@@ -106,7 +116,7 @@ class SemanticUVReconstructor(nn.Module):
         view_count=2,
         base_channels=32,
         token_channels=128,
-        query_size=16,
+        query_size=32,
         attention_heads=4,
         attention_layers=2,
         attention_dropout=0.0,
@@ -137,10 +147,17 @@ class SemanticUVReconstructor(nn.Module):
         self.semantic_classes = int(semantic_classes)
         self.semantic_backbone_name = str(semantic_backbone)
         self.siglip_model = str(siglip_model)
+        self.architecture_version = 2
 
         self.encoder = FixedViewEncoder(base_channels, token_channels)
+        self.detail_projection = nn.Sequential(
+            nn.Conv2d(base_channels * 4, token_channels, kernel_size=1),
+            nn.GroupNorm(norm_groups(token_channels), token_channels),
+            nn.SiLU(inplace=True),
+        )
         self.view_embedding = nn.Parameter(torch.randn(view_count, token_channels) * 0.02)
-        self.source_embedding = nn.Parameter(torch.randn(2, token_channels) * 0.02)
+        # Coarse CNN, high-resolution CNN detail, and SigLIP2 are distinct sources.
+        self.source_embedding = nn.Parameter(torch.randn(3, token_channels) * 0.02)
         if open_semantic_backbone is not None:
             self.open_semantic_backbone = open_semantic_backbone
             self.semantic_backbone_name = "injected"
@@ -224,25 +241,40 @@ class SemanticUVReconstructor(nn.Module):
         if views != self.view_count:
             raise ValueError(f"Expected {self.view_count} views, got {views}.")
 
-        encoded = self.encoder(images.reshape(batch * views, channels, height, width))
+        encoded, detail_encoded = self.encoder(
+            images.reshape(batch * views, channels, height, width)
+        )
         _, token_channels, feature_height, feature_width = encoded.shape
-        cnn_memory = encoded.flatten(2).transpose(1, 2)
-        cnn_memory = cnn_memory.reshape(
+        coarse_memory = encoded.flatten(2).transpose(1, 2)
+        coarse_memory = coarse_memory.reshape(
             batch, views, feature_height * feature_width, token_channels
         )
-        cnn_memory = (
-            cnn_memory
+        coarse_memory = (
+            coarse_memory
             + self.view_embedding.view(1, views, 1, token_channels)
             + self.source_embedding[0].view(1, 1, 1, token_channels)
         )
-        cnn_memory = cnn_memory.reshape(
+        coarse_memory = coarse_memory.reshape(
             batch, views * feature_height * feature_width, token_channels
         )
-        memory_parts = [cnn_memory]
+
+        detail_encoded = self.detail_projection(detail_encoded)
+        detail_height, detail_width = detail_encoded.shape[-2:]
+        detail_memory = detail_encoded.flatten(2).transpose(1, 2).reshape(
+            batch, views, detail_height * detail_width, token_channels
+        )
+        detail_memory = (
+            detail_memory
+            + self.view_embedding.view(1, views, 1, token_channels)
+            + self.source_embedding[1].view(1, 1, 1, token_channels)
+        ).reshape(batch, views * detail_height * detail_width, token_channels)
+
+        memory_parts = [detail_memory, coarse_memory]
         memory_valid_parts = [
-            torch.ones(cnn_memory.shape[:2], dtype=torch.bool, device=images.device)
+            torch.ones(detail_memory.shape[:2], dtype=torch.bool, device=images.device),
+            torch.ones(coarse_memory.shape[:2], dtype=torch.bool, device=images.device),
         ]
-        semantic_seed = cnn_memory.mean(dim=1)
+        semantic_seed = coarse_memory.mean(dim=1)
         open_semantic_embedding = None
         if self.open_semantic_backbone is not None:
             open_features = self.open_semantic_backbone(
@@ -252,7 +284,7 @@ class SemanticUVReconstructor(nn.Module):
             open_tokens = (
                 open_tokens
                 + self.view_embedding.view(1, views, 1, token_channels)
-                + self.source_embedding[1].view(1, 1, 1, token_channels)
+                + self.source_embedding[2].view(1, 1, 1, token_channels)
             )
             open_tokens = open_tokens.reshape(batch, -1, token_channels)
             open_token_mask = open_features["token_mask"].reshape(batch, -1)

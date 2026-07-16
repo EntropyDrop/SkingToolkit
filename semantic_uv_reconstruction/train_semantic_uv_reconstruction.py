@@ -232,6 +232,7 @@ def save_checkpoint(path, model, optimizer, scaler, epoch, args, metrics):
             "attention_layers": model.attention_layers,
             "attention_dropout": model.attention_dropout,
             "semantic_classes": model.semantic_classes,
+            "architecture_version": model.architecture_version,
             "semantic_backbone": model.semantic_backbone_name,
             "siglip_model": model.siglip_model,
             "views": parse_views(args.views),
@@ -266,11 +267,11 @@ def build_arg_parser():
     parser.add_argument("--siglip_local_files_only", action="store_true")
     parser.add_argument("--base_channels", type=int, default=32)
     parser.add_argument("--token_channels", type=int, default=128)
-    parser.add_argument("--query_size", type=int, default=16)
+    parser.add_argument("--query_size", type=int, default=32)
     parser.add_argument("--attention_heads", type=int, default=4)
     parser.add_argument("--attention_layers", type=int, default=2)
     parser.add_argument("--attention_dropout", type=float, default=0.0)
-    parser.add_argument("--batch_size", type=int, default=4)
+    parser.add_argument("--batch_size", type=int, default=2)
     parser.add_argument("--num_workers", type=int, default=8)
     parser.add_argument("--prefetch_factor", type=int, default=4)
     parser.add_argument("--epochs", type=int, default=30)
@@ -286,7 +287,8 @@ def build_arg_parser():
     parser.add_argument("--resume", default=None)
     parser.add_argument("--save_every", type=int, default=1)
     parser.add_argument("--preview_every", type=int, default=1)
-    parser.add_argument("--lambda_uv_rgb", type=float, default=1.0)
+    parser.add_argument("--lambda_uv_rgb", type=float, default=2.0)
+    parser.add_argument("--lambda_uv_edge", type=float, default=1.0)
     parser.add_argument("--lambda_outer_alpha", type=float, default=1.0)
     parser.add_argument("--lambda_outer_dice", type=float, default=0.5)
     parser.add_argument("--lambda_semantic_uv", type=float, default=0.25)
@@ -389,6 +391,7 @@ def main():
     ).to(device)
     criterion = SemanticUVReconstructionLoss(
         lambda_uv_rgb=args.lambda_uv_rgb,
+        lambda_uv_edge=args.lambda_uv_edge,
         lambda_outer_alpha=args.lambda_outer_alpha,
         lambda_outer_dice=args.lambda_outer_dice,
         lambda_semantic_uv=args.lambda_semantic_uv,
@@ -414,6 +417,8 @@ def main():
         expected = {
             "views": views,
             "semantic_classes": args.semantic_classes,
+            "architecture_version": model.architecture_version,
+            "query_size": args.query_size,
             "semantic_backbone": args.semantic_backbone,
             "siglip_model": args.siglip_model,
         }
@@ -438,11 +443,15 @@ def main():
         "device": str(device),
         "fixed_render_training": True,
         "render_augmentation": False,
+        "architecture_version": model.architecture_version,
         "semantic_classes": args.semantic_classes,
         "semantic_backbone": args.semantic_backbone,
         "siglip_model": args.siglip_model,
         "siglip_frozen": model.has_open_semantics,
         "lambda_siglip_render": args.lambda_siglip_render,
+        "lambda_uv_rgb": args.lambda_uv_rgb,
+        "lambda_uv_edge": args.lambda_uv_edge,
+        "query_size": args.query_size,
         "base_learning_rate": args.lr,
         "min_lr_ratio": args.min_lr_ratio,
     }

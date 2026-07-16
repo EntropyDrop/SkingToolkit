@@ -7,6 +7,11 @@ render-to-UV trainer and the compatible parser-conditioned completion trainer.
 The former fuses a high-resolution CNN with frozen SigLIP2 features; the latter
 retains `UVInpaintingNet` so existing checkpoints remain usable.
 
+The direct reconstructor's architecture version 2 uses `/8` CNN detail memory,
+32x32 learned UV queries, PixelShuffle upsampling, and UV RGB edge supervision.
+Version-1 direct checkpoints used 16x16 queries and bilinear upsampling and must
+not be resumed into version 2.
+
 ## Commands
 
 From the workspace root:

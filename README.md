@@ -65,7 +65,10 @@ predicts the complete atlas directly. It fuses a high-resolution CNN with a
 frozen, language-aligned SigLIP2 vision tower, uses source-skin-derived
 structural attributes and differentiable pixel/semantic re-render losses, and
 has no finite garment concept table. This path does not require a parser
-checkpoint and currently applies no randomized render variation.
+checkpoint and currently applies no randomized render variation. Its current
+architecture uses `/8` local-detail tokens, a 32x32 UV query grid, a learned
+PixelShuffle decoder, and UV edge supervision to preserve Minecraft texel
+boundaries instead of averaging them during upsampling.
 
 ### `renderer.py`
 

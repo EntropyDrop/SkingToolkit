@@ -120,6 +120,7 @@ class SemanticUVModelTest(unittest.TestCase):
         self.assertEqual(outputs["semantic_uv_logits"].shape, (2, 13, 64, 64))
         self.assertEqual(outputs["outer_presence_logits"].shape, (2, 6))
         self.assertEqual(outputs["part_colors"].shape, (2, 12, 3))
+        self.assertTrue(any(isinstance(layer, nn.PixelShuffle) for layer in model.decoder.modules()))
         base = model.base_mask.bool().expand(2, -1, -1, -1)
         invalid = ~(model.base_mask.bool() | model.decor_mask.bool())
         invalid = invalid.expand(2, -1, -1, -1)
@@ -162,6 +163,11 @@ class SemanticUVModelTest(unittest.TestCase):
         metrics["loss_total"].backward()
         self.assertIsNotNone(model.rgb_head.weight.grad)
         self.assertGreater(float(model.rgb_head.weight.grad.abs().sum()), 0.0)
+        detail_grad = model.detail_projection[0].weight.grad
+        self.assertIsNotNone(detail_grad)
+        self.assertGreater(float(detail_grad.abs().sum()), 0.0)
+        self.assertIn("loss_uv_edge", metrics)
+        self.assertIn("rgb_mae_255", metrics)
 
     def test_open_semantic_fusion_and_render_cycle_are_differentiable(self):
         backbone = FakeOpenSemanticBackbone(token_channels=32)
@@ -176,6 +182,7 @@ class SemanticUVModelTest(unittest.TestCase):
         )
         criterion = SemanticUVReconstructionLoss(
             lambda_uv_rgb=0.0,
+            lambda_uv_edge=0.0,
             lambda_outer_alpha=0.0,
             lambda_outer_dice=0.0,
             lambda_semantic_uv=0.0,

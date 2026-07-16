@@ -152,13 +152,16 @@ mapping directly from clean, fixed front/back renders. It does not consume
 `dense_uv_parser` conditioning and does not measure the rendered cuboid to decide
 the layer. Each view passes through two complementary branches:
 
-- a trainable high-resolution CNN that preserves grid edges, colors, and exact
-  local texture;
+- a trainable high-resolution CNN whose `/8` detail tokens preserve grid edges,
+  colors, and exact local texture, alongside coarser `/16` context tokens;
 - a frozen SigLIP2 vision tower that supplies continuous, language-aligned
   patch and global features without defining a garment vocabulary.
 
-Learned UV queries jointly attend to both branches from both views, and the
-decoder predicts the complete 64x64 RGBA atlas. SigLIP2 is not used to generate
+Learned UV queries jointly attend to both branches from both views. Architecture
+version 2 uses a 32x32 UV query grid and a learned PixelShuffle decoder to reach
+64x64; it does not bilinearly enlarge 16x16 features. Full-UV RGB supervision is
+weighted more strongly and an explicit UV RGB-gradient loss penalizes blurred
+texel boundaries. SigLIP2 is not used to generate
 captions or closed labels. Concepts such as caps, hoods, scarves, unusual
 costumes, and concepts absent from the skin dataset remain positions in the
 continuous pretrained embedding space rather than entries in a finite table.
@@ -231,6 +234,14 @@ preview rows are
 the input views, predicted UV, ground-truth UV, predicted outer alpha, and
 ground-truth outer alpha.
 
+Architecture version 2 is intentionally incompatible with checkpoints created
+by the former 16x16-query/bilinear decoder. Do not set `RESUME` to one of those
+checkpoints: start a new versioned run. The startup summary must show
+`"architecture_version": 2`, `"query_size": 32`, `"lambda_uv_rgb": 2.0`, and
+`"lambda_uv_edge": 1.0`. Epoch metrics additionally report `loss_uv_edge` and
+`rgb_mae_255`; the latter is the occupied-texel RGB MAE expressed on a 0-255
+scale and should keep falling along with visual sharpness.
+
 ### Remote training environment
 
 The default semantic backbone is the frozen FixRes checkpoint
@@ -254,8 +265,9 @@ SIGLIP_LOCAL_FILES_ONLY=true ./run_semantic_uv_reconstruction_training.sh
 
 The frozen SigLIP2 weights are deliberately excluded from each epoch
 checkpoint; resuming reloads them from the Hugging Face cache and restores only
-the trainable CNN, fusion, query, and decoder weights. The default batch size is
-4. If the extra semantic re-render pass exceeds available VRAM, first reduce
+the trainable CNN, fusion, query, and decoder weights. Because the 32x32 query
+grid and `/8` detail memory use more VRAM, the default batch size is 2. If the
+extra semantic re-render pass exceeds available VRAM, first reduce
 `BATCH_SIZE`; as a fallback set `LAMBDA_SIGLIP_RENDER=0` while retaining SigLIP2
 tokens in the forward model. For a dependency-free structural ablation use:
 

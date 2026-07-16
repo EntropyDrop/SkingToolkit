@@ -3,7 +3,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from SkingToolkit.semantic_uv_reconstruction.dataset import load_uv_masks
-from SkingToolkit.semantic_uv_reconstruction.losses import alpha_dice_loss, alpha_masked_rgb_l1, minecraft_layer_rects
+from SkingToolkit.semantic_uv_reconstruction.losses import (
+    alpha_dice_loss,
+    alpha_masked_rgb_l1,
+    edge_l1,
+    minecraft_layer_rects,
+)
 
 
 IGNORE_INDEX = 255
@@ -76,7 +81,8 @@ def build_semantic_attribute_targets(target_uv, inner_part_masks, outer_part_mas
 class SemanticUVReconstructionLoss(nn.Module):
     def __init__(
         self,
-        lambda_uv_rgb=1.0,
+        lambda_uv_rgb=2.0,
+        lambda_uv_edge=1.0,
         lambda_outer_alpha=1.0,
         lambda_outer_dice=0.5,
         lambda_semantic_uv=0.25,
@@ -89,6 +95,7 @@ class SemanticUVReconstructionLoss(nn.Module):
     ):
         super().__init__()
         self.lambda_uv_rgb = float(lambda_uv_rgb)
+        self.lambda_uv_edge = float(lambda_uv_edge)
         self.lambda_outer_alpha = float(lambda_outer_alpha)
         self.lambda_outer_dice = float(lambda_outer_dice)
         self.lambda_semantic_uv = float(lambda_semantic_uv)
@@ -101,6 +108,7 @@ class SemanticUVReconstructionLoss(nn.Module):
 
         weights = (
             self.lambda_uv_rgb,
+            self.lambda_uv_edge,
             self.lambda_outer_alpha,
             self.lambda_outer_dice,
             self.lambda_semantic_uv,
@@ -139,6 +147,7 @@ class SemanticUVReconstructionLoss(nn.Module):
         zero = pred_uv.new_zeros((), dtype=torch.float32)
         valid_mask = (self.base_mask + self.decor_mask).clamp(0.0, 1.0)
         loss_uv_rgb = alpha_masked_rgb_l1(pred_uv, target_uv, valid_mask)
+        loss_uv_edge = edge_l1(pred_uv, target_uv, valid_mask)
 
         target_alpha = target_uv[:, 3:4]
         alpha_bce = F.binary_cross_entropy_with_logits(
@@ -247,6 +256,7 @@ class SemanticUVReconstructionLoss(nn.Module):
         )
         loss_total = (
             self.lambda_uv_rgb * loss_uv_rgb
+            + self.lambda_uv_edge * loss_uv_edge
             + self.lambda_outer_alpha * loss_outer_alpha
             + self.lambda_outer_dice * loss_outer_dice
             + loss_semantic
@@ -266,6 +276,8 @@ class SemanticUVReconstructionLoss(nn.Module):
         return {
             "loss_total": loss_total,
             "loss_uv_rgb": loss_uv_rgb,
+            "loss_uv_edge": loss_uv_edge,
+            "rgb_mae_255": loss_uv_rgb.detach() * 255.0,
             "loss_outer_alpha": loss_outer_alpha,
             "loss_outer_dice": loss_outer_dice,
             "loss_semantic": loss_semantic,
