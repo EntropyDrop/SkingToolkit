@@ -147,7 +147,11 @@ Use the latest parser checkpoint automatically:
 ./run_infer.sh
 ```
 
-By default it looks for the highest `runs/dense_uv_parser_v*/best.pt`, then the highest `../semantic_uv_reconstruction/runs/semantic_uv_reconstruction_topology_maskgit_v*/best.pt`. It writes:
+By default it first selects the highest topology-completion version, then reads
+that run's `config.json` and reuses the exact parser checkpoint used during
+training. If the recorded path is unavailable, it falls back to the highest
+`dense_uv_parser*_vN/best.pt`, then the newest compatible `best.pt` or
+`latest.pt`. The launcher prints both selected paths before inference. It writes:
 
 - `outputs/parser_conditioning.png`
 - `outputs/parser_pred_uv.png`: preliminary 64x64 RGBA skin merged directly from known parser conditioning texels

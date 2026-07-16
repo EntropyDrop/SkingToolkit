@@ -31,21 +31,72 @@ find_latest_checkpoint() {
   printf '%s\n' "$best_checkpoint"
 }
 
+find_latest_family_checkpoint() {
+  local root="$1"
+  local family="$2"
+  local checkpoint_name="$3"
+  local best_v=-1
+  local best_checkpoint=""
+  local dir base v
+
+  shopt -s nullglob
+  for dir in "$root"/"${family}"*; do
+    [[ -d "$dir" && -f "$dir/$checkpoint_name" ]] || continue
+    base="$(basename "$dir")"
+    if [[ "$base" =~ _v([0-9]+)$ ]]; then
+      v=$((10#${BASH_REMATCH[1]}))
+      if (( v > best_v )); then
+        best_v="$v"
+        best_checkpoint="$dir/$checkpoint_name"
+      fi
+    elif [[ -z "$best_checkpoint" ]]; then
+      best_checkpoint="$dir/$checkpoint_name"
+    elif [[ "$dir/$checkpoint_name" -nt "$best_checkpoint" && $best_v -lt 0 ]]; then
+      best_checkpoint="$dir/$checkpoint_name"
+    fi
+  done
+  shopt -u nullglob
+
+  printf '%s\n' "$best_checkpoint"
+}
+
+parser_checkpoint_from_inpaint_config() {
+  local inpaint_checkpoint="$1"
+  local config_path
+  local recorded
+  local candidate
+
+  [[ -n "$inpaint_checkpoint" ]] || return 0
+  config_path="$(dirname "$inpaint_checkpoint")/config.json"
+  [[ -f "$config_path" ]] || return 0
+  recorded="$($PYTHON_BIN -c '
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    config = json.load(handle)
+print(
+    config.get("metadata", {}).get("parser_checkpoint")
+    or config.get("args", {}).get("parser_checkpoint")
+    or ""
+)
+' "$config_path")"
+  [[ -n "$recorded" ]] || return 0
+
+  # Relative parser paths were recorded from semantic_uv_reconstruction/, while
+  # this launcher runs from dense_uv_parser/. Try both working directories.
+  for candidate in \
+    "$recorded" \
+    "../semantic_uv_reconstruction/$recorded" \
+    "../$recorded"; do
+    if [[ -f "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+}
+
 PYTHON_BIN="${PYTHON_BIN:-python}"
-
-PARSER_RUNS_DIR="${PARSER_RUNS_DIR:-runs}"
-PARSER_RUN_PREFIX="${PARSER_RUN_PREFIX:-dense_uv_parser_v}"
-PARSER_CHECKPOINT_NAME="${PARSER_CHECKPOINT_NAME:-best.pt}"
-PARSER_CHECKPOINT="${PARSER_CHECKPOINT:-${CHECKPOINT:-}}"
-
-if [[ -z "$PARSER_CHECKPOINT" ]]; then
-  PARSER_CHECKPOINT="$(find_latest_checkpoint "$PARSER_RUNS_DIR" "$PARSER_RUN_PREFIX" "$PARSER_CHECKPOINT_NAME")"
-fi
-if [[ -z "$PARSER_CHECKPOINT" ]]; then
-  echo "No parser checkpoint found under ${PARSER_RUNS_DIR}/${PARSER_RUN_PREFIX}*/${PARSER_CHECKPOINT_NAME}." >&2
-  echo "Train one first with ./run_dense_uv_parser_training.sh or set PARSER_CHECKPOINT=/path/to/best.pt." >&2
-  exit 1
-fi
 
 INPAINT_MODEL="${INPAINT_MODEL:-topology_maskgit}"
 INPAINT_RUNS_DIR="${INPAINT_RUNS_DIR:-../semantic_uv_reconstruction/runs}"
@@ -56,6 +107,47 @@ if [[ "$INPAINT_CHECKPOINT" == "none" ]]; then
   INPAINT_CHECKPOINT=""
 elif [[ -z "$INPAINT_CHECKPOINT" ]]; then
   INPAINT_CHECKPOINT="$(find_latest_checkpoint "$INPAINT_RUNS_DIR" "$INPAINT_RUN_PREFIX" "$INPAINT_CHECKPOINT_NAME")"
+  if [[ -z "$INPAINT_CHECKPOINT" ]]; then
+    INPAINT_CHECKPOINT="$(find_latest_family_checkpoint "$INPAINT_RUNS_DIR" "semantic_uv_reconstruction_${INPAINT_MODEL}" "$INPAINT_CHECKPOINT_NAME")"
+  fi
+fi
+if [[ -n "$INPAINT_CHECKPOINT" && ! -f "$INPAINT_CHECKPOINT" ]]; then
+  echo "Inpaint checkpoint not found: $INPAINT_CHECKPOINT" >&2
+  exit 1
+fi
+
+PARSER_RUNS_DIR="${PARSER_RUNS_DIR:-runs}"
+PARSER_RUN_PREFIX="${PARSER_RUN_PREFIX:-dense_uv_parser_v}"
+PARSER_CHECKPOINT_NAME="${PARSER_CHECKPOINT_NAME:-best.pt}"
+PARSER_CHECKPOINT="${PARSER_CHECKPOINT:-${CHECKPOINT:-}}"
+
+if [[ -z "$PARSER_CHECKPOINT" ]]; then
+  PARSER_CHECKPOINT="$(parser_checkpoint_from_inpaint_config "$INPAINT_CHECKPOINT")"
+fi
+if [[ -z "$PARSER_CHECKPOINT" ]]; then
+  PARSER_CHECKPOINT="$(find_latest_checkpoint "$PARSER_RUNS_DIR" "$PARSER_RUN_PREFIX" "$PARSER_CHECKPOINT_NAME")"
+fi
+if [[ -z "$PARSER_CHECKPOINT" ]]; then
+  PARSER_CHECKPOINT="$(find_latest_family_checkpoint "$PARSER_RUNS_DIR" "dense_uv_parser" "$PARSER_CHECKPOINT_NAME")"
+fi
+if [[ -z "$PARSER_CHECKPOINT" && "$PARSER_CHECKPOINT_NAME" != "latest.pt" ]]; then
+  PARSER_CHECKPOINT="$(find_latest_family_checkpoint "$PARSER_RUNS_DIR" "dense_uv_parser" "latest.pt")"
+fi
+if [[ -z "$PARSER_CHECKPOINT" ]]; then
+  echo "No parser checkpoint found in $PARSER_RUNS_DIR or in the latest inpaint run config." >&2
+  echo "Train one first with ./run_dense_uv_parser_training.sh or set PARSER_CHECKPOINT=/path/to/best.pt." >&2
+  exit 1
+fi
+if [[ ! -f "$PARSER_CHECKPOINT" ]]; then
+  echo "Parser checkpoint not found: $PARSER_CHECKPOINT" >&2
+  exit 1
+fi
+
+echo "Using parser checkpoint: $PARSER_CHECKPOINT"
+if [[ -n "$INPAINT_CHECKPOINT" ]]; then
+  echo "Using inpaint checkpoint: $INPAINT_CHECKPOINT"
+else
+  echo "No inpaint checkpoint found; exporting parser conditioning only."
 fi
 
 OUTPUT_WAS_SET=false
