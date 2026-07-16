@@ -265,15 +265,64 @@ SIGLIP_LOCAL_FILES_ONLY=true ./run_semantic_uv_reconstruction_training.sh
 
 The frozen SigLIP2 weights are deliberately excluded from each epoch
 checkpoint; resuming reloads them from the Hugging Face cache and restores only
-the trainable CNN, fusion, query, and decoder weights. Because the 32x32 query
-grid and `/8` detail memory use more VRAM, the default batch size is 2. If the
-extra semantic re-render pass exceeds available VRAM, first reduce
+the trainable CNN, fusion, query, and decoder weights. The long-running,
+VRAM-rich default uses batch size 4. If the 32x32 query grid, `/8` detail memory,
+and semantic re-render pass exceed available VRAM, first reduce
 `BATCH_SIZE`; as a fallback set `LAMBDA_SIGLIP_RENDER=0` while retaining SigLIP2
 tokens in the forward model. For a dependency-free structural ablation use:
 
 ```bash
 SEMANTIC_BACKBONE=none LAMBDA_SIGLIP_RENDER=0 ./run_semantic_uv_reconstruction_training.sh
 ```
+
+### Training throughput
+
+The default launcher keeps the high-resolution texture path but avoids several
+unnecessary costs:
+
+- padded SigLIP2 letterbox patches are removed before UV cross-attention, which
+  also allows fused scaled-dot-product attention on supported CUDA builds;
+- the expensive differentiable SigLIP2 re-render cycle runs once every four
+  batches and is multiplied by four when used, preserving its expected loss
+  weight;
+- CUDA uses channels-last convolution storage and fused AdamW when available;
+- progress values are copied from CUDA only every 50 batches instead of forcing
+  a device synchronization after every optimizer step;
+- preview inference uses the configured mixed precision.
+
+The startup summary reports `siglip_render_every`, `channels_last`,
+`fused_optimizer`, and `torch_compile`. The default long-running configuration
+is equivalent to:
+
+```bash
+BATCH_SIZE=4 SIGLIP_RENDER_EVERY=4 LOG_EVERY=50 \
+TORCH_COMPILE=true COMPILE_MODE=reduce-overhead \
+./run_semantic_uv_reconstruction_training.sh
+```
+
+Every train/validation metric block includes `epoch_seconds` and
+`samples_per_second`, making before/after throughput directly comparable on the
+remote GPU. Set `LOG_EVERY` to change the progress refresh interval.
+
+Use `SIGLIP_RENDER_EVERY=1` to compute the semantic cycle on every batch. For a
+faster run that still uses frozen SigLIP2 tokens to understand the source views,
+disable only the predicted-render cycle:
+
+```bash
+LAMBDA_SIGLIP_RENDER=0 ./run_semantic_uv_reconstruction_training.sh
+```
+
+PyTorch compilation is enabled by default. Its first batches are slower while
+kernels are generated, after which long runs can benefit. If the remote
+PyTorch/CUDA combination produces graph breaks or a compiler error, disable it:
+
+```bash
+TORCH_COMPILE=false ./run_semantic_uv_reconstruction_training.sh
+```
+
+Set `FUSED_OPTIMIZER=false` only when diagnosing an optimizer compatibility
+problem. Unsupported fused AdamW implementations automatically fall back to the
+standard optimizer.
 
 ## Generate Render Pairs
 

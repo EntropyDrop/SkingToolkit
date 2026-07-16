@@ -19,6 +19,9 @@ from SkingToolkit.semantic_uv_reconstruction.semantic_losses import (
 )
 from SkingToolkit.semantic_uv_reconstruction.semantic_backbone import SigLIP2VisionBackbone
 from SkingToolkit.semantic_uv_reconstruction.semantic_model import SemanticUVReconstructor
+from SkingToolkit.semantic_uv_reconstruction.train_semantic_uv_reconstruction import (
+    build_arg_parser,
+)
 
 
 class FakeOpenSemanticBackbone(nn.Module):
@@ -95,7 +98,10 @@ class SigLIP2AdapterTest(unittest.TestCase):
             backbone = SigLIP2VisionBackbone("fake-fixres", token_channels=8)
         images = torch.rand(2, 3, 20, 40, requires_grad=True)
         outputs = backbone(images)
-        self.assertEqual(outputs["tokens"].shape, (2, 16, 8))
+        self.assertEqual(outputs["tokens"].shape, (2, 8, 8))
+        self.assertEqual(outputs["token_mask"].shape, (2, 8))
+        self.assertTrue(outputs["token_mask"].all())
+        self.assertTrue(outputs["tokens_compact"])
         self.assertEqual(outputs["raw_global"].shape, (2, 12))
         self.assertFalse(any(parameter.requires_grad for parameter in backbone.vision_model.parameters()))
         outputs["raw_global"].sum().backward()
@@ -104,6 +110,15 @@ class SigLIP2AdapterTest(unittest.TestCase):
 
 
 class SemanticUVModelTest(unittest.TestCase):
+    def test_long_run_performance_defaults(self):
+        args = build_arg_parser().parse_args([])
+        self.assertEqual(args.batch_size, 4)
+        self.assertEqual(args.siglip_render_every, 4)
+        self.assertEqual(args.log_every, 50)
+        self.assertTrue(args.fused_optimizer)
+        self.assertTrue(args.compile)
+        self.assertEqual(args.compile_mode, "reduce-overhead")
+
     def test_dual_view_model_outputs_valid_skin_structure(self):
         model = SemanticUVReconstructor(
             view_count=2,
@@ -200,6 +215,12 @@ class SemanticUVModelTest(unittest.TestCase):
         )
         outputs = model(gt_renders[:, :, :3])
         self.assertEqual(outputs["open_semantic_embedding"].shape, (1, 6))
+        skipped_metrics = criterion(
+            outputs,
+            target_uv,
+            compute_siglip_render=False,
+        )
+        self.assertEqual(float(skipped_metrics["loss_siglip_render"]), 0.0)
         metrics = criterion(
             outputs,
             target_uv,

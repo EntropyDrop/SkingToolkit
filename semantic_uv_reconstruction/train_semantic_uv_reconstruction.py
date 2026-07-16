@@ -3,6 +3,7 @@ import json
 import math
 import os
 import sys
+import time
 from contextlib import nullcontext
 from pathlib import Path
 
@@ -102,7 +103,10 @@ def run_epoch(
     scaler=None,
     grad_clip=1.0,
     description="train",
+    siglip_render_every=1,
+    log_every=50,
 ):
+    started_at = time.perf_counter()
     training = optimizer is not None
     model.train(training)
     metric_sums = {}
@@ -113,7 +117,7 @@ def run_epoch(
 
     grad_context = torch.enable_grad if training else torch.no_grad
     with grad_context():
-        for batch in iterator:
+        for batch_index, batch in enumerate(iterator):
             batch = move_batch(batch, device)
             target_uv = batch["uv"]
             gt_renders = render_fixed_views(target_uv, renderer, views)
@@ -123,6 +127,7 @@ def run_epoch(
 
             with autocast_context(device, precision):
                 outputs = model(images)
+                compute_siglip_render = batch_index % siglip_render_every == 0
                 metrics = criterion(
                     outputs,
                     target_uv,
@@ -131,8 +136,12 @@ def run_epoch(
                     views=views,
                     semantic_uv_target=batch.get("semantic_uv"),
                     semantic_encoder=(
-                        model.encode_open_semantics if model.has_open_semantics else None
+                        model.encode_open_semantics
+                        if model.has_open_semantics and compute_siglip_render
+                        else None
                     ),
+                    compute_siglip_render=compute_siglip_render,
+                    siglip_render_scale=siglip_render_every,
                 )
                 loss = metrics["loss_total"]
 
@@ -156,21 +165,30 @@ def run_epoch(
                 detached = value.detach()
                 contribution = detached if name.startswith("count_") else detached * batch_size
                 metric_sums[name] = metric_sums.get(name, 0.0) + contribution
-            if tqdm is not None:
+            if tqdm is not None and (
+                (batch_index + 1) % log_every == 0 or batch_index + 1 == len(loader)
+            ):
                 iterator.set_postfix(
                     loss=f"{float(loss.detach().cpu()):.4f}",
                     outer=f"{float(metrics['loss_outer_alpha'].detach().cpu()):.3f}",
                 )
-    return format_metrics(metric_sums, sample_count)
+    result = format_metrics(metric_sums, sample_count)
+    epoch_seconds = max(time.perf_counter() - started_at, 1e-6)
+    result["epoch_seconds"] = epoch_seconds
+    result["samples_per_second"] = sample_count / epoch_seconds
+    return result
 
 
 @torch.no_grad()
-def save_preview(model, loader, renderer, views, device, output_path, max_items=4):
+def save_preview(
+    model, loader, renderer, views, device, output_path, precision="no", max_items=4
+):
     model.eval()
     batch = move_batch(next(iter(loader)), device)
     target_uv = batch["uv"]
     renders = render_fixed_views(target_uv, renderer, views)
-    outputs = model(renders[:, :, :3])
+    with autocast_context(device, precision):
+        outputs = model(renders[:, :, :3])
     count = min(max_items, target_uv.shape[0])
 
     view_rows = []
@@ -271,7 +289,7 @@ def build_arg_parser():
     parser.add_argument("--attention_heads", type=int, default=4)
     parser.add_argument("--attention_layers", type=int, default=2)
     parser.add_argument("--attention_dropout", type=float, default=0.0)
-    parser.add_argument("--batch_size", type=int, default=2)
+    parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--num_workers", type=int, default=8)
     parser.add_argument("--prefetch_factor", type=int, default=4)
     parser.add_argument("--epochs", type=int, default=30)
@@ -287,6 +305,21 @@ def build_arg_parser():
     parser.add_argument("--resume", default=None)
     parser.add_argument("--save_every", type=int, default=1)
     parser.add_argument("--preview_every", type=int, default=1)
+    parser.add_argument("--siglip_render_every", type=int, default=4)
+    parser.add_argument("--log_every", type=int, default=50)
+    parser.add_argument(
+        "--fused_optimizer", dest="fused_optimizer", action="store_true", default=True
+    )
+    parser.add_argument(
+        "--no_fused_optimizer", dest="fused_optimizer", action="store_false"
+    )
+    parser.add_argument("--compile", dest="compile", action="store_true", default=True)
+    parser.add_argument("--no_compile", "--no-compile", dest="compile", action="store_false")
+    parser.add_argument(
+        "--compile_mode",
+        choices=["default", "reduce-overhead", "max-autotune"],
+        default="reduce-overhead",
+    )
     parser.add_argument("--lambda_uv_rgb", type=float, default=2.0)
     parser.add_argument("--lambda_uv_edge", type=float, default=1.0)
     parser.add_argument("--lambda_outer_alpha", type=float, default=1.0)
@@ -313,6 +346,10 @@ def main():
         raise ValueError("Without --semantic_labels_dir, --semantic_classes must be 13.")
     if args.attention_dropout < 0.0 or args.attention_dropout >= 1.0:
         raise ValueError("--attention_dropout must be in [0, 1).")
+    if args.siglip_render_every < 1:
+        raise ValueError("--siglip_render_every must be positive.")
+    if args.log_every < 1:
+        raise ValueError("--log_every must be positive.")
     if args.semantic_backbone == "none" and args.lambda_siglip_render > 0.0:
         raise ValueError("--lambda_siglip_render must be 0 when --semantic_backbone=none.")
 
@@ -389,6 +426,9 @@ def main():
         siglip_model=args.siglip_model,
         siglip_local_files_only=args.siglip_local_files_only,
     ).to(device)
+    channels_last = device.type == "cuda"
+    if channels_last:
+        model.to(memory_format=torch.channels_last)
     criterion = SemanticUVReconstructionLoss(
         lambda_uv_rgb=args.lambda_uv_rgb,
         lambda_uv_edge=args.lambda_uv_edge,
@@ -402,11 +442,25 @@ def main():
         lambda_render_alpha=args.lambda_render_alpha,
         lambda_siglip_render=args.lambda_siglip_render,
     ).to(device)
-    optimizer = torch.optim.AdamW(
-        (parameter for parameter in model.parameters() if parameter.requires_grad),
-        lr=args.lr,
-        weight_decay=args.weight_decay,
-    )
+    optimizer_kwargs = {"lr": args.lr, "weight_decay": args.weight_decay}
+    fused_optimizer = bool(args.fused_optimizer and device.type == "cuda")
+    if fused_optimizer:
+        optimizer_kwargs["fused"] = True
+    try:
+        optimizer = torch.optim.AdamW(
+            (parameter for parameter in model.parameters() if parameter.requires_grad),
+            **optimizer_kwargs,
+        )
+    except (RuntimeError, TypeError, ValueError) as error:
+        if not fused_optimizer:
+            raise
+        print(f"WARNING: fused AdamW is unavailable ({error}); using standard AdamW.")
+        fused_optimizer = False
+        optimizer_kwargs.pop("fused", None)
+        optimizer = torch.optim.AdamW(
+            (parameter for parameter in model.parameters() if parameter.requires_grad),
+            **optimizer_kwargs,
+        )
     scaler = build_grad_scaler(device, args.mixed_precision)
 
     start_epoch = 1
@@ -449,6 +503,11 @@ def main():
         "siglip_model": args.siglip_model,
         "siglip_frozen": model.has_open_semantics,
         "lambda_siglip_render": args.lambda_siglip_render,
+        "siglip_render_every": args.siglip_render_every,
+        "log_every": args.log_every,
+        "channels_last": channels_last,
+        "fused_optimizer": fused_optimizer,
+        "torch_compile": args.compile,
         "lambda_uv_rgb": args.lambda_uv_rgb,
         "lambda_uv_edge": args.lambda_uv_edge,
         "query_size": args.query_size,
@@ -456,6 +515,11 @@ def main():
         "min_lr_ratio": args.min_lr_ratio,
     }
     print(json.dumps(summary, indent=2, ensure_ascii=False))
+
+    if args.compile:
+        if not hasattr(model, "compile"):
+            raise RuntimeError("--compile requires PyTorch with torch.nn.Module.compile().")
+        model.compile(mode=args.compile_mode)
 
     preview_loader = val_loader if val_loader is not None else train_loader
     for epoch in range(start_epoch, args.epochs + 1):
@@ -475,6 +539,8 @@ def main():
             scaler=scaler,
             grad_clip=args.grad_clip,
             description=f"train {epoch}",
+            siglip_render_every=args.siglip_render_every,
+            log_every=args.log_every,
         )
         val_metrics = (
             run_epoch(
@@ -486,6 +552,8 @@ def main():
                 device,
                 args.mixed_precision,
                 description=f"val {epoch}",
+                siglip_render_every=args.siglip_render_every,
+                log_every=args.log_every,
             )
             if val_loader is not None
             else train_metrics
@@ -539,6 +607,7 @@ def main():
                 views,
                 device,
                 output_dir / "previews" / f"epoch_{epoch:04d}.png",
+                precision=args.mixed_precision,
             )
 
 

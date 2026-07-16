@@ -72,6 +72,7 @@ class SigLIP2VisionBackbone(nn.Module):
         self.patch_size = int(patch_size)
         self.raw_feature_dim = int(hidden_size)
         self.token_channels = int(token_channels)
+        self._valid_token_index_cache = {}
         self.register_buffer(
             "image_mean",
             torch.tensor(image_mean, dtype=torch.float32).view(1, 3, 1, 1),
@@ -121,40 +122,67 @@ class SigLIP2VisionBackbone(nn.Module):
         top = pad_height // 2
         bottom = pad_height - top
         pixels = F.pad(resized, (left, right, top, bottom), value=0.5)
-        pixel_mask = images.new_zeros(
-            (images.shape[0], self.image_size, self.image_size), dtype=torch.bool
-        )
-        pixel_mask[:, top : top + resized_height, left : left + resized_width] = True
         pixels = (pixels - self.image_mean) / self.image_std
-        return pixels, pixel_mask
+        return pixels, (top, left, resized_height, resized_width)
+
+    def _valid_token_indices(self, content_rect, token_count, device):
+        cache_key = (*content_rect, int(token_count), str(device))
+        cached = self._valid_token_index_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        top, left, resized_height, resized_width = content_rect
+        patch_grid = self.image_size // self.patch_size
+        patch_tokens = patch_grid * patch_grid
+        if token_count not in (patch_tokens, patch_tokens + 1):
+            indices = torch.arange(token_count, device=device)
+        else:
+            row_start = top // self.patch_size
+            row_stop = min(
+                patch_grid,
+                (top + resized_height + self.patch_size - 1) // self.patch_size,
+            )
+            column_start = left // self.patch_size
+            column_stop = min(
+                patch_grid,
+                (left + resized_width + self.patch_size - 1) // self.patch_size,
+            )
+            patch_indices = [
+                row * patch_grid + column
+                for row in range(row_start, row_stop)
+                for column in range(column_start, column_stop)
+            ]
+            if token_count == patch_tokens + 1:
+                patch_indices = [0, *(index + 1 for index in patch_indices)]
+            indices = torch.tensor(patch_indices, dtype=torch.long, device=device)
+        self._valid_token_index_cache[cache_key] = indices
+        return indices
 
     def forward(self, images):
-        pixels, pixel_mask = self._letterbox(images)
+        pixels, content_rect = self._letterbox(images)
         outputs = self.vision_model(
             pixel_values=pixels,
         )
         raw_tokens = outputs.last_hidden_state
         raw_global = outputs.pooler_output
 
-        patch_mask = F.max_pool2d(
-            pixel_mask.unsqueeze(1).float(),
-            kernel_size=self.patch_size,
-            stride=self.patch_size,
-        ).flatten(1).bool()
-        if raw_tokens.shape[1] == patch_mask.shape[1] + 1:
-            patch_mask = torch.cat(
-                [torch.ones_like(patch_mask[:, :1]), patch_mask], dim=1
-            )
-        elif raw_tokens.shape[1] != patch_mask.shape[1]:
-            # Some future fixed-resolution checkpoints may pack tokens differently.
-            # Treat them as valid because their spatial correspondence is unknown.
-            patch_mask = torch.ones(
-                raw_tokens.shape[:2], dtype=torch.bool, device=raw_tokens.device
-            )
+        # Every image in this call has the same spatial shape and therefore the
+        # same letterbox mask. Remove padded patch tokens instead of carrying a
+        # key-padding mask into every UV cross-attention layer. Besides reducing
+        # memory length, an unmasked attention call can use PyTorch's fused SDPA
+        # kernels on supported CUDA devices.
+        valid_token_indices = self._valid_token_indices(
+            content_rect, raw_tokens.shape[1], raw_tokens.device
+        )
+        raw_tokens = raw_tokens.index_select(1, valid_token_indices)
+        patch_mask = torch.ones(
+            raw_tokens.shape[:2], dtype=torch.bool, device=raw_tokens.device
+        )
 
         return {
             "tokens": self.token_projection(raw_tokens),
             "token_mask": patch_mask,
+            "tokens_compact": True,
             "global": self.global_projection(raw_global),
             "raw_global": raw_global,
         }

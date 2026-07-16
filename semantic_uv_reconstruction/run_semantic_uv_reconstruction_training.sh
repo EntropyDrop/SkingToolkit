@@ -102,7 +102,7 @@ QUERY_SIZE="${QUERY_SIZE:-32}"
 ATTENTION_HEADS="${ATTENTION_HEADS:-4}"
 ATTENTION_LAYERS="${ATTENTION_LAYERS:-2}"
 ATTENTION_DROPOUT="${ATTENTION_DROPOUT:-0.0}"
-BATCH_SIZE="${BATCH_SIZE:-2}"
+BATCH_SIZE="${BATCH_SIZE:-4}"
 NUM_WORKERS="${NUM_WORKERS:-16}"
 PREFETCH_FACTOR="${PREFETCH_FACTOR:-4}"
 EPOCHS="${EPOCHS:-30}"
@@ -110,6 +110,11 @@ LR="${LR:-2e-4}"
 MIN_LR_RATIO="${MIN_LR_RATIO:-0.05}"
 MIXED_PRECISION="${MIXED_PRECISION:-bf16}"
 DEVICE="${DEVICE:-auto}"
+SIGLIP_RENDER_EVERY="${SIGLIP_RENDER_EVERY:-4}"
+LOG_EVERY="${LOG_EVERY:-50}"
+FUSED_OPTIMIZER="${FUSED_OPTIMIZER:-true}"
+TORCH_COMPILE="${TORCH_COMPILE:-true}"
+COMPILE_MODE="${COMPILE_MODE:-reduce-overhead}"
 
 LAMBDA_UV_RGB="${LAMBDA_UV_RGB:-2.0}"
 LAMBDA_UV_EDGE="${LAMBDA_UV_EDGE:-1.0}"
@@ -135,6 +140,14 @@ if [[ -n "$RESUME" ]]; then
 fi
 if [[ "$SIGLIP_LOCAL_FILES_ONLY" == "true" ]]; then
   optional_args+=(--siglip_local_files_only)
+fi
+if [[ "$FUSED_OPTIMIZER" != "true" ]]; then
+  optional_args+=(--no_fused_optimizer)
+fi
+if [[ "$TORCH_COMPILE" == "true" ]]; then
+  optional_args+=(--compile --compile_mode "$COMPILE_MODE")
+else
+  optional_args+=(--no-compile)
 fi
 
 python train_semantic_uv_reconstruction.py \
@@ -170,4 +183,6 @@ python train_semantic_uv_reconstruction.py \
   --lambda_render_rgb "$LAMBDA_RENDER_RGB" \
   --lambda_render_alpha "$LAMBDA_RENDER_ALPHA" \
   --lambda_siglip_render "$LAMBDA_SIGLIP_RENDER" \
+  --siglip_render_every "$SIGLIP_RENDER_EVERY" \
+  --log_every "$LOG_EVERY" \
   "${optional_args[@]}"

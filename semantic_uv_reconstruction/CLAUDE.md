@@ -12,6 +12,11 @@ The direct reconstructor's architecture version 2 uses `/8` CNN detail memory,
 Version-1 direct checkpoints used 16x16 queries and bilinear upsampling and must
 not be resumed into version 2.
 
+The direct launcher defaults to batch size 4, a four-step SigLIP render-cycle
+interval, log refresh every 50 batches, compiled execution, compacted letterbox
+tokens, channels-last, and fused AdamW. `SIGLIP_RENDER_EVERY=1` restores
+per-batch cycle evaluation; `TORCH_COMPILE=false` is the compatibility fallback.
+
 ## Commands
 
 From the workspace root:

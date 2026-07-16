@@ -141,6 +141,8 @@ class SemanticUVReconstructionLoss(nn.Module):
         views=None,
         semantic_uv_target=None,
         semantic_encoder=None,
+        compute_siglip_render=True,
+        siglip_render_scale=1.0,
     ):
         target_uv = target_uv.float()
         pred_uv = outputs["uv"]
@@ -207,7 +209,7 @@ class SemanticUVReconstructionLoss(nn.Module):
         render_losses_enabled = (
             self.lambda_render_rgb > 0.0
             or self.lambda_render_alpha > 0.0
-            or self.lambda_siglip_render > 0.0
+            or (self.lambda_siglip_render > 0.0 and compute_siglip_render)
         )
         if render_losses_enabled:
             if renderer is None or views is None or gt_renders is None:
@@ -230,7 +232,7 @@ class SemanticUVReconstructionLoss(nn.Module):
             view_count = max(len(views), 1)
             loss_render_rgb = render_rgb_total / view_count
             loss_render_alpha = render_alpha_total / view_count
-            if self.lambda_siglip_render > 0.0:
+            if self.lambda_siglip_render > 0.0 and compute_siglip_render:
                 if semantic_encoder is None or "open_semantic_embedding" not in outputs:
                     raise ValueError(
                         "SigLIP render loss requires an open semantic backbone and "
@@ -247,6 +249,7 @@ class SemanticUVReconstructionLoss(nn.Module):
                         predicted_embedding.float(), target_embedding.float(), dim=-1
                     )
                 ).mean()
+                loss_siglip_render = loss_siglip_render * float(siglip_render_scale)
 
         loss_semantic = (
             self.lambda_semantic_uv * loss_semantic_uv

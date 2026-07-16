@@ -228,9 +228,10 @@ class SemanticUVReconstructor(nn.Module):
         if images.dim() != 5 or images.shape[2] != 3:
             raise ValueError(f"Expected images shaped BxVx3xHxW, got {tuple(images.shape)}.")
         batch, views, channels, height, width = images.shape
-        encoded = self.open_semantic_backbone(
-            images.reshape(batch * views, channels, height, width)
-        )
+        flat_images = images.reshape(batch * views, channels, height, width)
+        if flat_images.is_cuda:
+            flat_images = flat_images.contiguous(memory_format=torch.channels_last)
+        encoded = self.open_semantic_backbone(flat_images)
         raw_global = encoded["raw_global"].reshape(batch, views, -1)
         return F.normalize(raw_global.float(), dim=-1)
 
@@ -241,9 +242,10 @@ class SemanticUVReconstructor(nn.Module):
         if views != self.view_count:
             raise ValueError(f"Expected {self.view_count} views, got {views}.")
 
-        encoded, detail_encoded = self.encoder(
-            images.reshape(batch * views, channels, height, width)
-        )
+        flat_images = images.reshape(batch * views, channels, height, width)
+        if flat_images.is_cuda:
+            flat_images = flat_images.contiguous(memory_format=torch.channels_last)
+        encoded, detail_encoded = self.encoder(flat_images)
         _, token_channels, feature_height, feature_width = encoded.shape
         coarse_memory = encoded.flatten(2).transpose(1, 2)
         coarse_memory = coarse_memory.reshape(
@@ -270,16 +272,11 @@ class SemanticUVReconstructor(nn.Module):
         ).reshape(batch, views * detail_height * detail_width, token_channels)
 
         memory_parts = [detail_memory, coarse_memory]
-        memory_valid_parts = [
-            torch.ones(detail_memory.shape[:2], dtype=torch.bool, device=images.device),
-            torch.ones(coarse_memory.shape[:2], dtype=torch.bool, device=images.device),
-        ]
+        open_memory_requires_mask = False
         semantic_seed = coarse_memory.mean(dim=1)
         open_semantic_embedding = None
         if self.open_semantic_backbone is not None:
-            open_features = self.open_semantic_backbone(
-                images.reshape(batch * views, channels, height, width)
-            )
+            open_features = self.open_semantic_backbone(flat_images)
             open_tokens = open_features["tokens"].reshape(batch, views, -1, token_channels)
             open_tokens = (
                 open_tokens
@@ -289,7 +286,7 @@ class SemanticUVReconstructor(nn.Module):
             open_tokens = open_tokens.reshape(batch, -1, token_channels)
             open_token_mask = open_features["token_mask"].reshape(batch, -1)
             memory_parts.append(open_tokens)
-            memory_valid_parts.append(open_token_mask)
+            open_memory_requires_mask = not bool(open_features.get("tokens_compact", False))
             open_global = open_features["global"].reshape(batch, views, token_channels).mean(dim=1)
             semantic_seed = semantic_seed + open_global
             raw_global = open_features["raw_global"].reshape(batch, views, -1)
@@ -297,7 +294,14 @@ class SemanticUVReconstructor(nn.Module):
             open_semantic_embedding = F.normalize(raw_global.mean(dim=1).float(), dim=-1)
 
         memory = torch.cat(memory_parts, dim=1)
-        memory_valid = torch.cat(memory_valid_parts, dim=1)
+        memory_valid = None
+        if open_memory_requires_mask:
+            cnn_valid = torch.ones(
+                (batch, detail_memory.shape[1] + coarse_memory.shape[1]),
+                dtype=torch.bool,
+                device=images.device,
+            )
+            memory_valid = torch.cat([cnn_valid, open_token_mask], dim=1)
         semantic = self.semantic_bottleneck(semantic_seed)
         queries = self.uv_queries.unsqueeze(0).expand(batch, -1, -1)
         queries = queries + semantic.unsqueeze(1)
