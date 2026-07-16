@@ -1,3 +1,4 @@
+import io
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,9 +10,23 @@ from SkingToolkit.semantic_uv_reconstruction.model import UVInpaintingNet
 from SkingToolkit.semantic_uv_reconstruction.topology_model import (
     TopologyAwareUVCompletionNet,
 )
+from SkingToolkit.semantic_uv_reconstruction.train import Logger
 
 
 class InpaintCheckpointCompatibilityTest(unittest.TestCase):
+    def test_training_logger_preserves_terminal_capabilities(self):
+        stream = io.StringIO()
+        with tempfile.TemporaryDirectory() as directory:
+            logger = Logger(Path(directory) / "train.log", stream)
+            try:
+                self.assertEqual(logger.isatty(), stream.isatty())
+                self.assertEqual(logger.encoding, "utf-8")
+                logger.write("loading model\n")
+                logger.flush()
+                self.assertEqual(stream.getvalue(), "loading model\n")
+            finally:
+                logger.log.close()
+
     def test_loads_topology_checkpoint_from_embedded_model_config(self):
         source = TopologyAwareUVCompletionNet(
             input_channels=12,

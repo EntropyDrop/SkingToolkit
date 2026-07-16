@@ -696,6 +696,8 @@ def build_arg_parser():
 
 
 class Logger(object):
+    """Mirror stdout/stderr to a file while retaining terminal stream APIs."""
+
     def __init__(self, filename, stream, mode="w"):
         self.terminal = stream
         self.log = open(filename, mode, encoding="utf-8")
@@ -711,6 +713,19 @@ class Logger(object):
     def flush(self):
         self.terminal.flush()
         self.log.flush()
+
+    def isatty(self):
+        """Keep compatibility with Transformers, tqdm, and color detection."""
+        isatty = getattr(self.terminal, "isatty", None)
+        return bool(isatty()) if isatty is not None else False
+
+    def fileno(self):
+        """Expose the underlying descriptor to terminal-aware libraries."""
+        return self.terminal.fileno()
+
+    @property
+    def encoding(self):
+        return getattr(self.terminal, "encoding", None) or "utf-8"
 
 
 def main():
