@@ -42,7 +42,9 @@ class SigLIP2VisionBackbone(nn.Module):
             ) from error
 
         processor = AutoImageProcessor.from_pretrained(
-            model_name, local_files_only=bool(local_files_only)
+            model_name,
+            local_files_only=bool(local_files_only),
+            use_fast=False,
         )
         full_model = AutoModel.from_pretrained(
             model_name, local_files_only=bool(local_files_only)
@@ -72,6 +74,9 @@ class SigLIP2VisionBackbone(nn.Module):
         self.patch_size = int(patch_size)
         self.raw_feature_dim = int(hidden_size)
         self.token_channels = int(token_channels)
+        # Cache only immutable Python index tuples. A CUDA tensor kept here can
+        # outlive a torch.compile CUDA Graph invocation and point at storage
+        # overwritten by the next replay.
         self._valid_token_index_cache = {}
         self.register_buffer(
             "image_mean",
@@ -126,37 +131,39 @@ class SigLIP2VisionBackbone(nn.Module):
         return pixels, (top, left, resized_height, resized_width)
 
     def _valid_token_indices(self, content_rect, token_count, device):
-        cache_key = (*content_rect, int(token_count), str(device))
+        cache_key = (*content_rect, int(token_count))
         cached = self._valid_token_index_cache.get(cache_key)
-        if cached is not None:
-            return cached
-
-        top, left, resized_height, resized_width = content_rect
-        patch_grid = self.image_size // self.patch_size
-        patch_tokens = patch_grid * patch_grid
-        if token_count not in (patch_tokens, patch_tokens + 1):
-            indices = torch.arange(token_count, device=device)
-        else:
-            row_start = top // self.patch_size
-            row_stop = min(
-                patch_grid,
-                (top + resized_height + self.patch_size - 1) // self.patch_size,
-            )
-            column_start = left // self.patch_size
-            column_stop = min(
-                patch_grid,
-                (left + resized_width + self.patch_size - 1) // self.patch_size,
-            )
-            patch_indices = [
-                row * patch_grid + column
-                for row in range(row_start, row_stop)
-                for column in range(column_start, column_stop)
-            ]
-            if token_count == patch_tokens + 1:
-                patch_indices = [0, *(index + 1 for index in patch_indices)]
-            indices = torch.tensor(patch_indices, dtype=torch.long, device=device)
-        self._valid_token_index_cache[cache_key] = indices
-        return indices
+        if cached is None:
+            top, left, resized_height, resized_width = content_rect
+            patch_grid = self.image_size // self.patch_size
+            patch_tokens = patch_grid * patch_grid
+            if token_count not in (patch_tokens, patch_tokens + 1):
+                cached = tuple(range(token_count))
+            else:
+                row_start = top // self.patch_size
+                row_stop = min(
+                    patch_grid,
+                    (top + resized_height + self.patch_size - 1) // self.patch_size,
+                )
+                column_start = left // self.patch_size
+                column_stop = min(
+                    patch_grid,
+                    (left + resized_width + self.patch_size - 1) // self.patch_size,
+                )
+                patch_indices = tuple(
+                    row * patch_grid + column
+                    for row in range(row_start, row_stop)
+                    for column in range(column_start, column_stop)
+                )
+                cached = (
+                    (0, *(index + 1 for index in patch_indices))
+                    if token_count == patch_tokens + 1
+                    else patch_indices
+                )
+            self._valid_token_index_cache[cache_key] = cached
+        # This tensor belongs only to the current eager/compiled invocation.
+        # Never retain it in Python state across CUDA Graph replays.
+        return torch.tensor(cached, dtype=torch.long, device=device)
 
     def forward(self, images):
         pixels, content_rect = self._letterbox(images)

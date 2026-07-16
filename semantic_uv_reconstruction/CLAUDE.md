@@ -15,7 +15,9 @@ not be resumed into version 2.
 The direct launcher defaults to batch size 4, a four-step SigLIP render-cycle
 interval, log refresh every 50 batches, compiled execution, compacted letterbox
 tokens, channels-last, and fused AdamW. `SIGLIP_RENDER_EVERY=1` restores
-per-batch cycle evaluation; `TORCH_COMPILE=false` is the compatibility fallback.
+per-batch cycle evaluation. Compilation defaults to
+`max-autotune-no-cudagraphs`; `TORCH_COMPILE=false` is the compatibility
+fallback.
 
 ## Commands
 

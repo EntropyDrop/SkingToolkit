@@ -43,6 +43,15 @@ def build_grad_scaler(device, precision):
     return torch.amp.GradScaler("cuda")
 
 
+def mark_compiled_step_begin(model):
+    """Declare an iteration boundary for optional CUDA Graph compile modes."""
+    compiled_call = getattr(model, "_compiled_call_impl", None)
+    compiler = getattr(torch, "compiler", None)
+    marker = getattr(compiler, "cudagraph_mark_step_begin", None)
+    if compiled_call is not None and marker is not None:
+        marker()
+
+
 def learning_rate_for_epoch(base_lr, epoch, epochs, min_lr_ratio=0.05):
     if epochs <= 1:
         return float(base_lr)
@@ -118,6 +127,7 @@ def run_epoch(
     grad_context = torch.enable_grad if training else torch.no_grad
     with grad_context():
         for batch_index, batch in enumerate(iterator):
+            mark_compiled_step_begin(model)
             batch = move_batch(batch, device)
             target_uv = batch["uv"]
             gt_renders = render_fixed_views(target_uv, renderer, views)
@@ -184,6 +194,7 @@ def save_preview(
     model, loader, renderer, views, device, output_path, precision="no", max_items=4
 ):
     model.eval()
+    mark_compiled_step_begin(model)
     batch = move_batch(next(iter(loader)), device)
     target_uv = batch["uv"]
     renders = render_fixed_views(target_uv, renderer, views)
@@ -317,8 +328,13 @@ def build_arg_parser():
     parser.add_argument("--no_compile", "--no-compile", dest="compile", action="store_false")
     parser.add_argument(
         "--compile_mode",
-        choices=["default", "reduce-overhead", "max-autotune"],
-        default="reduce-overhead",
+        choices=[
+            "default",
+            "reduce-overhead",
+            "max-autotune",
+            "max-autotune-no-cudagraphs",
+        ],
+        default="max-autotune-no-cudagraphs",
     )
     parser.add_argument("--lambda_uv_rgb", type=float, default=2.0)
     parser.add_argument("--lambda_uv_edge", type=float, default=1.0)

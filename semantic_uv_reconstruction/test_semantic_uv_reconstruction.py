@@ -74,8 +74,10 @@ class SigLIP2AdapterTest(unittest.TestCase):
 
         class FakeAutoImageProcessor:
             @staticmethod
-            def from_pretrained(model_name, local_files_only=False):
+            def from_pretrained(model_name, local_files_only=False, use_fast=True):
                 del model_name, local_files_only
+                if use_fast:
+                    raise AssertionError("The adapter must preserve slow processor metadata.")
                 return SimpleNamespace(
                     image_mean=(0.5, 0.5, 0.5),
                     image_std=(0.5, 0.5, 0.5),
@@ -117,7 +119,7 @@ class SemanticUVModelTest(unittest.TestCase):
         self.assertEqual(args.log_every, 50)
         self.assertTrue(args.fused_optimizer)
         self.assertTrue(args.compile)
-        self.assertEqual(args.compile_mode, "reduce-overhead")
+        self.assertEqual(args.compile_mode, "max-autotune-no-cudagraphs")
 
     def test_dual_view_model_outputs_valid_skin_structure(self):
         model = SemanticUVReconstructor(

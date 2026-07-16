@@ -296,7 +296,7 @@ is equivalent to:
 
 ```bash
 BATCH_SIZE=4 SIGLIP_RENDER_EVERY=4 LOG_EVERY=50 \
-TORCH_COMPILE=true COMPILE_MODE=reduce-overhead \
+TORCH_COMPILE=true COMPILE_MODE=max-autotune-no-cudagraphs \
 ./run_semantic_uv_reconstruction_training.sh
 ```
 
@@ -313,8 +313,11 @@ LAMBDA_SIGLIP_RENDER=0 ./run_semantic_uv_reconstruction_training.sh
 ```
 
 PyTorch compilation is enabled by default. Its first batches are slower while
-kernels are generated, after which long runs can benefit. If the remote
-PyTorch/CUDA combination produces graph breaks or a compiler error, disable it:
+kernels are generated, after which long runs can benefit. The default
+`max-autotune-no-cudagraphs` mode intentionally avoids CUDA Graph lifetime
+errors when the same frozen semantic tower is used in both source encoding and
+the periodic render cycle. If the remote PyTorch/CUDA combination still
+produces graph breaks or a compiler error, disable compilation:
 
 ```bash
 TORCH_COMPILE=false ./run_semantic_uv_reconstruction_training.sh
