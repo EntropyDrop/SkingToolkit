@@ -18,7 +18,9 @@ if str(WORKSPACE_ROOT) not in sys.path:
 from SkingToolkit.semantic_uv_reconstruction.dataset import UVInpaintingDataset, finalize_minecraft_alpha, RenderAugmenter, parse_views  # noqa: E402
 from SkingToolkit.semantic_uv_reconstruction.losses import UVInpaintingLoss  # noqa: E402
 from SkingToolkit.semantic_uv_reconstruction.model import UVInpaintingNet, PatchGANDiscriminator, count_parameters  # noqa: E402
+from SkingToolkit.semantic_uv_reconstruction.topology_model import TopologyAwareUVCompletionNet  # noqa: E402
 from SkingToolkit.dense_uv_parser.model import DenseUVParserNet  # noqa: E402
+from SkingToolkit.dense_uv_parser.semantic import attach_siglip_runtime  # noqa: E402
 from SkingToolkit.dense_uv_parser.utils import (  # noqa: E402
     SPLAT_COLOR_AGGREGATIONS,
     randomize_render_background,
@@ -139,8 +141,34 @@ def load_dense_parser(checkpoint_path, device):
             checkpoint_args.get("surface_classes", 0 if geometry_only else 2 if predict_affine else 0),
         ),
         geometry_only=geometry_only,
+        feature_dropout=model_config.get(
+            "feature_dropout", checkpoint_args.get("feature_dropout", 0.0)
+        ),
+        semantic_feature_dim=model_config.get("semantic_feature_dim", 0),
+        semantic_channels=model_config.get("semantic_channels", 128),
+        semantic_attention_heads=model_config.get("semantic_attention_heads", 4),
+        semantic_layers=model_config.get("semantic_layers", 1),
+        semantic_dropout=model_config.get("semantic_dropout", 0.05),
+        predict_confidence=model_config.get(
+            "predict_confidence",
+            any(key.startswith("route_confidence.") for key in state_dict),
+        ),
     ).to(device)
     model.load_state_dict(state_dict)
+    if model.semantic_feature_dim > 0:
+        attach_siglip_runtime(
+            model,
+            model_config.get(
+                "siglip_model",
+                checkpoint_args.get(
+                    "siglip_model", "google/siglip2-base-patch16-224"
+                ),
+            ),
+            device,
+            local_files_only=bool(
+                checkpoint_args.get("siglip_local_files_only", False)
+            ),
+        )
     model.eval()
     for param in model.parameters():
         param.requires_grad_(False)
@@ -168,6 +196,7 @@ def build_dense_parser_conditioning(
     color_aggregation="exact_mode",
     geometry_route_texel_consensus=False,
     reject_semantic_fallback=True,
+    confidence_aware_conditioning=False,
     bg_color=(128, 128, 128),
     return_renders=False,
 ):
@@ -220,6 +249,7 @@ def build_dense_parser_conditioning(
             geometry_route_texel_consensus=geometry_route_texel_consensus,
             observed_foreground=observed_foreground,
             reject_semantic_fallback=reject_semantic_fallback,
+            include_confidence=confidence_aware_conditioning,
         )
 
     if not is_batched:
@@ -250,6 +280,7 @@ def build_training_conditioning(
     parser_splat_color_aggregation="exact_mode",
     parser_geometry_route_texel_consensus=False,
     parser_reject_semantic_fallback=True,
+    confidence_aware_conditioning=False,
     bg_color=(128, 128, 128),
     return_renders=False,
 ):
@@ -276,6 +307,7 @@ def build_training_conditioning(
         color_aggregation=parser_splat_color_aggregation,
         geometry_route_texel_consensus=parser_geometry_route_texel_consensus,
         reject_semantic_fallback=parser_reject_semantic_fallback,
+        confidence_aware_conditioning=confidence_aware_conditioning,
         bg_color=bg_color,
         return_renders=return_renders,
     )
@@ -311,6 +343,13 @@ def run_epoch(
     parser_reject_semantic_fallback=True,
     bg_color=(128, 128, 128),
     log_every=50,
+    topology_drop_known_min=0.1,
+    topology_drop_known_max=0.5,
+    topology_teacher_reveal_unknown=0.1,
+    lambda_rgb_token=1.0,
+    lambda_alpha_token=0.5,
+    ignore_covered_inner=True,
+    covered_inner_alpha_threshold=0.1,
 ):
     model.train(train)
     if criterion.discriminator is not None:
@@ -351,14 +390,44 @@ def run_epoch(
                 parser_geometry_route_texel_consensus=parser_geometry_route_texel_consensus,
                 parser_reject_semantic_fallback=parser_reject_semantic_fallback,
                 bg_color=bg_color,
+                confidence_aware_conditioning=(
+                    getattr(model, "input_channels", 10) == 12
+                ),
                 return_renders=True,
             )
             conditioning, gt_renders = result
+            if train and hasattr(model, "augment_training_conditioning"):
+                conditioning = model.augment_training_conditioning(
+                    conditioning,
+                    batch["uv"],
+                    drop_known_min=topology_drop_known_min,
+                    drop_known_max=topology_drop_known_max,
+                    teacher_reveal_unknown=topology_teacher_reveal_unknown,
+                )
 
         with torch.set_grad_enabled(train):
             with autocast_context(device, precision):
-                pred_uv = model(conditioning)
+                model_outputs = None
+                if hasattr(model, "masked_token_loss"):
+                    model_outputs = model(conditioning, return_logits=True)
+                    pred_uv = model_outputs["uv"]
+                else:
+                    pred_uv = model(conditioning)
                 losses = criterion(pred_uv, batch["uv"], gt_renders=gt_renders)
+                if model_outputs is not None:
+                    token_losses = model.masked_token_loss(
+                        model_outputs,
+                        batch["uv"],
+                        lambda_rgb_token=lambda_rgb_token,
+                        lambda_alpha_token=lambda_alpha_token,
+                        ignore_covered_inner=ignore_covered_inner,
+                        covered_inner_alpha_threshold=covered_inner_alpha_threshold,
+                    )
+                    continuous_recon = losses["loss_recon_total"]
+                    losses["loss_recon_continuous"] = continuous_recon
+                    losses["loss_recon_total"] = continuous_recon + token_losses["loss_token"]
+                    losses["loss_total"] = losses["loss_total"] + token_losses["loss_token"]
+                    losses.update(token_losses)
                 loss = losses["loss_total"]
 
         if train:
@@ -445,6 +514,16 @@ def save_checkpoint(
         "input_channels": input_channels,
         "metrics": metrics,
     }
+    if hasattr(model, "checkpoint_config"):
+        checkpoint["model_config"] = model.checkpoint_config()
+    else:
+        checkpoint["model_config"] = {
+            "model_type": "unet",
+            "input_channels": input_channels,
+            "base_channels": getattr(args, "base_channels", 64),
+            "preserve_known": getattr(args, "preserve_known", True),
+            "arm_model": "steve",
+        }
     if best_metric is not None:
         checkpoint["best_metric"] = best_metric
     if discriminator is not None:
@@ -490,7 +569,25 @@ def build_arg_parser():
         action="store_true",
         help="Deprecated compatibility option; UV unprojection always builds RGBA plus mask conditioning.",
     )
+    parser.add_argument(
+        "--completion_model",
+        choices=["unet", "topology_maskgit"],
+        default="unet",
+        help="UV completion architecture. topology_maskgit uses cuboid topology and discrete masked generation.",
+    )
     parser.add_argument("--base_channels", type=int, default=64, help="Base channel width for UVInpaintingNet.")
+    parser.add_argument("--topology_channels", type=int, default=128)
+    parser.add_argument("--topology_layers", type=int, default=4)
+    parser.add_argument("--topology_attention_heads", type=int, default=4)
+    parser.add_argument("--topology_dropout", type=float, default=0.05)
+    parser.add_argument("--topology_hard_lock_threshold", type=float, default=0.85)
+    parser.add_argument("--topology_drop_known_min", type=float, default=0.1)
+    parser.add_argument("--topology_drop_known_max", type=float, default=0.5)
+    parser.add_argument("--topology_teacher_reveal_unknown", type=float, default=0.1)
+    parser.add_argument("--lambda_rgb_token", type=float, default=1.0)
+    parser.add_argument("--lambda_alpha_token", type=float, default=0.5)
+    parser.add_argument("--preview_generation_steps", type=int, default=4)
+    parser.add_argument("--preview_generation_temperature", type=float, default=0.0)
     parser.add_argument("--augment", dest="augment", action="store_true", default=False, help="Enable optional render-space geometric augmentation.")
     parser.add_argument("--no_augment", dest="augment", action="store_false")
     parser.add_argument("--augment_validation", dest="augment_validation", action="store_true", default=False)
@@ -620,6 +717,24 @@ def main():
     args = build_arg_parser().parse_args()
     args.conditioning_mode = "dense_parser_inpaint"
     torch.manual_seed(args.seed)
+    if not 0.0 <= args.topology_drop_known_min <= args.topology_drop_known_max <= 1.0:
+        raise ValueError("Topology known-drop ratios must satisfy 0 <= min <= max <= 1.")
+    if not 0.0 <= args.topology_teacher_reveal_unknown <= 1.0:
+        raise ValueError("--topology_teacher_reveal_unknown must be in [0, 1].")
+    if not 0.0 <= args.topology_hard_lock_threshold <= 1.0:
+        raise ValueError("--topology_hard_lock_threshold must be in [0, 1].")
+    if args.topology_attention_heads < 1:
+        raise ValueError("--topology_attention_heads must be positive.")
+    if args.topology_channels % args.topology_attention_heads != 0:
+        raise ValueError("Topology channels must be divisible by attention heads.")
+    if args.topology_layers < 1:
+        raise ValueError("--topology_layers must be positive.")
+    if not 0.0 <= args.topology_dropout < 1.0:
+        raise ValueError("--topology_dropout must be in [0, 1).")
+    if args.lambda_rgb_token < 0.0 or args.lambda_alpha_token < 0.0:
+        raise ValueError("Topology token-loss weights must be non-negative.")
+    if args.preview_generation_steps < 1 or args.preview_generation_temperature < 0.0:
+        raise ValueError("Preview generation requires positive steps and non-negative temperature.")
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -673,7 +788,9 @@ def main():
         scale_range=args.scale_range,
         perspective_scale=args.perspective_scale,
     )
-    input_channels = dataset.input_channels
+    input_channels = (
+        12 if args.completion_model == "topology_maskgit" else dataset.input_channels
+    )
 
     val_len = int(len(dataset) * args.val_split) if args.val_split > 0 else 0
     if val_len > 0 and len(dataset) - val_len > 0:
@@ -715,11 +832,22 @@ def main():
             **loader_kwargs,
         )
 
-    model = UVInpaintingNet(
-        input_channels=input_channels,
-        base_channels=args.base_channels,
-        preserve_known=args.preserve_known,
-    ).to(device)
+    if args.completion_model == "topology_maskgit":
+        model = TopologyAwareUVCompletionNet(
+            input_channels=input_channels,
+            hidden_channels=args.topology_channels,
+            layers=args.topology_layers,
+            attention_heads=args.topology_attention_heads,
+            dropout=args.topology_dropout,
+            preserve_known=args.preserve_known,
+            hard_lock_threshold=args.topology_hard_lock_threshold,
+        ).to(device)
+    else:
+        model = UVInpaintingNet(
+            input_channels=input_channels,
+            base_channels=args.base_channels,
+            preserve_known=args.preserve_known,
+        ).to(device)
 
     discriminator = None
     d_optimizer = None
@@ -758,6 +886,12 @@ def main():
     checkpoint = None
     if args.resume:
         checkpoint = torch.load(args.resume, map_location=device)
+        checkpoint_model_type = checkpoint.get("model_config", {}).get("model_type", "unet")
+        if checkpoint_model_type != args.completion_model:
+            raise ValueError(
+                "Cannot resume with a different completion model: "
+                f"checkpoint={checkpoint_model_type}, requested={args.completion_model}."
+            )
         checkpoint_preserve_known = checkpoint.get("args", {}).get("preserve_known", True)
         if bool(checkpoint_preserve_known) != args.preserve_known:
             raise ValueError(
@@ -801,6 +935,8 @@ def main():
         "input_channels": input_channels,
         "conditioning_mode": args.conditioning_mode,
         "conditioning_source": "dense_parser",
+        "completion_model": args.completion_model,
+        "model_config": model.checkpoint_config() if hasattr(model, "checkpoint_config") else None,
         "preserve_known": args.preserve_known,
         "parser_checkpoint": args.parser_checkpoint,
         "parser_splat_fg_threshold": args.parser_splat_fg_threshold,
@@ -858,6 +994,13 @@ def main():
             parser_geometry_route_texel_consensus=args.parser_geometry_route_texel_consensus,
             parser_reject_semantic_fallback=not args.parser_allow_semantic_fallback,
             bg_color=dataset.bg_color, log_every=args.log_every,
+            topology_drop_known_min=args.topology_drop_known_min,
+            topology_drop_known_max=args.topology_drop_known_max,
+            topology_teacher_reveal_unknown=args.topology_teacher_reveal_unknown,
+            lambda_rgb_token=args.lambda_rgb_token,
+            lambda_alpha_token=args.lambda_alpha_token,
+            ignore_covered_inner=not args.supervise_covered_inner,
+            covered_inner_alpha_threshold=args.covered_inner_alpha_threshold,
         )
         metrics = {"train": train_metrics}
         if val_loader is not None:
@@ -890,6 +1033,13 @@ def main():
                     parser_geometry_route_texel_consensus=args.parser_geometry_route_texel_consensus,
                     parser_reject_semantic_fallback=not args.parser_allow_semantic_fallback,
                     bg_color=dataset.bg_color, log_every=args.log_every,
+                    topology_drop_known_min=args.topology_drop_known_min,
+                    topology_drop_known_max=args.topology_drop_known_max,
+                    topology_teacher_reveal_unknown=args.topology_teacher_reveal_unknown,
+                    lambda_rgb_token=args.lambda_rgb_token,
+                    lambda_alpha_token=args.lambda_alpha_token,
+                    ignore_covered_inner=not args.supervise_covered_inner,
+                    covered_inner_alpha_threshold=args.covered_inner_alpha_threshold,
                 )
             metrics["val"] = val_metrics
 
@@ -933,8 +1083,19 @@ def main():
                     parser_geometry_route_texel_consensus=args.parser_geometry_route_texel_consensus,
                     parser_reject_semantic_fallback=not args.parser_allow_semantic_fallback,
                     bg_color=dataset.bg_color,
+                    confidence_aware_conditioning=(
+                        getattr(model, "input_channels", 10) == 12
+                    ),
                 )
-                pred_uv = model(preview_cond)
+                if hasattr(model, "generate"):
+                    pred_uv = model.generate(
+                        preview_cond,
+                        steps=args.preview_generation_steps,
+                        temperature=args.preview_generation_temperature,
+                        seed=args.seed,
+                    )
+                else:
+                    pred_uv = model(preview_cond)
             save_preview(pred_uv, preview_batch["uv"], output_dir / "previews" / f"epoch_{epoch:04d}.png")
 
         is_best = metric < best_metric

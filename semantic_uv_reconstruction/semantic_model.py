@@ -83,6 +83,57 @@ class UVQueryBlock(nn.Module):
         return queries + self.feed_forward(self.ff_norm(queries))
 
 
+class UVCrossAttentionBlock(nn.Module):
+    """Cross-attend UV queries to compact latents without quadratic self-attention."""
+
+    def __init__(self, channels, heads=4, dropout=0.0):
+        super().__init__()
+        self.query_norm = nn.LayerNorm(channels)
+        self.memory_norm = nn.LayerNorm(channels)
+        self.cross_attention = nn.MultiheadAttention(
+            channels, heads, dropout=dropout, batch_first=True
+        )
+        self.ff_norm = nn.LayerNorm(channels)
+        self.feed_forward = nn.Sequential(
+            nn.Linear(channels, channels * 4),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(channels * 4, channels),
+        )
+
+    def forward(self, queries, memory):
+        normalized_memory = self.memory_norm(memory)
+        attended, _ = self.cross_attention(
+            self.query_norm(queries),
+            normalized_memory,
+            normalized_memory,
+            need_weights=False,
+        )
+        queries = queries + attended
+        return queries + self.feed_forward(self.ff_norm(queries))
+
+
+class UVSpatialMixer(nn.Module):
+    """Cheap local communication between UV queries on their native 2D grid."""
+
+    def __init__(self, channels):
+        super().__init__()
+        self.block = nn.Sequential(
+            nn.Conv2d(channels, channels, kernel_size=3, padding=1, groups=channels),
+            nn.GroupNorm(norm_groups(channels), channels),
+            nn.SiLU(inplace=True),
+            nn.Conv2d(channels, channels, kernel_size=1),
+        )
+
+    def forward(self, queries, query_size):
+        batch, _, channels = queries.shape
+        features = queries.transpose(1, 2).reshape(
+            batch, channels, query_size, query_size
+        )
+        features = features + self.block(features)
+        return features.flatten(2).transpose(1, 2)
+
+
 class UVUpsampleBlock(nn.Module):
     """Learn a separate feature vector for every 2x2 output texel block.
 
@@ -120,11 +171,13 @@ class SemanticUVReconstructor(nn.Module):
         attention_heads=4,
         attention_layers=2,
         attention_dropout=0.0,
+        memory_latents=256,
         semantic_classes=13,
         semantic_backbone="none",
         siglip_model="google/siglip2-base-patch16-224",
         siglip_local_files_only=False,
         open_semantic_backbone=None,
+        use_siglip_patch_tokens=False,
     ):
         super().__init__()
         if view_count < 1:
@@ -136,6 +189,8 @@ class SemanticUVReconstructor(nn.Module):
             raise ValueError("64 / query_size must be a power of two.")
         if token_channels % attention_heads != 0:
             raise ValueError("token_channels must be divisible by attention_heads.")
+        if memory_latents < 16:
+            raise ValueError("memory_latents must be at least 16.")
 
         self.view_count = int(view_count)
         self.base_channels = int(base_channels)
@@ -144,10 +199,12 @@ class SemanticUVReconstructor(nn.Module):
         self.attention_heads = int(attention_heads)
         self.attention_layers = int(attention_layers)
         self.attention_dropout = float(attention_dropout)
+        self.memory_latent_count = int(memory_latents)
         self.semantic_classes = int(semantic_classes)
         self.semantic_backbone_name = str(semantic_backbone)
         self.siglip_model = str(siglip_model)
-        self.architecture_version = 2
+        self.use_siglip_patch_tokens = bool(use_siglip_patch_tokens)
+        self.architecture_version = 3
 
         self.encoder = FixedViewEncoder(base_channels, token_channels)
         self.detail_projection = nn.Sequential(
@@ -171,8 +228,17 @@ class SemanticUVReconstructor(nn.Module):
             self.open_semantic_backbone = None
         else:
             raise ValueError("semantic_backbone must be 'siglip2' or 'none'.")
+        if (
+            self.open_semantic_backbone is not None
+            and not self.use_siglip_patch_tokens
+            and hasattr(self.open_semantic_backbone, "token_projection")
+        ):
+            self.open_semantic_backbone.token_projection.requires_grad_(False)
         self.uv_queries = nn.Parameter(
             torch.randn(query_size * query_size, token_channels) * 0.02
+        )
+        self.memory_latents = nn.Parameter(
+            torch.randn(memory_latents, token_channels) * 0.02
         )
         self.semantic_bottleneck = nn.Sequential(
             nn.LayerNorm(token_channels),
@@ -180,9 +246,15 @@ class SemanticUVReconstructor(nn.Module):
             nn.GELU(),
             nn.Linear(token_channels, token_channels),
         )
+        self.memory_resampler = UVQueryBlock(
+            token_channels, attention_heads, attention_dropout
+        )
         self.query_blocks = nn.ModuleList(
-            UVQueryBlock(token_channels, attention_heads, attention_dropout)
+            UVCrossAttentionBlock(token_channels, attention_heads, attention_dropout)
             for _ in range(attention_layers)
+        )
+        self.query_mixers = nn.ModuleList(
+            UVSpatialMixer(token_channels) for _ in range(attention_layers)
         )
 
         decoder_blocks = []
@@ -235,12 +307,14 @@ class SemanticUVReconstructor(nn.Module):
         raw_global = encoded["raw_global"].reshape(batch, views, -1)
         return F.normalize(raw_global.float(), dim=-1)
 
-    def forward(self, images):
+    def forward(self, images, open_semantic_raw=None):
         if images.dim() != 5 or images.shape[2] != 3:
             raise ValueError(f"Expected images shaped BxVx3xHxW, got {tuple(images.shape)}.")
         batch, views, channels, height, width = images.shape
         if views != self.view_count:
             raise ValueError(f"Expected {self.view_count} views, got {views}.")
+        if open_semantic_raw is not None and self.open_semantic_backbone is None:
+            raise ValueError("Cached SigLIP features require an open semantic backbone.")
 
         flat_images = images.reshape(batch * views, channels, height, width)
         if flat_images.is_cuda:
@@ -276,20 +350,50 @@ class SemanticUVReconstructor(nn.Module):
         semantic_seed = coarse_memory.mean(dim=1)
         open_semantic_embedding = None
         if self.open_semantic_backbone is not None:
-            open_features = self.open_semantic_backbone(flat_images)
-            open_tokens = open_features["tokens"].reshape(batch, views, -1, token_channels)
-            open_tokens = (
-                open_tokens
-                + self.view_embedding.view(1, views, 1, token_channels)
-                + self.source_embedding[2].view(1, 1, 1, token_channels)
-            )
-            open_tokens = open_tokens.reshape(batch, -1, token_channels)
-            open_token_mask = open_features["token_mask"].reshape(batch, -1)
-            memory_parts.append(open_tokens)
-            open_memory_requires_mask = not bool(open_features.get("tokens_compact", False))
-            open_global = open_features["global"].reshape(batch, views, token_channels).mean(dim=1)
+            if open_semantic_raw is None:
+                open_features = (
+                    self.open_semantic_backbone(flat_images)
+                    if self.use_siglip_patch_tokens
+                    else self.open_semantic_backbone.encode_global(flat_images)
+                )
+                raw_global = open_features["raw_global"].reshape(batch, views, -1)
+                projected_global = open_features["global"].reshape(
+                    batch, views, token_channels
+                )
+                if self.use_siglip_patch_tokens:
+                    open_tokens = open_features["tokens"].reshape(
+                        batch, views, -1, token_channels
+                    )
+                    open_tokens = (
+                        open_tokens
+                        + self.view_embedding.view(1, views, 1, token_channels)
+                        + self.source_embedding[2].view(1, 1, 1, token_channels)
+                    )
+                    open_tokens = open_tokens.reshape(batch, -1, token_channels)
+                    open_token_mask = open_features["token_mask"].reshape(batch, -1)
+                    memory_parts.append(open_tokens)
+                    open_memory_requires_mask = not bool(
+                        open_features.get("tokens_compact", False)
+                    )
+            else:
+                if open_semantic_raw.dim() != 3 or open_semantic_raw.shape[:2] != (
+                    batch,
+                    views,
+                ):
+                    raise ValueError(
+                        "Cached SigLIP features must be shaped BxVxD; got "
+                        f"{tuple(open_semantic_raw.shape)}."
+                    )
+                raw_global = open_semantic_raw.float()
+                projected_global = self.open_semantic_backbone.project_global(
+                    raw_global.reshape(batch * views, -1)
+                ).reshape(batch, views, token_channels)
+                if self.use_siglip_patch_tokens:
+                    raise ValueError(
+                        "A global-only SigLIP cache cannot supply patch tokens."
+                    )
+            open_global = projected_global.mean(dim=1)
             semantic_seed = semantic_seed + open_global
-            raw_global = open_features["raw_global"].reshape(batch, views, -1)
             open_semantic_view_embeddings = F.normalize(raw_global.float(), dim=-1)
             open_semantic_embedding = F.normalize(raw_global.mean(dim=1).float(), dim=-1)
 
@@ -303,10 +407,14 @@ class SemanticUVReconstructor(nn.Module):
             )
             memory_valid = torch.cat([cnn_valid, open_token_mask], dim=1)
         semantic = self.semantic_bottleneck(semantic_seed)
+        latents = self.memory_latents.unsqueeze(0).expand(batch, -1, -1)
+        latents = latents + semantic.unsqueeze(1)
+        latents = self.memory_resampler(latents, memory, memory_valid)
         queries = self.uv_queries.unsqueeze(0).expand(batch, -1, -1)
         queries = queries + semantic.unsqueeze(1)
-        for block in self.query_blocks:
-            queries = block(queries, memory, memory_valid)
+        for block, mixer in zip(self.query_blocks, self.query_mixers):
+            queries = block(queries, latents)
+            queries = mixer(queries, self.query_size)
 
         features = queries.transpose(1, 2).reshape(
             batch, token_channels, self.query_size, self.query_size

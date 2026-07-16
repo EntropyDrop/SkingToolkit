@@ -15,6 +15,7 @@ if str(WORKSPACE_ROOT) not in sys.path:
     sys.path.insert(0, str(WORKSPACE_ROOT))
 
 from SkingToolkit.dense_uv_parser.model import DenseUVParserNet  # noqa: E402
+from SkingToolkit.dense_uv_parser.semantic import attach_siglip_runtime  # noqa: E402
 from SkingToolkit.dense_uv_parser.utils import (  # noqa: E402
     FACE_PALETTE,
     IGNORE_INDEX,
@@ -40,6 +41,7 @@ from SkingToolkit.dense_uv_parser.utils import (  # noqa: E402
 )
 from SkingToolkit.semantic_uv_reconstruction.dataset import finalize_minecraft_alpha, tensor_to_rgba_image, view_native_size  # noqa: E402
 from SkingToolkit.semantic_uv_reconstruction.model import UVInpaintingNet  # noqa: E402
+from SkingToolkit.semantic_uv_reconstruction.topology_model import TopologyAwareUVCompletionNet  # noqa: E402
 from SkingToolkit.semantic_uv_reconstruction.train import get_device  # noqa: E402
 from SkingToolkit.renderer import DifferentiableRenderer  # noqa: E402
 
@@ -103,8 +105,31 @@ def load_parser(checkpoint_path, device):
         feature_dropout=model_config.get(
             "feature_dropout", checkpoint_args.get("feature_dropout", 0.0)
         ),
+        semantic_feature_dim=model_config.get("semantic_feature_dim", 0),
+        semantic_channels=model_config.get("semantic_channels", 128),
+        semantic_attention_heads=model_config.get("semantic_attention_heads", 4),
+        semantic_layers=model_config.get("semantic_layers", 1),
+        semantic_dropout=model_config.get("semantic_dropout", 0.05),
+        predict_confidence=model_config.get(
+            "predict_confidence",
+            any(key.startswith("route_confidence.") for key in state_dict),
+        ),
     ).to(device)
     model.load_state_dict(state_dict)
+    if model.semantic_feature_dim > 0:
+        attach_siglip_runtime(
+            model,
+            model_config.get(
+                "siglip_model",
+                checkpoint_args.get(
+                    "siglip_model", "google/siglip2-base-patch16-224"
+                ),
+            ),
+            device,
+            local_files_only=bool(
+                checkpoint_args.get("siglip_local_files_only", False)
+            ),
+        )
     model.eval()
     return model, checkpoint_args
 
@@ -112,14 +137,48 @@ def load_parser(checkpoint_path, device):
 def load_inpaint(checkpoint_path, device):
     checkpoint = torch.load(checkpoint_path, map_location=device)
     checkpoint_args = checkpoint.get("args", {})
-    input_channels = checkpoint.get("input_channels", checkpoint_args.get("input_channels", 10))
-    model = UVInpaintingNet(
-        input_channels=input_channels,
-        base_channels=checkpoint_args.get("base_channels", 64),
-        preserve_known=checkpoint_args.get("preserve_known", True),
-    ).to(device)
+    model_config = checkpoint.get("model_config", {})
+    model_type = model_config.get(
+        "model_type", checkpoint_args.get("completion_model", "unet")
+    )
+    input_channels = model_config.get(
+        "input_channels", checkpoint.get("input_channels", checkpoint_args.get("input_channels", 10))
+    )
+    if model_type == "topology_maskgit":
+        model = TopologyAwareUVCompletionNet(
+            input_channels=input_channels,
+            hidden_channels=model_config.get(
+                "hidden_channels", checkpoint_args.get("topology_channels", 128)
+            ),
+            layers=model_config.get("layers", checkpoint_args.get("topology_layers", 4)),
+            attention_heads=model_config.get(
+                "attention_heads", checkpoint_args.get("topology_attention_heads", 4)
+            ),
+            dropout=model_config.get("dropout", checkpoint_args.get("topology_dropout", 0.05)),
+            preserve_known=model_config.get(
+                "preserve_known", checkpoint_args.get("preserve_known", True)
+            ),
+            hard_lock_threshold=model_config.get(
+                "hard_lock_threshold",
+                checkpoint_args.get("topology_hard_lock_threshold", 0.85),
+            ),
+        ).to(device)
+    elif model_type == "unet":
+        model = UVInpaintingNet(
+            input_channels=input_channels,
+            base_channels=model_config.get(
+                "base_channels", checkpoint_args.get("base_channels", 64)
+            ),
+            preserve_known=model_config.get(
+                "preserve_known", checkpoint_args.get("preserve_known", True)
+            ),
+        ).to(device)
+    else:
+        raise ValueError(f"Unsupported inpaint model_type={model_type!r}.")
     model.load_state_dict(checkpoint["model"])
     model.eval()
+    checkpoint_args = dict(checkpoint_args)
+    checkpoint_args["completion_model"] = model_type
     return model, checkpoint_args
 
 
@@ -157,7 +216,8 @@ def load_view_images(args, views, renderer, bg_color=(128, 128, 128)):
 
 def save_conditioning_preview(conditioning, output_path):
     inner_rgb = conditioning[:, 0:3]
-    outer_rgb = conditioning[:, 5:8]
+    outer_offset = 6 if conditioning.shape[1] == 12 else 5
+    outer_rgb = conditioning[:, outer_offset : outer_offset + 3]
     preview = torch.cat([inner_rgb, outer_rgb], dim=0)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     save_image(preview.clamp(0.0, 1.0), output_path, nrow=conditioning.shape[0])
@@ -405,6 +465,9 @@ def build_arg_parser():
     parser = argparse.ArgumentParser(description="Infer UV conditioning with a dense UV parser.")
     parser.add_argument("--parser_checkpoint", required=True)
     parser.add_argument("--inpaint_checkpoint", default=None, help="Optional semantic_uv_reconstruction checkpoint used to inpaint final skin.")
+    parser.add_argument("--inpaint_steps", type=int, default=4, help="Masked-generation steps for topology checkpoints.")
+    parser.add_argument("--inpaint_temperature", type=float, default=0.0, help="0 uses deterministic argmax; positive values sample unknown texels.")
+    parser.add_argument("--inpaint_seed", type=int, default=1234)
     parser.add_argument("--output", default=None, help="Final RGBA UV PNG path; requires --inpaint_checkpoint.")
     parser.add_argument("--conditioning_output", default=None, help="Optional preview image for parser-splatted conditioning.")
     parser.add_argument(
@@ -490,6 +553,8 @@ def build_arg_parser():
 
 def main():
     args = build_arg_parser().parse_args()
+    if args.inpaint_steps < 1 or args.inpaint_temperature < 0.0:
+        raise ValueError("Inpaint generation requires positive steps and non-negative temperature.")
     if args.output and not args.inpaint_checkpoint:
         raise ValueError("--output requires --inpaint_checkpoint.")
     if not any(
@@ -519,6 +584,10 @@ def main():
 
     device = get_device(args.device)
     parser_model, parser_args = load_parser(args.parser_checkpoint, device)
+    inpaint_model = None
+    inpaint_args = None
+    if args.output:
+        inpaint_model, inpaint_args = load_inpaint(args.inpaint_checkpoint, device)
     views = parse_views(parser_args.get("views", "walk_front_both_layer_ortho,walk_back_both_layer_ortho"))
     if parser_model.view_classes not in (0, len(views)):
         raise ValueError(
@@ -586,6 +655,9 @@ def main():
             color_aggregation=args.color_aggregation,
             geometry_route_texel_consensus=geometry_route_texel_consensus,
             reject_semantic_fallback=not args.allow_semantic_fallback,
+            include_confidence=(
+                getattr(inpaint_model, "input_channels", 10) == 12
+            ),
             return_details=True,
         )
 
@@ -739,13 +811,15 @@ def main():
         )
 
     if args.output:
-        inpaint_model, inpaint_args = load_inpaint(args.inpaint_checkpoint, device)
         print(
             "inpaint_config="
             + json.dumps(
                 {
                     "checkpoint": checkpoint_run_id(args.inpaint_checkpoint),
+                    "completion_model": inpaint_args.get("completion_model", "unet"),
                     "preserve_known": bool(inpaint_args.get("preserve_known", True)),
+                    "generation_steps": args.inpaint_steps,
+                    "generation_temperature": args.inpaint_temperature,
                 },
                 sort_keys=True,
             )
@@ -809,8 +883,17 @@ def main():
                 f"checkpoint={expected_color_aggregation}, requested={args.color_aggregation}."
             )
         with torch.no_grad():
+            if hasattr(inpaint_model, "generate"):
+                completed = inpaint_model.generate(
+                    conditioning,
+                    steps=args.inpaint_steps,
+                    temperature=args.inpaint_temperature,
+                    seed=args.inpaint_seed,
+                )[0]
+            else:
+                completed = inpaint_model(conditioning)[0]
             pred_uv = finalize_minecraft_alpha(
-                inpaint_model(conditioning)[0],
+                completed,
                 alpha_threshold=args.alpha_threshold,
                 enforce_base_alpha=not args.no_enforce_base_alpha,
             )

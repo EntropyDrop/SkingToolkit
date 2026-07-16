@@ -35,7 +35,8 @@ find_latest_checkpoint() {
   printf '%s\n' "$best_checkpoint"
 }
 
-MODEL="${MODEL:-full}"
+COMPLETION_MODEL="${COMPLETION_MODEL:-topology_maskgit}"
+MODEL="${MODEL:-$COMPLETION_MODEL}"
 if [[ -z "${RUN_NAME:-}" ]]; then
   v=1
   while [[ -d "runs/semantic_uv_reconstruction_${MODEL}_v${v}" ]]; do
@@ -45,10 +46,63 @@ if [[ -z "${RUN_NAME:-}" ]]; then
 fi
 DATA_DIR="${DATA_DIR:-../skins}"
 MAPPINGS_SIZE="${MAPPINGS_SIZE:-256x512}"
-MAPPINGS_DIR="${MAPPINGS_DIR:-../../github/differentiable_minecraft_renderer/mappings_${MAPPINGS_SIZE}}"
 VIEWS="${VIEWS:-walk_front_both_layer_ortho,walk_back_both_layer_ortho}"
+
+resolve_mappings_dir() {
+  local requested="${MAPPINGS_DIR:-}"
+  local name="mappings_${MAPPINGS_SIZE}"
+  local candidate=""
+  local discovered=""
+
+  if [[ -n "$requested" ]]; then
+    if [[ ! -d "$requested" ]]; then
+      echo "MAPPINGS_DIR does not exist: $requested" >&2
+      return 1
+    fi
+    MAPPINGS_DIR="$requested"
+    return 0
+  fi
+
+  for candidate in \
+    "../differentiable_minecraft_renderer/$name" \
+    "../../differentiable_minecraft_renderer/$name" \
+    "../../github/differentiable_minecraft_renderer/$name" \
+    "../$name"; do
+    if [[ -d "$candidate" ]]; then
+      MAPPINGS_DIR="$candidate"
+      return 0
+    fi
+  done
+
+  discovered="$(find ../.. -maxdepth 5 -type d -name "$name" -print -quit 2>/dev/null || true)"
+  if [[ -n "$discovered" ]]; then
+    MAPPINGS_DIR="$discovered"
+    return 0
+  fi
+
+  echo "Could not find $name from $(pwd)." >&2
+  echo "Set MAPPINGS_DIR=/absolute/path/to/$name." >&2
+  return 1
+}
+
+resolve_mappings_dir
+
+IFS=',' read -r -a configured_views <<< "$VIEWS"
+missing_mapping_files=()
+for view in "${configured_views[@]}"; do
+  view="${view//[[:space:]]/}"
+  if [[ -n "$view" && ! -f "$MAPPINGS_DIR/${view}_mapping.pt" ]]; then
+    missing_mapping_files+=("${view}_mapping.pt")
+  fi
+done
+if (( ${#missing_mapping_files[@]} > 0 )); then
+  echo "MAPPINGS_DIR=$MAPPINGS_DIR is missing required files:" >&2
+  printf '  %s\n' "${missing_mapping_files[@]}" >&2
+  exit 1
+fi
+
 MAX_SAMPLES="${MAX_SAMPLES:-30000}"
-BATCH_SIZE="${BATCH_SIZE:-32}"
+BATCH_SIZE="${BATCH_SIZE:-8}"
 NUM_WORKERS="${NUM_WORKERS:-16}"
 PREFETCH_FACTOR="${PREFETCH_FACTOR:-4}"
 EPOCHS="${EPOCHS:-30}"
@@ -63,6 +117,20 @@ SCHEDULER="${SCHEDULER:-cosine}"
 MIN_LR="${MIN_LR:-1e-5}"
 LOG_EVERY="${LOG_EVERY:-50}"
 PRESERVE_KNOWN="${PRESERVE_KNOWN:-true}"
+
+# --- Topology-aware masked generator ---
+TOPOLOGY_CHANNELS="${TOPOLOGY_CHANNELS:-128}"
+TOPOLOGY_LAYERS="${TOPOLOGY_LAYERS:-4}"
+TOPOLOGY_ATTENTION_HEADS="${TOPOLOGY_ATTENTION_HEADS:-4}"
+TOPOLOGY_DROPOUT="${TOPOLOGY_DROPOUT:-0.05}"
+TOPOLOGY_HARD_LOCK_THRESHOLD="${TOPOLOGY_HARD_LOCK_THRESHOLD:-0.85}"
+TOPOLOGY_DROP_KNOWN_MIN="${TOPOLOGY_DROP_KNOWN_MIN:-0.1}"
+TOPOLOGY_DROP_KNOWN_MAX="${TOPOLOGY_DROP_KNOWN_MAX:-0.5}"
+TOPOLOGY_TEACHER_REVEAL_UNKNOWN="${TOPOLOGY_TEACHER_REVEAL_UNKNOWN:-0.1}"
+LAMBDA_RGB_TOKEN="${LAMBDA_RGB_TOKEN:-1.0}"
+LAMBDA_ALPHA_TOKEN="${LAMBDA_ALPHA_TOKEN:-0.5}"
+PREVIEW_GENERATION_STEPS="${PREVIEW_GENERATION_STEPS:-4}"
+PREVIEW_GENERATION_TEMPERATURE="${PREVIEW_GENERATION_TEMPERATURE:-0.0}"
 
 # --- Dense parser conditioning ---
 PARSER_RUNS_DIR="${PARSER_RUNS_DIR:-../dense_uv_parser/runs}"
@@ -196,6 +264,19 @@ python train.py \
   --max_samples "$MAX_SAMPLES" \
   --output_dir "runs/$RUN_NAME" \
   --views "$VIEWS" \
+  --completion_model "$COMPLETION_MODEL" \
+  --topology_channels "$TOPOLOGY_CHANNELS" \
+  --topology_layers "$TOPOLOGY_LAYERS" \
+  --topology_attention_heads "$TOPOLOGY_ATTENTION_HEADS" \
+  --topology_dropout "$TOPOLOGY_DROPOUT" \
+  --topology_hard_lock_threshold "$TOPOLOGY_HARD_LOCK_THRESHOLD" \
+  --topology_drop_known_min "$TOPOLOGY_DROP_KNOWN_MIN" \
+  --topology_drop_known_max "$TOPOLOGY_DROP_KNOWN_MAX" \
+  --topology_teacher_reveal_unknown "$TOPOLOGY_TEACHER_REVEAL_UNKNOWN" \
+  --lambda_rgb_token "$LAMBDA_RGB_TOKEN" \
+  --lambda_alpha_token "$LAMBDA_ALPHA_TOKEN" \
+  --preview_generation_steps "$PREVIEW_GENERATION_STEPS" \
+  --preview_generation_temperature "$PREVIEW_GENERATION_TEMPERATURE" \
   --batch_size "$BATCH_SIZE" \
   --num_workers "$NUM_WORKERS" \
   --prefetch_factor "$PREFETCH_FACTOR" \

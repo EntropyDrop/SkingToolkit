@@ -9,13 +9,17 @@ fixed front/back renders -> CNN + frozen SigLIP2 semantics -> complete 64x64 RGB
 Start it with `./run_semantic_uv_reconstruction_training.sh`. It does not need a
 parser checkpoint or a finite garment concept table.
 
-The directory also retains the compatible parser-conditioned completion path:
+For inputs with occlusion or invisible UV texels, the recommended production
+path is geometry-first, topology-aware completion:
 
 ```text
-fixed-view renders -> dense parser UV conditioning -> complete 64x64 RGBA UV
+fixed-view renders -> dense parser geometry routing -> topology-aware masked generation -> complete 64x64 RGBA UV
 ```
 
-Start that legacy-compatible path with `./run_parser_conditioned_training.sh`.
+Start it with `./run_parser_conditioned_training.sh`. The direct SigLIP2 path
+remains useful as a separate fixed-view reconstruction experiment, while the
+parser-conditioned path gives explicit control over observed versus generated
+texels.
 
 ---
 
@@ -26,15 +30,29 @@ Reconstructing a flat 64x64 Minecraft skin layout from 2D camera renders is a di
 To solve this, `dense_uv_parser` performs coordinate-guided routing first and `semantic_uv_reconstruction` concentrates on UV-space completion:
 
 ### 1. Dense Parser Conditioning
-* The frozen parser classifies visible pixels as inner, outer, or secondary/deeper surfaces.
-* Fixed renderer mappings route those pixels into a 10-channel tensor: inner RGBA plus known mask, followed by outer RGBA plus known mask.
-* Unknown and ambiguous texels remain empty, turning the task into UV-space inpainting rather than camera-coordinate translation.
+* The frozen parser combines high-resolution geometry features with frozen
+  multi-view SigLIP2 context to classify pixels as inner, outer, or
+  secondary/deeper surfaces.
+* Fixed mappings route them into 12 channels: inner RGBA, evidence, and learned
+  confidence, followed by the same outer fields.
+* Unknown and low-confidence texels remain generatable, turning the task into
+  confidence-aware UV completion rather than camera-coordinate translation.
 
-### 2. Network Architecture (`UVInpaintingNet`)
-* The model is a custom 2D U-Net-like segmentation network.
-* **Encoder**: Consists of a Conv Stem followed by 3 Down-sampling blocks. Each down-block uses Group Normalization (dynamically selecting groups based on channels) and SiLU activations.
-* **Decoder**: Features 3 Up-sampling blocks with bilinear interpolation and skip connections from the encoder to retain high-frequency textures.
-* **Output Head**: Predicts a 4-channel (RGBA) flat skin in `[0, 1]` using a Sigmoid activation.
+### 2. Topology-Aware Masked Generator (`TopologyAwareUVCompletionNet`)
+* Every valid atlas texel carries its body part, cuboid face, inner/outer layer,
+  face-local coordinates, and observed/unknown state.
+* Local graph attention follows real cuboid seams instead of accidental 2D atlas
+  adjacency. A fifth edge connects corresponding inner and outer texels.
+* Seventy-two surface tokens (six parts × six faces × two layers) exchange global
+  context with a compact transformer before broadcasting it back to texels.
+* RGB is generated as three 256-way categorical tokens and outer alpha as a
+  binary token. Inference iteratively reveals the most confident unknown texels.
+* Parser evidence above `--topology_hard_lock_threshold` is copied byte-for-byte.
+  Lower-confidence evidence is visible to the model but may be repaired. Invalid
+  atlas padding remains transparent.
+
+The previous `UVInpaintingNet` U-Net is still loadable and trainable with
+`COMPLETION_MODEL=unet`, including legacy checkpoints.
 
 ### 3. Multi-Term Loss Formulation (`UVInpaintingLoss`)
 To guarantee both flat UV accuracy and visual rendering consistency, training optimizes a weighted sum of reconstruction terms:
@@ -44,6 +62,9 @@ To guarantee both flat UV accuracy and visual rendering consistency, training op
 4. **Alpha Edge L1 Loss (`loss_alpha_edge`)**: Computes alpha-gradient differences to keep silhouettes, cutouts, and outer-layer boundaries crisp.
 5. **Differentiable Render Consistency L1 Loss (`loss_render`)**: Passively runs the predicted 64x64 skin through the `DifferentiableRenderer` to generate 2D camera views, comparing them against the ground truth renders. This forces the network to resolve overlapping texture layers correctly.
 6. **UV-Space Edge L1 Loss (`loss_edge`)**: Computes RGB-gradient differences (x and y directions) between predicted and ground truth skins to enforce sharp pixel boundaries.
+7. **Masked RGB/Alpha Token Losses**: Train discrete generation on unlocked
+   texels. Randomly hiding a fraction of parser evidence prevents the
+   generator from overfitting to a single visibility pattern.
 
 ---
 
@@ -66,7 +87,7 @@ Geometric augmentation is disabled by default to preserve fixed-view pixel align
 For a short sharpening finetune after the first run, resume from the best checkpoint with a very small GAN weight:
 
 ```bash
-RESUME=runs/semantic_uv_reconstruction_full_v1/best.pt RESUME_LR=5e-5 EPOCHS=15 LAMBDA_GAN=0.005 ./run_parser_conditioned_training.sh
+RESUME=runs/semantic_uv_reconstruction_topology_maskgit_v1/best.pt RESUME_LR=5e-5 EPOCHS=15 LAMBDA_GAN=0.005 ./run_parser_conditioned_training.sh
 ```
 
 Use the actual run folder name in `RESUME`. Avoid jumping straight back to `LAMBDA_GAN=0.03` unless the colors are already stable.
@@ -76,6 +97,7 @@ python SkingToolkit/semantic_uv_reconstruction/train.py \
   --data_dir /path/to/gt_skins \
   --output_dir runs/semantic_uv_reconstruction_static \
   --parser_checkpoint ../dense_uv_parser/runs/dense_uv_parser_v1/best.pt \
+  --completion_model topology_maskgit \
   --views static_front,static_back,top_front_45,top_back_45 \
   --batch_size 16 \
   --epochs 20
@@ -100,12 +122,26 @@ Useful knobs:
 - `--covered_inner_alpha_threshold`: GT outer-layer alpha threshold used to decide covered inner texels; defaults to `0.1`.
 - `--render_size`: deprecated compatibility option; UV unprojection uses native mapping sizes.
 - `--include_alpha`: deprecated compatibility option; conditioning always uses RGBA plus masks.
+- `--completion_model`: `topology_maskgit` for topology-aware discrete completion,
+  or `unet` for the legacy continuous U-Net.
+- `--topology_drop_known_min` / `--topology_drop_known_max`: range of observed
+  texels randomly hidden during training; defaults to `0.1`–`0.5`.
+- `--topology_teacher_reveal_unknown`: fraction of originally invisible GT
+  texels exposed as self-conditioning during training; defaults to `0.1`.
+- `--topology_hard_lock_threshold`: minimum calibrated parser confidence copied
+  exactly into the result; defaults to `0.85`.
+- `--lambda_rgb_token` / `--lambda_alpha_token`: discrete unknown-texel loss weights.
+- `--preview_generation_steps` / `--preview_generation_temperature`: iterative
+  preview sampling controls. Temperature `0` is deterministic.
 
 Performance notes:
 
 - `run_parser_conditioned_training.sh` disables geometric augmentation by default: `AUGMENT=false`, `TRANSLATION_SCALE=0.0`, `SCALE_RANGE=0.0`, and `PERSPECTIVE_SCALE=0.0`.
 - Validation also uses fixed canonical geometry, and parser affine refinement is disabled. Pure solid-background randomization remains enabled.
-- Parser conditioning uses the same semantic-first routing as production inference: semantic outer confidence `0.55`, relative margin `0.35`, projected-texel consensus disabled, and geometric UV coverage filtering disabled (`0`). The fixed grid assigns approximate UV coordinates but does not override the predicted inner/outer meaning.
+- Parser conditioning uses the same semantics-conditioned geometry routing as
+  production inference: outer confidence `0.55`, relative margin `0.35`,
+  projected-texel consensus disabled, and geometric UV coverage filtering
+  disabled (`0`). Fixed geometry remains responsible for coordinates.
 - For lower console overhead on fast GPUs, raise `LOG_EVERY` (for example `LOG_EVERY=100`).
 
 ### Train From Dense Parser Conditioning
@@ -118,10 +154,12 @@ Semantic UV Reconstruction training always uses parser-generated conditioning, m
 
 This automatically finds the newest `../dense_uv_parser/runs/dense_uv_parser_v*/best.pt`. Its frozen parser also sees the same randomized solid-color RGB backgrounds used for parser training, so Semantic UV reconstruction learns to complete parser conditioning from arbitrary-solid-background inputs. To finetune from an existing `semantic_uv_reconstruction` checkpoint:
 
-Visible UV texels recovered by the parser are copied directly into the final output; the inpaint network only determines unknown texels. This prevents already observed colors from being blurred by reconstruction.
+High-confidence UV texels recovered by the parser are copied directly into the
+final output. Lower-confidence recovered colors remain evidence for the
+topology model and can be corrected instead of being permanently locked.
 
 ```bash
-RESUME=runs/semantic_uv_reconstruction_full_v34/best.pt \
+RESUME=runs/semantic_uv_reconstruction_topology_maskgit_v1/best.pt \
 RESUME_LR=5e-5 \
 EPOCHS=15 \
 ./run_parser_conditioned_training.sh
@@ -143,7 +181,12 @@ cd SkingToolkit/dense_uv_parser
 FRONT=/path/to/front.png BACK=/path/to/back.png ./run_infer.sh
 ```
 
-`dense_uv_parser/infer.py` loads `UVInpaintingNet` after parser splatting, then writes the completed skin to `outputs/pred_uv.png`.
+`dense_uv_parser/infer.py` reads the completion architecture from the checkpoint,
+performs parser splatting, and writes the completed skin to `outputs/pred_uv.png`.
+Topology checkpoints default to four deterministic reveal steps. Override them
+with `INPAINT_STEPS`, `INPAINT_TEMPERATURE`, and `INPAINT_SEED`; a positive
+temperature enables stochastic alternatives while preserving every observed
+texel.
 
 ## Semantic Fixed-View UV Reconstruction
 
@@ -154,12 +197,15 @@ the layer. Each view passes through two complementary branches:
 
 - a trainable high-resolution CNN whose `/8` detail tokens preserve grid edges,
   colors, and exact local texture, alongside coarser `/16` context tokens;
-- a frozen SigLIP2 vision tower that supplies continuous, language-aligned
-  patch and global features without defining a garment vocabulary.
+- a frozen SigLIP2 vision tower that supplies a continuous, language-aligned
+  global feature without defining a garment vocabulary.
 
-Learned UV queries jointly attend to both branches from both views. Architecture
-version 2 uses a 32x32 UV query grid and a learned PixelShuffle decoder to reach
-64x64; it does not bilinearly enlarge 16x16 features. Full-UV RGB supervision is
+Architecture version 3 first lets 256 learned memory latents read the complete
+front/back CNN memory once. The 32x32 UV queries then attend only to those
+compact latents and communicate locally through depthwise UV convolutions. This
+replaces two repeated 1024-by-full-image attention matrices without lowering
+the `/8` source resolution or the 32x32 UV grid. A learned PixelShuffle decoder
+reaches 64x64 without bilinear feature enlargement. Full-UV RGB supervision is
 weighted more strongly and an explicit UV RGB-gradient loss penalizes blurred
 texel boundaries. SigLIP2 is not used to generate
 captions or closed labels. Concepts such as caps, hoods, scarves, unusual
@@ -234,13 +280,14 @@ preview rows are
 the input views, predicted UV, ground-truth UV, predicted outer alpha, and
 ground-truth outer alpha.
 
-Architecture version 2 is intentionally incompatible with checkpoints created
-by the former 16x16-query/bilinear decoder. Do not set `RESUME` to one of those
+Architecture version 3 is intentionally incompatible with version-1 and
+version-2 direct checkpoints because the full-image decoder attention has been
+replaced by a memory-latent resampler. Do not set `RESUME` to one of those
 checkpoints: start a new versioned run. The startup summary must show
-`"architecture_version": 2`, `"query_size": 32`, `"lambda_uv_rgb": 2.0`, and
-`"lambda_uv_edge": 1.0`. Epoch metrics additionally report `loss_uv_edge` and
-`rgb_mae_255`; the latter is the occupied-texel RGB MAE expressed on a 0-255
-scale and should keep falling along with visual sharpness.
+`"architecture_version": 3`, `"memory_latents": 256`, `"query_size": 32`,
+`"lambda_uv_rgb": 2.0`, and `"lambda_uv_edge": 1.0`. Epoch metrics additionally
+report `loss_uv_edge` and `rgb_mae_255`; the latter is the occupied-texel RGB MAE
+expressed on a 0-255 scale and should keep falling along with visual sharpness.
 
 ### Remote training environment
 
@@ -256,8 +303,12 @@ Install the additional dependencies on the training computer:
 pip install -U transformers sentencepiece safetensors
 ```
 
-The first run downloads the Hugging Face checkpoint. To use an already cached
-copy on an offline training machine:
+The first run downloads the Hugging Face checkpoint. It then makes a one-time
+memory-mapped cache of the frozen pooled SigLIP2 feature for every source skin
+and both views. For 100k skins with a 768-dimensional float16 feature this is
+about 300 MB. Later epochs and restarts reuse it, while the small global
+projection remains trainable. To use an already downloaded Hugging Face copy on
+an offline training machine:
 
 ```bash
 SIGLIP_LOCAL_FILES_ONLY=true ./run_semantic_uv_reconstruction_training.sh
@@ -265,11 +316,11 @@ SIGLIP_LOCAL_FILES_ONLY=true ./run_semantic_uv_reconstruction_training.sh
 
 The frozen SigLIP2 weights are deliberately excluded from each epoch
 checkpoint; resuming reloads them from the Hugging Face cache and restores only
-the trainable CNN, fusion, query, and decoder weights. The long-running,
+the trainable CNN, fusion, latent/query, and decoder weights. The long-running,
 VRAM-rich default uses batch size 4. If the 32x32 query grid, `/8` detail memory,
 and semantic re-render pass exceed available VRAM, first reduce
-`BATCH_SIZE`; as a fallback set `LAMBDA_SIGLIP_RENDER=0` while retaining SigLIP2
-tokens in the forward model. For a dependency-free structural ablation use:
+`BATCH_SIZE`; as a fallback set `LAMBDA_SIGLIP_RENDER=0` while retaining cached
+SigLIP2 source semantics. For a dependency-free structural ablation use:
 
 ```bash
 SEMANTIC_BACKBONE=none LAMBDA_SIGLIP_RENDER=0 ./run_semantic_uv_reconstruction_training.sh
@@ -280,11 +331,15 @@ SEMANTIC_BACKBONE=none LAMBDA_SIGLIP_RENDER=0 ./run_semantic_uv_reconstruction_t
 The default launcher keeps the high-resolution texture path but avoids several
 unnecessary costs:
 
-- padded SigLIP2 letterbox patches are removed before UV cross-attention, which
-  also allows fused scaled-dot-product attention on supported CUDA builds;
+- frozen source-view SigLIP2 globals are computed once in
+  `cache_siglip_globals.py`, memory-mapped, and reused across all epochs;
+- 256 memory latents read the full `/8` and `/16` view tokens once, after which
+  UV queries attend only to the compact latent memory;
 - the expensive differentiable SigLIP2 re-render cycle runs once every four
-  batches and is multiplied by four when used, preserving its expected loss
-  weight;
+  batches after a two-epoch warmup and is multiplied by four when used,
+  preserving its expected loss weight;
+- the first two epochs double the relative RGB and UV-edge objective so early
+  optimization prioritizes texture and texel boundaries over auxiliary heads;
 - CUDA uses channels-last convolution storage and fused AdamW when available;
 - progress values are copied from CUDA only every 50 batches instead of forcing
   a device synchronization after every optimizer step;
@@ -295,7 +350,9 @@ The startup summary reports `siglip_render_every`, `channels_last`,
 is equivalent to:
 
 ```bash
-BATCH_SIZE=4 SIGLIP_RENDER_EVERY=4 LOG_EVERY=50 \
+BATCH_SIZE=4 MEMORY_LATENTS=256 SIGLIP_RENDER_EVERY=4 \
+SIGLIP_RENDER_WARMUP_EPOCHS=2 RGB_WARMUP_EPOCHS=2 \
+RGB_WARMUP_MULTIPLIER=2 LOG_EVERY=50 \
 TORCH_COMPILE=true COMPILE_MODE=max-autotune-no-cudagraphs \
 ./run_semantic_uv_reconstruction_training.sh
 ```
@@ -304,8 +361,8 @@ Every train/validation metric block includes `epoch_seconds` and
 `samples_per_second`, making before/after throughput directly comparable on the
 remote GPU. Set `LOG_EVERY` to change the progress refresh interval.
 
-Use `SIGLIP_RENDER_EVERY=1` to compute the semantic cycle on every batch. For a
-faster run that still uses frozen SigLIP2 tokens to understand the source views,
+Use `SIGLIP_RENDER_EVERY=1` to compute the semantic cycle on every batch after
+warmup. For a faster run that still uses cached frozen SigLIP2 source semantics,
 disable only the predicted-render cycle:
 
 ```bash
@@ -326,6 +383,10 @@ TORCH_COMPILE=false ./run_semantic_uv_reconstruction_training.sh
 Set `FUSED_OPTIMIZER=false` only when diagnosing an optimizer compatibility
 problem. Unsupported fused AdamW implementations automatically fall back to the
 standard optimizer.
+
+Set `CACHE_SIGLIP_GLOBALS=false` only for diagnostics; it makes every epoch run
+the frozen source vision tower again. `USE_SIGLIP_PATCH_TOKENS=true` is an
+optional high-cost ablation and cannot be combined with the global-only cache.
 
 ## Generate Render Pairs
 

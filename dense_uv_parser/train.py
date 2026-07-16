@@ -7,6 +7,7 @@ from contextlib import nullcontext
 from pathlib import Path
 
 import torch
+import torch.nn.functional as F
 from torch.utils.data import DataLoader, random_split
 from torchvision.utils import save_image
 
@@ -17,6 +18,11 @@ if str(WORKSPACE_ROOT) not in sys.path:
 
 from SkingToolkit.dense_uv_parser.losses import DenseUVParserLoss  # noqa: E402
 from SkingToolkit.dense_uv_parser.model import DenseUVParserNet, count_parameters  # noqa: E402
+from SkingToolkit.dense_uv_parser.semantic import (  # noqa: E402
+    attach_siglip_runtime,
+    build_siglip_runtime,
+    cached_semantic_batch,
+)
 from SkingToolkit.dense_uv_parser.utils import (  # noqa: E402
     FACE_PALETTE,
     IGNORE_INDEX,
@@ -50,6 +56,13 @@ from SkingToolkit.dense_uv_parser.utils import (  # noqa: E402
     surface_class_count,
 )
 from SkingToolkit.semantic_uv_reconstruction.dataset import UVInpaintingDataset  # noqa: E402
+from SkingToolkit.semantic_uv_reconstruction.semantic_dataset import (  # noqa: E402
+    SigLIPGlobalCache,
+)
+from SkingToolkit.semantic_uv_reconstruction.semantic_losses import (  # noqa: E402
+    build_part_layer_masks,
+    build_semantic_attribute_targets,
+)
 from SkingToolkit.semantic_uv_reconstruction.train import get_device  # noqa: E402
 from SkingToolkit.renderer import DifferentiableRenderer  # noqa: E402
 
@@ -512,6 +525,8 @@ def run_epoch(
     args,
     train=True,
     compute_hard_metrics=False,
+    semantic_cache=None,
+    semantic_masks=None,
 ):
     model.train(train)
     views = parse_views(args.views)
@@ -537,12 +552,49 @@ def run_epoch(
             augment_generator=val_generator,
         )
         parser_samples = rendered.shape[0]
+        semantic_features = cached_semantic_batch(
+            semantic_cache, batch["path"], device
+        )
 
         with torch.set_grad_enabled(train):
             with autocast_context(device, precision):
-                outputs = model(rendered, view_ids=view_ids)
+                outputs = (
+                    model(
+                        rendered,
+                        view_ids=view_ids,
+                        semantic_features=semantic_features,
+                    )
+                    if semantic_features is not None
+                    else model(rendered, view_ids=view_ids)
+                )
                 losses = criterion(outputs, targets)
                 zero = losses["loss_total"].new_zeros(())
+                if semantic_masks is not None and "outer_presence_logits" in outputs:
+                    inner_part_masks, outer_part_masks = semantic_masks
+                    attributes = build_semantic_attribute_targets(
+                        batch["uv"], inner_part_masks, outer_part_masks
+                    )
+                    loss_semantic_presence = F.binary_cross_entropy_with_logits(
+                        outputs["outer_presence_logits"].float(),
+                        attributes["outer_presence"],
+                    )
+                    loss_semantic_coverage = F.smooth_l1_loss(
+                        outputs["outer_coverage"].float(),
+                        attributes["outer_coverage"],
+                    )
+                    loss_semantic_attributes = (
+                        args.lambda_semantic_presence * loss_semantic_presence
+                        + args.lambda_semantic_coverage * loss_semantic_coverage
+                    )
+                    losses["loss_semantic_presence"] = loss_semantic_presence
+                    losses["loss_semantic_coverage"] = loss_semantic_coverage
+                    losses["loss_semantic_attributes"] = loss_semantic_attributes
+                    losses["loss_total"] = losses["loss_total"] + loss_semantic_attributes
+                    losses["loss_routing"] = losses["loss_routing"] + loss_semantic_attributes
+                else:
+                    losses["loss_semantic_presence"] = zero
+                    losses["loss_semantic_coverage"] = zero
+                    losses["loss_semantic_attributes"] = zero
                 auxiliary_enabled = args.parser_mode == "geometry_fit" and any(
                     weight > 0
                     for weight in (
@@ -677,15 +729,35 @@ def run_epoch(
 
 
 
-def save_preview(model, renderer, loader, device, args, output_path, max_items=2):
+def save_preview(
+    model,
+    renderer,
+    loader,
+    device,
+    args,
+    output_path,
+    max_items=2,
+    semantic_cache=None,
+):
     model.eval()
     views = parse_views(args.views)
     batch = move_batch(next(iter(loader)), device)
     rendered, targets, view_count, view_ids = build_parser_inputs(
         batch["uv"], renderer, views, train=False, args=args, apply_augment=False
     )
+    semantic_features = cached_semantic_batch(
+        semantic_cache, batch["path"], device
+    )
     with torch.no_grad():
-        outputs = model(rendered, view_ids=view_ids)
+        outputs = (
+            model(
+                rendered,
+                view_ids=view_ids,
+                semantic_features=semantic_features,
+            )
+            if semantic_features is not None
+            else model(rendered, view_ids=view_ids)
+        )
         if "affine" in outputs:
             pred_conditioning, routing_details = splat_parser_predictions_to_uv_conditioning(
                 rendered,
@@ -927,6 +999,14 @@ def save_checkpoint(path, model, optimizer, scaler, epoch, args, metrics, best_m
             "layer_face_classes": 0 if model.geometry_only else 12,
             "geometry_only": model.geometry_only,
             "feature_dropout": model.feature_dropout_probability,
+            "semantic_backbone": args.semantic_backbone,
+            "siglip_model": args.siglip_model if args.semantic_backbone == "siglip2" else None,
+            "semantic_feature_dim": model.semantic_feature_dim,
+            "semantic_channels": model.semantic_channels,
+            "semantic_attention_heads": model.semantic_attention_heads,
+            "semantic_layers": model.semantic_layers,
+            "semantic_dropout": model.semantic_dropout,
+            "predict_confidence": model.predict_confidence,
             "arm_model": "steve",
         },
     }
@@ -954,6 +1034,19 @@ def build_arg_parser():
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument("--base_channels", type=int, default=32)
     parser.add_argument("--feature_dropout", type=float, default=0.10)
+    parser.add_argument(
+        "--semantic_backbone",
+        choices=["none", "siglip2"],
+        default="none",
+        help="Frozen global semantic context used to condition route-role parsing.",
+    )
+    parser.add_argument("--siglip_model", default="google/siglip2-base-patch16-224")
+    parser.add_argument("--siglip_cache_dir", default=None)
+    parser.add_argument("--siglip_local_files_only", action="store_true")
+    parser.add_argument("--semantic_channels", type=int, default=128)
+    parser.add_argument("--semantic_attention_heads", type=int, default=4)
+    parser.add_argument("--semantic_layers", type=int, default=1)
+    parser.add_argument("--semantic_dropout", type=float, default=0.05)
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--num_workers", type=int, default=8)
     parser.add_argument("--prefetch_factor", type=int, default=4)
@@ -1023,6 +1116,9 @@ def build_arg_parser():
     parser.add_argument("--lambda_surface", type=float, default=1.0)
     parser.add_argument("--lambda_outer_false_positive", type=float, default=0.75)
     parser.add_argument("--lambda_outer_false_negative", type=float, default=0.75)
+    parser.add_argument("--lambda_route_confidence", type=float, default=0.25)
+    parser.add_argument("--lambda_semantic_presence", type=float, default=0.25)
+    parser.add_argument("--lambda_semantic_coverage", type=float, default=0.25)
     parser.add_argument("--outer_false_positive_gamma", type=float, default=2.0)
     parser.add_argument("--outer_false_negative_gamma", type=float, default=2.0)
     parser.add_argument("--route_class_weight_floor", type=float, default=0.75)
@@ -1097,6 +1193,20 @@ def main():
         raise ValueError("--lambda_outer_false_positive must be non-negative.")
     if args.lambda_outer_false_negative < 0:
         raise ValueError("--lambda_outer_false_negative must be non-negative.")
+    if min(
+        args.lambda_route_confidence,
+        args.lambda_semantic_presence,
+        args.lambda_semantic_coverage,
+    ) < 0:
+        raise ValueError("Semantic and confidence loss weights must be non-negative.")
+    if args.semantic_channels < 1 or args.semantic_layers < 1:
+        raise ValueError("Semantic channels and layers must be positive.")
+    if args.semantic_attention_heads < 1:
+        raise ValueError("--semantic_attention_heads must be positive.")
+    if args.semantic_channels % args.semantic_attention_heads != 0:
+        raise ValueError("Semantic channels must be divisible by attention heads.")
+    if not 0.0 <= args.semantic_dropout < 1.0:
+        raise ValueError("--semantic_dropout must be in [0, 1).")
     if args.outer_false_positive_gamma < 0:
         raise ValueError("--outer_false_positive_gamma must be non-negative.")
     if args.outer_false_negative_gamma < 0:
@@ -1127,6 +1237,40 @@ def main():
         views=args.views,
         max_samples=args.max_samples,
     )
+    semantic_cache = None
+    runtime_semantic_backbone = None
+    semantic_feature_dim = 0
+    semantic_masks = None
+    if args.semantic_backbone == "siglip2":
+        if args.siglip_cache_dir:
+            semantic_cache = SigLIPGlobalCache(
+                args.siglip_cache_dir,
+                expected_views=parse_views(args.views),
+                expected_model=args.siglip_model,
+                expected_data_dir=args.data_dir,
+            )
+            missing_semantics = [
+                Path(path).name
+                for path in dataset.skin_paths
+                if Path(path).name not in semantic_cache.filename_to_index
+            ]
+            if missing_semantics:
+                raise ValueError(
+                    f"SigLIP cache is missing {len(missing_semantics)} selected skins; "
+                    f"first missing: {missing_semantics[0]}."
+                )
+            semantic_feature_dim = int(semantic_cache.metadata["feature_dim"])
+        else:
+            runtime_semantic_backbone = build_siglip_runtime(
+                args.siglip_model,
+                device,
+                semantic_channels=args.semantic_channels,
+                local_files_only=args.siglip_local_files_only,
+            )
+            semantic_feature_dim = runtime_semantic_backbone.raw_feature_dim
+        semantic_masks = tuple(
+            mask.to(device) for mask in build_part_layer_masks()
+        )
     val_count = int(len(dataset) * args.val_split)
     train_count = len(dataset) - val_count
     generator = torch.Generator().manual_seed(args.seed)
@@ -1172,7 +1316,21 @@ def main():
         surface_classes=surface_classes,
         geometry_only=geometry_only,
         feature_dropout=args.feature_dropout,
+        semantic_feature_dim=semantic_feature_dim,
+        semantic_channels=args.semantic_channels,
+        semantic_attention_heads=args.semantic_attention_heads,
+        semantic_layers=args.semantic_layers,
+        semantic_dropout=args.semantic_dropout,
+        predict_confidence=args.semantic_backbone != "none",
     ).to(device)
+    if runtime_semantic_backbone is not None:
+        attach_siglip_runtime(
+            model,
+            args.siglip_model,
+            device,
+            local_files_only=args.siglip_local_files_only,
+            backbone=runtime_semantic_backbone,
+        )
     criterion = DenseUVParserLoss(
         lambda_foreground=args.lambda_foreground,
         lambda_layer=args.lambda_layer,
@@ -1185,6 +1343,7 @@ def main():
         lambda_surface=args.lambda_surface,
         lambda_outer_false_positive=args.lambda_outer_false_positive,
         lambda_outer_false_negative=args.lambda_outer_false_negative,
+        lambda_route_confidence=args.lambda_route_confidence,
         outer_false_positive_gamma=args.outer_false_positive_gamma,
         outer_false_negative_gamma=args.outer_false_negative_gamma,
         route_class_weight_floor=args.route_class_weight_floor,
@@ -1208,6 +1367,42 @@ def main():
             raise ValueError(
                 f"Cannot resume parser_mode={checkpoint_mode!r} as {args.parser_mode!r}. Start a new run."
             )
+        checkpoint_semantic_backbone = checkpoint.get("model_config", {}).get(
+            "semantic_backbone", "none"
+        )
+        if checkpoint_semantic_backbone != args.semantic_backbone:
+            raise ValueError(
+                "Cannot change semantic backbone while resuming: "
+                f"checkpoint={checkpoint_semantic_backbone!r}, "
+                f"requested={args.semantic_backbone!r}. Start a new run."
+            )
+        if args.semantic_backbone != "none":
+            checkpoint_config = checkpoint.get("model_config", {})
+            checkpoint_siglip_model = checkpoint_config.get(
+                "siglip_model", checkpoint.get("args", {}).get("siglip_model")
+            )
+            if checkpoint_siglip_model != args.siglip_model:
+                raise ValueError(
+                    "Cannot change SigLIP model while resuming: "
+                    f"checkpoint={checkpoint_siglip_model!r}, "
+                    f"requested={args.siglip_model!r}. Start a new run."
+                )
+            semantic_resume_fields = {
+                "semantic_feature_dim": model.semantic_feature_dim,
+                "semantic_channels": model.semantic_channels,
+                "semantic_attention_heads": model.semantic_attention_heads,
+                "semantic_layers": model.semantic_layers,
+            }
+            mismatches = {
+                name: (checkpoint_config.get(name), expected)
+                for name, expected in semantic_resume_fields.items()
+                if checkpoint_config.get(name) != expected
+            }
+            if mismatches:
+                raise ValueError(
+                    "Cannot change semantic adapter shape while resuming: "
+                    f"{mismatches}. Start a new run."
+                )
         checkpoint_layer_classes = checkpoint.get("model_config", {}).get("layer_classes", 2)
         if geometry_only and checkpoint_layer_classes != model.layer_classes:
             raise ValueError(
@@ -1270,6 +1465,11 @@ def main():
         "views": parse_views(args.views),
         "parameters": count_parameters(model),
         "feature_dropout": args.feature_dropout,
+        "semantic_backbone": args.semantic_backbone,
+        "semantic_feature_dim": semantic_feature_dim,
+        "semantic_channels": args.semantic_channels,
+        "semantic_layers": args.semantic_layers,
+        "predict_confidence": model.predict_confidence,
         "device": str(device),
         "parser_mode": args.parser_mode,
         "uv_classification": model.uv_classification,
@@ -1302,6 +1502,9 @@ def main():
         "lambda_render_alpha": args.lambda_render_alpha,
         "lambda_outer_false_positive": args.lambda_outer_false_positive,
         "lambda_outer_false_negative": args.lambda_outer_false_negative,
+        "lambda_route_confidence": args.lambda_route_confidence,
+        "lambda_semantic_presence": args.lambda_semantic_presence,
+        "lambda_semantic_coverage": args.lambda_semantic_coverage,
         "outer_false_positive_gamma": args.outer_false_positive_gamma,
         "outer_false_negative_gamma": args.outer_false_negative_gamma,
         "route_class_weight_floor": args.route_class_weight_floor,
@@ -1340,6 +1543,8 @@ def main():
             compute_hard_metrics=(
                 val_loader is None and args.best_metric == "loss_hard_uv_selection"
             ),
+            semantic_cache=semantic_cache,
+            semantic_masks=semantic_masks,
         )
         train_metrics["learning_rate"] = epoch_lr
         metrics = {"train": train_metrics}
@@ -1358,6 +1563,8 @@ def main():
                     args,
                     train=False,
                     compute_hard_metrics=True,
+                    semantic_cache=semantic_cache,
+                    semantic_masks=semantic_masks,
                 )
             metrics["val"] = val_metrics
             metric_source = val_metrics
@@ -1386,6 +1593,7 @@ def main():
                 device,
                 args,
                 output_dir / "previews" / f"epoch_{epoch:04d}.png",
+                semantic_cache=semantic_cache,
             )
 
 

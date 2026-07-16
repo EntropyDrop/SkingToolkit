@@ -1,3 +1,4 @@
+import json
 import sys
 import tempfile
 import types
@@ -10,6 +11,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from PIL import Image
+import numpy as np
 
 from SkingToolkit.semantic_uv_reconstruction.semantic_dataset import SemanticUVPairDataset
 from SkingToolkit.semantic_uv_reconstruction.semantic_losses import (
@@ -47,6 +49,13 @@ class FakeOpenSemanticBackbone(nn.Module):
             "global": self.global_projection(raw_global),
             "raw_global": raw_global,
         }
+
+    def encode_global(self, images):
+        outputs = self.forward(images)
+        return {name: outputs[name] for name in ("global", "raw_global")}
+
+    def project_global(self, raw_global):
+        return self.global_projection(raw_global)
 
 
 class FakeRenderer:
@@ -116,6 +125,10 @@ class SemanticUVModelTest(unittest.TestCase):
         args = build_arg_parser().parse_args([])
         self.assertEqual(args.batch_size, 4)
         self.assertEqual(args.siglip_render_every, 4)
+        self.assertEqual(args.siglip_render_warmup_epochs, 2)
+        self.assertEqual(args.rgb_warmup_epochs, 2)
+        self.assertEqual(args.rgb_warmup_multiplier, 2.0)
+        self.assertEqual(args.memory_latents, 256)
         self.assertEqual(args.log_every, 50)
         self.assertTrue(args.fused_optimizer)
         self.assertTrue(args.compile)
@@ -137,6 +150,8 @@ class SemanticUVModelTest(unittest.TestCase):
         self.assertEqual(outputs["semantic_uv_logits"].shape, (2, 13, 64, 64))
         self.assertEqual(outputs["outer_presence_logits"].shape, (2, 6))
         self.assertEqual(outputs["part_colors"].shape, (2, 12, 3))
+        self.assertEqual(model.architecture_version, 3)
+        self.assertEqual(model.memory_latent_count, 256)
         self.assertTrue(any(isinstance(layer, nn.PixelShuffle) for layer in model.decoder.modules()))
         base = model.base_mask.bool().expand(2, -1, -1, -1)
         invalid = ~(model.base_mask.bool() | model.decor_mask.bool())
@@ -185,6 +200,40 @@ class SemanticUVModelTest(unittest.TestCase):
         self.assertGreater(float(detail_grad.abs().sum()), 0.0)
         self.assertIn("loss_uv_edge", metrics)
         self.assertIn("rgb_mae_255", metrics)
+        self.assertIsNotNone(model.memory_latents.grad)
+        self.assertGreater(float(model.memory_latents.grad.abs().sum()), 0.0)
+
+    def test_rgb_warmup_scales_only_uv_detail_objective(self):
+        model = SemanticUVReconstructor(
+            view_count=2,
+            base_channels=8,
+            token_channels=32,
+            query_size=8,
+            attention_heads=4,
+            attention_layers=1,
+        )
+        criterion = SemanticUVReconstructionLoss(
+            lambda_uv_rgb=2.0,
+            lambda_uv_edge=1.0,
+            lambda_outer_alpha=0.0,
+            lambda_outer_dice=0.0,
+            lambda_semantic_uv=0.0,
+            lambda_semantic_presence=0.0,
+            lambda_semantic_coverage=0.0,
+            lambda_semantic_color=0.0,
+            lambda_render_rgb=0.0,
+            lambda_render_alpha=0.0,
+            lambda_siglip_render=0.0,
+        )
+        outputs = model(torch.rand(1, 2, 3, 64, 32))
+        target = outputs["uv"].detach().clone()
+        target[:, :3] = 1.0 - target[:, :3]
+        normal = criterion(outputs, target, uv_detail_scale=1.0)
+        warmup = criterion(outputs, target, uv_detail_scale=2.0)
+        self.assertTrue(
+            torch.allclose(warmup["loss_total"], normal["loss_total"] * 2.0)
+        )
+        self.assertEqual(float(warmup["uv_detail_scale"]), 2.0)
 
     def test_open_semantic_fusion_and_render_cycle_are_differentiable(self):
         backbone = FakeOpenSemanticBackbone(token_channels=32)
@@ -236,6 +285,23 @@ class SemanticUVModelTest(unittest.TestCase):
         self.assertIsNotNone(model.rgb_head.weight.grad)
         self.assertGreater(float(model.rgb_head.weight.grad.abs().sum()), 0.0)
 
+    def test_cached_global_semantics_skip_source_vision_encoding(self):
+        backbone = FakeOpenSemanticBackbone(token_channels=32)
+        model = SemanticUVReconstructor(
+            view_count=2,
+            base_channels=8,
+            token_channels=32,
+            query_size=8,
+            attention_heads=4,
+            attention_layers=1,
+            open_semantic_backbone=backbone,
+        )
+        images = torch.rand(1, 2, 3, 64, 32)
+        cached = torch.rand(1, 2, backbone.raw_feature_dim)
+        outputs = model(images, open_semantic_raw=cached)
+        expected = F.normalize(cached.mean(dim=1), dim=-1)
+        self.assertTrue(torch.allclose(outputs["open_semantic_embedding"], expected))
+
 
 class SemanticAnnotationTest(unittest.TestCase):
     def test_dataset_needs_no_concept_vocabulary(self):
@@ -246,6 +312,40 @@ class SemanticAnnotationTest(unittest.TestCase):
             dataset = SemanticUVPairDataset(root)
             self.assertEqual(len(dataset), 2)
             self.assertEqual(set(dataset[0]), {"uv", "path"})
+
+    def test_dataset_reads_memory_mapped_siglip_globals(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            skins = root / "skins"
+            cache = root / "cache"
+            skins.mkdir()
+            cache.mkdir()
+            Image.new("RGBA", (64, 64), (10, 20, 30, 255)).save(skins / "one.png")
+            values = np.arange(12, dtype=np.float16).reshape(1, 2, 6)
+            np.save(cache / "embeddings.npy", values)
+            (cache / "metadata.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "filenames": ["one.png"],
+                        "views": ["front", "back"],
+                        "siglip_model": "fake",
+                        "feature_dim": 6,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            dataset = SemanticUVPairDataset(
+                skins,
+                siglip_cache_dir=cache,
+                siglip_cache_views=["front", "back"],
+                siglip_cache_model="fake",
+            )
+            sample = dataset[0]
+            self.assertEqual(sample["siglip_raw_global"].shape, (2, 6))
+            self.assertTrue(
+                torch.equal(sample["siglip_raw_global"], torch.from_numpy(values[0]).float())
+            )
 
 
 if __name__ == "__main__":

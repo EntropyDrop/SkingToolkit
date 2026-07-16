@@ -48,6 +48,112 @@ class UpBlock(nn.Module):
         return self.block(torch.cat([x, skip], dim=1))
 
 
+class MultiViewSemanticFusion(nn.Module):
+    """Fuse frozen per-view semantic features into parser bottleneck features."""
+
+    def __init__(
+        self,
+        raw_feature_dim,
+        semantic_channels,
+        bottleneck_channels,
+        view_classes,
+        attention_heads=4,
+        layers=1,
+        dropout=0.05,
+    ):
+        super().__init__()
+        if raw_feature_dim < 1 or semantic_channels < 1:
+            raise ValueError("Semantic feature dimensions must be positive.")
+        if view_classes < 1:
+            raise ValueError("Semantic fusion requires view-conditioned parser inputs.")
+        if attention_heads < 1:
+            raise ValueError("semantic_attention_heads must be positive.")
+        if semantic_channels % attention_heads != 0:
+            raise ValueError("semantic_channels must be divisible by attention_heads.")
+        if layers < 1:
+            raise ValueError("semantic_layers must be positive.")
+        if not 0.0 <= dropout < 1.0:
+            raise ValueError("semantic_dropout must be in [0, 1).")
+        self.raw_feature_dim = int(raw_feature_dim)
+        self.semantic_channels = int(semantic_channels)
+        self.view_classes = int(view_classes)
+        self.input_projection = nn.Sequential(
+            nn.LayerNorm(raw_feature_dim),
+            nn.Linear(raw_feature_dim, semantic_channels),
+            nn.GELU(),
+        )
+        self.view_embedding = nn.Parameter(
+            torch.randn(view_classes, semantic_channels) * 0.02
+        )
+        self.encoder = nn.ModuleList(
+            nn.TransformerEncoderLayer(
+                d_model=semantic_channels,
+                nhead=attention_heads,
+                dim_feedforward=semantic_channels * 4,
+                dropout=dropout,
+                activation="gelu",
+                batch_first=True,
+                norm_first=True,
+            )
+            for _ in range(layers)
+        )
+        self.modulation = nn.Sequential(
+            nn.LayerNorm(semantic_channels * 2),
+            nn.Linear(semantic_channels * 2, semantic_channels * 2),
+            nn.GELU(),
+            nn.Linear(semantic_channels * 2, bottleneck_channels * 2),
+        )
+        self.summary = nn.Sequential(
+            nn.LayerNorm(semantic_channels),
+            nn.Linear(semantic_channels, semantic_channels),
+            nn.GELU(),
+        )
+        # Preserve the geometry-only initialization. The adapter starts by
+        # contributing no FiLM shift/scale and learns semantic corrections.
+        nn.init.zeros_(self.modulation[-1].weight)
+        nn.init.zeros_(self.modulation[-1].bias)
+
+    def forward(self, raw_features, view_ids, sample_count):
+        if raw_features.dim() == 3:
+            if raw_features.shape[1] != self.view_classes:
+                raise ValueError(
+                    f"Expected {self.view_classes} semantic views, got {raw_features.shape[1]}."
+                )
+            raw_features = raw_features.reshape(-1, raw_features.shape[-1])
+        if raw_features.dim() != 2 or raw_features.shape != (
+            sample_count,
+            self.raw_feature_dim,
+        ):
+            raise ValueError(
+                "Semantic features must be shaped NxD or BxVxD; got "
+                f"{tuple(raw_features.shape)}."
+            )
+        if sample_count % self.view_classes != 0:
+            raise ValueError(
+                f"Semantic sample count {sample_count} is not divisible by "
+                f"view count {self.view_classes}."
+            )
+        grouped_view_ids = view_ids.reshape(-1, self.view_classes)
+        expected_ids = torch.arange(
+            self.view_classes, device=view_ids.device
+        ).view(1, -1)
+        if not torch.equal(grouped_view_ids, expected_ids.expand_as(grouped_view_ids)):
+            raise ValueError("Semantic fusion requires canonical grouped view order.")
+
+        batch = sample_count // self.view_classes
+        tokens = self.input_projection(raw_features.float()).reshape(
+            batch, self.view_classes, self.semantic_channels
+        )
+        tokens = tokens + self.view_embedding.unsqueeze(0)
+        for layer in self.encoder:
+            tokens = layer(tokens)
+        pooled = tokens.mean(dim=1)
+        per_view = torch.cat(
+            [tokens, pooled.unsqueeze(1).expand_as(tokens)], dim=-1
+        ).reshape(sample_count, self.semantic_channels * 2)
+        return self.modulation(per_view), self.summary(pooled)
+
+
 class DenseUVParserNet(nn.Module):
     """Predict dense Minecraft UV routing for each render pixel."""
 
@@ -68,6 +174,12 @@ class DenseUVParserNet(nn.Module):
         surface_classes=0,
         geometry_only=False,
         feature_dropout=0.0,
+        semantic_feature_dim=0,
+        semantic_channels=128,
+        semantic_attention_heads=4,
+        semantic_layers=1,
+        semantic_dropout=0.05,
+        predict_confidence=False,
     ):
         super().__init__()
         self.geometry_only = bool(geometry_only)
@@ -80,6 +192,12 @@ class DenseUVParserNet(nn.Module):
         self.affine_translation_scale = float(affine_translation_scale)
         self.affine_scale_range = float(affine_scale_range)
         self.surface_classes = int(surface_classes)
+        self.semantic_feature_dim = int(semantic_feature_dim)
+        self.semantic_channels = int(semantic_channels)
+        self.semantic_attention_heads = int(semantic_attention_heads)
+        self.semantic_layers = int(semantic_layers)
+        self.semantic_dropout = float(semantic_dropout)
+        self.predict_confidence = bool(predict_confidence)
         self.feature_dropout_probability = float(feature_dropout)
         if not 0.0 <= self.feature_dropout_probability < 1.0:
             raise ValueError("feature_dropout must be in [0, 1).")
@@ -89,6 +207,19 @@ class DenseUVParserNet(nn.Module):
         self.down2 = DownBlock(c * 2, c * 4)
         self.down3 = DownBlock(c * 4, c * 8)
         self.mid = ConvBlock(c * 8, c * 8)
+        self.semantic_fusion = (
+            MultiViewSemanticFusion(
+                self.semantic_feature_dim,
+                self.semantic_channels,
+                c * 8,
+                self.view_classes,
+                attention_heads=self.semantic_attention_heads,
+                layers=self.semantic_layers,
+                dropout=self.semantic_dropout,
+            )
+            if self.semantic_feature_dim > 0
+            else None
+        )
         self.up2 = UpBlock(c * 8, c * 4, c * 4)
         self.up1 = UpBlock(c * 4, c * 2, c * 2)
         self.up0 = UpBlock(c * 2, c, c)
@@ -99,6 +230,12 @@ class DenseUVParserNet(nn.Module):
         self.feature_dropout = nn.Dropout2d(self.feature_dropout_probability)
         self.foreground = nn.Conv2d(c, 1, kernel_size=1)
         self.layer = nn.Conv2d(c, self.layer_classes, kernel_size=1)
+        self.route_confidence = (
+            nn.Conv2d(c, 1, kernel_size=1) if self.predict_confidence else None
+        )
+        if self.semantic_fusion is not None:
+            self.outer_presence_head = nn.Linear(self.semantic_channels, 6)
+            self.outer_coverage_head = nn.Linear(self.semantic_channels, 6)
         if not self.geometry_only:
             self.part = nn.Conv2d(c, part_classes, kernel_size=1)
             self.face = nn.Conv2d(c, face_classes, kernel_size=1)
@@ -138,7 +275,17 @@ class DenseUVParserNet(nn.Module):
             upper_log_scale = math.log1p(self.affine_scale_range)
             self.affine_log_scale_limit = max(abs(lower_log_scale), abs(upper_log_scale))
 
-    def forward(self, x, view_ids=None):
+    def _runtime_semantic_features(self, images):
+        backbone = getattr(self, "_runtime_semantic_backbone", None)
+        if backbone is None:
+            raise ValueError(
+                "This parser requires semantic_features or an attached SigLIP2 runtime backbone."
+            )
+        with torch.no_grad():
+            return backbone.encode_global(images[:, :3])["raw_global"]
+
+    def forward(self, x, view_ids=None, semantic_features=None):
+        source_images = x
         if self.view_classes > 0:
             if view_ids is None:
                 raise ValueError("view_ids are required for a view-conditioned dense UV parser.")
@@ -155,6 +302,18 @@ class DenseUVParserNet(nn.Module):
         s2 = self.down2(s1)
         s3 = self.down3(s2)
         x = self.mid(s3)
+        semantic_summary = None
+        if self.semantic_fusion is not None:
+            if semantic_features is None:
+                semantic_features = self._runtime_semantic_features(source_images)
+            modulation, semantic_summary = self.semantic_fusion(
+                semantic_features,
+                view_ids,
+                source_images.shape[0],
+            )
+            scale, shift = modulation.chunk(2, dim=1)
+            x = x * (1.0 + scale.unsqueeze(-1).unsqueeze(-1))
+            x = x + shift.unsqueeze(-1).unsqueeze(-1)
         affine = None
         if self.predict_affine:
             raw_affine = torch.tanh(self.affine_head(x))
@@ -175,6 +334,15 @@ class DenseUVParserNet(nn.Module):
             "foreground": self.foreground(x),
             "layer": self.layer(x),
         }
+        if self.route_confidence is not None:
+            outputs["route_confidence"] = self.route_confidence(x)
+        if semantic_summary is not None:
+            outputs["outer_presence_logits"] = self.outer_presence_head(
+                semantic_summary
+            )
+            outputs["outer_coverage"] = torch.sigmoid(
+                self.outer_coverage_head(semantic_summary)
+            )
         if not self.geometry_only:
             outputs["part"] = self.part(x)
             outputs["face"] = self.face(x)

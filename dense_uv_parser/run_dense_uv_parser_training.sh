@@ -57,12 +57,48 @@ fi
 
 DATA_DIR="${DATA_DIR:-../skins}"
 MAPPINGS_SIZE="${MAPPINGS_SIZE:-256x512}"
-MAPPINGS_DIR="${MAPPINGS_DIR:-../../github/differentiable_minecraft_renderer/mappings_${MAPPINGS_SIZE}}"
 VIEWS="${VIEWS:-walk_front_both_layer_ortho,walk_back_both_layer_ortho}"
+
+resolve_mappings_dir() {
+  local requested="${MAPPINGS_DIR:-}"
+  local name="mappings_${MAPPINGS_SIZE}"
+  local candidate=""
+  local discovered=""
+  if [[ -n "$requested" ]]; then
+    [[ -d "$requested" ]] || { echo "MAPPINGS_DIR does not exist: $requested" >&2; return 1; }
+    MAPPINGS_DIR="$requested"
+    return 0
+  fi
+  for candidate in \
+    "../differentiable_minecraft_renderer/$name" \
+    "../../differentiable_minecraft_renderer/$name" \
+    "../../github/differentiable_minecraft_renderer/$name" \
+    "../$name"; do
+    if [[ -d "$candidate" ]]; then
+      MAPPINGS_DIR="$candidate"
+      return 0
+    fi
+  done
+  discovered="$(find ../.. -maxdepth 5 -type d -name "$name" -print -quit 2>/dev/null || true)"
+  [[ -n "$discovered" ]] || { echo "Could not find $name from $(pwd)." >&2; return 1; }
+  MAPPINGS_DIR="$discovered"
+}
+resolve_mappings_dir
+
 PARSER_MODE="${PARSER_MODE:-geometry_fit}"
 MAX_SAMPLES="${MAX_SAMPLES:-30000}"
 BASE_CHANNELS="${BASE_CHANNELS:-32}"
 FEATURE_DROPOUT="${FEATURE_DROPOUT:-0.10}"
+SEMANTIC_BACKBONE="${SEMANTIC_BACKBONE:-siglip2}"
+SIGLIP_MODEL="${SIGLIP_MODEL:-google/siglip2-base-patch16-224}"
+SIGLIP_LOCAL_FILES_ONLY="${SIGLIP_LOCAL_FILES_ONLY:-false}"
+CACHE_SIGLIP_GLOBALS="${CACHE_SIGLIP_GLOBALS:-true}"
+SIGLIP_CACHE_DIR="${SIGLIP_CACHE_DIR:-cache/semantic_dense_parser_siglip2_${MAPPINGS_SIZE}_${MAX_SAMPLES}}"
+SIGLIP_CACHE_BATCH_SIZE="${SIGLIP_CACHE_BATCH_SIZE:-32}"
+SEMANTIC_CHANNELS="${SEMANTIC_CHANNELS:-128}"
+SEMANTIC_ATTENTION_HEADS="${SEMANTIC_ATTENTION_HEADS:-4}"
+SEMANTIC_LAYERS="${SEMANTIC_LAYERS:-1}"
+SEMANTIC_DROPOUT="${SEMANTIC_DROPOUT:-0.05}"
 BATCH_SIZE="${BATCH_SIZE:-32}"
 NUM_WORKERS="${NUM_WORKERS:-16}"
 PREFETCH_FACTOR="${PREFETCH_FACTOR:-4}"
@@ -106,6 +142,9 @@ LAMBDA_AFFINE="${LAMBDA_AFFINE:-1.0}"
 LAMBDA_SURFACE="${LAMBDA_SURFACE:-1.0}"
 LAMBDA_OUTER_FALSE_POSITIVE="${LAMBDA_OUTER_FALSE_POSITIVE:-0.75}"
 LAMBDA_OUTER_FALSE_NEGATIVE="${LAMBDA_OUTER_FALSE_NEGATIVE:-0.75}"
+LAMBDA_ROUTE_CONFIDENCE="${LAMBDA_ROUTE_CONFIDENCE:-0.25}"
+LAMBDA_SEMANTIC_PRESENCE="${LAMBDA_SEMANTIC_PRESENCE:-0.25}"
+LAMBDA_SEMANTIC_COVERAGE="${LAMBDA_SEMANTIC_COVERAGE:-0.25}"
 OUTER_FALSE_POSITIVE_GAMMA="${OUTER_FALSE_POSITIVE_GAMMA:-2.0}"
 OUTER_FALSE_NEGATIVE_GAMMA="${OUTER_FALSE_NEGATIVE_GAMMA:-2.0}"
 ROUTE_CLASS_WEIGHT_FLOOR="${ROUTE_CLASS_WEIGHT_FLOOR:-0.75}"
@@ -188,6 +227,38 @@ if [[ -n "$RESUME" ]]; then
   resume_args=(--resume "$RESUME")
 fi
 
+semantic_args=(--semantic_backbone "$SEMANTIC_BACKBONE")
+if [[ "$SEMANTIC_BACKBONE" == "siglip2" ]]; then
+  cache_args=()
+  if [[ "$SIGLIP_LOCAL_FILES_ONLY" == "true" ]]; then
+    cache_args+=(--siglip_local_files_only)
+    semantic_args+=(--siglip_local_files_only)
+  fi
+  if [[ "$CACHE_SIGLIP_GLOBALS" == "true" ]]; then
+    python ../semantic_uv_reconstruction/cache_siglip_globals.py \
+      --data_dir "$DATA_DIR" \
+      --cache_dir "$SIGLIP_CACHE_DIR" \
+      --mappings_dir "$MAPPINGS_DIR" \
+      --views "$VIEWS" \
+      --siglip_model "$SIGLIP_MODEL" \
+      --max_samples "$MAX_SAMPLES" \
+      --batch_size "$SIGLIP_CACHE_BATCH_SIZE" \
+      --num_workers "$NUM_WORKERS" \
+      --prefetch_factor "$PREFETCH_FACTOR" \
+      --mixed_precision "$MIXED_PRECISION" \
+      --device "${DEVICE:-auto}" \
+      "${cache_args[@]}"
+    semantic_args+=(--siglip_cache_dir "$SIGLIP_CACHE_DIR")
+  fi
+  semantic_args+=(
+    --siglip_model "$SIGLIP_MODEL"
+    --semantic_channels "$SEMANTIC_CHANNELS"
+    --semantic_attention_heads "$SEMANTIC_ATTENTION_HEADS"
+    --semantic_layers "$SEMANTIC_LAYERS"
+    --semantic_dropout "$SEMANTIC_DROPOUT"
+  )
+fi
+
 python train.py \
   --data_dir "$DATA_DIR" \
   --output_dir "$OUTPUT_DIR" \
@@ -197,6 +268,7 @@ python train.py \
   --max_samples "$MAX_SAMPLES" \
   --base_channels "$BASE_CHANNELS" \
   --feature_dropout "$FEATURE_DROPOUT" \
+  "${semantic_args[@]}" \
   --batch_size "$BATCH_SIZE" \
   --num_workers "$NUM_WORKERS" \
   --prefetch_factor "$PREFETCH_FACTOR" \
@@ -219,6 +291,9 @@ python train.py \
   --lambda_surface "$LAMBDA_SURFACE" \
   --lambda_outer_false_positive "$LAMBDA_OUTER_FALSE_POSITIVE" \
   --lambda_outer_false_negative "$LAMBDA_OUTER_FALSE_NEGATIVE" \
+  --lambda_route_confidence "$LAMBDA_ROUTE_CONFIDENCE" \
+  --lambda_semantic_presence "$LAMBDA_SEMANTIC_PRESENCE" \
+  --lambda_semantic_coverage "$LAMBDA_SEMANTIC_COVERAGE" \
   --outer_false_positive_gamma "$OUTER_FALSE_POSITIVE_GAMMA" \
   --outer_false_negative_gamma "$OUTER_FALSE_NEGATIVE_GAMMA" \
   --route_class_weight_floor "$ROUTE_CLASS_WEIGHT_FLOOR" \

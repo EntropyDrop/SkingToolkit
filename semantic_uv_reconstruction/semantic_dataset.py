@@ -1,3 +1,4 @@
+import json
 import os
 from pathlib import Path
 
@@ -10,6 +11,75 @@ from SkingToolkit.semantic_uv_reconstruction.dataset import IMAGE_EXTENSIONS, lo
 
 
 IGNORE_INDEX = 255
+SIGLIP_CACHE_VERSION = 1
+
+
+class SigLIPGlobalCache:
+    """Memory-mapped frozen SigLIP globals keyed by source skin filename."""
+
+    def __init__(
+        self,
+        cache_dir,
+        expected_views=None,
+        expected_model=None,
+        expected_data_dir=None,
+    ):
+        self.cache_dir = Path(cache_dir)
+        metadata_path = self.cache_dir / "metadata.json"
+        embeddings_path = self.cache_dir / "embeddings.npy"
+        if not metadata_path.is_file() or not embeddings_path.is_file():
+            raise FileNotFoundError(
+                f"Incomplete SigLIP cache in {self.cache_dir}; expected metadata.json "
+                "and embeddings.npy."
+            )
+        self.metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        if self.metadata.get("version") != SIGLIP_CACHE_VERSION:
+            raise ValueError(
+                f"Unsupported SigLIP cache version {self.metadata.get('version')!r}."
+            )
+        if expected_views is not None and self.metadata.get("views") != list(expected_views):
+            raise ValueError(
+                f"SigLIP cache views={self.metadata.get('views')!r}, "
+                f"expected {list(expected_views)!r}."
+            )
+        if expected_model is not None and self.metadata.get("siglip_model") != expected_model:
+            raise ValueError(
+                f"SigLIP cache model={self.metadata.get('siglip_model')!r}, "
+                f"expected {expected_model!r}."
+            )
+        if expected_data_dir is not None:
+            cached_data_dir_value = self.metadata.get("data_dir")
+            requested_data_dir = Path(expected_data_dir).resolve()
+            if (
+                cached_data_dir_value
+                and Path(cached_data_dir_value).resolve() != requested_data_dir
+            ):
+                raise ValueError(
+                    f"SigLIP cache data_dir={str(Path(cached_data_dir_value).resolve())!r}, "
+                    f"expected {str(requested_data_dir)!r}."
+                )
+        filenames = self.metadata.get("filenames")
+        if not isinstance(filenames, list) or len(set(filenames)) != len(filenames):
+            raise ValueError("SigLIP cache filenames must be a unique list.")
+        self.filename_to_index = {name: index for index, name in enumerate(filenames)}
+        self.embeddings = np.load(embeddings_path, mmap_mode="r")
+        expected_shape = (
+            len(filenames),
+            len(self.metadata["views"]),
+            int(self.metadata["feature_dim"]),
+        )
+        if self.embeddings.shape != expected_shape:
+            raise ValueError(
+                f"SigLIP cache shape={self.embeddings.shape}, expected {expected_shape}."
+            )
+
+    def get(self, filename):
+        try:
+            index = self.filename_to_index[filename]
+        except KeyError as error:
+            raise KeyError(f"{filename} is missing from the SigLIP cache.") from error
+        # Copy the tiny row so DataLoader collation never holds a read-only mmap view.
+        return torch.from_numpy(np.array(self.embeddings[index], dtype=np.float32, copy=True))
 
 
 def load_semantic_uv_label(path):
@@ -36,11 +106,24 @@ class SemanticUVPairDataset(Dataset):
         bg_color=(128, 128, 128),
         normalize_model=True,
         semantic_labels_dir=None,
+        siglip_cache_dir=None,
+        siglip_cache_views=None,
+        siglip_cache_model=None,
     ):
         self.data_dir = Path(data_dir)
         self.bg_color = bg_color
         self.normalize_model = normalize_model
         self.semantic_labels_dir = Path(semantic_labels_dir) if semantic_labels_dir else None
+        self.siglip_cache = (
+            SigLIPGlobalCache(
+                siglip_cache_dir,
+                expected_views=siglip_cache_views,
+                expected_model=siglip_cache_model,
+                expected_data_dir=self.data_dir,
+            )
+            if siglip_cache_dir
+            else None
+        )
 
         self.skin_paths = sorted(
             self.data_dir / filename
@@ -60,6 +143,17 @@ class SemanticUVPairDataset(Dataset):
                     f"Missing semantic UV labels for {len(missing)} skins in "
                     f"{self.semantic_labels_dir}; first missing: {preview}"
                 )
+        if self.siglip_cache is not None:
+            missing = [
+                path.name
+                for path in self.skin_paths
+                if path.name not in self.siglip_cache.filename_to_index
+            ]
+            if missing:
+                raise ValueError(
+                    f"SigLIP cache is missing {len(missing)} selected skins; "
+                    f"first missing: {', '.join(missing[:5])}."
+                )
 
     def __len__(self):
         return len(self.skin_paths)
@@ -76,4 +170,6 @@ class SemanticUVPairDataset(Dataset):
         }
         if self.semantic_labels_dir is not None:
             sample["semantic_uv"] = load_semantic_uv_label(self.semantic_labels_dir / skin_path.name)
+        if self.siglip_cache is not None:
+            sample["siglip_raw_global"] = self.siglip_cache.get(skin_path.name)
         return sample

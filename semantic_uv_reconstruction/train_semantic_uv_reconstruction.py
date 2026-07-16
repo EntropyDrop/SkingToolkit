@@ -70,7 +70,7 @@ def move_batch(batch, device):
         "uv": batch["uv"].to(device, non_blocking=True),
         "path": batch["path"],
     }
-    for name in ("semantic_uv",):
+    for name in ("semantic_uv", "siglip_raw_global"):
         if name in batch:
             moved[name] = batch[name].to(device, non_blocking=True)
     return moved
@@ -114,6 +114,8 @@ def run_epoch(
     description="train",
     siglip_render_every=1,
     log_every=50,
+    siglip_render_enabled=True,
+    uv_detail_scale=1.0,
 ):
     started_at = time.perf_counter()
     training = optimizer is not None
@@ -136,8 +138,14 @@ def run_epoch(
                 optimizer.zero_grad(set_to_none=True)
 
             with autocast_context(device, precision):
-                outputs = model(images)
-                compute_siglip_render = batch_index % siglip_render_every == 0
+                outputs = model(
+                    images,
+                    open_semantic_raw=batch.get("siglip_raw_global"),
+                )
+                compute_siglip_render = (
+                    siglip_render_enabled
+                    and batch_index % siglip_render_every == 0
+                )
                 metrics = criterion(
                     outputs,
                     target_uv,
@@ -152,6 +160,7 @@ def run_epoch(
                     ),
                     compute_siglip_render=compute_siglip_render,
                     siglip_render_scale=siglip_render_every,
+                    uv_detail_scale=uv_detail_scale,
                 )
                 loss = metrics["loss_total"]
 
@@ -199,7 +208,10 @@ def save_preview(
     target_uv = batch["uv"]
     renders = render_fixed_views(target_uv, renderer, views)
     with autocast_context(device, precision):
-        outputs = model(renders[:, :, :3])
+        outputs = model(
+            renders[:, :, :3],
+            open_semantic_raw=batch.get("siglip_raw_global"),
+        )
     count = min(max_items, target_uv.shape[0])
 
     view_rows = []
@@ -260,8 +272,10 @@ def save_checkpoint(path, model, optimizer, scaler, epoch, args, metrics):
             "attention_heads": model.attention_heads,
             "attention_layers": model.attention_layers,
             "attention_dropout": model.attention_dropout,
+            "memory_latents": model.memory_latent_count,
             "semantic_classes": model.semantic_classes,
             "architecture_version": model.architecture_version,
+            "use_siglip_patch_tokens": model.use_siglip_patch_tokens,
             "semantic_backbone": model.semantic_backbone_name,
             "siglip_model": model.siglip_model,
             "views": parse_views(args.views),
@@ -294,12 +308,15 @@ def build_arg_parser():
     parser.add_argument("--semantic_backbone", choices=["siglip2", "none"], default="siglip2")
     parser.add_argument("--siglip_model", default="google/siglip2-base-patch16-224")
     parser.add_argument("--siglip_local_files_only", action="store_true")
+    parser.add_argument("--siglip_cache_dir", default=None)
+    parser.add_argument("--use_siglip_patch_tokens", action="store_true")
     parser.add_argument("--base_channels", type=int, default=32)
     parser.add_argument("--token_channels", type=int, default=128)
     parser.add_argument("--query_size", type=int, default=32)
     parser.add_argument("--attention_heads", type=int, default=4)
     parser.add_argument("--attention_layers", type=int, default=2)
     parser.add_argument("--attention_dropout", type=float, default=0.0)
+    parser.add_argument("--memory_latents", type=int, default=256)
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--num_workers", type=int, default=8)
     parser.add_argument("--prefetch_factor", type=int, default=4)
@@ -317,6 +334,9 @@ def build_arg_parser():
     parser.add_argument("--save_every", type=int, default=1)
     parser.add_argument("--preview_every", type=int, default=1)
     parser.add_argument("--siglip_render_every", type=int, default=4)
+    parser.add_argument("--siglip_render_warmup_epochs", type=int, default=2)
+    parser.add_argument("--rgb_warmup_epochs", type=int, default=2)
+    parser.add_argument("--rgb_warmup_multiplier", type=float, default=2.0)
     parser.add_argument("--log_every", type=int, default=50)
     parser.add_argument(
         "--fused_optimizer", dest="fused_optimizer", action="store_true", default=True
@@ -366,8 +386,18 @@ def main():
         raise ValueError("--siglip_render_every must be positive.")
     if args.log_every < 1:
         raise ValueError("--log_every must be positive.")
+    if args.memory_latents < 16:
+        raise ValueError("--memory_latents must be at least 16.")
+    if args.siglip_render_warmup_epochs < 0 or args.rgb_warmup_epochs < 0:
+        raise ValueError("Warmup epochs must be non-negative.")
+    if args.rgb_warmup_multiplier < 1.0:
+        raise ValueError("--rgb_warmup_multiplier must be at least 1.")
     if args.semantic_backbone == "none" and args.lambda_siglip_render > 0.0:
         raise ValueError("--lambda_siglip_render must be 0 when --semantic_backbone=none.")
+    if args.semantic_backbone == "none" and args.siglip_cache_dir:
+        raise ValueError("--siglip_cache_dir requires --semantic_backbone=siglip2.")
+    if args.siglip_cache_dir and args.use_siglip_patch_tokens:
+        raise ValueError("A global SigLIP cache cannot be used with patch tokens.")
 
     device = get_device(args.device)
     if hasattr(torch, "set_float32_matmul_precision"):
@@ -391,6 +421,9 @@ def main():
         args.data_dir,
         max_samples=args.max_samples,
         semantic_labels_dir=args.semantic_labels_dir,
+        siglip_cache_dir=args.siglip_cache_dir,
+        siglip_cache_views=views,
+        siglip_cache_model=args.siglip_model,
     )
     val_count = int(len(dataset) * args.val_split)
     if args.val_split > 0.0 and val_count == 0:
@@ -437,10 +470,12 @@ def main():
         attention_heads=args.attention_heads,
         attention_layers=args.attention_layers,
         attention_dropout=args.attention_dropout,
+        memory_latents=args.memory_latents,
         semantic_classes=args.semantic_classes,
         semantic_backbone=args.semantic_backbone,
         siglip_model=args.siglip_model,
         siglip_local_files_only=args.siglip_local_files_only,
+        use_siglip_patch_tokens=args.use_siglip_patch_tokens,
     ).to(device)
     channels_last = device.type == "cuda"
     if channels_last:
@@ -489,8 +524,10 @@ def main():
             "semantic_classes": args.semantic_classes,
             "architecture_version": model.architecture_version,
             "query_size": args.query_size,
+            "memory_latents": args.memory_latents,
             "semantic_backbone": args.semantic_backbone,
             "siglip_model": args.siglip_model,
+            "use_siglip_patch_tokens": args.use_siglip_patch_tokens,
         }
         for name, expected_value in expected.items():
             if config.get(name) != expected_value:
@@ -518,8 +555,13 @@ def main():
         "semantic_backbone": args.semantic_backbone,
         "siglip_model": args.siglip_model,
         "siglip_frozen": model.has_open_semantics,
+        "siglip_source_cache": args.siglip_cache_dir,
+        "use_siglip_patch_tokens": args.use_siglip_patch_tokens,
         "lambda_siglip_render": args.lambda_siglip_render,
         "siglip_render_every": args.siglip_render_every,
+        "siglip_render_warmup_epochs": args.siglip_render_warmup_epochs,
+        "rgb_warmup_epochs": args.rgb_warmup_epochs,
+        "rgb_warmup_multiplier": args.rgb_warmup_multiplier,
         "log_every": args.log_every,
         "channels_last": channels_last,
         "fused_optimizer": fused_optimizer,
@@ -527,6 +569,7 @@ def main():
         "lambda_uv_rgb": args.lambda_uv_rgb,
         "lambda_uv_edge": args.lambda_uv_edge,
         "query_size": args.query_size,
+        "memory_latents": args.memory_latents,
         "base_learning_rate": args.lr,
         "min_lr_ratio": args.min_lr_ratio,
     }
@@ -539,6 +582,10 @@ def main():
 
     preview_loader = val_loader if val_loader is not None else train_loader
     for epoch in range(start_epoch, args.epochs + 1):
+        uv_detail_scale = (
+            args.rgb_warmup_multiplier if epoch <= args.rgb_warmup_epochs else 1.0
+        )
+        siglip_render_enabled = epoch > args.siglip_render_warmup_epochs
         learning_rate = learning_rate_for_epoch(
             args.lr, epoch, args.epochs, args.min_lr_ratio
         )
@@ -557,6 +604,8 @@ def main():
             description=f"train {epoch}",
             siglip_render_every=args.siglip_render_every,
             log_every=args.log_every,
+            siglip_render_enabled=siglip_render_enabled,
+            uv_detail_scale=uv_detail_scale,
         )
         val_metrics = (
             run_epoch(
@@ -570,6 +619,8 @@ def main():
                 description=f"val {epoch}",
                 siglip_render_every=args.siglip_render_every,
                 log_every=args.log_every,
+                siglip_render_enabled=siglip_render_enabled,
+                uv_detail_scale=uv_detail_scale,
             )
             if val_loader is not None
             else train_metrics
@@ -582,6 +633,8 @@ def main():
             "train": train_metrics,
             "val": val_metrics,
             "learning_rate": learning_rate,
+            "uv_detail_scale": uv_detail_scale,
+            "siglip_render_enabled": siglip_render_enabled,
             "best_loss": best_loss,
         }
         print(f"epoch={epoch} metrics={json.dumps(epoch_metrics, ensure_ascii=False)}")

@@ -106,6 +106,15 @@ class SigLIP2VisionBackbone(nn.Module):
         self.vision_model.eval()
         return self
 
+    def project_global(self, raw_global):
+        """Project cached or freshly encoded language-aligned global features."""
+        if raw_global.shape[-1] != self.raw_feature_dim:
+            raise ValueError(
+                f"Expected SigLIP feature dim {self.raw_feature_dim}, "
+                f"got {raw_global.shape[-1]}."
+            )
+        return self.global_projection(raw_global)
+
     def _letterbox(self, images):
         if images.dim() != 4 or images.shape[1] != 3:
             raise ValueError(f"Expected Nx3xHxW images, got {tuple(images.shape)}.")
@@ -165,6 +174,16 @@ class SigLIP2VisionBackbone(nn.Module):
         # Never retain it in Python state across CUDA Graph replays.
         return torch.tensor(cached, dtype=torch.long, device=device)
 
+    def encode_global(self, images):
+        """Encode only pooled semantics, skipping patch projection and masking."""
+        pixels, _ = self._letterbox(images)
+        outputs = self.vision_model(pixel_values=pixels)
+        raw_global = outputs.pooler_output
+        return {
+            "global": self.project_global(raw_global),
+            "raw_global": raw_global,
+        }
+
     def forward(self, images):
         pixels, content_rect = self._letterbox(images)
         outputs = self.vision_model(
@@ -190,6 +209,6 @@ class SigLIP2VisionBackbone(nn.Module):
             "tokens": self.token_projection(raw_tokens),
             "token_mask": patch_mask,
             "tokens_compact": True,
-            "global": self.global_projection(raw_global),
+            "global": self.project_global(raw_global),
             "raw_global": raw_global,
         }

@@ -4,9 +4,9 @@
 
 ```text
 front/back renders
-  → dense_uv_parser
-  → partial inner/outer UV conditioning
-  → semantic_uv_reconstruction
+  → semantic-conditioned dense_uv_parser + fixed geometry
+  → partial inner/outer UV evidence + calibrated confidence
+  → topology-aware masked generation
   → complete 64×64 RGBA skin
 ```
 
@@ -27,6 +27,8 @@ SkingToolkit/
 │   └── run_infer.sh
 └── semantic_uv_reconstruction/
     ├── model.py
+    ├── topology.py
+    ├── topology_model.py
     ├── losses.py
     ├── dataset.py
     ├── train.py
@@ -42,22 +44,30 @@ SkingToolkit/
 
 ### `dense_uv_parser`
 
-The parser classifies render pixels as background, directly visible inner skin, directly visible outer skin, or a secondary/deeper renderer surface. Fixed Steve geometry supplies the exact body-part, face, and UV mappings. Its predictions are splatted into a 10-channel UV conditioning tensor:
+The parser classifies render pixels as background, directly visible inner skin,
+directly visible outer skin, or a secondary/deeper renderer surface. A frozen
+SigLIP2 tower supplies fused front/back semantic context while fixed Steve
+geometry supplies body-part, face, and UV mappings. Its predictions are splatted
+into a 12-channel confidence-aware tensor:
 
 ```text
-[inner RGBA + known mask, outer RGBA + known mask]
+[inner RGBA + evidence + confidence, outer RGBA + evidence + confidence]
 ```
 
 Training includes supervised routing losses plus a differentiable soft-UV and multi-view rendering branch. See [dense_uv_parser/README.md](dense_uv_parser/README.md) for configuration and diagnostics.
 
 ### `semantic_uv_reconstruction`
 
-The module's primary model reconstructs a complete atlas directly from fixed
-front/back renders by fusing a high-resolution CNN with frozen SigLIP2
-semantics. It also retains the parser-conditioned completion model for existing
-checkpoints and production inference.
+The module includes a direct fixed-view CNN + SigLIP2 reconstruction path. For
+production inputs with invisible surfaces, its geometry-first path preserves
+high-confidence parser texels and repairs uncertain or missing texels with
+cuboid seam, body-part, face, and inner/outer-layer topology. Legacy U-Net
+checkpoints remain loadable.
 
-The public classes are `UVInpaintingNet`, `UVInpaintingDataset`, and `UVInpaintingLoss`. See [semantic_uv_reconstruction/README.md](semantic_uv_reconstruction/README.md) for all training options.
+The public classes include `TopologyAwareUVCompletionNet`, `UVInpaintingNet`,
+`UVInpaintingDataset`, and `UVInpaintingLoss`. See
+[semantic_uv_reconstruction/README.md](semantic_uv_reconstruction/README.md) for
+all training options.
 
 The same directory includes `SemanticUVReconstructor`, an independent
 fixed-view training path that jointly encodes clean front/back renders and
@@ -68,7 +78,9 @@ has no finite garment concept table. This path does not require a parser
 checkpoint and currently applies no randomized render variation. Its current
 architecture uses `/8` local-detail tokens, a 32x32 UV query grid, a learned
 PixelShuffle decoder, and UV edge supervision to preserve Minecraft texel
-boundaries instead of averaging them during upsampling.
+boundaries instead of averaging them during upsampling. Its direct trainer uses
+a compact memory-latent resampler and a reusable frozen SigLIP2 global-feature
+cache so every UV query and every epoch do not repeat the same expensive work.
 
 ### `renderer.py`
 
@@ -82,7 +94,7 @@ Install the core Python dependencies:
 pip install torch torchvision tqdm pillow numpy
 ```
 
-The optional semantic fixed-view trainer additionally requires:
+The standard semantic-conditioned parser and optional direct semantic trainer require:
 
 ```bash
 pip install -U transformers sentencepiece safetensors
@@ -125,7 +137,7 @@ cd SkingToolkit/dense_uv_parser
 FRONT=/path/to/front.png BACK=/path/to/back.png ./run_infer.sh
 ```
 
-By default the launcher selects the newest parser checkpoint and the newest `../semantic_uv_reconstruction/runs/semantic_uv_reconstruction_full_v*/best.pt`. Important outputs include:
+By default the launcher selects the newest parser checkpoint and the newest `../semantic_uv_reconstruction/runs/semantic_uv_reconstruction_topology_maskgit_v*/best.pt`. Important outputs include:
 
 - `outputs/parser_pred_uv.png`: preliminary UV assembled from parser-visible texels.
 - `outputs/parser_conditioning.png`: inner/outer conditioning preview.
@@ -136,7 +148,7 @@ You can override checkpoint selection explicitly:
 
 ```bash
 PARSER_CHECKPOINT=runs/dense_uv_parser_v3/best.pt \
-INPAINT_CHECKPOINT=../semantic_uv_reconstruction/runs/semantic_uv_reconstruction_full_v4/best.pt \
+INPAINT_CHECKPOINT=../semantic_uv_reconstruction/runs/semantic_uv_reconstruction_topology_maskgit_v4/best.pt \
 ./run_infer.sh
 ```
 

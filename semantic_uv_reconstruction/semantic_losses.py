@@ -143,7 +143,10 @@ class SemanticUVReconstructionLoss(nn.Module):
         semantic_encoder=None,
         compute_siglip_render=True,
         siglip_render_scale=1.0,
+        uv_detail_scale=1.0,
     ):
+        if uv_detail_scale <= 0.0:
+            raise ValueError("uv_detail_scale must be positive.")
         target_uv = target_uv.float()
         pred_uv = outputs["uv"]
         zero = pred_uv.new_zeros((), dtype=torch.float32)
@@ -258,8 +261,8 @@ class SemanticUVReconstructionLoss(nn.Module):
             + self.lambda_semantic_color * loss_semantic_color
         )
         loss_total = (
-            self.lambda_uv_rgb * loss_uv_rgb
-            + self.lambda_uv_edge * loss_uv_edge
+            float(uv_detail_scale) * self.lambda_uv_rgb * loss_uv_rgb
+            + float(uv_detail_scale) * self.lambda_uv_edge * loss_uv_edge
             + self.lambda_outer_alpha * loss_outer_alpha
             + self.lambda_outer_dice * loss_outer_dice
             + loss_semantic
@@ -281,6 +284,7 @@ class SemanticUVReconstructionLoss(nn.Module):
             "loss_uv_rgb": loss_uv_rgb,
             "loss_uv_edge": loss_uv_edge,
             "rgb_mae_255": loss_uv_rgb.detach() * 255.0,
+            "uv_detail_scale": pred_uv.new_tensor(float(uv_detail_scale)),
             "loss_outer_alpha": loss_outer_alpha,
             "loss_outer_dice": loss_outer_dice,
             "loss_semantic": loss_semantic,

@@ -1311,6 +1311,10 @@ def _routing_from_geometry_surface_outputs(
             (selected_role_score * best_surface_score.clamp_min(0.0)).sqrt(),
             selected_role_score,
         )
+        if "route_confidence" in outputs:
+            selected_confidence = selected_confidence * torch.sigmoid(
+                outputs["route_confidence"][selection, 0].float()
+            )
         selected_margin = torch.where(
             selected_secondary,
             torch.minimum(role_margin, surface_margin),
@@ -1357,6 +1361,11 @@ def _routing_from_geometry_surface_outputs(
         "route_role": route_role,
         "secondary": secondary,
         "secondary_routed": secondary,
+        "learned_trust": (
+            torch.sigmoid(outputs["route_confidence"][:, 0].float())
+            if "route_confidence" in outputs
+            else torch.ones_like(foreground_prob)
+        ),
     }
 
 
@@ -1675,6 +1684,7 @@ def splat_parser_predictions_to_uv_conditioning(
     observed_foreground=None,
     reject_semantic_fallback=False,
     reject_inner_semantic_fallback=False,
+    include_confidence=False,
     return_details=False,
 ):
     """Route parser outputs to UV, using static mappings for affine-parser checkpoints."""
@@ -1857,6 +1867,7 @@ def splat_parser_predictions_to_uv_conditioning(
         bg_color=bg_color,
         confidence=routing["confidence"],
         color_aggregation=color_aggregation,
+        include_confidence=include_confidence,
     )
     if return_details:
         return conditioning, {
@@ -2059,6 +2070,7 @@ def splat_to_uv_conditioning(
     bg_color=(128, 128, 128),
     confidence=None,
     color_aggregation="exact_mode",
+    include_confidence=False,
 ):
     if rendered.dim() != 4:
         raise ValueError(f"Expected rendered tensor as NCHW, got {tuple(rendered.shape)}.")
@@ -2076,6 +2088,9 @@ def splat_to_uv_conditioning(
     dtype = rendered.dtype
     accum = rendered.new_zeros(groups, LAYER_CLASSES, 4, UV_SIZE * UV_SIZE)
     counts = rendered.new_zeros(groups, LAYER_CLASSES, 1, UV_SIZE * UV_SIZE)
+    confidence_map = rendered.new_zeros(
+        groups, LAYER_CLASSES, 1, UV_SIZE * UV_SIZE
+    )
 
     if confidence is None:
         confidence = rendered.new_ones(fg.shape)
@@ -2128,12 +2143,20 @@ def splat_to_uv_conditioning(
                 selected_indices = first_best[first_best < target_uv.shape[0]]
                 values = values[:, selected_indices]
                 target_uv = target_uv[selected_indices]
+                scores = scores[selected_indices]
 
             accum[group, layer_index].index_add_(1, target_uv, values)
             counts[group, layer_index, 0].index_add_(
                 0,
                 target_uv,
                 torch.ones(target_uv.shape[0], dtype=dtype, device=device),
+            )
+            confidence_map[group, layer_index, 0].scatter_reduce_(
+                0,
+                target_uv,
+                scores.to(dtype=dtype),
+                reduce="amax",
+                include_self=True,
             )
 
     known = (counts > 0).to(dtype=dtype)
@@ -2145,32 +2168,39 @@ def splat_to_uv_conditioning(
         bg.expand(groups, LAYER_CLASSES, 3, UV_SIZE * UV_SIZE),
     )
     alpha = torch.where(known > 0, aggregated[:, :, 3:4], torch.zeros_like(aggregated[:, :, 3:4]))
-    layers = torch.cat([rgb, alpha, known], dim=2).reshape(groups, -1, UV_SIZE, UV_SIZE)
+    layer_channels = [rgb, alpha, known]
+    if include_confidence:
+        layer_channels.append(confidence_map * known)
+    layers = torch.cat(layer_channels, dim=2).reshape(
+        groups, -1, UV_SIZE, UV_SIZE
+    )
     return layers.clamp(0.0, 1.0)
 
 
 def conditioning_to_pred_uv(conditioning):
     """Merge two-layer parser conditioning into a preliminary RGBA skin atlas.
 
-    Conditioning stores ``inner RGBA + known`` followed by
-    ``outer RGBA + known``.  Their Minecraft UV rectangles normally do not
-    overlap, but outer data wins if both layers mark the same texel as known.
+    Conditioning stores either ``RGBA + evidence`` (legacy 10-channel input)
+    or ``RGBA + evidence + confidence`` (12-channel input) for each layer.
+    Their Minecraft UV rectangles normally do not overlap, but outer data wins
+    if both layers mark the same texel as observed.
     Unknown RGB retains the conditioning background as a useful placeholder;
     unknown alpha remains transparent until Minecraft base-alpha finalization.
     """
     squeeze_batch = conditioning.dim() == 3
     if squeeze_batch:
         conditioning = conditioning.unsqueeze(0)
-    if conditioning.dim() != 4 or conditioning.shape[1] != 10:
+    if conditioning.dim() != 4 or conditioning.shape[1] not in (10, 12):
         raise ValueError(
-            "Expected conditioning with shape (N, 10, H, W) or (10, H, W), "
+            "Expected 10- or 12-channel parser conditioning, "
             f"got {tuple(conditioning.shape)}."
         )
 
     inner_rgba = conditioning[:, 0:4]
     inner_known = conditioning[:, 4:5] > 0.5
-    outer_rgba = conditioning[:, 5:9]
-    outer_known = conditioning[:, 9:10] > 0.5
+    outer_offset = 6 if conditioning.shape[1] == 12 else 5
+    outer_rgba = conditioning[:, outer_offset : outer_offset + 4]
+    outer_known = conditioning[:, outer_offset + 4 : outer_offset + 5] > 0.5
     known = inner_known | outer_known
 
     rgba = torch.where(outer_known.expand_as(outer_rgba), outer_rgba, inner_rgba)

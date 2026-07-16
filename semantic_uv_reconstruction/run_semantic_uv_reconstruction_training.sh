@@ -95,6 +95,10 @@ SEMANTIC_CLASSES="${SEMANTIC_CLASSES:-13}"
 SEMANTIC_BACKBONE="${SEMANTIC_BACKBONE:-siglip2}"
 SIGLIP_MODEL="${SIGLIP_MODEL:-google/siglip2-base-patch16-224}"
 SIGLIP_LOCAL_FILES_ONLY="${SIGLIP_LOCAL_FILES_ONLY:-false}"
+CACHE_SIGLIP_GLOBALS="${CACHE_SIGLIP_GLOBALS:-true}"
+SIGLIP_CACHE_DIR="${SIGLIP_CACHE_DIR:-cache/siglip2_base_patch16_224_${MAPPINGS_SIZE}}"
+SIGLIP_CACHE_BATCH_SIZE="${SIGLIP_CACHE_BATCH_SIZE:-32}"
+USE_SIGLIP_PATCH_TOKENS="${USE_SIGLIP_PATCH_TOKENS:-false}"
 
 BASE_CHANNELS="${BASE_CHANNELS:-32}"
 TOKEN_CHANNELS="${TOKEN_CHANNELS:-128}"
@@ -102,6 +106,7 @@ QUERY_SIZE="${QUERY_SIZE:-32}"
 ATTENTION_HEADS="${ATTENTION_HEADS:-4}"
 ATTENTION_LAYERS="${ATTENTION_LAYERS:-2}"
 ATTENTION_DROPOUT="${ATTENTION_DROPOUT:-0.0}"
+MEMORY_LATENTS="${MEMORY_LATENTS:-256}"
 BATCH_SIZE="${BATCH_SIZE:-4}"
 NUM_WORKERS="${NUM_WORKERS:-16}"
 PREFETCH_FACTOR="${PREFETCH_FACTOR:-4}"
@@ -111,6 +116,9 @@ MIN_LR_RATIO="${MIN_LR_RATIO:-0.05}"
 MIXED_PRECISION="${MIXED_PRECISION:-bf16}"
 DEVICE="${DEVICE:-auto}"
 SIGLIP_RENDER_EVERY="${SIGLIP_RENDER_EVERY:-4}"
+SIGLIP_RENDER_WARMUP_EPOCHS="${SIGLIP_RENDER_WARMUP_EPOCHS:-2}"
+RGB_WARMUP_EPOCHS="${RGB_WARMUP_EPOCHS:-2}"
+RGB_WARMUP_MULTIPLIER="${RGB_WARMUP_MULTIPLIER:-2.0}"
 LOG_EVERY="${LOG_EVERY:-50}"
 FUSED_OPTIMIZER="${FUSED_OPTIMIZER:-true}"
 TORCH_COMPILE="${TORCH_COMPILE:-true}"
@@ -141,6 +149,9 @@ fi
 if [[ "$SIGLIP_LOCAL_FILES_ONLY" == "true" ]]; then
   optional_args+=(--siglip_local_files_only)
 fi
+if [[ "$USE_SIGLIP_PATCH_TOKENS" == "true" ]]; then
+  optional_args+=(--use_siglip_patch_tokens)
+fi
 if [[ "$FUSED_OPTIMIZER" != "true" ]]; then
   optional_args+=(--no_fused_optimizer)
 fi
@@ -148,6 +159,33 @@ if [[ "$TORCH_COMPILE" == "true" ]]; then
   optional_args+=(--compile --compile_mode "$COMPILE_MODE")
 else
   optional_args+=(--no-compile)
+fi
+
+if [[ "$SEMANTIC_BACKBONE" == "siglip2" && "$CACHE_SIGLIP_GLOBALS" == "true" ]]; then
+  if [[ "$USE_SIGLIP_PATCH_TOKENS" == "true" ]]; then
+    echo "USE_SIGLIP_PATCH_TOKENS=true is incompatible with the global cache." >&2
+    exit 1
+  fi
+  cache_args=()
+  if [[ "$SIGLIP_LOCAL_FILES_ONLY" == "true" ]]; then
+    cache_args+=(--siglip_local_files_only)
+  fi
+  if [[ -n "$MAX_SAMPLES" ]]; then
+    cache_args+=(--max_samples "$MAX_SAMPLES")
+  fi
+  python cache_siglip_globals.py \
+    --data_dir "$DATA_DIR" \
+    --cache_dir "$SIGLIP_CACHE_DIR" \
+    --mappings_dir "$MAPPINGS_DIR" \
+    --views "$VIEWS" \
+    --siglip_model "$SIGLIP_MODEL" \
+    --batch_size "$SIGLIP_CACHE_BATCH_SIZE" \
+    --num_workers "$NUM_WORKERS" \
+    --prefetch_factor "$PREFETCH_FACTOR" \
+    --mixed_precision "$MIXED_PRECISION" \
+    --device "$DEVICE" \
+    "${cache_args[@]}"
+  optional_args+=(--siglip_cache_dir "$SIGLIP_CACHE_DIR")
 fi
 
 python train_semantic_uv_reconstruction.py \
@@ -164,6 +202,7 @@ python train_semantic_uv_reconstruction.py \
   --attention_heads "$ATTENTION_HEADS" \
   --attention_layers "$ATTENTION_LAYERS" \
   --attention_dropout "$ATTENTION_DROPOUT" \
+  --memory_latents "$MEMORY_LATENTS" \
   --batch_size "$BATCH_SIZE" \
   --num_workers "$NUM_WORKERS" \
   --prefetch_factor "$PREFETCH_FACTOR" \
@@ -184,5 +223,8 @@ python train_semantic_uv_reconstruction.py \
   --lambda_render_alpha "$LAMBDA_RENDER_ALPHA" \
   --lambda_siglip_render "$LAMBDA_SIGLIP_RENDER" \
   --siglip_render_every "$SIGLIP_RENDER_EVERY" \
+  --siglip_render_warmup_epochs "$SIGLIP_RENDER_WARMUP_EPOCHS" \
+  --rgb_warmup_epochs "$RGB_WARMUP_EPOCHS" \
+  --rgb_warmup_multiplier "$RGB_WARMUP_MULTIPLIER" \
   --log_every "$LOG_EVERY" \
   "${optional_args[@]}"

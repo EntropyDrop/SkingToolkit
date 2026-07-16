@@ -47,7 +47,7 @@ if [[ -z "$PARSER_CHECKPOINT" ]]; then
   exit 1
 fi
 
-INPAINT_MODEL="${INPAINT_MODEL:-full}"
+INPAINT_MODEL="${INPAINT_MODEL:-topology_maskgit}"
 INPAINT_RUNS_DIR="${INPAINT_RUNS_DIR:-../semantic_uv_reconstruction/runs}"
 INPAINT_RUN_PREFIX="${INPAINT_RUN_PREFIX:-semantic_uv_reconstruction_${INPAINT_MODEL}_v}"
 INPAINT_CHECKPOINT_NAME="${INPAINT_CHECKPOINT_NAME:-best.pt}"
@@ -101,6 +101,9 @@ ALPHA_THRESHOLD="${ALPHA_THRESHOLD:-0.5}"
 DEVICE="${DEVICE:-auto}"
 NO_ENFORCE_BASE_ALPHA="${NO_ENFORCE_BASE_ALPHA:-false}"
 OVERLAY_ALPHA="${OVERLAY_ALPHA:-0.45}"
+INPAINT_STEPS="${INPAINT_STEPS:-4}"
+INPAINT_TEMPERATURE="${INPAINT_TEMPERATURE:-0.0}"
+INPAINT_SEED="${INPAINT_SEED:-1234}"
 
 args=(
   infer.py
@@ -115,6 +118,9 @@ args=(
   --affine_refine_translation_px "$AFFINE_REFINE_TRANSLATION_PX"
   --affine_refine_scale "$AFFINE_REFINE_SCALE"
   --alpha_threshold "$ALPHA_THRESHOLD"
+  --inpaint_steps "$INPAINT_STEPS"
+  --inpaint_temperature "$INPAINT_TEMPERATURE"
+  --inpaint_seed "$INPAINT_SEED"
   --device "$DEVICE"
 )
 

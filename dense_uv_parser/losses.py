@@ -89,6 +89,7 @@ class DenseUVParserLoss(nn.Module):
         lambda_surface=1.0,
         lambda_outer_false_positive=0.75,
         lambda_outer_false_negative=0.75,
+        lambda_route_confidence=0.25,
         outer_false_positive_gamma=2.0,
         outer_false_negative_gamma=2.0,
         route_class_weight_floor=0.75,
@@ -111,6 +112,7 @@ class DenseUVParserLoss(nn.Module):
         self.lambda_surface = lambda_surface
         self.lambda_outer_false_positive = lambda_outer_false_positive
         self.lambda_outer_false_negative = lambda_outer_false_negative
+        self.lambda_route_confidence = float(lambda_route_confidence)
         self.outer_false_positive_gamma = outer_false_positive_gamma
         self.outer_false_negative_gamma = outer_false_negative_gamma
         self.route_class_weight_floor = route_class_weight_floor
@@ -247,6 +249,45 @@ class DenseUVParserLoss(nn.Module):
             loss_surface = zero
             acc_surface = zero
 
+        if "route_confidence" in outputs and "route_role" in targets:
+            valid_route = targets["route_role"] != IGNORE_INDEX
+            predicted_role = outputs["layer"].detach().argmax(dim=1)
+            route_correct = predicted_role == targets["route_role"]
+            if "surface" in outputs and "surface" in targets:
+                predicted_surface = outputs["surface"].detach().argmax(dim=1)
+                secondary = targets["route_role"] == 2
+                surface_correct = predicted_surface == targets["surface"]
+                route_correct = route_correct & (~secondary | surface_correct)
+            confidence_target = route_correct.float()
+            confidence_logits = outputs["route_confidence"][:, 0].float()
+            if valid_route.any():
+                loss_route_confidence = F.binary_cross_entropy_with_logits(
+                    confidence_logits[valid_route],
+                    confidence_target[valid_route],
+                )
+                confidence_probability = torch.sigmoid(confidence_logits)
+                confidence_mae = (
+                    confidence_probability[valid_route]
+                    - confidence_target[valid_route]
+                ).abs().mean()
+                trusted_prediction = confidence_probability[valid_route] >= 0.5
+                trusted_correct = confidence_target[valid_route] > 0.5
+                precision_trusted_route = (
+                    (trusted_prediction & trusted_correct).float().sum()
+                    / trusted_prediction.float().sum().clamp_min(1.0)
+                )
+                coverage_trusted_route = trusted_prediction.float().mean()
+            else:
+                loss_route_confidence = zero
+                confidence_mae = zero
+                precision_trusted_route = zero
+                coverage_trusted_route = zero
+        else:
+            loss_route_confidence = zero
+            confidence_mae = zero
+            precision_trusted_route = zero
+            coverage_trusted_route = zero
+
         geometry_route_roles = outputs["layer"].shape[1] == 3 and "route_role" in targets
         loss_routing = (
             loss_layer
@@ -273,6 +314,7 @@ class DenseUVParserLoss(nn.Module):
             + self.lambda_surface * loss_surface
             + weighted_outer_false_positive
             + weighted_outer_false_negative
+            + self.lambda_route_confidence * loss_route_confidence
         )
 
         metrics = {
@@ -299,6 +341,10 @@ class DenseUVParserLoss(nn.Module):
             "loss_outer_false_positive_weighted": weighted_outer_false_positive,
             "loss_outer_false_negative": loss_outer_false_negative,
             "loss_outer_false_negative_weighted": weighted_outer_false_negative,
+            "loss_route_confidence": loss_route_confidence,
+            "confidence_mae": confidence_mae,
+            "precision_trusted_route": precision_trusted_route,
+            "coverage_trusted_route": coverage_trusted_route,
             "loss_routing": loss_routing,
             "loss_geometry": loss_geometry,
             "acc_surface": acc_surface,
