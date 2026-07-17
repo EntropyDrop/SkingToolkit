@@ -122,11 +122,19 @@ SEMANTIC_GATE="${SEMANTIC_GATE:-true}"
 AFFINE_REFINE="${AFFINE_REFINE:-false}"
 AFFINE_REFINE_TRANSLATION_PX="${AFFINE_REFINE_TRANSLATION_PX:-0.0}"
 AFFINE_REFINE_SCALE="${AFFINE_REFINE_SCALE:-0.0}"
-ROUTE_CONFIDENCE_THRESHOLD="${ROUTE_CONFIDENCE_THRESHOLD:-0.50}"
-ROUTE_MARGIN_THRESHOLD="${ROUTE_MARGIN_THRESHOLD:-0.15}"
+# Do not reject ordinary inner-layer evidence during parser model selection.
+# The asymmetric outer gates below are the controls that suppress the costly
+# inner-to-outer routing errors. Runtime inference can still opt into the fully
+# conservative profile when the input itself is noisy.
+ROUTE_CONFIDENCE_THRESHOLD="${ROUTE_CONFIDENCE_THRESHOLD:-0.0}"
+ROUTE_MARGIN_THRESHOLD="${ROUTE_MARGIN_THRESHOLD:-0.0}"
 OUTER_ROUTE_CONFIDENCE_THRESHOLD="${OUTER_ROUTE_CONFIDENCE_THRESHOLD:-0.80}"
 OUTER_ROUTE_MARGIN_THRESHOLD="${OUTER_ROUTE_MARGIN_THRESHOLD:-0.55}"
 OUTER_UV_MIN_COVERAGE="${OUTER_UV_MIN_COVERAGE:-0.25}"
+OUTER_GEOMETRY_RESCUE="${OUTER_GEOMETRY_RESCUE:-true}"
+OUTER_RESCUE_CONFIDENCE_THRESHOLD="${OUTER_RESCUE_CONFIDENCE_THRESHOLD:-0.60}"
+OUTER_RESCUE_MARGIN_THRESHOLD="${OUTER_RESCUE_MARGIN_THRESHOLD:-0.25}"
+OUTER_RESCUE_MIN_COVERAGE="${OUTER_RESCUE_MIN_COVERAGE:-0.10}"
 GEOMETRY_ROUTE_TEXEL_CONSENSUS="${GEOMETRY_ROUTE_TEXEL_CONSENSUS:-true}"
 SPLAT_COLOR_AGGREGATION="${SPLAT_COLOR_AGGREGATION:-exact_mode}"
 ALLOW_SEMANTIC_FALLBACK="${ALLOW_SEMANTIC_FALLBACK:-false}"
@@ -215,6 +223,12 @@ if [[ "$GEOMETRY_ROUTE_TEXEL_CONSENSUS" == "true" ]]; then
   routing_consensus_args=(--geometry_route_texel_consensus)
 else
   routing_consensus_args=(--no_geometry_route_texel_consensus)
+fi
+outer_rescue_args=()
+if [[ "$OUTER_GEOMETRY_RESCUE" == "true" ]]; then
+  outer_rescue_args=(--outer_geometry_rescue)
+else
+  outer_rescue_args=(--no_outer_geometry_rescue)
 fi
 cudnn_args=()
 if [[ "$CUDNN_BENCHMARK" == "true" ]]; then
@@ -318,6 +332,9 @@ python train.py \
   --outer_route_confidence_threshold "$OUTER_ROUTE_CONFIDENCE_THRESHOLD" \
   --outer_route_margin_threshold "$OUTER_ROUTE_MARGIN_THRESHOLD" \
   --outer_uv_min_coverage "$OUTER_UV_MIN_COVERAGE" \
+  --outer_rescue_confidence_threshold "$OUTER_RESCUE_CONFIDENCE_THRESHOLD" \
+  --outer_rescue_margin_threshold "$OUTER_RESCUE_MARGIN_THRESHOLD" \
+  --outer_rescue_min_coverage "$OUTER_RESCUE_MIN_COVERAGE" \
   --splat_color_aggregation "$SPLAT_COLOR_AGGREGATION" \
   "${augment_args[@]}" \
   "${background_args[@]}" \
@@ -325,6 +342,7 @@ python train.py \
   "${affine_refine_args[@]}" \
   "${fallback_args[@]}" \
   "${routing_consensus_args[@]}" \
+  "${outer_rescue_args[@]}" \
   "${uv_class_args[@]}" \
   "${cudnn_args[@]}" \
   "${resume_args[@]}"

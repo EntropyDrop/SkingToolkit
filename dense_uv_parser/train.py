@@ -467,6 +467,16 @@ def hard_uv_conditioning_metrics(
             outer_route_confidence_threshold=args.outer_route_confidence_threshold,
             outer_route_margin_threshold=args.outer_route_margin_threshold,
             outer_uv_min_coverage=args.outer_uv_min_coverage,
+            outer_geometry_rescue=getattr(args, "outer_geometry_rescue", False),
+            outer_rescue_confidence_threshold=getattr(
+                args, "outer_rescue_confidence_threshold", 0.60
+            ),
+            outer_rescue_margin_threshold=getattr(
+                args, "outer_rescue_margin_threshold", 0.25
+            ),
+            outer_rescue_min_coverage=getattr(
+                args, "outer_rescue_min_coverage", 0.10
+            ),
             color_aggregation=args.splat_color_aggregation,
             geometry_route_texel_consensus=getattr(
                 args, "geometry_route_texel_consensus", False
@@ -776,6 +786,16 @@ def save_preview(
                 outer_route_confidence_threshold=args.outer_route_confidence_threshold,
                 outer_route_margin_threshold=args.outer_route_margin_threshold,
                 outer_uv_min_coverage=args.outer_uv_min_coverage,
+                outer_geometry_rescue=getattr(args, "outer_geometry_rescue", False),
+                outer_rescue_confidence_threshold=getattr(
+                    args, "outer_rescue_confidence_threshold", 0.60
+                ),
+                outer_rescue_margin_threshold=getattr(
+                    args, "outer_rescue_margin_threshold", 0.25
+                ),
+                outer_rescue_min_coverage=getattr(
+                    args, "outer_rescue_min_coverage", 0.10
+                ),
                 color_aggregation=args.splat_color_aggregation,
                 geometry_route_texel_consensus=getattr(
                     args, "geometry_route_texel_consensus", False
@@ -1071,11 +1091,25 @@ def build_arg_parser():
     parser.add_argument("--no_affine_refine", dest="affine_refine", action="store_false")
     parser.add_argument("--affine_refine_translation_px", type=float, default=0.0)
     parser.add_argument("--affine_refine_scale", type=float, default=0.0)
-    parser.add_argument("--route_confidence_threshold", type=float, default=0.50)
-    parser.add_argument("--route_margin_threshold", type=float, default=0.15)
+    parser.add_argument("--route_confidence_threshold", type=float, default=0.0)
+    parser.add_argument("--route_margin_threshold", type=float, default=0.0)
     parser.add_argument("--outer_route_confidence_threshold", type=float, default=0.80)
     parser.add_argument("--outer_route_margin_threshold", type=float, default=0.55)
     parser.add_argument("--outer_uv_min_coverage", type=float, default=0.25)
+    parser.add_argument(
+        "--outer_geometry_rescue",
+        dest="outer_geometry_rescue",
+        action="store_true",
+        default=True,
+    )
+    parser.add_argument(
+        "--no_outer_geometry_rescue",
+        dest="outer_geometry_rescue",
+        action="store_false",
+    )
+    parser.add_argument("--outer_rescue_confidence_threshold", type=float, default=0.60)
+    parser.add_argument("--outer_rescue_margin_threshold", type=float, default=0.25)
+    parser.add_argument("--outer_rescue_min_coverage", type=float, default=0.10)
     parser.add_argument(
         "--geometry_route_texel_consensus",
         dest="geometry_route_texel_consensus",

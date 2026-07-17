@@ -197,19 +197,20 @@ python infer.py \
   --conditioning_output parser_conditioning.png
 ```
 
-The conditioning preview shows the predicted inner-layer RGB row and outer-layer RGB row. The precision-first defaults require inner confidence/margin `0.50/0.15`, outer confidence/margin `0.80/0.55`, outer footprint coverage `0.25`, and projected-texel consensus. These settings match the default conservative inference profile and strongly reduce inner-to-outer false positives.
+The conditioning preview shows the predicted inner-layer RGB row and outer-layer RGB row. The precision-first defaults leave the ordinary inner route ungated (`0.0/0.0`) while requiring outer confidence/margin `0.80/0.55`, outer footprint coverage `0.25`, and projected-texel consensus. This asymmetric policy targets inner-to-outer false positives without discarding otherwise correct inner evidence. Geometry-backed outer rescue is enabled: a texel proven by an outer-only silhouette or exact secondary/backface slot may use the relaxed `0.60/0.25` gate and `0.10` coverage floor. Overlapping inner/outer regions still use the strict gate.
 
 Inference uses a wider solid-background tolerance of `48/255` than the parser's
 training utility. This rejects green-screen and other solid-background colors
 blended into antialiased character boundaries. Override it with
 `BACKGROUND_COLOR_TOLERANCE` in normalized RGB units when necessary.
 
-For noisy parser evidence, `ROUTING_PROFILE=conservative` raises inner/outer
-confidence and margin gates, requires minimum outer footprint support, enables
-projected-texel consensus, and uses a `64/255` background tolerance. Rejected
-texels become unknown rather than permanently wrong and are handled by topology
-completion. The default `balanced` profile preserves the training-time routing
-settings for comparison.
+For noisy parser evidence, `ROUTING_PROFILE=conservative` keeps strict outer
+confidence, margin, and footprint gates, enables projected-texel consensus and
+geometry-backed rescue, and uses a `64/255` background tolerance. Rejected texels
+become unknown rather than permanently wrong and are handled by topology
+completion. Set `OUTER_GEOMETRY_RESCUE=false` for an ablation, or tune
+`OUTER_RESCUE_CONFIDENCE_THRESHOLD`, `OUTER_RESCUE_MARGIN_THRESHOLD`, and
+`OUTER_RESCUE_MIN_COVERAGE`. The `balanced` profile disables this rescue.
 
 Topology inference enables `INPAINT_PALETTE_SNAP=true` by default. Only generated
 texels are projected onto colors observed on the same body part and layer;

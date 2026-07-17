@@ -1444,6 +1444,71 @@ def _surface_aware_outer_coverage(routing, trusted, selected_outer, renderer, vi
     )
 
 
+def _grouped_uv_support(mask, flat_uv, group_size):
+    """Broadcast per-pixel evidence to matching UV texels across all input views."""
+    if mask.shape != flat_uv.shape:
+        raise ValueError("mask and flat_uv must have identical shapes.")
+    if group_size <= 0 or mask.shape[0] % group_size != 0:
+        raise ValueError("group_size must evenly divide the routed batch.")
+
+    group_count = mask.shape[0] // group_size
+    item_groups = torch.arange(mask.shape[0], device=mask.device) // group_size
+    grouped_uv = flat_uv + item_groups.view(-1, 1, 1) * (UV_SIZE * UV_SIZE)
+    support_count = torch.zeros(
+        group_count * UV_SIZE * UV_SIZE,
+        device=mask.device,
+        dtype=torch.float32,
+    )
+    selected_uv = grouped_uv[mask]
+    support_count.scatter_add_(
+        0,
+        selected_uv,
+        torch.ones(selected_uv.shape[0], device=mask.device, dtype=support_count.dtype),
+    )
+    return support_count[grouped_uv] > 0
+
+
+def _geometry_supported_outer_texels(routing, renderer, views):
+    """Find outer texels proven by outer-only silhouette or an exact secondary slot.
+
+    A direct outer pixel outside the base cuboid silhouette cannot be explained by
+    the inner layer. Likewise a routed secondary surface is tied to an exact
+    renderer slot. Either observation is safe evidence for relaxing confidence
+    gates on the same outer UV texel in another pixel or view.
+    """
+    views = parse_views(views)
+    if not views:
+        raise ValueError("At least one renderer view is required for outer rescue.")
+    selected_outer = routing["layer"] == 1
+    if selected_outer.shape[0] % len(views) != 0:
+        raise ValueError("Routed batch must be divisible by the number of views.")
+
+    outer_only = torch.zeros_like(selected_outer)
+    selected_surface = routing.get("surface")
+    for view_index, view in enumerate(views):
+        selection = slice(view_index, selected_outer.shape[0], len(views))
+        static = build_static_surface_routing(renderer, view, selected_outer.device)
+        direct_outer = static["masks"][1] & ~static["masks"][0]
+        if selected_surface is not None:
+            direct_outer = direct_outer.unsqueeze(0) & (
+                selected_surface[selection] == ROUTE_OUTER_PRIMARY
+            )
+        else:
+            direct_outer = direct_outer.unsqueeze(0).expand(
+                selected_outer[selection].shape[0], -1, -1
+            )
+        outer_only[selection] = direct_outer
+
+    secondary = routing.get("secondary", torch.zeros_like(selected_outer))
+    geometry_seed = selected_outer & (outer_only | secondary)
+    supported_texel = _grouped_uv_support(
+        geometry_seed,
+        routing["flat_uv"],
+        len(views),
+    )
+    return selected_outer & supported_texel
+
+
 def _scatter_soft_uv(rgb_sum, weight_sum, source_rgb, weight, flat_uv, valid):
     """Differentiably accumulate weighted render pixels into fixed UV indices."""
     if not valid.any():
@@ -1678,6 +1743,10 @@ def splat_parser_predictions_to_uv_conditioning(
     outer_route_confidence_threshold=None,
     outer_route_margin_threshold=None,
     outer_uv_min_coverage=0.5,
+    outer_geometry_rescue=False,
+    outer_rescue_confidence_threshold=0.60,
+    outer_rescue_margin_threshold=0.25,
+    outer_rescue_min_coverage=0.10,
     color_aggregation="exact_mode",
     geometry_outer_threshold=0.5,
     geometry_route_texel_consensus=True,
@@ -1703,6 +1772,12 @@ def splat_parser_predictions_to_uv_conditioning(
         raise ValueError("outer_route_margin_threshold must be in [0, 1].")
     if not 0.0 <= outer_uv_min_coverage <= 1.0:
         raise ValueError("outer_uv_min_coverage must be in [0, 1].")
+    if not 0.0 <= outer_rescue_confidence_threshold <= 1.0:
+        raise ValueError("outer_rescue_confidence_threshold must be in [0, 1].")
+    if not 0.0 <= outer_rescue_margin_threshold <= 1.0:
+        raise ValueError("outer_rescue_margin_threshold must be in [0, 1].")
+    if not 0.0 <= outer_rescue_min_coverage <= 1.0:
+        raise ValueError("outer_rescue_min_coverage must be in [0, 1].")
     if not 0.0 <= background_color_tolerance <= 1.0:
         raise ValueError("background_color_tolerance must be in [0, 1].")
     if "affine" not in outputs:
@@ -1807,7 +1882,7 @@ def splat_parser_predictions_to_uv_conditioning(
         routing["confidence_margin_ratio"].new_tensor(outer_route_margin_threshold),
         routing["confidence_margin_ratio"].new_tensor(route_margin_threshold),
     )
-    trusted = (
+    strict_trusted = (
         raw_foreground
         & canonical_observed_foreground
         & (routing["confidence"] >= confidence_threshold)
@@ -1817,8 +1892,33 @@ def splat_parser_predictions_to_uv_conditioning(
         rejected_fallback = routing["semantic_fallback"] & (
             selected_outer | reject_inner_semantic_fallback
         )
-        trusted = trusted & ~rejected_fallback
+        strict_trusted = strict_trusted & ~rejected_fallback
+    geometry_supported_outer = torch.zeros_like(selected_outer)
+    outer_geometry_rescued = torch.zeros_like(selected_outer)
+    if outer_geometry_rescue:
+        geometry_supported_outer = _geometry_supported_outer_texels(
+            routing,
+            renderer,
+            views,
+        )
+        rescue_trusted = (
+            raw_foreground
+            & canonical_observed_foreground
+            & geometry_supported_outer
+            & (routing["confidence"] >= outer_rescue_confidence_threshold)
+            & (
+                routing["confidence_margin_ratio"]
+                >= outer_rescue_margin_threshold
+            )
+        )
+        if reject_semantic_fallback:
+            rescue_trusted = rescue_trusted & ~rejected_fallback
+        outer_geometry_rescued = rescue_trusted & ~strict_trusted
+        trusted = strict_trusted | rescue_trusted
+    else:
+        trusted = strict_trusted
     outer_uv_coverage = torch.ones_like(routing["confidence"])
+    outer_required_coverage = torch.zeros_like(routing["confidence"])
     if outer_uv_min_coverage > 0.0:
         views_per_group = len(views)
         group_count = trusted.shape[0] // views_per_group
@@ -1854,11 +1954,28 @@ def splat_parser_predictions_to_uv_conditioning(
             coverage = observed.reshape(group_count, UV_SIZE * UV_SIZE) / expected.clamp_min(1.0)
             pixel_coverage = coverage[item_groups.view(-1, 1, 1), routing["flat_uv"]]
         outer_uv_coverage = torch.where(selected_outer, pixel_coverage, outer_uv_coverage)
-        trusted = trusted & (~selected_outer | (pixel_coverage >= outer_uv_min_coverage))
+        required_coverage = torch.full_like(pixel_coverage, outer_uv_min_coverage)
+        if outer_geometry_rescue:
+            required_coverage = torch.where(
+                geometry_supported_outer,
+                required_coverage.new_tensor(
+                    min(outer_uv_min_coverage, outer_rescue_min_coverage)
+                ),
+                required_coverage,
+            )
+        outer_required_coverage = torch.where(
+            selected_outer,
+            required_coverage,
+            outer_required_coverage,
+        )
+        trusted = trusted & (~selected_outer | (pixel_coverage >= required_coverage))
     routing["raw_foreground"] = raw_foreground
     routing["observed_foreground"] = canonical_observed_foreground
     routing["background_rejected"] = raw_foreground & ~canonical_observed_foreground
     routing["rejected"] = raw_foreground & ~trusted
+    routing["outer_geometry_supported"] = geometry_supported_outer
+    routing["outer_geometry_rescued"] = outer_geometry_rescued & trusted
+    routing["outer_required_coverage"] = outer_required_coverage
     routing["foreground"] = trusted
     if "secondary_routed" in routing:
         routing["secondary_rejected"] = routing["secondary"] & ~trusted

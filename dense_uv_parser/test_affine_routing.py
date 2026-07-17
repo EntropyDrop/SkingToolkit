@@ -192,11 +192,15 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         self.assertEqual(parser_args.lambda_outer_false_negative, 0.40)
         self.assertEqual(parser_args.route_outer_class_weight_cap, 0.75)
         self.assertEqual(parser_args.best_metric, "loss_hard_uv_selection")
-        self.assertEqual(parser_args.route_confidence_threshold, 0.50)
-        self.assertEqual(parser_args.route_margin_threshold, 0.15)
+        self.assertEqual(parser_args.route_confidence_threshold, 0.0)
+        self.assertEqual(parser_args.route_margin_threshold, 0.0)
         self.assertEqual(parser_args.outer_route_confidence_threshold, 0.80)
         self.assertEqual(parser_args.outer_route_margin_threshold, 0.55)
         self.assertEqual(parser_args.outer_uv_min_coverage, 0.25)
+        self.assertTrue(parser_args.outer_geometry_rescue)
+        self.assertEqual(parser_args.outer_rescue_confidence_threshold, 0.60)
+        self.assertEqual(parser_args.outer_rescue_margin_threshold, 0.25)
+        self.assertEqual(parser_args.outer_rescue_min_coverage, 0.10)
         self.assertTrue(parser_args.geometry_route_texel_consensus)
         self.assertEqual(parser_args.outer_selection_precision_weight, 1.50)
         self.assertEqual(parser_args.outer_selection_recall_weight, 0.50)
@@ -209,11 +213,15 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         self.assertEqual(inpainting_args.translation_scale, 0.0)
         self.assertEqual(inpainting_args.scale_range, 0.0)
         self.assertEqual(inpainting_args.perspective_scale, 0.0)
-        self.assertEqual(inpainting_args.parser_route_confidence_threshold, 0.50)
-        self.assertEqual(inpainting_args.parser_route_margin_threshold, 0.15)
+        self.assertEqual(inpainting_args.parser_route_confidence_threshold, 0.0)
+        self.assertEqual(inpainting_args.parser_route_margin_threshold, 0.0)
         self.assertEqual(inpainting_args.parser_outer_route_confidence_threshold, 0.80)
         self.assertEqual(inpainting_args.parser_outer_route_margin_threshold, 0.55)
         self.assertIsNone(inpainting_args.parser_outer_uv_min_coverage)
+        self.assertTrue(inpainting_args.parser_outer_geometry_rescue)
+        self.assertEqual(inpainting_args.parser_outer_rescue_confidence_threshold, 0.60)
+        self.assertEqual(inpainting_args.parser_outer_rescue_margin_threshold, 0.25)
+        self.assertEqual(inpainting_args.parser_outer_rescue_min_coverage, 0.10)
         self.assertIsNone(inpainting_args.parser_geometry_route_texel_consensus)
 
     def test_geometry_model_emits_exact_surface_head(self):
@@ -278,6 +286,73 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         self.assertEqual(int(routing["flat_uv"][0, 0, 0]), 1)
         self.assertEqual(float(conditioning[0, 4, 0, 1]), 1.0)
         self.assertTrue(torch.equal(conditioning[0, :3, 0, 1], torch.tensor([1.0, 0.0, 0.0])))
+
+    def test_geometry_supported_outer_secondary_bypasses_only_strict_outer_gate(self):
+        renderer = FakeRenderer(valid_pixels=1)
+        composite_grid = renderer.front_inner_grid.unsqueeze(0).clone()
+        composite_grid[0, 0, 0, 0] = (40.0 / 63.0) * 2.0 - 1.0
+        renderer.register_buffer("front_composite_grid_layers", composite_grid)
+        renderer.register_buffer(
+            "front_composite_mask_layers",
+            renderer.front_inner_mask.unsqueeze(0).clone(),
+        )
+        renderer.register_buffer(
+            "front_composite_is_decor_layers",
+            torch.ones_like(renderer.front_inner_mask.unsqueeze(0), dtype=torch.bool),
+        )
+        rendered = torch.rand(1, 4, 8, 8)
+        rendered[:, 3] = 1.0
+        role_logits = torch.full((1, 3, 8, 8), -8.0)
+        role_logits[:, 0, 0, 0] = 0.0
+        role_logits[:, 1, 0, 0] = 0.0
+        role_logits[:, 2, 0, 0] = 1.0
+        surface_logits = torch.full((1, 3, 8, 8), -8.0)
+        surface_logits[:, 2, 0, 0] = 8.0
+        outputs = {
+            "foreground": torch.full((1, 1, 8, 8), 10.0),
+            "layer": role_logits,
+            "surface": surface_logits,
+            "affine": torch.zeros(1, 3),
+        }
+        observed = torch.zeros(1, 8, 8, dtype=torch.bool)
+        observed[:, 0, 0] = True
+
+        _, strict = splat_parser_predictions_to_uv_conditioning(
+            rendered,
+            outputs,
+            renderer=renderer,
+            views=["front"],
+            group_size=1,
+            affine_refine=False,
+            observed_foreground=observed,
+            outer_route_confidence_threshold=0.80,
+            outer_route_margin_threshold=0.55,
+            outer_uv_min_coverage=0.25,
+            return_details=True,
+        )
+        conditioning, rescued = splat_parser_predictions_to_uv_conditioning(
+            rendered,
+            outputs,
+            renderer=renderer,
+            views=["front"],
+            group_size=1,
+            affine_refine=False,
+            observed_foreground=observed,
+            outer_route_confidence_threshold=0.80,
+            outer_route_margin_threshold=0.55,
+            outer_uv_min_coverage=0.25,
+            outer_geometry_rescue=True,
+            outer_rescue_confidence_threshold=0.55,
+            outer_rescue_margin_threshold=0.25,
+            outer_rescue_min_coverage=0.10,
+            return_details=True,
+        )
+
+        self.assertEqual(int(strict["routing"]["foreground"].sum()), 0)
+        self.assertTrue(rescued["routing"]["outer_geometry_supported"][0, 0, 0])
+        self.assertTrue(rescued["routing"]["outer_geometry_rescued"][0, 0, 0])
+        self.assertEqual(int(rescued["routing"]["foreground"].sum()), 1)
+        self.assertEqual(float(conditioning[:, 9:10].sum()), 1.0)
 
     def test_surface_head_cannot_change_primary_role(self):
         renderer = FakeRenderer(valid_pixels=1)

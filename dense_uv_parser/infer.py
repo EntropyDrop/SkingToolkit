@@ -579,6 +579,21 @@ def build_arg_parser():
         help="Reject outer UV texels supported by less than this fraction of their projected footprint.",
     )
     parser.add_argument(
+        "--outer_geometry_rescue",
+        dest="outer_geometry_rescue",
+        action="store_true",
+        default=True,
+        help="Relax outer gates only for UV texels proven by outer-only silhouette or an exact secondary slot.",
+    )
+    parser.add_argument(
+        "--no_outer_geometry_rescue",
+        dest="outer_geometry_rescue",
+        action="store_false",
+    )
+    parser.add_argument("--outer_rescue_confidence_threshold", type=float, default=0.60)
+    parser.add_argument("--outer_rescue_margin_threshold", type=float, default=0.25)
+    parser.add_argument("--outer_rescue_min_coverage", type=float, default=0.10)
+    parser.add_argument(
         "--geometry_route_texel_consensus",
         dest="geometry_route_texel_consensus",
         action="store_true",
@@ -717,6 +732,10 @@ def main():
             outer_route_confidence_threshold=args.outer_route_confidence_threshold,
             outer_route_margin_threshold=args.outer_route_margin_threshold,
             outer_uv_min_coverage=outer_uv_min_coverage,
+            outer_geometry_rescue=args.outer_geometry_rescue,
+            outer_rescue_confidence_threshold=args.outer_rescue_confidence_threshold,
+            outer_rescue_margin_threshold=args.outer_rescue_margin_threshold,
+            outer_rescue_min_coverage=args.outer_rescue_min_coverage,
             color_aggregation=args.color_aggregation,
             geometry_route_texel_consensus=geometry_route_texel_consensus,
             background_color_tolerance=args.background_color_tolerance,
@@ -740,7 +759,10 @@ def main():
         rejected_outer = routing["rejected"] & (routing["layer"] == 1)
         coverage_rejected_outer = raw_outer & (
             routing.get("outer_uv_coverage", torch.ones_like(routing["confidence"]))
-            < outer_uv_min_coverage
+            < routing.get(
+                "outer_required_coverage",
+                torch.full_like(routing["confidence"], outer_uv_min_coverage),
+            )
         )
         secondary_count = int(routing.get("secondary", torch.zeros_like(raw_outer)).sum().item())
         routed_secondary_count = int(
@@ -751,6 +773,18 @@ def main():
         )
         background_rejected_count = int(
             routing.get("background_rejected", torch.zeros_like(raw_outer)).sum().item()
+        )
+        outer_geometry_supported_count = int(
+            routing.get("outer_geometry_supported", torch.zeros_like(raw_outer)).sum().item()
+        )
+        outer_geometry_rescued_count = int(
+            routing.get("outer_geometry_rescued", torch.zeros_like(raw_outer)).sum().item()
+        )
+        outer_geometry_supported_rejected_count = int(
+            (
+                routing.get("outer_geometry_supported", torch.zeros_like(raw_outer))
+                & routing["rejected"]
+            ).sum().item()
         )
         raw_secondary_count = int(
             (
@@ -781,6 +815,9 @@ def main():
                         3,
                     ),
                     "outer_coverage_rejected_pixels": int(coverage_rejected_outer.sum().item()),
+                    "outer_geometry_supported_pixels": outer_geometry_supported_count,
+                    "outer_geometry_rescued_pixels": outer_geometry_rescued_count,
+                    "outer_geometry_supported_rejected_pixels": outer_geometry_supported_rejected_count,
                     "background_rejected_pixels": background_rejected_count,
                     "background_color_tolerance": round(
                         float(args.background_color_tolerance), 6
