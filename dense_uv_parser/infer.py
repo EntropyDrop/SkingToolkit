@@ -1,4 +1,5 @@
 import argparse
+import inspect
 import json
 import sys
 from pathlib import Path
@@ -185,6 +186,46 @@ def load_inpaint(checkpoint_path, device):
 def checkpoint_run_id(path):
     path = Path(path)
     return f"{path.parent.name}/{path.name}"
+
+
+def generate_topology_completion(
+    model,
+    conditioning,
+    steps,
+    temperature,
+    seed,
+    palette_snap=True,
+    palette_min_confidence=0.5,
+):
+    """Call new and legacy topology generators without source-version crashes."""
+    parameters = inspect.signature(model.generate).parameters
+    kwargs = {
+        "steps": steps,
+        "temperature": temperature,
+        "seed": seed,
+    }
+    palette_supported = "palette_snap" in parameters
+    if palette_supported:
+        kwargs.update(
+            palette_snap=palette_snap,
+            palette_min_confidence=palette_min_confidence,
+        )
+    elif palette_snap:
+        print(
+            "inpaint_warning="
+            + json.dumps(
+                {
+                    "message": (
+                        "palette snapping is unavailable because "
+                        "semantic_uv_reconstruction/topology_model.py is older "
+                        "than dense_uv_parser/infer.py; update both files"
+                    ),
+                    "palette_snap_applied": False,
+                },
+                sort_keys=True,
+            )
+        )
+    return model.generate(conditioning, **kwargs)
 
 
 def load_view_images(args, views, renderer, bg_color=(128, 128, 128)):
@@ -914,7 +955,8 @@ def main():
             )
         with torch.no_grad():
             if hasattr(inpaint_model, "generate"):
-                completed = inpaint_model.generate(
+                completed = generate_topology_completion(
+                    inpaint_model,
                     conditioning,
                     steps=args.inpaint_steps,
                     temperature=args.inpaint_temperature,
