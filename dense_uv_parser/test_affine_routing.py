@@ -492,6 +492,30 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         self.assertTrue(foreground[0, 5, 5])
         self.assertTrue(foreground[0, 7, 7])
 
+    def test_wider_inference_tolerance_rejects_antialiased_background_edge(self):
+        rendered = torch.zeros(1, 4, 16, 16)
+        background = torch.tensor([0.2, 0.7, 0.8]).view(1, 3, 1, 1)
+        rendered[:, :3] = background
+        rendered[:, 3] = 1.0
+        # This connected ring is a foreground/background blend rather than a
+        # real character color. It lies outside the training-time 16/255
+        # tolerance but inside the safer inference-time 48/255 tolerance.
+        rendered[:, :3, 3:13, 3:13] = torch.tensor([0.30, 0.60, 0.70]).view(
+            1, 3, 1, 1
+        )
+        rendered[:, :3, 4:12, 4:12] = 0.9
+
+        narrow = estimate_solid_background_foreground(
+            rendered, color_tolerance=16.0 / 255.0
+        )
+        wide = estimate_solid_background_foreground(
+            rendered, color_tolerance=48.0 / 255.0
+        )
+
+        self.assertTrue(narrow[0, 3, 3])
+        self.assertFalse(wide[0, 3, 3])
+        self.assertTrue(wide[0, 5, 5])
+
     def test_geometry_routing_rejects_solid_background_inside_mapping(self):
         renderer = FakeRenderer(mask=torch.ones(16, 16))
         rendered = torch.zeros(1, 4, 16, 16)

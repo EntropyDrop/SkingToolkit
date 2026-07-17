@@ -227,8 +227,9 @@ def save_parser_uv(
     conditioning,
     output_path,
     alpha_threshold=0.5,
-    enforce_base_alpha=True,
+    enforce_base_alpha=False,
 ):
+    """Save the partial parser atlas with unknown texels left transparent."""
     parser_uv = conditioning_to_pred_uv(conditioning)
     if parser_uv.dim() != 4 or parser_uv.shape[0] != 1:
         raise ValueError(
@@ -468,6 +469,19 @@ def build_arg_parser():
     parser.add_argument("--inpaint_steps", type=int, default=4, help="Masked-generation steps for topology checkpoints.")
     parser.add_argument("--inpaint_temperature", type=float, default=0.0, help="0 uses deterministic argmax; positive values sample unknown texels.")
     parser.add_argument("--inpaint_seed", type=int, default=1234)
+    parser.add_argument(
+        "--inpaint_palette_snap",
+        dest="inpaint_palette_snap",
+        action="store_true",
+        default=True,
+        help="Snap generated RGB to observed per-part/layer character palettes.",
+    )
+    parser.add_argument(
+        "--no_inpaint_palette_snap",
+        dest="inpaint_palette_snap",
+        action="store_false",
+    )
+    parser.add_argument("--inpaint_palette_min_confidence", type=float, default=0.5)
     parser.add_argument("--output", default=None, help="Final RGBA UV PNG path; requires --inpaint_checkpoint.")
     parser.add_argument("--conditioning_output", default=None, help="Optional preview image for parser-splatted conditioning.")
     parser.add_argument(
@@ -507,6 +521,12 @@ def build_arg_parser():
     parser.add_argument("--view_images", nargs="*", default=None)
     parser.add_argument("--mappings_dir", default=None)
     parser.add_argument("--fg_threshold", type=float, default=0.5)
+    parser.add_argument(
+        "--background_color_tolerance",
+        type=float,
+        default=48.0 / 255.0,
+        help="RGB distance used to reject solid-background and antialiased edge pixels.",
+    )
     parser.add_argument("--route_confidence_threshold", type=float, default=0.0)
     parser.add_argument("--route_margin_threshold", type=float, default=0.0)
     parser.add_argument("--outer_route_confidence_threshold", type=float, default=0.55)
@@ -555,6 +575,10 @@ def main():
     args = build_arg_parser().parse_args()
     if args.inpaint_steps < 1 or args.inpaint_temperature < 0.0:
         raise ValueError("Inpaint generation requires positive steps and non-negative temperature.")
+    if not 0.0 <= args.background_color_tolerance <= 1.0:
+        raise ValueError("--background_color_tolerance must be in [0, 1].")
+    if not 0.0 <= args.inpaint_palette_min_confidence <= 1.0:
+        raise ValueError("--inpaint_palette_min_confidence must be in [0, 1].")
     if args.output and not args.inpaint_checkpoint:
         raise ValueError("--output requires --inpaint_checkpoint.")
     if not any(
@@ -654,6 +678,7 @@ def main():
             outer_uv_min_coverage=outer_uv_min_coverage,
             color_aggregation=args.color_aggregation,
             geometry_route_texel_consensus=geometry_route_texel_consensus,
+            background_color_tolerance=args.background_color_tolerance,
             reject_semantic_fallback=not args.allow_semantic_fallback,
             include_confidence=(
                 getattr(inpaint_model, "input_channels", 10) == 12
@@ -716,6 +741,9 @@ def main():
                     ),
                     "outer_coverage_rejected_pixels": int(coverage_rejected_outer.sum().item()),
                     "background_rejected_pixels": background_rejected_count,
+                    "background_color_tolerance": round(
+                        float(args.background_color_tolerance), 6
+                    ),
                     "secondary_backface_pixels": secondary_count,
                     "routed_secondary_pixels": routed_secondary_count,
                     "rejected_secondary_pixels": rejected_secondary_count,
@@ -807,7 +835,7 @@ def main():
             conditioning.detach().cpu(),
             Path(args.parser_uv_output),
             alpha_threshold=args.alpha_threshold,
-            enforce_base_alpha=not args.no_enforce_base_alpha,
+            enforce_base_alpha=False,
         )
 
     if args.output:
@@ -820,6 +848,8 @@ def main():
                     "preserve_known": bool(inpaint_args.get("preserve_known", True)),
                     "generation_steps": args.inpaint_steps,
                     "generation_temperature": args.inpaint_temperature,
+                    "palette_snap": args.inpaint_palette_snap,
+                    "palette_min_confidence": args.inpaint_palette_min_confidence,
                 },
                 sort_keys=True,
             )
@@ -889,6 +919,8 @@ def main():
                     steps=args.inpaint_steps,
                     temperature=args.inpaint_temperature,
                     seed=args.inpaint_seed,
+                    palette_snap=args.inpaint_palette_snap,
+                    palette_min_confidence=args.inpaint_palette_min_confidence,
                 )[0]
             else:
                 completed = inpaint_model(conditioning)[0]

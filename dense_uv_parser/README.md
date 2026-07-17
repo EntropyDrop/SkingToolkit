@@ -154,7 +154,9 @@ training. If the recorded path is unavailable, it falls back to the highest
 `latest.pt`. The launcher prints both selected paths before inference. It writes:
 
 - `outputs/parser_conditioning.png`
-- `outputs/parser_pred_uv.png`: preliminary 64x64 RGBA skin merged directly from known parser conditioning texels
+- `outputs/parser_pred_uv.png`: partial 64x64 RGBA atlas containing only known
+  parser texels; unknown base-layer texels intentionally remain transparent, so
+  this diagnostic file is not itself a valid finished Minecraft skin
 - `outputs/parser_debug_geometry_grid.png`: fitted inner/outer cuboid faces with projected UV texel boundaries
 - `outputs/parser_debug_geometry_overlay.png`: inner (cyan) and outer (magenta) fitted grids overlaid on the canonicalized source views
 - `outputs/parser_debug_geometry_routed_overlay.png`: the same grids over only pixels routed to their matching inner/outer layer
@@ -172,6 +174,7 @@ INPAINT_CHECKPOINT=../semantic_uv_reconstruction/runs/semantic_uv_reconstruction
 OUTPUT= CONDITIONING_OUTPUT=outputs/parser_conditioning.png ./run_infer.sh
 OUTPUT= PARSER_UV_OUTPUT=outputs/parser_pred_uv.png ./run_infer.sh
 GEOMETRY_ROUTE_TEXEL_CONSENSUS=false OUTER_UV_MIN_COVERAGE=0 ./run_infer.sh
+BACKGROUND_COLOR_TOLERANCE=0.1882352941 ./run_infer.sh
 ```
 
 Use a trained parser checkpoint plus an existing `semantic_uv_reconstruction` inpaint checkpoint:
@@ -194,3 +197,14 @@ python infer.py \
 ```
 
 The conditioning preview shows the predicted inner-layer RGB row and outer-layer RGB row. Outer routing still defaults to semantic confidence `0.55` and relative margin `0.35`, but projected-footprint coverage defaults to `0`. This keeps semantic uncertainty filtering while preventing an imperfect AI-generated cuboid outline from deleting a visually coherent outer garment.
+
+Inference uses a wider solid-background tolerance of `48/255` than the parser's
+training utility. This rejects green-screen and other solid-background colors
+blended into antialiased character boundaries. Override it with
+`BACKGROUND_COLOR_TOLERANCE` in normalized RGB units when necessary.
+
+Topology inference enables `INPAINT_PALETTE_SNAP=true` by default. Only generated
+texels are projected onto colors observed on the same body part and layer;
+parser-locked pixels remain byte-exact. This suppresses unrelated dataset-prior
+green/purple speckles without retraining. Set `INPAINT_PALETTE_SNAP=false` for
+an ablation, or adjust `INPAINT_PALETTE_MIN_CONFIDENCE` (default `0.5`).

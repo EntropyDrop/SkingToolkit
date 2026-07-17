@@ -1682,6 +1682,7 @@ def splat_parser_predictions_to_uv_conditioning(
     geometry_outer_threshold=0.5,
     geometry_route_texel_consensus=True,
     observed_foreground=None,
+    background_color_tolerance=SOLID_BACKGROUND_COLOR_TOLERANCE,
     reject_semantic_fallback=False,
     reject_inner_semantic_fallback=False,
     include_confidence=False,
@@ -1702,6 +1703,8 @@ def splat_parser_predictions_to_uv_conditioning(
         raise ValueError("outer_route_margin_threshold must be in [0, 1].")
     if not 0.0 <= outer_uv_min_coverage <= 1.0:
         raise ValueError("outer_uv_min_coverage must be in [0, 1].")
+    if not 0.0 <= background_color_tolerance <= 1.0:
+        raise ValueError("background_color_tolerance must be in [0, 1].")
     if "affine" not in outputs:
         conditioning = splat_predictions_to_uv_conditioning(
             rendered,
@@ -1721,7 +1724,10 @@ def splat_parser_predictions_to_uv_conditioning(
         raise ValueError(f"group_size={group_size} must equal the number of views ({len(views)}).")
 
     if observed_foreground is None:
-        observed_foreground = estimate_solid_background_foreground(rendered)
+        observed_foreground = estimate_solid_background_foreground(
+            rendered,
+            color_tolerance=background_color_tolerance,
+        )
     else:
         if observed_foreground.shape != rendered.shape[:1] + rendered.shape[-2:]:
             raise ValueError(

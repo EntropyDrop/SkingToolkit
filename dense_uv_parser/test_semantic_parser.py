@@ -1,7 +1,11 @@
+import tempfile
 import unittest
+from pathlib import Path
 
 import torch
+from PIL import Image
 
+from SkingToolkit.dense_uv_parser.infer import save_parser_uv
 from SkingToolkit.dense_uv_parser.losses import DenseUVParserLoss
 from SkingToolkit.dense_uv_parser.model import DenseUVParserNet
 from SkingToolkit.dense_uv_parser.utils import splat_to_uv_conditioning
@@ -84,6 +88,18 @@ class SemanticDenseUVParserTest(unittest.TestCase):
         self.assertEqual(tuple(conditioning.shape), (1, 12, 64, 64))
         self.assertEqual(float(conditioning[0, 4, 0, 0]), 1.0)
         self.assertAlmostEqual(float(conditioning[0, 5, 0, 0]), 0.7, places=5)
+
+    def test_parser_uv_diagnostic_leaves_unknown_base_texels_transparent(self):
+        conditioning = torch.zeros(1, 12, 64, 64)
+        conditioning[0, 0:4, 8, 8] = torch.tensor([1.0, 0.0, 0.0, 1.0])
+        conditioning[0, 4, 8, 8] = 1.0
+        conditioning[0, 5, 8, 8] = 1.0
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "parser.png"
+            save_parser_uv(conditioning, output)
+            image = Image.open(output).convert("RGBA")
+            self.assertEqual(image.getpixel((8, 8)), (255, 0, 0, 255))
+            self.assertEqual(image.getpixel((20, 20))[3], 0)
 
 
 if __name__ == "__main__":

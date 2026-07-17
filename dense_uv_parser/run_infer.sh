@@ -177,6 +177,7 @@ FRONT="${FRONT:-../test_imgs/front_rgba.png}"
 BACK="${BACK:-../test_imgs/back_rgba.png}"
 MAPPINGS_DIR="${MAPPINGS_DIR:-}"
 FG_THRESHOLD="${FG_THRESHOLD:-0.5}"
+BACKGROUND_COLOR_TOLERANCE="${BACKGROUND_COLOR_TOLERANCE:-0.1882352941}"
 ROUTE_CONFIDENCE_THRESHOLD="${ROUTE_CONFIDENCE_THRESHOLD:-0.0}"
 ROUTE_MARGIN_THRESHOLD="${ROUTE_MARGIN_THRESHOLD:-0.0}"
 OUTER_ROUTE_CONFIDENCE_THRESHOLD="${OUTER_ROUTE_CONFIDENCE_THRESHOLD:-0.55}"
@@ -196,11 +197,14 @@ OVERLAY_ALPHA="${OVERLAY_ALPHA:-0.45}"
 INPAINT_STEPS="${INPAINT_STEPS:-4}"
 INPAINT_TEMPERATURE="${INPAINT_TEMPERATURE:-0.0}"
 INPAINT_SEED="${INPAINT_SEED:-1234}"
+INPAINT_PALETTE_SNAP="${INPAINT_PALETTE_SNAP:-true}"
+INPAINT_PALETTE_MIN_CONFIDENCE="${INPAINT_PALETTE_MIN_CONFIDENCE:-0.5}"
 
 args=(
   infer.py
   --parser_checkpoint "$PARSER_CHECKPOINT"
   --fg_threshold "$FG_THRESHOLD"
+  --background_color_tolerance "$BACKGROUND_COLOR_TOLERANCE"
   --route_confidence_threshold "$ROUTE_CONFIDENCE_THRESHOLD"
   --route_margin_threshold "$ROUTE_MARGIN_THRESHOLD"
   --outer_route_confidence_threshold "$OUTER_ROUTE_CONFIDENCE_THRESHOLD"
@@ -213,8 +217,15 @@ args=(
   --inpaint_steps "$INPAINT_STEPS"
   --inpaint_temperature "$INPAINT_TEMPERATURE"
   --inpaint_seed "$INPAINT_SEED"
+  --inpaint_palette_min_confidence "$INPAINT_PALETTE_MIN_CONFIDENCE"
   --device "$DEVICE"
 )
+
+if [[ "$INPAINT_PALETTE_SNAP" == "true" ]]; then
+  args+=(--inpaint_palette_snap)
+else
+  args+=(--no_inpaint_palette_snap)
+fi
 
 if [[ "$GEOMETRY_ROUTE_TEXEL_CONSENSUS" == "true" ]]; then
   args+=(--geometry_route_texel_consensus)
