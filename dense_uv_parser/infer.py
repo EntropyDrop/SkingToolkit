@@ -933,19 +933,32 @@ def main():
         if expected_outer_coverage is not None and abs(
             float(expected_outer_coverage) - outer_uv_min_coverage
         ) > 1e-9:
-            raise ValueError(
-                "Parser outer UV coverage threshold does not match the semantic_uv_reconstruction checkpoint: "
-                f"checkpoint={expected_outer_coverage}, requested={outer_uv_min_coverage}."
+            print(
+                "inpaint_warning="
+                + json.dumps(
+                    {
+                        "message": "using stricter inference outer-coverage filtering",
+                        "checkpoint_outer_uv_min_coverage": float(expected_outer_coverage),
+                        "requested_outer_uv_min_coverage": float(outer_uv_min_coverage),
+                    },
+                    sort_keys=True,
+                )
             )
         expected_consensus = inpaint_args.get("parser_geometry_route_texel_consensus")
         if (
             expected_consensus is not None
             and bool(expected_consensus) != geometry_route_texel_consensus
         ):
-            raise ValueError(
-                "Parser routing mode does not match the semantic_uv_reconstruction checkpoint: "
-                f"checkpoint texel_consensus={bool(expected_consensus)}, "
-                f"requested={geometry_route_texel_consensus}."
+            print(
+                "inpaint_warning="
+                + json.dumps(
+                    {
+                        "message": "using inference-time projected-texel consensus",
+                        "checkpoint_texel_consensus": bool(expected_consensus),
+                        "requested_texel_consensus": bool(geometry_route_texel_consensus),
+                    },
+                    sort_keys=True,
+                )
             )
         expected_color_aggregation = inpaint_args.get("parser_splat_color_aggregation")
         if expected_color_aggregation is not None and expected_color_aggregation != args.color_aggregation:

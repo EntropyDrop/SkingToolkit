@@ -175,6 +175,7 @@ OUTPUT= CONDITIONING_OUTPUT=outputs/parser_conditioning.png ./run_infer.sh
 OUTPUT= PARSER_UV_OUTPUT=outputs/parser_pred_uv.png ./run_infer.sh
 GEOMETRY_ROUTE_TEXEL_CONSENSUS=false OUTER_UV_MIN_COVERAGE=0 ./run_infer.sh
 BACKGROUND_COLOR_TOLERANCE=0.1882352941 ./run_infer.sh
+ROUTING_PROFILE=conservative COMBINED=/path/to/combined.png ./run_infer.sh
 ```
 
 Use a trained parser checkpoint plus an existing `semantic_uv_reconstruction` inpaint checkpoint:
@@ -202,6 +203,13 @@ Inference uses a wider solid-background tolerance of `48/255` than the parser's
 training utility. This rejects green-screen and other solid-background colors
 blended into antialiased character boundaries. Override it with
 `BACKGROUND_COLOR_TOLERANCE` in normalized RGB units when necessary.
+
+For noisy parser evidence, `ROUTING_PROFILE=conservative` raises inner/outer
+confidence and margin gates, requires minimum outer footprint support, enables
+projected-texel consensus, and uses a `64/255` background tolerance. Rejected
+texels become unknown rather than permanently wrong and are handled by topology
+completion. The default `balanced` profile preserves the training-time routing
+settings for comparison.
 
 Topology inference enables `INPAINT_PALETTE_SNAP=true` by default. Only generated
 texels are projected onto colors observed on the same body part and layer;
