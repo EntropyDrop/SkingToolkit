@@ -228,6 +228,47 @@ def generate_topology_completion(
     return model.generate(conditioning, **kwargs)
 
 
+def lock_completed_parser_evidence(completed, conditioning, confidence_threshold=0.0):
+    """Copy trusted parser RGBA back after completion, including legacy generators."""
+    if not 0.0 <= confidence_threshold <= 1.0:
+        raise ValueError("confidence_threshold must be in [0, 1].")
+    if completed.dim() != 4 or completed.shape[1:] != (4, 64, 64):
+        raise ValueError(f"Expected completed Bx4x64x64 UV, got {tuple(completed.shape)}.")
+    if conditioning.dim() != 4 or conditioning.shape[1] not in (10, 12):
+        raise ValueError(
+            "Expected 10- or 12-channel conditioning, "
+            f"got {tuple(conditioning.shape)}."
+        )
+    if completed.shape[0] != conditioning.shape[0]:
+        raise ValueError("Completed UV and conditioning batch sizes must match.")
+
+    inner_rgba = conditioning[:, 0:4]
+    inner_evidence = conditioning[:, 4:5] > 0.5
+    outer_offset = 6 if conditioning.shape[1] == 12 else 5
+    outer_rgba = conditioning[:, outer_offset : outer_offset + 4]
+    outer_evidence = conditioning[:, outer_offset + 4 : outer_offset + 5] > 0.5
+    if conditioning.shape[1] == 12:
+        inner_evidence = inner_evidence & (
+            conditioning[:, 5:6] >= float(confidence_threshold)
+        )
+        outer_evidence = outer_evidence & (
+            conditioning[:, 11:12] >= float(confidence_threshold)
+        )
+
+    locked_rgba = torch.where(outer_evidence.expand_as(outer_rgba), outer_rgba, inner_rgba)
+    locked_mask = inner_evidence | outer_evidence
+    difference = (completed - locked_rgba).abs().amax(dim=1, keepdim=True)
+    overwritten = locked_mask & (difference > (0.5 / 255.0))
+    locked = torch.where(locked_mask.expand_as(completed), locked_rgba, completed)
+    return locked, {
+        "locked_evidence_texels": int(locked_mask.sum().item()),
+        "model_overwrote_locked_texels": int(overwritten.sum().item()),
+        "max_locked_rgba_error": (
+            float(difference[locked_mask].max().item()) if locked_mask.any() else 0.0
+        ),
+    }
+
+
 def load_view_images(args, views, renderer, bg_color=(128, 128, 128)):
     images = []
     if args.combined:
@@ -523,6 +564,12 @@ def build_arg_parser():
         action="store_false",
     )
     parser.add_argument("--inpaint_palette_min_confidence", type=float, default=0.5)
+    parser.add_argument(
+        "--inpaint_evidence_lock_threshold",
+        type=float,
+        default=0.0,
+        help="Lock parser evidence at or above this confidence; zero preserves every routed texel.",
+    )
     parser.add_argument("--output", default=None, help="Final RGBA UV PNG path; requires --inpaint_checkpoint.")
     parser.add_argument("--conditioning_output", default=None, help="Optional preview image for parser-splatted conditioning.")
     parser.add_argument(
@@ -635,6 +682,8 @@ def main():
         raise ValueError("--background_color_tolerance must be in [0, 1].")
     if not 0.0 <= args.inpaint_palette_min_confidence <= 1.0:
         raise ValueError("--inpaint_palette_min_confidence must be in [0, 1].")
+    if not 0.0 <= args.inpaint_evidence_lock_threshold <= 1.0:
+        raise ValueError("--inpaint_evidence_lock_threshold must be in [0, 1].")
     if args.output and not args.inpaint_checkpoint:
         raise ValueError("--output requires --inpaint_checkpoint.")
     if not any(
@@ -928,6 +977,7 @@ def main():
                     "generation_temperature": args.inpaint_temperature,
                     "palette_snap": args.inpaint_palette_snap,
                     "palette_min_confidence": args.inpaint_palette_min_confidence,
+                    "evidence_lock_threshold": args.inpaint_evidence_lock_threshold,
                 },
                 sort_keys=True,
             )
@@ -1004,6 +1054,10 @@ def main():
                 f"checkpoint={expected_color_aggregation}, requested={args.color_aggregation}."
             )
         with torch.no_grad():
+            if hasattr(inpaint_model, "hard_lock_threshold"):
+                inpaint_model.hard_lock_threshold = float(
+                    args.inpaint_evidence_lock_threshold
+                )
             if hasattr(inpaint_model, "generate"):
                 completed = generate_topology_completion(
                     inpaint_model,
@@ -1016,6 +1070,13 @@ def main():
                 )[0]
             else:
                 completed = inpaint_model(conditioning)[0]
+            completed_batch, lock_stats = lock_completed_parser_evidence(
+                completed.unsqueeze(0),
+                conditioning,
+                confidence_threshold=args.inpaint_evidence_lock_threshold,
+            )
+            completed = completed_batch[0]
+            print("inpaint_evidence_lock=" + json.dumps(lock_stats, sort_keys=True))
             pred_uv = finalize_minecraft_alpha(
                 completed,
                 alpha_threshold=args.alpha_threshold,

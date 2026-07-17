@@ -134,8 +134,9 @@ topology checkpoints receive a 12-channel tensor:
 [inner RGBA + evidence + confidence, outer RGBA + evidence + confidence]
 ```
 
-Evidence at or above the topology hard-lock threshold is preserved exactly;
-weaker evidence is supplied as context but can be regenerated.
+Production topology inference uses a zero hard-lock threshold, so every routed
+evidence texel is preserved exactly. Raising the threshold is an explicit
+repair-mode ablation for weak evidence.
 
 Affine refinement is disabled by default so fixed-view inputs are never shifted after parsing. When explicitly enabled, it uses the observed solid-background silhouette rather than the parser's noisy foreground logits. Canonicalized RGB is padded with the detected source background color instead of black.
 
@@ -212,8 +213,9 @@ completion. Set `OUTER_GEOMETRY_RESCUE=false` for an ablation, or tune
 `OUTER_RESCUE_CONFIDENCE_THRESHOLD`, `OUTER_RESCUE_MARGIN_THRESHOLD`, and
 `OUTER_RESCUE_MIN_COVERAGE`. The `balanced` profile disables this rescue.
 
-Topology inference enables `INPAINT_PALETTE_SNAP=true` by default. Only generated
-texels are projected onto colors observed on the same body part and layer;
-parser-locked pixels remain byte-exact. This suppresses unrelated dataset-prior
-green/purple speckles without retraining. Set `INPAINT_PALETTE_SNAP=false` for
-an ablation, or adjust `INPAINT_PALETTE_MIN_CONFIDENCE` (default `0.5`).
+Topology inference enables `INPAINT_PALETTE_SNAP=true` and locks all routed
+parser evidence (`INPAINT_EVIDENCE_LOCK_THRESHOLD=0`) by default. Generated RGB
+is copied from nearby observed evidence on the same body part/layer/face, while
+parser RGBA is reapplied byte-exact after generation. This suppresses unrelated
+dataset-prior colors without retraining. Set `INPAINT_PALETTE_SNAP=false` for an
+ablation, or adjust `INPAINT_PALETTE_MIN_CONFIDENCE` (default `0.75`).

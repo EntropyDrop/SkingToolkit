@@ -213,6 +213,7 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         self.assertEqual(inpainting_args.translation_scale, 0.0)
         self.assertEqual(inpainting_args.scale_range, 0.0)
         self.assertEqual(inpainting_args.perspective_scale, 0.0)
+        self.assertEqual(inpainting_args.topology_hard_lock_threshold, 0.0)
         self.assertEqual(inpainting_args.parser_route_confidence_threshold, 0.0)
         self.assertEqual(inpainting_args.parser_route_margin_threshold, 0.0)
         self.assertEqual(inpainting_args.parser_outer_route_confidence_threshold, 0.80)
