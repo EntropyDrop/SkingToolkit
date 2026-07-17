@@ -156,10 +156,10 @@ def format_metrics(
             )
     if "hard_recall_outer" in result:
         result["loss_hard_uv_selection"] = (
-            0.5 * (1.0 - result["hard_iou_inner"])
-            + 0.75 * (1.0 - result["hard_precision_outer"])
-            + 0.75 * (1.0 - result["hard_recall_outer"])
-            + 0.5 * (1.0 - result["hard_iou_outer"])
+            inner_recall_weight * (1.0 - result["hard_iou_inner"])
+            + outer_precision_weight * (1.0 - result["hard_precision_outer"])
+            + outer_recall_weight * (1.0 - result["hard_recall_outer"])
+            + outer_iou_weight * (1.0 - result["hard_iou_outer"])
         )
     return result
 
@@ -1071,16 +1071,16 @@ def build_arg_parser():
     parser.add_argument("--no_affine_refine", dest="affine_refine", action="store_false")
     parser.add_argument("--affine_refine_translation_px", type=float, default=0.0)
     parser.add_argument("--affine_refine_scale", type=float, default=0.0)
-    parser.add_argument("--route_confidence_threshold", type=float, default=0.0)
-    parser.add_argument("--route_margin_threshold", type=float, default=0.0)
-    parser.add_argument("--outer_route_confidence_threshold", type=float, default=0.55)
-    parser.add_argument("--outer_route_margin_threshold", type=float, default=0.35)
-    parser.add_argument("--outer_uv_min_coverage", type=float, default=0.0)
+    parser.add_argument("--route_confidence_threshold", type=float, default=0.50)
+    parser.add_argument("--route_margin_threshold", type=float, default=0.15)
+    parser.add_argument("--outer_route_confidence_threshold", type=float, default=0.80)
+    parser.add_argument("--outer_route_margin_threshold", type=float, default=0.55)
+    parser.add_argument("--outer_uv_min_coverage", type=float, default=0.25)
     parser.add_argument(
         "--geometry_route_texel_consensus",
         dest="geometry_route_texel_consensus",
         action="store_true",
-        default=False,
+        default=True,
         help="Let fixed projected UV cells override local semantic route-role predictions.",
     )
     parser.add_argument(
@@ -1114,15 +1114,15 @@ def build_arg_parser():
     parser.add_argument("--lambda_uv_class", type=float, default=1.0)
     parser.add_argument("--lambda_affine", type=float, default=1.0)
     parser.add_argument("--lambda_surface", type=float, default=1.0)
-    parser.add_argument("--lambda_outer_false_positive", type=float, default=0.75)
-    parser.add_argument("--lambda_outer_false_negative", type=float, default=0.75)
+    parser.add_argument("--lambda_outer_false_positive", type=float, default=1.50)
+    parser.add_argument("--lambda_outer_false_negative", type=float, default=0.40)
     parser.add_argument("--lambda_route_confidence", type=float, default=0.25)
     parser.add_argument("--lambda_semantic_presence", type=float, default=0.25)
     parser.add_argument("--lambda_semantic_coverage", type=float, default=0.25)
     parser.add_argument("--outer_false_positive_gamma", type=float, default=2.0)
     parser.add_argument("--outer_false_negative_gamma", type=float, default=2.0)
     parser.add_argument("--route_class_weight_floor", type=float, default=0.75)
-    parser.add_argument("--route_outer_class_weight_cap", type=float, default=1.0)
+    parser.add_argument("--route_outer_class_weight_cap", type=float, default=0.75)
     parser.add_argument("--lambda_soft_uv_rgb", type=float, default=0.25)
     parser.add_argument("--lambda_soft_uv_alpha", type=float, default=0.35)
     parser.add_argument("--lambda_soft_uv_inner_recall", type=float, default=0.50)
@@ -1131,8 +1131,8 @@ def build_arg_parser():
     parser.add_argument("--soft_uv_recall_hard_weight", type=float, default=0.50)
     parser.add_argument("--lambda_render_rgb", type=float, default=0.20)
     parser.add_argument("--lambda_render_alpha", type=float, default=0.25)
-    parser.add_argument("--outer_selection_precision_weight", type=float, default=0.75)
-    parser.add_argument("--outer_selection_recall_weight", type=float, default=0.75)
+    parser.add_argument("--outer_selection_precision_weight", type=float, default=1.50)
+    parser.add_argument("--outer_selection_recall_weight", type=float, default=0.50)
     parser.add_argument("--outer_selection_iou_weight", type=float, default=0.5)
     parser.add_argument("--inner_selection_recall_weight", type=float, default=0.5)
     parser.add_argument(

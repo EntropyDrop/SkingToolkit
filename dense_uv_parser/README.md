@@ -73,17 +73,17 @@ Training previews are saved under `runs/<run>/previews`:
 - `epoch_XXXX.png`: predicted inner/outer RGB rows, followed by GT inner/outer RGB rows.
 - `epoch_XXXX_debug.png`: semantic diagnostics plus fitted inner/outer grids and RGB-filled grid previews.
 
-For good parser splatting, watch `hard_iou_inner`, `hard_precision_outer`, `hard_recall_outer`, `hard_iou_outer`, `loss_soft_uv_inner_recall_hard`, `loss_soft_uv_outer_recall_hard`, `precision_secondary`, `recall_secondary`, `acc_route_role`, `confidence_mae`, `precision_trusted_route`, and `coverage_trusted_route`. Validation runs the same configured routing, confidence gates, and UV splat used by inference. `best.pt` defaults to the lowest `loss_hard_uv_selection`, defined as `0.5 * (1 - hard_iou_inner) + 0.75 * (1 - hard_precision_outer) + 0.75 * (1 - hard_recall_outer) + 0.5 * (1 - hard_iou_outer)`. These hard TP/FP/FN counts are accumulated over the complete validation set. The older soft-classification `loss_outer_selection` remains logged as a diagnostic, but it no longer chooses the production checkpoint because higher pixel accuracy can coexist with worse usable UV coverage.
+For good parser splatting, watch `hard_iou_inner`, `hard_precision_outer`, `hard_recall_outer`, `hard_iou_outer`, `loss_soft_uv_inner_recall_hard`, `loss_soft_uv_outer_recall_hard`, `precision_secondary`, `recall_secondary`, `acc_route_role`, `confidence_mae`, `precision_trusted_route`, and `coverage_trusted_route`. Validation runs the same configured routing, confidence gates, and UV splat used by inference. `best.pt` defaults to the lowest precision-first `loss_hard_uv_selection`, defined as `0.5 * (1 - hard_iou_inner) + 1.5 * (1 - hard_precision_outer) + 0.5 * (1 - hard_recall_outer) + 0.5 * (1 - hard_iou_outer)`. These hard TP/FP/FN counts are accumulated over the complete validation set. The older soft-classification `loss_outer_selection` remains logged as a diagnostic, but it no longer chooses the production checkpoint because higher pixel accuracy can coexist with worse usable UV coverage.
 
-Route-role training uses complementary focal terms. The false-positive term penalizes high-confidence outer predictions on GT inner/secondary pixels, while the false-negative term penalizes visible GT outer pixels that receive too little outer probability. The abundant inner class has a minimum balanced weight of `0.75`, while automatic balancing cannot raise the outer target class above `1.0`. These defaults prevent both fabricated outer skin and systematic loss of real clothing/hat layers without removing secondary-class balancing:
+Route-role training uses complementary focal terms. The false-positive term penalizes high-confidence outer predictions on GT inner/secondary pixels, while the false-negative term penalizes visible GT outer pixels that receive too little outer probability. The abundant inner class has a minimum balanced weight of `0.75`, while automatic balancing cannot raise the outer target class above `0.75`. Defaults deliberately prefer outer precision: uncertain outer pixels become topology-completion holes instead of permanently moving inner colors onto the outer layer.
 
 ```bash
-LAMBDA_OUTER_FALSE_POSITIVE=0.75 \
-LAMBDA_OUTER_FALSE_NEGATIVE=0.75 \
+LAMBDA_OUTER_FALSE_POSITIVE=1.50 \
+LAMBDA_OUTER_FALSE_NEGATIVE=0.40 \
 OUTER_FALSE_POSITIVE_GAMMA=2.0 \
 OUTER_FALSE_NEGATIVE_GAMMA=2.0 \
 ROUTE_CLASS_WEIGHT_FLOOR=0.75 \
-ROUTE_OUTER_CLASS_WEIGHT_CAP=1.0 \
+ROUTE_OUTER_CLASS_WEIGHT_CAP=0.75 \
 ./run_dense_uv_parser_training.sh
 ```
 
@@ -197,7 +197,7 @@ python infer.py \
   --conditioning_output parser_conditioning.png
 ```
 
-The conditioning preview shows the predicted inner-layer RGB row and outer-layer RGB row. Outer routing still defaults to semantic confidence `0.55` and relative margin `0.35`, but projected-footprint coverage defaults to `0`. This keeps semantic uncertainty filtering while preventing an imperfect AI-generated cuboid outline from deleting a visually coherent outer garment.
+The conditioning preview shows the predicted inner-layer RGB row and outer-layer RGB row. The precision-first defaults require inner confidence/margin `0.50/0.15`, outer confidence/margin `0.80/0.55`, outer footprint coverage `0.25`, and projected-texel consensus. These settings match the default conservative inference profile and strongly reduce inner-to-outer false positives.
 
 Inference uses a wider solid-background tolerance of `48/255` than the parser's
 training utility. This rejects green-screen and other solid-background colors
