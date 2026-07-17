@@ -217,5 +217,7 @@ Topology inference enables `INPAINT_PALETTE_SNAP=true` and locks all routed
 parser evidence (`INPAINT_EVIDENCE_LOCK_THRESHOLD=0`) by default. Generated RGB
 is copied from nearby observed evidence on the same body part/layer/face, while
 parser RGBA is reapplied byte-exact after generation. This suppresses unrelated
-dataset-prior colors without retraining. Set `INPAINT_PALETTE_SNAP=false` for an
-ablation, or adjust `INPAINT_PALETTE_MIN_CONFIDENCE` (default `0.75`).
+dataset-prior colors without retraining. Production applies this final pass in
+`infer.py` even for legacy topology checkpoints and propagates repeated stable
+colors before isolated evidence outliers. Set `INPAINT_PALETTE_SNAP=false` for
+an ablation, or adjust `INPAINT_PALETTE_MIN_CONFIDENCE` (default `0.75`).

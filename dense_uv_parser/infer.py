@@ -43,6 +43,12 @@ from SkingToolkit.dense_uv_parser.utils import (  # noqa: E402
 from SkingToolkit.semantic_uv_reconstruction.dataset import finalize_minecraft_alpha, tensor_to_rgba_image, view_native_size  # noqa: E402
 from SkingToolkit.semantic_uv_reconstruction.model import UVInpaintingNet  # noqa: E402
 from SkingToolkit.semantic_uv_reconstruction.topology_model import TopologyAwareUVCompletionNet  # noqa: E402
+from SkingToolkit.semantic_uv_reconstruction.topology import (  # noqa: E402
+    FACE_COUNT,
+    LAYER_COUNT,
+    PART_COUNT,
+    build_uv_topology,
+)
 from SkingToolkit.semantic_uv_reconstruction.train import get_device  # noqa: E402
 from SkingToolkit.renderer import DifferentiableRenderer  # noqa: E402
 
@@ -266,6 +272,117 @@ def lock_completed_parser_evidence(completed, conditioning, confidence_threshold
         "max_locked_rgba_error": (
             float(difference[locked_mask].max().item()) if locked_mask.any() else 0.0
         ),
+    }
+
+
+def propagate_completed_unknown_colors(completed, conditioning, min_confidence=0.75):
+    """Replace generated opaque RGB with stable nearby parser-observed colors."""
+    if not 0.0 <= min_confidence <= 1.0:
+        raise ValueError("min_confidence must be in [0, 1].")
+    if completed.dim() != 4 or completed.shape[1:] != (4, 64, 64):
+        raise ValueError(f"Expected completed Bx4x64x64 UV, got {tuple(completed.shape)}.")
+    if conditioning.dim() != 4 or conditioning.shape[1] not in (10, 12):
+        raise ValueError("Expected 10- or 12-channel parser conditioning.")
+
+    topology = build_uv_topology()
+    device = completed.device
+    valid = topology.valid.reshape(-1).to(device=device)
+    layer = topology.layer.reshape(-1).to(device=device)
+    part = topology.part.reshape(-1).to(device=device)
+    face = topology.face.reshape(-1).to(device=device)
+    coordinates = topology.local_uv.reshape(-1, 2).to(device=device).float()
+
+    flat = conditioning.flatten(2)
+    inner_rgba = flat[:, 0:4].transpose(1, 2)
+    inner_evidence = flat[:, 4] > 0.5
+    outer_offset = 6 if conditioning.shape[1] == 12 else 5
+    outer_rgba = flat[:, outer_offset : outer_offset + 4].transpose(1, 2)
+    outer_evidence = flat[:, outer_offset + 4] > 0.5
+    is_inner = (layer == 0).view(1, -1)
+    observed = torch.where(is_inner.unsqueeze(-1), inner_rgba, outer_rgba)
+    evidence = torch.where(is_inner, inner_evidence, outer_evidence) & valid.view(1, -1)
+    if conditioning.shape[1] == 12:
+        confidence = torch.where(
+            is_inner,
+            flat[:, 5],
+            flat[:, 11],
+        )
+    else:
+        confidence = evidence.to(dtype=completed.dtype)
+
+    result = completed.flatten(2).transpose(1, 2).clone()
+    generated = (~evidence) & valid.view(1, -1) & (result[..., 3] > 0.5)
+    opaque_source = evidence & (observed[..., 3] > 0.5)
+    strong_source = opaque_source & (confidence >= float(min_confidence))
+
+    def stable_indices(mask, colors):
+        indices = mask.nonzero(as_tuple=False).flatten()
+        if indices.numel() < 2:
+            return None, indices
+        rgb8 = colors[indices, :3].clamp(0.0, 1.0).mul(255.0).round().to(torch.uint8)
+        _, inverse, counts = torch.unique(
+            rgb8,
+            dim=0,
+            return_inverse=True,
+            return_counts=True,
+        )
+        stable = counts[inverse] >= 2
+        return (indices[stable] if stable.any() else None), indices
+
+    recolored = 0
+    for batch_index in range(result.shape[0]):
+        strong = strong_source[batch_index]
+        fallback = opaque_source[batch_index]
+        if not fallback.any():
+            continue
+        colors = observed[batch_index]
+        for part_index in range(PART_COUNT):
+            part_mask = part == part_index
+            for layer_index in range(LAYER_COUNT):
+                group_target = generated[batch_index] & part_mask & (layer == layer_index)
+                if not group_target.any():
+                    continue
+                for face_index in range(FACE_COUNT):
+                    target = group_target & (face == face_index)
+                    if not target.any():
+                        continue
+                    candidates = (
+                        strong & part_mask & (layer == layer_index) & (face == face_index),
+                        fallback & part_mask & (layer == layer_index) & (face == face_index),
+                        strong & part_mask & (layer == layer_index),
+                        fallback & part_mask & (layer == layer_index),
+                        strong & part_mask,
+                        fallback & part_mask,
+                        strong,
+                        fallback,
+                    )
+                    selected_reference = None
+                    first_nonempty = None
+                    for candidate in candidates:
+                        stable, indices = stable_indices(candidate, colors)
+                        if first_nonempty is None and indices.numel() > 0:
+                            first_nonempty = indices
+                        if stable is not None and stable.numel() > 0:
+                            selected_reference = stable
+                            break
+                    if selected_reference is None:
+                        selected_reference = first_nonempty
+                    if selected_reference is None or selected_reference.numel() == 0:
+                        continue
+                    target_indices = target.nonzero(as_tuple=False).flatten()
+                    nearest = torch.cdist(
+                        coordinates[target_indices],
+                        coordinates[selected_reference],
+                    ).argmin(dim=1)
+                    source_indices = selected_reference[nearest]
+                    result[batch_index, target_indices, :3] = colors[source_indices, :3]
+                    recolored += int(target_indices.numel())
+
+    result = result.transpose(1, 2).reshape_as(completed)
+    return result, {
+        "generated_opaque_texels": int(generated.sum().item()),
+        "topology_color_propagated_texels": recolored,
+        "uncolored_generated_texels": int(generated.sum().item()) - recolored,
     }
 
 
@@ -1065,11 +1182,24 @@ def main():
                     steps=args.inpaint_steps,
                     temperature=args.inpaint_temperature,
                     seed=args.inpaint_seed,
-                    palette_snap=args.inpaint_palette_snap,
+                    # Final color propagation is applied below for both current
+                    # and legacy generator signatures.
+                    palette_snap=False,
                     palette_min_confidence=args.inpaint_palette_min_confidence,
                 )[0]
             else:
                 completed = inpaint_model(conditioning)[0]
+            if args.inpaint_palette_snap:
+                completed_batch, color_stats = propagate_completed_unknown_colors(
+                    completed.unsqueeze(0),
+                    conditioning,
+                    min_confidence=args.inpaint_palette_min_confidence,
+                )
+                completed = completed_batch[0]
+                print(
+                    "inpaint_color_propagation="
+                    + json.dumps(color_stats, sort_keys=True)
+                )
             completed_batch, lock_stats = lock_completed_parser_evidence(
                 completed.unsqueeze(0),
                 conditioning,
