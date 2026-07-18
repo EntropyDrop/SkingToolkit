@@ -60,6 +60,21 @@ Inference writes these intermediate products by default:
 dense_uv_parser/outputs/foreground_probability.png
 dense_uv_parser/outputs/foreground_mask.png
 dense_uv_parser/outputs/foreground_cutout.png
+dense_uv_parser/outputs/foreground_parser_input.png
+```
+
+`foreground_cutout.png` is an RGBA image whose rejected background has zero
+alpha. Internally, dense parser features receive the same cutout composited over
+a deterministic adaptive high-contrast color. The color is selected from a
+fixed palette by maximizing the low-quantile RGB distance to high-confidence
+foreground boundary colors. `foreground_parser_input.png` shows the exact RGB
+given to the parser. UV color splatting continues to sample the untouched source
+image so foreground colors are not altered.
+
+Use the former neutral gray background for an ablation:
+
+```bash
+FOREGROUND_PARSER_BACKGROUND=neutral ./run_infer.sh
 ```
 
 Choose or disable the checkpoint explicitly:

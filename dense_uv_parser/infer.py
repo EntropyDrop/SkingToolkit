@@ -41,6 +41,7 @@ from SkingToolkit.dense_uv_parser.utils import (  # noqa: E402
     surface_class_count,
 )
 from SkingToolkit.fixed_view_foreground.inference import (  # noqa: E402
+    build_parser_input,
     find_latest_checkpoint as find_latest_foreground_checkpoint,
     load_foreground_model,
     predict_foreground,
@@ -826,6 +827,12 @@ def build_arg_parser():
     )
     parser.add_argument("--foreground_threshold", type=float, default=0.5)
     parser.add_argument(
+        "--foreground_parser_background",
+        choices=["adaptive", "neutral"],
+        default="adaptive",
+        help="Solid background used for the masked RGB passed to dense parser.",
+    )
+    parser.add_argument(
         "--foreground_probability_output",
         default="outputs/foreground_probability.png",
         help="Grayscale foreground probability produced before dense parsing.",
@@ -839,6 +846,11 @@ def build_arg_parser():
         "--foreground_cutout_output",
         default="outputs/foreground_cutout.png",
         help="Input views with the predicted background removed.",
+    )
+    parser.add_argument(
+        "--foreground_parser_input_output",
+        default="outputs/foreground_parser_input.png",
+        help="Exact adaptive-background RGB images passed to dense parser.",
     )
     parser.add_argument("--inpaint_checkpoint", default=None, help="Optional semantic_uv_reconstruction checkpoint used to inpaint final skin.")
     parser.add_argument("--inpaint_steps", type=int, default=4, help="Masked-generation steps for topology checkpoints.")
@@ -1170,6 +1182,7 @@ def main():
     view_ids = torch.arange(len(views), device=device)
     with torch.no_grad():
         observed_foreground = None
+        parser_rendered = rendered
         if foreground_model is not None:
             foreground_probability = predict_foreground(
                 foreground_model, rendered, view_ids
@@ -1184,6 +1197,26 @@ def main():
                 cutout_output=args.foreground_cutout_output,
                 bg_color=bg_color,
             )
+            (
+                parser_rendered,
+                parser_background_rgb,
+                parser_background_indices,
+            ) = build_parser_input(
+                rendered,
+                observed_foreground,
+                bg_color=bg_color,
+                background_mode=args.foreground_parser_background,
+                foreground_probability=foreground_probability,
+                return_background=True,
+            )
+            if args.foreground_parser_input_output:
+                parser_input_path = Path(args.foreground_parser_input_output)
+                parser_input_path.parent.mkdir(parents=True, exist_ok=True)
+                save_image(
+                    parser_rendered[:, :3].detach().cpu(),
+                    parser_input_path,
+                    nrow=len(views),
+                )
             print(
                 "foreground_filter="
                 + json.dumps(
@@ -1193,12 +1226,20 @@ def main():
                         "mean_probability": round(
                             float(foreground_probability.mean().item()), 6
                         ),
+                        "parser_background_mode": args.foreground_parser_background,
+                        "parser_background_rgb": [
+                            [int(round(channel * 255.0)) for channel in color]
+                            for color in parser_background_rgb.detach().cpu().tolist()
+                        ],
+                        "parser_background_indices": parser_background_indices,
                         "threshold": args.foreground_threshold,
                     },
                     sort_keys=True,
                 )
             )
-        outputs = parser_model(rendered, view_ids=view_ids)
+        # Background removal affects parser features, while routing/splatting
+        # below still reads exact foreground colors from the original input.
+        outputs = parser_model(parser_rendered, view_ids=view_ids)
         conditioning, routing_details = splat_parser_predictions_to_uv_conditioning(
             rendered,
             outputs,

@@ -206,6 +206,7 @@ GEOMETRY_FILL_OUTPUT="${GEOMETRY_FILL_OUTPUT-outputs/parser_debug_geometry_fill.
 FOREGROUND_PROBABILITY_OUTPUT="${FOREGROUND_PROBABILITY_OUTPUT-outputs/foreground_probability.png}"
 FOREGROUND_MASK_OUTPUT="${FOREGROUND_MASK_OUTPUT-outputs/foreground_mask.png}"
 FOREGROUND_CUTOUT_OUTPUT="${FOREGROUND_CUTOUT_OUTPUT-outputs/foreground_cutout.png}"
+FOREGROUND_PARSER_INPUT_OUTPUT="${FOREGROUND_PARSER_INPUT_OUTPUT-outputs/foreground_parser_input.png}"
 
 COMBINED="${COMBINED:-}"
 VIEW_IMAGES="${VIEW_IMAGES:-}"
@@ -246,6 +247,7 @@ case "$ROUTING_PROFILE" in
 esac
 FG_THRESHOLD="${FG_THRESHOLD:-0.5}"
 FOREGROUND_THRESHOLD="${FOREGROUND_THRESHOLD:-0.5}"
+FOREGROUND_PARSER_BACKGROUND="${FOREGROUND_PARSER_BACKGROUND:-adaptive}"
 BACKGROUND_COLOR_TOLERANCE="${BACKGROUND_COLOR_TOLERANCE:-$DEFAULT_BACKGROUND_COLOR_TOLERANCE}"
 ROUTE_CONFIDENCE_THRESHOLD="${ROUTE_CONFIDENCE_THRESHOLD:-$DEFAULT_ROUTE_CONFIDENCE_THRESHOLD}"
 ROUTE_MARGIN_THRESHOLD="${ROUTE_MARGIN_THRESHOLD:-$DEFAULT_ROUTE_MARGIN_THRESHOLD}"
@@ -295,6 +297,7 @@ args=(
   --parser_checkpoint "$PARSER_CHECKPOINT"
   --foreground_checkpoint "${FOREGROUND_CHECKPOINT:-none}"
   --foreground_threshold "$FOREGROUND_THRESHOLD"
+  --foreground_parser_background "$FOREGROUND_PARSER_BACKGROUND"
   --fg_threshold "$FG_THRESHOLD"
   --background_color_tolerance "$BACKGROUND_COLOR_TOLERANCE"
   --route_confidence_threshold "$ROUTE_CONFIDENCE_THRESHOLD"
@@ -333,6 +336,9 @@ if [[ -n "$FOREGROUND_MASK_OUTPUT" ]]; then
 fi
 if [[ -n "$FOREGROUND_CUTOUT_OUTPUT" ]]; then
   args+=(--foreground_cutout_output "$FOREGROUND_CUTOUT_OUTPUT")
+fi
+if [[ -n "$FOREGROUND_PARSER_INPUT_OUTPUT" ]]; then
+  args+=(--foreground_parser_input_output "$FOREGROUND_PARSER_INPUT_OUTPUT")
 fi
 
 if [[ "$INPAINT_PALETTE_SNAP" == "true" ]]; then
@@ -487,6 +493,9 @@ if [[ -n "$FOREGROUND_CHECKPOINT" ]]; then
   fi
   if [[ -n "$FOREGROUND_CUTOUT_OUTPUT" ]]; then
     echo "Foreground cutout output: $FOREGROUND_CUTOUT_OUTPUT"
+  fi
+  if [[ -n "$FOREGROUND_PARSER_INPUT_OUTPUT" ]]; then
+    echo "Foreground parser input: $FOREGROUND_PARSER_INPUT_OUTPUT"
   fi
 fi
 if [[ -n "$INPAINT_CHECKPOINT" ]]; then
