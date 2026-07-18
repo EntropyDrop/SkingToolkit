@@ -235,6 +235,14 @@ different surface. Tune
 `REJECTED_CONTEXT_MARGIN_THRESHOLD`, or disable this path with
 `REJECTED_CONTEXT=false`.
 
+When the topology model predicts a referenced outer texel transparent,
+`INPAINT_CONTEXT_ALPHA_RESCUE=true` restores its opacity only if the rejected
+pixel is backed by part-level outer semantics or outer-only geometry. The
+additional local gates default to confidence `0.50` and margin `0.10`; tune them
+with `INPAINT_CONTEXT_ALPHA_MIN_CONFIDENCE` and
+`INPAINT_CONTEXT_ALPHA_MIN_MARGIN`. This preserves supported visible outer
+detail without turning every rejected inner/outer ambiguity into opaque decor.
+
 Topology inference enables `INPAINT_PALETTE_SNAP=true` and locks all routed
 parser evidence (`INPAINT_EVIDENCE_LOCK_THRESHOLD=0`) by default. Generated RGB
 uses distribution-mean decoding (`INPAINT_RGB_DECODE=mean`) and is projected onto

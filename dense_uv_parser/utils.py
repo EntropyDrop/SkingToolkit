@@ -1802,6 +1802,8 @@ def splat_parser_predictions_to_uv_conditioning(
     include_rejected_context=True,
     rejected_context_confidence_threshold=0.35,
     rejected_context_margin_threshold=0.10,
+    rejected_context_alpha_confidence_threshold=0.50,
+    rejected_context_alpha_margin_threshold=0.10,
     include_confidence=False,
     return_details=False,
 ):
@@ -1834,6 +1836,14 @@ def splat_parser_predictions_to_uv_conditioning(
         raise ValueError("rejected_context_confidence_threshold must be in [0, 1].")
     if not 0.0 <= rejected_context_margin_threshold <= 1.0:
         raise ValueError("rejected_context_margin_threshold must be in [0, 1].")
+    if not 0.0 <= rejected_context_alpha_confidence_threshold <= 1.0:
+        raise ValueError(
+            "rejected_context_alpha_confidence_threshold must be in [0, 1]."
+        )
+    if not 0.0 <= rejected_context_alpha_margin_threshold <= 1.0:
+        raise ValueError(
+            "rejected_context_alpha_margin_threshold must be in [0, 1]."
+        )
     if not 0.0 <= background_color_tolerance <= 1.0:
         raise ValueError("background_color_tolerance must be in [0, 1].")
     if "affine" not in outputs:
@@ -2086,6 +2096,22 @@ def splat_parser_predictions_to_uv_conditioning(
     )
     if reject_semantic_fallback:
         rejected_context = rejected_context & ~rejected_fallback
+    rejected_context_alpha_supported = (
+        rejected_context
+        & selected_outer
+        & (geometry_supported_outer | semantic_supported_outer)
+        & (
+            routing["confidence"]
+            >= rejected_context_alpha_confidence_threshold
+        )
+        & (
+            routing["confidence_margin_ratio"]
+            >= rejected_context_alpha_margin_threshold
+        )
+    )
+    context_alpha_rescue_uv = conditioning.new_zeros(
+        conditioning.shape[0], 1, UV_SIZE, UV_SIZE
+    )
     if include_rejected_context and include_confidence and rejected_context.any():
         context = splat_to_uv_conditioning(
             canonical_rendered,
@@ -2112,13 +2138,30 @@ def splat_parser_predictions_to_uv_conditioning(
                 context[:, offset + 5 : offset + 6],
                 conditioning[:, offset + 5 : offset + 6],
             )
+        if rejected_context_alpha_supported.any():
+            alpha_context = splat_to_uv_conditioning(
+                canonical_rendered,
+                rejected_context_alpha_supported,
+                routing["layer"],
+                routing["flat_uv"],
+                group_size=group_size,
+                bg_color=bg_color,
+                confidence=routing["confidence"],
+                color_aggregation=color_aggregation,
+                include_confidence=True,
+            )
+            context_alpha_rescue_uv = alpha_context[:, 10:11] > 0.5
     routing["rejected_context"] = rejected_context
+    routing["rejected_context_alpha_supported"] = (
+        rejected_context_alpha_supported
+    )
     if return_details:
         return conditioning, {
             "rendered": canonical_rendered,
             "outputs": canonical_outputs,
             "routing": routing,
             "alignment": alignment,
+            "context_alpha_rescue_uv": context_alpha_rescue_uv,
         }
     return conditioning
 

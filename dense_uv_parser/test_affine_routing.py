@@ -459,6 +459,63 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         self.assertTrue(torch.allclose(conditioning[0, 6:9, y, x], source_rgb))
         self.assertTrue(details["routing"]["rejected_context"][0, 0, 0])
 
+    def test_semantic_supported_rejected_context_marks_alpha_rescue_uv(self):
+        renderer = FakeRenderer(valid_pixels=1)
+        renderer.front_outer_mask.copy_(renderer.front_inner_mask)
+        renderer.front_inner_grid[0, 0] = torch.tensor(
+            [(8.0 / 63.0) * 2.0 - 1.0, (8.0 / 63.0) * 2.0 - 1.0]
+        )
+        renderer.front_outer_grid[0, 0] = torch.tensor(
+            [(40.0 / 63.0) * 2.0 - 1.0, (8.0 / 63.0) * 2.0 - 1.0]
+        )
+        rendered = torch.zeros(1, 4, 8, 8)
+        rendered[:, :3, 0, 0] = torch.tensor([0.7, 0.1, 0.1])
+        rendered[:, 3] = 1.0
+        role_logits = torch.full((1, 3, 8, 8), -8.0)
+        role_logits[:, 0, 0, 0] = 0.0
+        role_logits[:, 1, 0, 0] = 0.4
+        outputs = {
+            "foreground": torch.full((1, 1, 8, 8), 10.0),
+            "layer": role_logits,
+            "affine": torch.zeros(1, 3),
+            "outer_presence_logits": torch.tensor(
+                [[10.0, -10.0, -10.0, -10.0, -10.0, -10.0]]
+            ),
+            "outer_coverage": torch.tensor(
+                [[0.8, 0.0, 0.0, 0.0, 0.0, 0.0]]
+            ),
+        }
+        observed = torch.zeros(1, 8, 8, dtype=torch.bool)
+        observed[:, 0, 0] = True
+
+        conditioning, details = splat_parser_predictions_to_uv_conditioning(
+            rendered,
+            outputs,
+            renderer=renderer,
+            views=["front"],
+            group_size=1,
+            affine_refine=False,
+            observed_foreground=observed,
+            outer_route_confidence_threshold=0.80,
+            outer_route_margin_threshold=0.55,
+            outer_semantic_rescue=True,
+            include_rejected_context=True,
+            include_confidence=True,
+            rejected_context_alpha_confidence_threshold=0.50,
+            rejected_context_alpha_margin_threshold=0.10,
+            return_details=True,
+        )
+
+        target_uv = int(details["routing"]["flat_uv"][0, 0, 0])
+        y, x = divmod(target_uv, 64)
+        self.assertEqual(int(details["routing"]["foreground"].sum()), 0)
+        self.assertTrue(details["routing"]["outer_semantic_supported"][0, 0, 0])
+        self.assertTrue(
+            details["routing"]["rejected_context_alpha_supported"][0, 0, 0]
+        )
+        self.assertEqual(float(conditioning[0, 10, y, x]), 0.0)
+        self.assertTrue(details["context_alpha_rescue_uv"][0, 0, y, x])
+
     def test_surface_head_cannot_change_primary_role(self):
         renderer = FakeRenderer(valid_pixels=1)
         renderer.front_outer_mask.copy_(renderer.front_inner_mask)

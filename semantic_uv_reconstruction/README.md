@@ -214,7 +214,8 @@ spread across an unknown surface.
 Use `INPAINT_PALETTE_SNAP=false` to disable topology color propagation,
 `INPAINT_PALETTE_MIN_CONFIDENCE` to select shared palette evidence,
 `INPAINT_CONTEXT_MIN_CONFIDENCE` to copy unlocked context only at its matching
-UV coordinate, or
+UV coordinate, `INPAINT_CONTEXT_ALPHA_RESCUE=false` to disable the guarded
+semantic/geometry-supported opacity restoration, or
 `INPAINT_EVIDENCE_LOCK_THRESHOLD` to deliberately permit low-confidence repair.
 
 ## Semantic Fixed-View UV Reconstruction

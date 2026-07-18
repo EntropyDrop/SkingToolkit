@@ -20,6 +20,36 @@ from SkingToolkit.semantic_uv_reconstruction.train import Logger
 
 
 class InpaintCheckpointCompatibilityTest(unittest.TestCase):
+    def test_supported_context_restores_model_rejected_outer_alpha(self):
+        topology = build_uv_topology()
+        index = int(
+            ((topology.layer.reshape(-1) == 1).nonzero(as_tuple=False))[0]
+        )
+        y, x = divmod(index, 64)
+        context_color = torch.tensor([0.55, 0.08, 0.12, 1.0])
+        conditioning = torch.zeros(1, 12, 64, 64)
+        conditioning[0, 6:10, y, x] = context_color
+        conditioning[0, 10, y, x] = 0.0
+        conditioning[0, 11, y, x] = 0.65
+        completed = torch.zeros(1, 4, 64, 64)
+        rescue_mask = torch.zeros(1, 1, 64, 64, dtype=torch.bool)
+        rescue_mask[0, 0, y, x] = True
+
+        propagated, stats = propagate_completed_unknown_colors(
+            completed,
+            conditioning,
+            min_confidence=0.75,
+            context_min_confidence=0.35,
+            context_alpha_rescue_mask=rescue_mask,
+        )
+
+        self.assertTrue(torch.equal(propagated[0, :, y, x], context_color))
+        self.assertEqual(stats["model_generated_opaque_texels"], 0)
+        self.assertEqual(stats["context_alpha_rescue_eligible_texels"], 1)
+        self.assertEqual(stats["context_alpha_restored_texels"], 1)
+        self.assertEqual(stats["direct_context_texels"], 1)
+        self.assertEqual(stats["context_alpha_rejected_texels"], 0)
+
     def test_low_confidence_context_is_copied_only_at_the_same_uv(self):
         topology = build_uv_topology()
         indices = (topology.surface.reshape(-1) == 0).nonzero(

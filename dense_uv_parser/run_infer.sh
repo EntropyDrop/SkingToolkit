@@ -257,6 +257,9 @@ INPAINT_RGB_DECODE="${INPAINT_RGB_DECODE:-mean}"
 INPAINT_PALETTE_SNAP="${INPAINT_PALETTE_SNAP:-true}"
 INPAINT_PALETTE_MIN_CONFIDENCE="${INPAINT_PALETTE_MIN_CONFIDENCE:-0.75}"
 INPAINT_CONTEXT_MIN_CONFIDENCE="${INPAINT_CONTEXT_MIN_CONFIDENCE:-0.35}"
+INPAINT_CONTEXT_ALPHA_RESCUE="${INPAINT_CONTEXT_ALPHA_RESCUE:-true}"
+INPAINT_CONTEXT_ALPHA_MIN_CONFIDENCE="${INPAINT_CONTEXT_ALPHA_MIN_CONFIDENCE:-0.50}"
+INPAINT_CONTEXT_ALPHA_MIN_MARGIN="${INPAINT_CONTEXT_ALPHA_MIN_MARGIN:-0.10}"
 INPAINT_EVIDENCE_LOCK_THRESHOLD="${INPAINT_EVIDENCE_LOCK_THRESHOLD:-0.0}"
 
 echo "Using routing profile: $ROUTING_PROFILE"
@@ -291,6 +294,8 @@ args=(
   --inpaint_rgb_decode "$INPAINT_RGB_DECODE"
   --inpaint_palette_min_confidence "$INPAINT_PALETTE_MIN_CONFIDENCE"
   --inpaint_context_min_confidence "$INPAINT_CONTEXT_MIN_CONFIDENCE"
+  --inpaint_context_alpha_min_confidence "$INPAINT_CONTEXT_ALPHA_MIN_CONFIDENCE"
+  --inpaint_context_alpha_min_margin "$INPAINT_CONTEXT_ALPHA_MIN_MARGIN"
   --inpaint_evidence_lock_threshold "$INPAINT_EVIDENCE_LOCK_THRESHOLD"
   --device "$DEVICE"
 )
@@ -299,6 +304,12 @@ if [[ "$INPAINT_PALETTE_SNAP" == "true" ]]; then
   args+=(--inpaint_palette_snap)
 else
   args+=(--no_inpaint_palette_snap)
+fi
+
+if [[ "$INPAINT_CONTEXT_ALPHA_RESCUE" == "true" ]]; then
+  args+=(--inpaint_context_alpha_rescue)
+else
+  args+=(--no_inpaint_context_alpha_rescue)
 fi
 
 if [[ "$GEOMETRY_ROUTE_TEXEL_CONSENSUS" == "true" ]]; then

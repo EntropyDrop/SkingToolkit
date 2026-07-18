@@ -286,6 +286,7 @@ def propagate_completed_unknown_colors(
     conditioning,
     min_confidence=0.75,
     context_min_confidence=None,
+    context_alpha_rescue_mask=None,
 ):
     """Replace generated opaque RGB with stable nearby parser-observed colors."""
     if not 0.0 <= min_confidence <= 1.0:
@@ -298,6 +299,16 @@ def propagate_completed_unknown_colors(
         raise ValueError(f"Expected completed Bx4x64x64 UV, got {tuple(completed.shape)}.")
     if conditioning.dim() != 4 or conditioning.shape[1] not in (10, 12):
         raise ValueError("Expected 10- or 12-channel parser conditioning.")
+    if context_alpha_rescue_mask is not None:
+        if context_alpha_rescue_mask.shape != (
+            completed.shape[0],
+            1,
+            64,
+            64,
+        ):
+            raise ValueError(
+                "context_alpha_rescue_mask must have shape Bx1x64x64."
+            )
 
     topology = build_uv_topology()
     device = completed.device
@@ -336,6 +347,29 @@ def propagate_completed_unknown_colors(
         confidence >= float(min_confidence)
     )
     result = completed.flatten(2).transpose(1, 2).clone()
+    model_generated = (
+        (~evidence) & valid.view(1, -1) & (result[..., 3] > 0.5)
+    )
+    if context_alpha_rescue_mask is None:
+        alpha_rescue_mask = torch.zeros_like(context_source)
+    else:
+        alpha_rescue_mask = (
+            context_alpha_rescue_mask.flatten(2)[:, 0]
+            .to(device=result.device)
+            .bool()
+        )
+    alpha_rescue_eligible = (
+        context_source
+        & alpha_rescue_mask
+        & valid.view(1, -1)
+        & (observed[..., 3] > 0.5)
+    )
+    alpha_restored = alpha_rescue_eligible & ~model_generated
+    result[..., 3] = torch.where(
+        alpha_rescue_eligible,
+        observed[..., 3].to(dtype=result.dtype),
+        result[..., 3],
+    )
     generated = (~evidence) & valid.view(1, -1) & (result[..., 3] > 0.5)
     opaque_source = (evidence | palette_context_source) & (observed[..., 3] > 0.5)
     strong_source = opaque_source & (confidence >= float(min_confidence))
@@ -423,6 +457,7 @@ def propagate_completed_unknown_colors(
 
     result = result.transpose(1, 2).reshape_as(completed)
     return result, {
+        "model_generated_opaque_texels": int(model_generated.sum().item()),
         "generated_opaque_texels": int(generated.sum().item()),
         "available_context_texels": int(
             (context_source & valid.view(1, -1) & (observed[..., 3] > 0.5))
@@ -438,7 +473,21 @@ def propagate_completed_unknown_colors(
             .sum()
             .item()
         ),
+        "context_alpha_rescue_eligible_texels": int(
+            alpha_rescue_eligible.sum().item()
+        ),
+        "context_alpha_restored_texels": int(alpha_restored.sum().item()),
         "direct_context_texels": int(direct_context.sum().item()),
+        "model_context_alpha_rejected_texels": int(
+            (
+                context_source
+                & valid.view(1, -1)
+                & (observed[..., 3] > 0.5)
+                & ~model_generated
+            )
+            .sum()
+            .item()
+        ),
         "context_alpha_rejected_texels": int(
             (
                 context_source
@@ -915,6 +964,27 @@ def build_arg_parser():
     )
     parser.add_argument("--rejected_context_confidence_threshold", type=float, default=0.35)
     parser.add_argument("--rejected_context_margin_threshold", type=float, default=0.10)
+    parser.add_argument(
+        "--inpaint_context_alpha_rescue",
+        dest="inpaint_context_alpha_rescue",
+        action="store_true",
+        default=True,
+        help=(
+            "Restore opacity only for rejected outer context backed by "
+            "part semantics or outer geometry."
+        ),
+    )
+    parser.add_argument(
+        "--no_inpaint_context_alpha_rescue",
+        dest="inpaint_context_alpha_rescue",
+        action="store_false",
+    )
+    parser.add_argument(
+        "--inpaint_context_alpha_min_confidence", type=float, default=0.50
+    )
+    parser.add_argument(
+        "--inpaint_context_alpha_min_margin", type=float, default=0.10
+    )
     parser.add_argument("--no_semantic_gate", dest="semantic_gate", action="store_false", default=None)
     parser.add_argument("--affine_refine", dest="affine_refine", action="store_true", default=None)
     parser.add_argument("--no_affine_refine", dest="affine_refine", action="store_false")
@@ -936,6 +1006,12 @@ def main():
         raise ValueError("--inpaint_palette_min_confidence must be in [0, 1].")
     if not 0.0 <= args.inpaint_context_min_confidence <= 1.0:
         raise ValueError("--inpaint_context_min_confidence must be in [0, 1].")
+    if not 0.0 <= args.inpaint_context_alpha_min_confidence <= 1.0:
+        raise ValueError(
+            "--inpaint_context_alpha_min_confidence must be in [0, 1]."
+        )
+    if not 0.0 <= args.inpaint_context_alpha_min_margin <= 1.0:
+        raise ValueError("--inpaint_context_alpha_min_margin must be in [0, 1].")
     if not 0.0 <= args.inpaint_evidence_lock_threshold <= 1.0:
         raise ValueError("--inpaint_evidence_lock_threshold must be in [0, 1].")
     if args.output and not args.inpaint_checkpoint:
@@ -1049,6 +1125,12 @@ def main():
             include_rejected_context=args.include_rejected_context,
             rejected_context_confidence_threshold=args.rejected_context_confidence_threshold,
             rejected_context_margin_threshold=args.rejected_context_margin_threshold,
+            rejected_context_alpha_confidence_threshold=(
+                args.inpaint_context_alpha_min_confidence
+            ),
+            rejected_context_alpha_margin_threshold=(
+                args.inpaint_context_alpha_min_margin
+            ),
             include_confidence=(
                 getattr(inpaint_model, "input_channels", 10) == 12
             ),
@@ -1098,6 +1180,12 @@ def main():
         rejected_context_count = int(
             routing.get("rejected_context", torch.zeros_like(raw_outer)).sum().item()
         )
+        rejected_context_alpha_supported_count = int(
+            routing.get(
+                "rejected_context_alpha_supported",
+                torch.zeros_like(raw_outer),
+            ).sum().item()
+        )
         outer_geometry_supported_rejected_count = int(
             (
                 routing.get("outer_geometry_supported", torch.zeros_like(raw_outer))
@@ -1139,6 +1227,9 @@ def main():
                     "outer_semantic_supported_pixels": outer_semantic_supported_count,
                     "outer_semantic_rescued_pixels": outer_semantic_rescued_count,
                     "rejected_context_pixels": rejected_context_count,
+                    "rejected_context_alpha_supported_pixels": (
+                        rejected_context_alpha_supported_count
+                    ),
                     "background_rejected_pixels": background_rejected_count,
                     "background_color_tolerance": round(
                         float(args.background_color_tolerance), 6
@@ -1251,6 +1342,13 @@ def main():
                     "palette_snap": args.inpaint_palette_snap,
                     "palette_min_confidence": args.inpaint_palette_min_confidence,
                     "context_min_confidence": args.inpaint_context_min_confidence,
+                    "context_alpha_rescue": args.inpaint_context_alpha_rescue,
+                    "context_alpha_min_confidence": (
+                        args.inpaint_context_alpha_min_confidence
+                    ),
+                    "context_alpha_min_margin": (
+                        args.inpaint_context_alpha_min_margin
+                    ),
                     "evidence_lock_threshold": args.inpaint_evidence_lock_threshold,
                 },
                 sort_keys=True,
@@ -1354,6 +1452,11 @@ def main():
                     conditioning,
                     min_confidence=args.inpaint_palette_min_confidence,
                     context_min_confidence=args.inpaint_context_min_confidence,
+                    context_alpha_rescue_mask=(
+                        routing_details.get("context_alpha_rescue_uv")
+                        if args.inpaint_context_alpha_rescue
+                        else None
+                    ),
                 )
                 completed = completed_batch[0]
                 print(
