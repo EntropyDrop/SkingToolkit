@@ -191,9 +191,11 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         self.assertEqual(parser_args.lambda_outer_false_positive, 1.50)
         self.assertEqual(parser_args.lambda_outer_false_negative, 0.40)
         self.assertEqual(parser_args.route_outer_class_weight_cap, 0.75)
-        self.assertEqual(parser_args.best_metric, "loss_hard_uv_selection")
+        self.assertEqual(parser_args.best_metric, "loss_hard_uv_color_selection")
+        self.assertEqual(parser_args.hard_rgb_selection_weight, 1.0)
         self.assertEqual(parser_args.route_confidence_threshold, 0.0)
         self.assertEqual(parser_args.route_margin_threshold, 0.0)
+        self.assertEqual(parser_args.background_color_tolerance, 0.25)
         self.assertEqual(parser_args.outer_route_confidence_threshold, 0.80)
         self.assertEqual(parser_args.outer_route_margin_threshold, 0.55)
         self.assertEqual(parser_args.outer_uv_min_coverage, 0.25)
@@ -410,6 +412,52 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         self.assertEqual(int(strict["routing"]["foreground"].sum()), 0)
         self.assertTrue(rescued["routing"]["outer_semantic_supported"][0, 0, 0])
         self.assertTrue(rescued["routing"]["outer_semantic_rescued"][0, 0, 0])
+        self.assertEqual(int(conditioning[:, 9:10].sum()), 1)
+
+    def test_learned_route_trust_uses_geometric_mean_not_product(self):
+        renderer = FakeRenderer(valid_pixels=1)
+        renderer.front_outer_mask.copy_(renderer.front_inner_mask)
+        rendered = torch.zeros(1, 4, 8, 8)
+        rendered[:, :3, 0, 0] = torch.tensor([0.7, 0.1, 0.1])
+        rendered[:, 3] = 1.0
+        probability = 0.85
+        logit = torch.log(torch.tensor(probability / (1.0 - probability)))
+        role_logits = torch.full((1, 3, 8, 8), -20.0)
+        role_logits[:, 0, 0, 0] = 0.0
+        role_logits[:, 1, 0, 0] = float(logit)
+        outputs = {
+            "foreground": torch.full((1, 1, 8, 8), 10.0),
+            "layer": role_logits,
+            "surface": torch.zeros(1, 2, 8, 8),
+            "route_confidence": torch.full((1, 1, 8, 8), float(logit)),
+            "affine": torch.zeros(1, 3),
+        }
+        observed = torch.zeros(1, 8, 8, dtype=torch.bool)
+        observed[:, 0, 0] = True
+
+        conditioning, details = splat_parser_predictions_to_uv_conditioning(
+            rendered,
+            outputs,
+            renderer=renderer,
+            views=["front"],
+            group_size=1,
+            affine_refine=False,
+            observed_foreground=observed,
+            outer_route_confidence_threshold=0.80,
+            outer_route_margin_threshold=0.55,
+            outer_uv_min_coverage=0.0,
+            outer_geometry_rescue=False,
+            outer_semantic_rescue=False,
+            geometry_route_texel_consensus=False,
+            return_details=True,
+        )
+
+        self.assertAlmostEqual(
+            float(details["routing"]["confidence"][0, 0, 0]),
+            probability,
+            places=5,
+        )
+        self.assertEqual(int(details["routing"]["foreground"].sum()), 1)
         self.assertEqual(int(conditioning[:, 9:10].sum()), 1)
 
     def test_rejected_outer_pixel_becomes_unlocked_completion_context(self):
@@ -978,6 +1026,10 @@ class GlobalAffineRoutingTest(unittest.TestCase):
                 "count_hard_outer_tp": torch.tensor(6.0),
                 "count_hard_outer_fp": torch.tensor(2.0),
                 "count_hard_outer_fn": torch.tensor(4.0),
+                "count_hard_inner_rgb_abs": torch.tensor(2.4),
+                "count_hard_inner_rgb_values": torch.tensor(24.0),
+                "count_hard_outer_rgb_abs": torch.tensor(3.6),
+                "count_hard_outer_rgb_values": torch.tensor(18.0),
             },
             count=10,
             inner_recall_weight=0.5,
@@ -1003,6 +1055,12 @@ class GlobalAffineRoutingTest(unittest.TestCase):
             + 0.75 * 0.25
             + 0.75 * 0.4
             + 0.5 * 0.5,
+        )
+        self.assertAlmostEqual(metrics["hard_rgb_mae_inner"], 0.1)
+        self.assertAlmostEqual(metrics["hard_rgb_mae_outer"], 0.2)
+        self.assertAlmostEqual(
+            metrics["loss_hard_uv_color_selection"],
+            metrics["loss_hard_uv_selection"] + 0.15,
         )
 
     def test_global_model_emits_surface_and_affine_losses(self):
@@ -1365,6 +1423,8 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         )
 
         self.assertIn("count_hard_inner_tp", metrics)
+        self.assertIn("count_hard_inner_rgb_abs", metrics)
+        self.assertIn("count_hard_outer_rgb_values", metrics)
 
     def test_color_canonicalization_uses_nearest_texels(self):
         height = width = 64

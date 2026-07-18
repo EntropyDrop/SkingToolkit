@@ -73,7 +73,7 @@ Training previews are saved under `runs/<run>/previews`:
 - `epoch_XXXX.png`: predicted inner/outer RGB rows, followed by GT inner/outer RGB rows.
 - `epoch_XXXX_debug.png`: semantic diagnostics plus fitted inner/outer grids and RGB-filled grid previews.
 
-For good parser splatting, watch `hard_iou_inner`, `hard_precision_outer`, `hard_recall_outer`, `hard_iou_outer`, `loss_soft_uv_inner_recall_hard`, `loss_soft_uv_outer_recall_hard`, `precision_secondary`, `recall_secondary`, `acc_route_role`, `confidence_mae`, `precision_trusted_route`, and `coverage_trusted_route`. Validation runs the same configured routing, confidence gates, and UV splat used by inference. `best.pt` defaults to the lowest precision-first `loss_hard_uv_selection`, defined as `0.5 * (1 - hard_iou_inner) + 1.5 * (1 - hard_precision_outer) + 0.5 * (1 - hard_recall_outer) + 0.5 * (1 - hard_iou_outer)`. These hard TP/FP/FN counts are accumulated over the complete validation set. The older soft-classification `loss_outer_selection` remains logged as a diagnostic, but it no longer chooses the production checkpoint because higher pixel accuracy can coexist with worse usable UV coverage.
+For good parser splatting, watch `hard_iou_inner`, `hard_precision_outer`, `hard_recall_outer`, `hard_iou_outer`, `hard_rgb_mae_inner`, `hard_rgb_mae_outer`, `loss_soft_uv_inner_recall_hard`, `loss_soft_uv_outer_recall_hard`, `precision_secondary`, `recall_secondary`, `acc_route_role`, `confidence_mae`, `precision_trusted_route`, and `coverage_trusted_route`. Validation runs the same configured routing, confidence gates, background rejection, and UV splat used by inference. `best.pt` defaults to the lowest `loss_hard_uv_color_selection`: the former hard inner/outer occupancy score plus mean hard inner/outer RGB MAE. This prevents a sparse or incorrectly colored atlas from winning checkpoint selection merely because its occupancy precision is high. Hard counts and color errors are accumulated over the complete validation set. The occupancy-only `loss_hard_uv_selection` and older soft-classification `loss_outer_selection` remain logged as diagnostics.
 
 Route-role training uses complementary focal terms. The false-positive term penalizes high-confidence outer predictions on GT inner/secondary pixels, while the false-negative term penalizes visible GT outer pixels that receive too little outer probability. The abundant inner class has a minimum balanced weight of `0.75`, while automatic balancing cannot raise the outer target class above `0.75`. Defaults deliberately prefer outer precision: uncertain outer pixels become topology-completion holes instead of permanently moving inner colors onto the outer layer.
 
@@ -122,12 +122,16 @@ Routing is geometry-anchored and semantics-conditioned. The route-role head uses
 local pixels, the configured view identity, and fused front/back SigLIP2 context
 to decide whether a region is inner, outer, or secondary; fixed cuboids still own
 body-part, face, and UV coordinates. Exact-surface logits disambiguate deeper
-renderer slots. Projected-texel voting and outer footprint rejection remain off
-by default because imperfect generated silhouettes need semantic tolerance. For
+renderer slots. Projected-texel voting and conservative outer footprint
+rejection are enabled for production-aligned validation. For
 each layer/UV texel, color aggregation selects a real source color and never
 averages colors.
 
-The learned route-confidence head multiplies the ordinary route score. New
+The learned route-confidence head is fused with the ordinary route score by a
+geometric mean. The trust target already represents route correctness, so this
+avoids double-penalizing correct routes by multiplying two correlated
+probabilities. Secondary routes use the geometric mean of role, surface, and
+learned trust. New
 topology checkpoints receive a 12-channel tensor:
 
 ```text
@@ -236,12 +240,13 @@ different surface. Tune
 `REJECTED_CONTEXT=false`.
 
 When the topology model predicts a referenced outer texel transparent,
-`INPAINT_CONTEXT_ALPHA_RESCUE=true` restores its opacity only if the rejected
+`INPAINT_CONTEXT_ALPHA_RESCUE=true` can restore its opacity only if the rejected
 pixel is backed by part-level outer semantics or outer-only geometry. The
 additional local gates default to confidence `0.50` and margin `0.10`; tune them
 with `INPAINT_CONTEXT_ALPHA_MIN_CONFIDENCE` and
-`INPAINT_CONTEXT_ALPHA_MIN_MARGIN`. This preserves supported visible outer
-detail without turning every rejected inner/outer ambiguity into opaque decor.
+`INPAINT_CONTEXT_ALPHA_MIN_MARGIN`. This experimental path is disabled by
+default because part-level support is not sufficient to prove the layer of an
+individual ambiguous pixel.
 
 Topology inference enables `INPAINT_PALETTE_SNAP=true` and locks all routed
 parser evidence (`INPAINT_EVIDENCE_LOCK_THRESHOLD=0`) by default. Generated RGB

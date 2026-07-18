@@ -968,7 +968,7 @@ def build_arg_parser():
         "--inpaint_context_alpha_rescue",
         dest="inpaint_context_alpha_rescue",
         action="store_true",
-        default=True,
+        default=False,
         help=(
             "Restore opacity only for rejected outer context backed by "
             "part semantics or outer geometry."
@@ -1148,6 +1148,15 @@ def main():
         raw_outer = routing["raw_foreground"] & (routing["layer"] == 1)
         rejected_inner = routing["rejected"] & (routing["layer"] == 0)
         rejected_outer = routing["rejected"] & (routing["layer"] == 1)
+        outer_confidence = routing["confidence"][raw_outer].float()
+        outer_margin_ratio = routing["confidence_margin_ratio"][raw_outer].float()
+
+        def quantile_or_zero(values, quantile):
+            return (
+                float(torch.quantile(values, quantile).item())
+                if values.numel() > 0
+                else 0.0
+            )
         coverage_rejected_outer = raw_outer & (
             routing.get("outer_uv_coverage", torch.ones_like(routing["confidence"]))
             < routing.get(
@@ -1219,6 +1228,21 @@ def main():
                     "outer_rejected_percent": round(
                         100.0 * int(rejected_outer.sum().item()) / max(int(raw_outer.sum().item()), 1),
                         3,
+                    ),
+                    "outer_confidence_p50": round(
+                        quantile_or_zero(outer_confidence, 0.50), 6
+                    ),
+                    "outer_confidence_p75": round(
+                        quantile_or_zero(outer_confidence, 0.75), 6
+                    ),
+                    "outer_confidence_p90": round(
+                        quantile_or_zero(outer_confidence, 0.90), 6
+                    ),
+                    "outer_margin_p50": round(
+                        quantile_or_zero(outer_margin_ratio, 0.50), 6
+                    ),
+                    "outer_margin_p75": round(
+                        quantile_or_zero(outer_margin_ratio, 0.75), 6
                     ),
                     "outer_coverage_rejected_pixels": int(coverage_rejected_outer.sum().item()),
                     "outer_geometry_supported_pixels": outer_geometry_supported_count,

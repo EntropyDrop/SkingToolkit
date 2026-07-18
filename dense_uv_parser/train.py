@@ -114,6 +114,7 @@ def format_metrics(
     outer_precision_weight=0.75,
     outer_recall_weight=0.75,
     outer_iou_weight=0.5,
+    hard_rgb_selection_weight=1.0,
 ):
     result = {}
     for name, value in metric_sums.items():
@@ -144,6 +145,13 @@ def format_metrics(
                 result[f"{family}iou_{role_name}"] = role_tp / max(
                     role_tp + role_fp + role_fn, 1.0
                 )
+                rgb_abs_name = f"count_{family}{role_name}_rgb_abs"
+                rgb_values_name = f"count_{family}{role_name}_rgb_values"
+                if rgb_abs_name in result and rgb_values_name in result:
+                    result[f"{family}rgb_mae_{role_name}"] = (
+                        result[rgb_abs_name]
+                        / max(result[rgb_values_name], 1.0)
+                    )
 
     if "recall_outer" in result:
         if "loss_geometry" in result:
@@ -161,6 +169,16 @@ def format_metrics(
             + outer_recall_weight * (1.0 - result["hard_recall_outer"])
             + outer_iou_weight * (1.0 - result["hard_iou_outer"])
         )
+        if "hard_rgb_mae_inner" in result and "hard_rgb_mae_outer" in result:
+            result["loss_hard_uv_color_selection"] = (
+                result["loss_hard_uv_selection"]
+                + hard_rgb_selection_weight
+                * 0.5
+                * (
+                    result["hard_rgb_mae_inner"]
+                    + result["hard_rgb_mae_outer"]
+                )
+            )
     return result
 
 
@@ -482,6 +500,7 @@ def hard_uv_conditioning_metrics(
                 args, "geometry_route_texel_consensus", False
             ),
             observed_foreground=None,
+            background_color_tolerance=args.background_color_tolerance,
             reject_semantic_fallback=not args.allow_semantic_fallback,
         )
         expected = splat_deterministic_targets_to_uv_conditioning(
@@ -508,18 +527,30 @@ def hard_uv_conditioning_metrics(
         )
 
     metrics = {}
-    for role_name, known_channel in (("inner", 4), ("outer", 9)):
+    for role_name, rgba_start, known_channel in (
+        ("inner", 0, 4),
+        ("outer", 5, 9),
+    ):
         predicted_known = predicted[:, known_channel] > 0.5
         expected_known = expected[:, known_channel] > 0.5
-        metrics[f"count_hard_{role_name}_tp"] = (
-            predicted_known & expected_known
-        ).sum().float()
+        matched = predicted_known & expected_known
+        metrics[f"count_hard_{role_name}_tp"] = matched.sum().float()
         metrics[f"count_hard_{role_name}_fp"] = (
             predicted_known & ~expected_known
         ).sum().float()
         metrics[f"count_hard_{role_name}_fn"] = (
             ~predicted_known & expected_known
         ).sum().float()
+        rgb_error = (
+            predicted[:, rgba_start : rgba_start + 3]
+            - expected[:, rgba_start : rgba_start + 3]
+        ).abs()
+        metrics[f"count_hard_{role_name}_rgb_abs"] = (
+            rgb_error * matched.unsqueeze(1)
+        ).sum().float()
+        metrics[f"count_hard_{role_name}_rgb_values"] = (
+            matched.sum().float() * 3.0
+        )
     return metrics
 
 
@@ -705,6 +736,7 @@ def run_epoch(
                 outer_precision_weight=args.outer_selection_precision_weight,
                 outer_recall_weight=args.outer_selection_recall_weight,
                 outer_iou_weight=args.outer_selection_iou_weight,
+                hard_rgb_selection_weight=args.hard_rgb_selection_weight,
             )
             postfix = {
                 "total": f"{avg['loss_total']:.4f}",
@@ -733,6 +765,7 @@ def run_epoch(
         outer_precision_weight=args.outer_selection_precision_weight,
         outer_recall_weight=args.outer_selection_recall_weight,
         outer_iou_weight=args.outer_selection_iou_weight,
+        hard_rgb_selection_weight=args.hard_rgb_selection_weight,
     )
 
 
@@ -1093,6 +1126,9 @@ def build_arg_parser():
     parser.add_argument("--affine_refine_scale", type=float, default=0.0)
     parser.add_argument("--route_confidence_threshold", type=float, default=0.0)
     parser.add_argument("--route_margin_threshold", type=float, default=0.0)
+    parser.add_argument(
+        "--background_color_tolerance", type=float, default=0.25
+    )
     parser.add_argument("--outer_route_confidence_threshold", type=float, default=0.80)
     parser.add_argument("--outer_route_margin_threshold", type=float, default=0.55)
     parser.add_argument("--outer_uv_min_coverage", type=float, default=0.25)
@@ -1169,6 +1205,7 @@ def build_arg_parser():
     parser.add_argument("--outer_selection_recall_weight", type=float, default=0.50)
     parser.add_argument("--outer_selection_iou_weight", type=float, default=0.5)
     parser.add_argument("--inner_selection_recall_weight", type=float, default=0.5)
+    parser.add_argument("--hard_rgb_selection_weight", type=float, default=1.0)
     parser.add_argument(
         "--render_softmax_temperature",
         type=float,
@@ -1192,8 +1229,9 @@ def build_arg_parser():
             "loss_differentiable",
             "loss_outer_selection",
             "loss_hard_uv_selection",
+            "loss_hard_uv_color_selection",
         ],
-        default="loss_hard_uv_selection",
+        default="loss_hard_uv_color_selection",
     )
     return parser
 
@@ -1215,6 +1253,10 @@ def main():
     )
     if any(weight < 0 for weight in differentiable_weights):
         raise ValueError("Differentiable parser loss weights must be non-negative.")
+    if args.hard_rgb_selection_weight < 0:
+        raise ValueError("--hard_rgb_selection_weight must be non-negative.")
+    if not 0.0 <= args.background_color_tolerance <= 1.0:
+        raise ValueError("--background_color_tolerance must be in [0, 1].")
     if args.lr <= 0:
         raise ValueError("--lr must be positive.")
     if not 0.0 <= args.min_lr_ratio <= 1.0:
@@ -1523,6 +1565,7 @@ def main():
         "background_augment_prob": args.background_augment_prob,
         "semantic_gate": args.semantic_gate,
         "geometry_route_texel_consensus": args.geometry_route_texel_consensus,
+        "background_color_tolerance": args.background_color_tolerance,
         "affine_refine": args.affine_refine,
         "affine_refine_translation_px": args.affine_refine_translation_px,
         "affine_refine_scale": args.affine_refine_scale,
@@ -1547,6 +1590,7 @@ def main():
         "outer_selection_recall_weight": args.outer_selection_recall_weight,
         "outer_selection_iou_weight": args.outer_selection_iou_weight,
         "inner_selection_recall_weight": args.inner_selection_recall_weight,
+        "hard_rgb_selection_weight": args.hard_rgb_selection_weight,
         "render_softmax_temperature": args.render_softmax_temperature,
     }
     with open(output_dir / "config.json", "w", encoding="utf-8") as handle:
@@ -1575,7 +1619,9 @@ def main():
             args,
             train=True,
             compute_hard_metrics=(
-                val_loader is None and args.best_metric == "loss_hard_uv_selection"
+                val_loader is None
+                and args.best_metric
+                in ("loss_hard_uv_selection", "loss_hard_uv_color_selection")
             ),
             semantic_cache=semantic_cache,
             semantic_masks=semantic_masks,

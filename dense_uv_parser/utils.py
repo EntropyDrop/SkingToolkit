@@ -1306,14 +1306,35 @@ def _routing_from_geometry_surface_outputs(
         role_margin_ratio = (
             role_margin / selected_role_score.clamp_min(1e-8)
         ).clamp(0.0, 1.0)
+        selected_surface_score = best_surface_score.clamp_min(0.0)
         selected_confidence = torch.where(
             selected_secondary,
-            (selected_role_score * best_surface_score.clamp_min(0.0)).sqrt(),
+            (selected_role_score * selected_surface_score).sqrt(),
             selected_role_score,
         )
         if "route_confidence" in outputs:
-            selected_confidence = selected_confidence * torch.sigmoid(
+            # The learned trust target already says whether the argmax route is
+            # correct (and includes surface correctness for secondary routes).
+            # Multiplying it by the class probability counts the same
+            # uncertainty twice and makes a 0.80 outer gate nearly
+            # unreachable.  A geometric mean keeps both signals necessary
+            # without systematically collapsing otherwise well-calibrated
+            # confidence.
+            learned_trust = torch.sigmoid(
                 outputs["route_confidence"][selection, 0].float()
+            )
+            primary_confidence = (
+                selected_role_score * learned_trust
+            ).clamp_min(0.0).sqrt()
+            secondary_confidence = (
+                selected_role_score
+                * selected_surface_score
+                * learned_trust
+            ).clamp_min(0.0).pow(1.0 / 3.0)
+            selected_confidence = torch.where(
+                selected_secondary,
+                secondary_confidence,
+                primary_confidence,
             )
         selected_margin = torch.where(
             selected_secondary,
