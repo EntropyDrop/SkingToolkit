@@ -202,6 +202,7 @@ def generate_topology_completion(
     seed,
     palette_snap=True,
     palette_min_confidence=0.5,
+    context_min_confidence=None,
     rgb_decode="mean",
 ):
     """Call new and legacy topology generators without source-version crashes."""
@@ -217,6 +218,8 @@ def generate_topology_completion(
             palette_snap=palette_snap,
             palette_min_confidence=palette_min_confidence,
         )
+        if "context_min_confidence" in parameters:
+            kwargs["context_min_confidence"] = context_min_confidence
     elif palette_snap:
         print(
             "inpaint_warning="
@@ -278,10 +281,19 @@ def lock_completed_parser_evidence(completed, conditioning, confidence_threshold
     }
 
 
-def propagate_completed_unknown_colors(completed, conditioning, min_confidence=0.75):
+def propagate_completed_unknown_colors(
+    completed,
+    conditioning,
+    min_confidence=0.75,
+    context_min_confidence=None,
+):
     """Replace generated opaque RGB with stable nearby parser-observed colors."""
     if not 0.0 <= min_confidence <= 1.0:
         raise ValueError("min_confidence must be in [0, 1].")
+    if context_min_confidence is None:
+        context_min_confidence = min_confidence
+    if not 0.0 <= context_min_confidence <= 1.0:
+        raise ValueError("context_min_confidence must be in [0, 1].")
     if completed.dim() != 4 or completed.shape[1:] != (4, 64, 64):
         raise ValueError(f"Expected completed Bx4x64x64 UV, got {tuple(completed.shape)}.")
     if conditioning.dim() != 4 or conditioning.shape[1] not in (10, 12):
@@ -313,10 +325,19 @@ def propagate_completed_unknown_colors(completed, conditioning, min_confidence=0
     else:
         confidence = evidence.to(dtype=completed.dtype)
 
-    context_source = (~evidence) & (confidence >= float(min_confidence))
+    # Rejected-but-plausible pixels need a lower threshold when copied back at
+    # their exact UV coordinate.  Keep them out of the shared propagation
+    # palette unless they also pass the stricter palette threshold, otherwise
+    # one uncertain pixel can recolor unrelated generated texels.
+    context_source = (~evidence) & (
+        confidence >= float(context_min_confidence)
+    )
+    palette_context_source = context_source & (
+        confidence >= float(min_confidence)
+    )
     result = completed.flatten(2).transpose(1, 2).clone()
     generated = (~evidence) & valid.view(1, -1) & (result[..., 3] > 0.5)
-    opaque_source = (evidence | context_source) & (observed[..., 3] > 0.5)
+    opaque_source = (evidence | palette_context_source) & (observed[..., 3] > 0.5)
     strong_source = opaque_source & (confidence >= float(min_confidence))
     direct_context = context_source & generated & (observed[..., 3] > 0.5)
     result[..., :3] = torch.where(
@@ -340,7 +361,7 @@ def propagate_completed_unknown_colors(completed, conditioning, min_confidence=0
         stable = counts[inverse] >= 2
         return (indices[stable] if stable.any() else None), indices
 
-    recolored = int(direct_context.sum().item())
+    recolored = 0
     for batch_index in range(result.shape[0]):
         strong = strong_source[batch_index]
         fallback = opaque_source[batch_index]
@@ -403,9 +424,37 @@ def propagate_completed_unknown_colors(completed, conditioning, min_confidence=0
     result = result.transpose(1, 2).reshape_as(completed)
     return result, {
         "generated_opaque_texels": int(generated.sum().item()),
+        "available_context_texels": int(
+            (context_source & valid.view(1, -1) & (observed[..., 3] > 0.5))
+            .sum()
+            .item()
+        ),
+        "palette_context_texels": int(
+            (
+                palette_context_source
+                & valid.view(1, -1)
+                & (observed[..., 3] > 0.5)
+            )
+            .sum()
+            .item()
+        ),
         "direct_context_texels": int(direct_context.sum().item()),
+        "context_alpha_rejected_texels": int(
+            (
+                context_source
+                & valid.view(1, -1)
+                & (observed[..., 3] > 0.5)
+                & ~generated
+            )
+            .sum()
+            .item()
+        ),
         "topology_color_propagated_texels": recolored,
-        "uncolored_generated_texels": int(generated.sum().item()) - recolored,
+        "uncolored_generated_texels": (
+            int(generated.sum().item())
+            - int(direct_context.sum().item())
+            - recolored
+        ),
     }
 
 
@@ -731,6 +780,15 @@ def build_arg_parser():
     )
     parser.add_argument("--inpaint_palette_min_confidence", type=float, default=0.5)
     parser.add_argument(
+        "--inpaint_context_min_confidence",
+        type=float,
+        default=0.35,
+        help=(
+            "Minimum confidence for copying rejected context at the same UV texel. "
+            "This does not lower the shared palette threshold."
+        ),
+    )
+    parser.add_argument(
         "--inpaint_evidence_lock_threshold",
         type=float,
         default=0.0,
@@ -876,6 +934,8 @@ def main():
         raise ValueError("--background_color_tolerance must be in [0, 1].")
     if not 0.0 <= args.inpaint_palette_min_confidence <= 1.0:
         raise ValueError("--inpaint_palette_min_confidence must be in [0, 1].")
+    if not 0.0 <= args.inpaint_context_min_confidence <= 1.0:
+        raise ValueError("--inpaint_context_min_confidence must be in [0, 1].")
     if not 0.0 <= args.inpaint_evidence_lock_threshold <= 1.0:
         raise ValueError("--inpaint_evidence_lock_threshold must be in [0, 1].")
     if args.output and not args.inpaint_checkpoint:
@@ -1190,6 +1250,7 @@ def main():
                     "rgb_decode": args.inpaint_rgb_decode,
                     "palette_snap": args.inpaint_palette_snap,
                     "palette_min_confidence": args.inpaint_palette_min_confidence,
+                    "context_min_confidence": args.inpaint_context_min_confidence,
                     "evidence_lock_threshold": args.inpaint_evidence_lock_threshold,
                 },
                 sort_keys=True,
@@ -1283,6 +1344,7 @@ def main():
                     # and legacy generator signatures.
                     palette_snap=False,
                     palette_min_confidence=args.inpaint_palette_min_confidence,
+                    context_min_confidence=args.inpaint_context_min_confidence,
                 )[0]
             else:
                 completed = inpaint_model(conditioning)[0]
@@ -1291,6 +1353,7 @@ def main():
                     completed.unsqueeze(0),
                     conditioning,
                     min_confidence=args.inpaint_palette_min_confidence,
+                    context_min_confidence=args.inpaint_context_min_confidence,
                 )
                 completed = completed_batch[0]
                 print(

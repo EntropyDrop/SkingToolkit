@@ -226,8 +226,11 @@ meaningful outer coverage for that body part. Tune
 Moderately confident pixels rejected by the strict output filter are retained
 as unlocked topology context (`REJECTED_CONTEXT=true`). They do not appear in
 `parser_pred_uv.png` and are never restored by the parser evidence lock. Context
-at or above `INPAINT_PALETTE_MIN_CONFIDENCE` anchors RGB at its exact UV texel;
-weaker context only conditions the generator. Tune
+at or above `INPAINT_CONTEXT_MIN_CONFIDENCE` (default `0.35`) anchors RGB at its
+exact UV texel when completion predicts that texel opaque. It does not enter the
+shared color palette unless it also passes the stricter
+`INPAINT_PALETTE_MIN_CONFIDENCE`, so uncertain local detail cannot recolor a
+different surface. Tune
 `REJECTED_CONTEXT_CONFIDENCE_THRESHOLD` and
 `REJECTED_CONTEXT_MARGIN_THRESHOLD`, or disable this path with
 `REJECTED_CONTEXT=false`.

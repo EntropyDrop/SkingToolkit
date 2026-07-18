@@ -212,7 +212,9 @@ reapplies locked parser RGBA after generation, including for legacy checkpoints.
 Repeated observed colors are preferred so one isolated parser outlier cannot
 spread across an unknown surface.
 Use `INPAINT_PALETTE_SNAP=false` to disable topology color propagation,
-`INPAINT_PALETTE_MIN_CONFIDENCE` to select reference evidence, or
+`INPAINT_PALETTE_MIN_CONFIDENCE` to select shared palette evidence,
+`INPAINT_CONTEXT_MIN_CONFIDENCE` to copy unlocked context only at its matching
+UV coordinate, or
 `INPAINT_EVIDENCE_LOCK_THRESHOLD` to deliberately permit low-confidence repair.
 
 ## Semantic Fixed-View UV Reconstruction

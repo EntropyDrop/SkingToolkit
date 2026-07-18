@@ -20,6 +20,42 @@ from SkingToolkit.semantic_uv_reconstruction.train import Logger
 
 
 class InpaintCheckpointCompatibilityTest(unittest.TestCase):
+    def test_low_confidence_context_is_copied_only_at_the_same_uv(self):
+        topology = build_uv_topology()
+        indices = (topology.surface.reshape(-1) == 0).nonzero(
+            as_tuple=False
+        ).flatten()[:2]
+        context_y, context_x = divmod(int(indices[0]), 64)
+        other_y, other_x = divmod(int(indices[1]), 64)
+        context_color = torch.tensor([0.55, 0.08, 0.12, 1.0])
+        generated_color = torch.tensor([0.0, 1.0, 1.0, 1.0])
+        conditioning = torch.zeros(1, 12, 64, 64)
+        conditioning[0, 0:4, context_y, context_x] = context_color
+        conditioning[0, 4, context_y, context_x] = 0.0
+        conditioning[0, 5, context_y, context_x] = 0.4
+        completed = torch.zeros(1, 4, 64, 64)
+        completed[0, :, context_y, context_x] = generated_color
+        completed[0, :, other_y, other_x] = generated_color
+
+        propagated, stats = propagate_completed_unknown_colors(
+            completed,
+            conditioning,
+            min_confidence=0.75,
+            context_min_confidence=0.35,
+        )
+
+        self.assertTrue(
+            torch.equal(propagated[0, :, context_y, context_x], context_color)
+        )
+        self.assertTrue(
+            torch.equal(propagated[0, :, other_y, other_x], generated_color)
+        )
+        self.assertEqual(stats["available_context_texels"], 1)
+        self.assertEqual(stats["palette_context_texels"], 0)
+        self.assertEqual(stats["direct_context_texels"], 1)
+        self.assertEqual(stats["topology_color_propagated_texels"], 0)
+        self.assertEqual(stats["uncolored_generated_texels"], 1)
+
     def test_rejected_context_guides_color_without_becoming_locked_evidence(self):
         topology = build_uv_topology()
         indices = (topology.surface.reshape(-1) == 0).nonzero(

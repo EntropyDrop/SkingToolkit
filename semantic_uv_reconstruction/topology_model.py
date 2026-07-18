@@ -558,6 +558,7 @@ class TopologyAwareUVCompletionNet(nn.Module):
         reference_confidence,
         generated,
         min_confidence=0.5,
+        context_min_confidence=None,
     ):
         """Project generated RGB onto observed topology-aware color triplets.
 
@@ -571,15 +572,25 @@ class TopologyAwareUVCompletionNet(nn.Module):
         """
         if not 0.0 <= min_confidence <= 1.0:
             raise ValueError("palette min_confidence must be in [0, 1].")
+        if context_min_confidence is None:
+            context_min_confidence = min_confidence
+        if not 0.0 <= context_min_confidence <= 1.0:
+            raise ValueError("context min_confidence must be in [0, 1].")
         snapped = result.clone()
         valid = self.valid_tokens[:, 0].bool().view(1, -1)
         opaque_reference = reference_observed[..., 3] > 0.5
         evidence_reference = reference_evidence[..., 0] > 0.5
         context_reference = (
             ~evidence_reference
-            & (reference_confidence[..., 0] >= float(min_confidence))
+            & (
+                reference_confidence[..., 0]
+                >= float(context_min_confidence)
+            )
         )
-        available_reference = evidence_reference | context_reference
+        palette_context_reference = context_reference & (
+            reference_confidence[..., 0] >= float(min_confidence)
+        )
+        available_reference = evidence_reference | palette_context_reference
         strong_reference = (
             available_reference
             & (reference_confidence[..., 0] >= float(min_confidence))
@@ -686,6 +697,7 @@ class TopologyAwareUVCompletionNet(nn.Module):
         seed=1234,
         palette_snap=False,
         palette_min_confidence=0.5,
+        context_min_confidence=None,
         rgb_decode="mean",
     ):
         if steps < 1:
@@ -778,6 +790,7 @@ class TopologyAwareUVCompletionNet(nn.Module):
                 original_confidence,
                 initial_unknown,
                 min_confidence=palette_min_confidence,
+                context_min_confidence=context_min_confidence,
             )
         return result.transpose(1, 2).reshape(-1, 4, UV_SIZE, UV_SIZE)
 
