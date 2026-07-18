@@ -147,7 +147,26 @@ if [[ ! -f "$PARSER_CHECKPOINT" ]]; then
   exit 1
 fi
 
+FOREGROUND_RUNS_DIR="${FOREGROUND_RUNS_DIR:-../fixed_view_foreground/runs}"
+FOREGROUND_RUN_PREFIX="${FOREGROUND_RUN_PREFIX:-fixed_view_foreground_v}"
+FOREGROUND_CHECKPOINT_NAME="${FOREGROUND_CHECKPOINT_NAME:-best.pt}"
+FOREGROUND_CHECKPOINT="${FOREGROUND_CHECKPOINT:-auto}"
+if [[ "$FOREGROUND_CHECKPOINT" == "auto" || "$FOREGROUND_CHECKPOINT" == "latest" ]]; then
+  FOREGROUND_CHECKPOINT="$(find_latest_checkpoint "$FOREGROUND_RUNS_DIR" "$FOREGROUND_RUN_PREFIX" "$FOREGROUND_CHECKPOINT_NAME")"
+fi
+if [[ "$FOREGROUND_CHECKPOINT" == "none" || "$FOREGROUND_CHECKPOINT" == "off" ]]; then
+  FOREGROUND_CHECKPOINT=""
+elif [[ -n "$FOREGROUND_CHECKPOINT" && ! -f "$FOREGROUND_CHECKPOINT" ]]; then
+  echo "Foreground checkpoint not found: $FOREGROUND_CHECKPOINT" >&2
+  exit 1
+fi
+
 echo "Using parser checkpoint: $PARSER_CHECKPOINT"
+if [[ -n "$FOREGROUND_CHECKPOINT" ]]; then
+  echo "Using foreground checkpoint: $FOREGROUND_CHECKPOINT"
+else
+  echo "No foreground checkpoint found; using color-based background fallback."
+fi
 if [[ -n "$INPAINT_CHECKPOINT" ]]; then
   echo "Using inpaint checkpoint: $INPAINT_CHECKPOINT"
 else
@@ -184,6 +203,9 @@ GEOMETRY_GRID_OUTPUT="${GEOMETRY_GRID_OUTPUT-outputs/parser_debug_geometry_grid.
 GEOMETRY_OVERLAY_OUTPUT="${GEOMETRY_OVERLAY_OUTPUT-outputs/parser_debug_geometry_overlay.png}"
 GEOMETRY_ROUTED_OVERLAY_OUTPUT="${GEOMETRY_ROUTED_OVERLAY_OUTPUT-outputs/parser_debug_geometry_routed_overlay.png}"
 GEOMETRY_FILL_OUTPUT="${GEOMETRY_FILL_OUTPUT-outputs/parser_debug_geometry_fill.png}"
+FOREGROUND_PROBABILITY_OUTPUT="${FOREGROUND_PROBABILITY_OUTPUT-outputs/foreground_probability.png}"
+FOREGROUND_MASK_OUTPUT="${FOREGROUND_MASK_OUTPUT-outputs/foreground_mask.png}"
+FOREGROUND_CUTOUT_OUTPUT="${FOREGROUND_CUTOUT_OUTPUT-outputs/foreground_cutout.png}"
 
 COMBINED="${COMBINED:-}"
 VIEW_IMAGES="${VIEW_IMAGES:-}"
@@ -223,6 +245,7 @@ case "$ROUTING_PROFILE" in
     ;;
 esac
 FG_THRESHOLD="${FG_THRESHOLD:-0.5}"
+FOREGROUND_THRESHOLD="${FOREGROUND_THRESHOLD:-0.5}"
 BACKGROUND_COLOR_TOLERANCE="${BACKGROUND_COLOR_TOLERANCE:-$DEFAULT_BACKGROUND_COLOR_TOLERANCE}"
 ROUTE_CONFIDENCE_THRESHOLD="${ROUTE_CONFIDENCE_THRESHOLD:-$DEFAULT_ROUTE_CONFIDENCE_THRESHOLD}"
 ROUTE_MARGIN_THRESHOLD="${ROUTE_MARGIN_THRESHOLD:-$DEFAULT_ROUTE_MARGIN_THRESHOLD}"
@@ -270,6 +293,8 @@ fi
 args=(
   infer.py
   --parser_checkpoint "$PARSER_CHECKPOINT"
+  --foreground_checkpoint "${FOREGROUND_CHECKPOINT:-none}"
+  --foreground_threshold "$FOREGROUND_THRESHOLD"
   --fg_threshold "$FG_THRESHOLD"
   --background_color_tolerance "$BACKGROUND_COLOR_TOLERANCE"
   --route_confidence_threshold "$ROUTE_CONFIDENCE_THRESHOLD"
@@ -299,6 +324,16 @@ args=(
   --inpaint_evidence_lock_threshold "$INPAINT_EVIDENCE_LOCK_THRESHOLD"
   --device "$DEVICE"
 )
+
+if [[ -n "$FOREGROUND_PROBABILITY_OUTPUT" ]]; then
+  args+=(--foreground_probability_output "$FOREGROUND_PROBABILITY_OUTPUT")
+fi
+if [[ -n "$FOREGROUND_MASK_OUTPUT" ]]; then
+  args+=(--foreground_mask_output "$FOREGROUND_MASK_OUTPUT")
+fi
+if [[ -n "$FOREGROUND_CUTOUT_OUTPUT" ]]; then
+  args+=(--foreground_cutout_output "$FOREGROUND_CUTOUT_OUTPUT")
+fi
 
 if [[ "$INPAINT_PALETTE_SNAP" == "true" ]]; then
   args+=(--inpaint_palette_snap)
@@ -442,6 +477,18 @@ if [[ "$NO_ENFORCE_BASE_ALPHA" == "true" ]]; then
 fi
 
 echo "Parser checkpoint: $PARSER_CHECKPOINT"
+if [[ -n "$FOREGROUND_CHECKPOINT" ]]; then
+  echo "Foreground checkpoint: $FOREGROUND_CHECKPOINT"
+  if [[ -n "$FOREGROUND_PROBABILITY_OUTPUT" ]]; then
+    echo "Foreground probability output: $FOREGROUND_PROBABILITY_OUTPUT"
+  fi
+  if [[ -n "$FOREGROUND_MASK_OUTPUT" ]]; then
+    echo "Foreground mask output: $FOREGROUND_MASK_OUTPUT"
+  fi
+  if [[ -n "$FOREGROUND_CUTOUT_OUTPUT" ]]; then
+    echo "Foreground cutout output: $FOREGROUND_CUTOUT_OUTPUT"
+  fi
+fi
 if [[ -n "$INPAINT_CHECKPOINT" ]]; then
   echo "Inpaint checkpoint: $INPAINT_CHECKPOINT"
 fi

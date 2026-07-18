@@ -40,6 +40,12 @@ from SkingToolkit.dense_uv_parser.utils import (  # noqa: E402
     splat_parser_predictions_to_uv_conditioning,
     surface_class_count,
 )
+from SkingToolkit.fixed_view_foreground.inference import (  # noqa: E402
+    find_latest_checkpoint as find_latest_foreground_checkpoint,
+    load_foreground_model,
+    predict_foreground,
+    save_foreground_outputs,
+)
 from SkingToolkit.semantic_uv_reconstruction.dataset import finalize_minecraft_alpha, tensor_to_rgba_image, view_native_size  # noqa: E402
 from SkingToolkit.semantic_uv_reconstruction.model import UVInpaintingNet  # noqa: E402
 from SkingToolkit.semantic_uv_reconstruction.topology_model import TopologyAwareUVCompletionNet  # noqa: E402
@@ -810,6 +816,30 @@ def save_debug_preview(
 def build_arg_parser():
     parser = argparse.ArgumentParser(description="Infer UV conditioning with a dense UV parser.")
     parser.add_argument("--parser_checkpoint", required=True)
+    parser.add_argument(
+        "--foreground_checkpoint",
+        default="auto",
+        help=(
+            "Fixed-view foreground checkpoint. 'auto' selects the latest "
+            "fixed_view_foreground_v*/best.pt; 'none' uses color-based fallback."
+        ),
+    )
+    parser.add_argument("--foreground_threshold", type=float, default=0.5)
+    parser.add_argument(
+        "--foreground_probability_output",
+        default="outputs/foreground_probability.png",
+        help="Grayscale foreground probability produced before dense parsing.",
+    )
+    parser.add_argument(
+        "--foreground_mask_output",
+        default="outputs/foreground_mask.png",
+        help="Thresholded fixed-view foreground mask used by dense parsing.",
+    )
+    parser.add_argument(
+        "--foreground_cutout_output",
+        default="outputs/foreground_cutout.png",
+        help="Input views with the predicted background removed.",
+    )
     parser.add_argument("--inpaint_checkpoint", default=None, help="Optional semantic_uv_reconstruction checkpoint used to inpaint final skin.")
     parser.add_argument("--inpaint_steps", type=int, default=4, help="Masked-generation steps for topology checkpoints.")
     parser.add_argument("--inpaint_temperature", type=float, default=0.0, help="0 uses deterministic decoding; positive values sample unknown texels.")
@@ -1007,6 +1037,8 @@ def main():
         raise ValueError("Inpaint generation requires positive steps and non-negative temperature.")
     if not 0.0 <= args.background_color_tolerance <= 1.0:
         raise ValueError("--background_color_tolerance must be in [0, 1].")
+    if not 0.0 <= args.foreground_threshold <= 1.0:
+        raise ValueError("--foreground_threshold must be in [0, 1].")
     if not 0.0 <= args.inpaint_palette_min_confidence <= 1.0:
         raise ValueError("--inpaint_palette_min_confidence must be in [0, 1].")
     if not 0.0 <= args.inpaint_context_min_confidence <= 1.0:
@@ -1057,6 +1089,45 @@ def main():
         raise ValueError(
             f"Parser checkpoint expects {parser_model.view_classes} views, but its metadata lists {len(views)}: {views}"
         )
+    foreground_model = None
+    foreground_checkpoint = args.foreground_checkpoint
+    if foreground_checkpoint == "auto":
+        latest_foreground = find_latest_foreground_checkpoint()
+        foreground_checkpoint = str(latest_foreground) if latest_foreground else None
+        if foreground_checkpoint is None:
+            print(
+                "foreground_warning="
+                + json.dumps(
+                    {
+                        "message": "no fixed-view foreground checkpoint found; using color-based background fallback",
+                        "runs_dir": str(TOOLKIT_ROOT / "fixed_view_foreground" / "runs"),
+                    },
+                    sort_keys=True,
+                )
+            )
+    elif foreground_checkpoint.lower() in ("none", "off", "false"):
+        foreground_checkpoint = None
+    if foreground_checkpoint is not None:
+        checkpoint_path = Path(foreground_checkpoint)
+        if not checkpoint_path.is_file():
+            raise FileNotFoundError(
+                f"Foreground checkpoint not found: {foreground_checkpoint}"
+            )
+        foreground_model, foreground_args, _ = load_foreground_model(
+            checkpoint_path, device
+        )
+        foreground_views = parse_views(foreground_args.get("views", views))
+        if foreground_views != views:
+            raise ValueError(
+                "Foreground/parser view mismatch: "
+                f"foreground={foreground_views}, parser={views}."
+            )
+        if foreground_model.view_classes != len(views):
+            raise ValueError(
+                "Foreground checkpoint view-class mismatch: "
+                f"checkpoint={foreground_model.view_classes}, requested={len(views)}."
+            )
+        print(f"Using foreground checkpoint: {checkpoint_path}")
     mappings_dir = args.mappings_dir or parser_args.get("mappings_dir")
     renderer = DifferentiableRenderer(mappings_dir=mappings_dir)
     missing_views = [view for view in views if view not in renderer.views]
@@ -1098,6 +1169,35 @@ def main():
     rendered = load_view_images(args, views, renderer, bg_color=bg_color).to(device)
     view_ids = torch.arange(len(views), device=device)
     with torch.no_grad():
+        observed_foreground = None
+        if foreground_model is not None:
+            foreground_probability = predict_foreground(
+                foreground_model, rendered, view_ids
+            )
+            observed_foreground = save_foreground_outputs(
+                rendered,
+                foreground_probability,
+                threshold=args.foreground_threshold,
+                view_count=len(views),
+                probability_output=args.foreground_probability_output,
+                mask_output=args.foreground_mask_output,
+                cutout_output=args.foreground_cutout_output,
+                bg_color=bg_color,
+            )
+            print(
+                "foreground_filter="
+                + json.dumps(
+                    {
+                        "checkpoint": str(foreground_checkpoint),
+                        "kept_pixels": int(observed_foreground.sum().item()),
+                        "mean_probability": round(
+                            float(foreground_probability.mean().item()), 6
+                        ),
+                        "threshold": args.foreground_threshold,
+                    },
+                    sort_keys=True,
+                )
+            )
         outputs = parser_model(rendered, view_ids=view_ids)
         conditioning, routing_details = splat_parser_predictions_to_uv_conditioning(
             rendered,
@@ -1125,6 +1225,7 @@ def main():
             outer_rescue_min_coverage=args.outer_rescue_min_coverage,
             color_aggregation=args.color_aggregation,
             geometry_route_texel_consensus=geometry_route_texel_consensus,
+            observed_foreground=observed_foreground,
             background_color_tolerance=args.background_color_tolerance,
             reject_semantic_fallback=not args.allow_semantic_fallback,
             include_rejected_context=args.include_rejected_context,

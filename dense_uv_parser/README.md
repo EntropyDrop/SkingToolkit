@@ -154,6 +154,16 @@ Use the latest parser checkpoint automatically:
 ./run_infer.sh
 ```
 
+Inference also looks for the numerically highest
+`../fixed_view_foreground/runs/fixed_view_foreground_vN/best.pt` before running
+the dense parser. When found, its fixed-view foreground mask replaces the
+color-distance background gate. It saves `foreground_probability.png`,
+`foreground_mask.png`, and `foreground_cutout.png` under `outputs/` by default.
+Train that model with `../fixed_view_foreground/run_training.sh`, select one with
+`FOREGROUND_CHECKPOINT=/path/to/best.pt`, or disable it with
+`FOREGROUND_CHECKPOINT=none`. If no checkpoint exists, inference logs a warning
+and retains the legacy color-based fallback.
+
 By default it first selects the highest topology-completion version, then reads
 that run's `config.json` and reuses the exact parser checkpoint used during
 training. If the recorded path is unavailable, it falls back to the highest
