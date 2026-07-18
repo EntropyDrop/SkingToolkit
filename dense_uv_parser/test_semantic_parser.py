@@ -99,7 +99,7 @@ class SemanticDenseUVParserTest(unittest.TestCase):
             save_parser_uv(conditioning, output)
             image = Image.open(output).convert("RGBA")
             self.assertEqual(image.getpixel((8, 8)), (255, 0, 0, 255))
-            self.assertEqual(image.getpixel((20, 20))[3], 0)
+            self.assertEqual(image.getpixel((20, 20)), (0, 0, 0, 0))
 
 
 if __name__ == "__main__":

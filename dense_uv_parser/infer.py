@@ -202,6 +202,7 @@ def generate_topology_completion(
     seed,
     palette_snap=True,
     palette_min_confidence=0.5,
+    rgb_decode="mean",
 ):
     """Call new and legacy topology generators without source-version crashes."""
     parameters = inspect.signature(model.generate).parameters
@@ -231,6 +232,8 @@ def generate_topology_completion(
                 sort_keys=True,
             )
         )
+    if "rgb_decode" in parameters:
+        kwargs["rgb_decode"] = rgb_decode
     return model.generate(conditioning, **kwargs)
 
 
@@ -370,9 +373,16 @@ def propagate_completed_unknown_colors(completed, conditioning, min_confidence=0
                     if selected_reference is None or selected_reference.numel() == 0:
                         continue
                     target_indices = target.nonzero(as_tuple=False).flatten()
-                    nearest = torch.cdist(
+                    color_distance = torch.cdist(
+                        result[batch_index, target_indices, :3].float(),
+                        colors[selected_reference, :3].float(),
+                    )
+                    spatial_distance = torch.cdist(
                         coordinates[target_indices],
                         coordinates[selected_reference],
+                    )
+                    nearest = (
+                        color_distance + 0.05 * spatial_distance
                     ).argmin(dim=1)
                     source_indices = selected_reference[nearest]
                     result[batch_index, target_indices, :3] = colors[source_indices, :3]
@@ -440,9 +450,29 @@ def save_parser_uv(
         alpha_threshold=alpha_threshold,
         enforce_base_alpha=enforce_base_alpha,
     )
+    # A partial parser atlas is a diagnostic artifact, not a complete skin.
+    # Clear placeholder RGB under transparent texels so viewers that mishandle
+    # base-layer alpha cannot display the conditioning background as predicted
+    # skin color.
+    opaque = parser_uv[3:4] > 0.5
+    parser_uv[:3] = torch.where(
+        opaque.expand_as(parser_uv[:3]),
+        parser_uv[:3],
+        torch.zeros_like(parser_uv[:3]),
+    )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     tensor_to_rgba_image(parser_uv.detach().cpu()).save(output_path)
-    print(f"Saved {output_path}")
+    print(
+        "parser_uv_stats="
+        + json.dumps(
+            {
+                "opaque_pixels": int(opaque.sum().item()),
+                "transparent_pixels": int((~opaque).sum().item()),
+            },
+            sort_keys=True,
+        )
+    )
+    print(f"Saved parser_partial_uv={output_path}")
 
 
 def save_debug_preview(
@@ -666,8 +696,14 @@ def build_arg_parser():
     parser.add_argument("--parser_checkpoint", required=True)
     parser.add_argument("--inpaint_checkpoint", default=None, help="Optional semantic_uv_reconstruction checkpoint used to inpaint final skin.")
     parser.add_argument("--inpaint_steps", type=int, default=4, help="Masked-generation steps for topology checkpoints.")
-    parser.add_argument("--inpaint_temperature", type=float, default=0.0, help="0 uses deterministic argmax; positive values sample unknown texels.")
+    parser.add_argument("--inpaint_temperature", type=float, default=0.0, help="0 uses deterministic decoding; positive values sample unknown texels.")
     parser.add_argument("--inpaint_seed", type=int, default=1234)
+    parser.add_argument(
+        "--inpaint_rgb_decode",
+        choices=["mean", "argmax"],
+        default="mean",
+        help="Deterministic RGB decoder. mean matches the continuous training objective; argmax is legacy behavior.",
+    )
     parser.add_argument(
         "--inpaint_palette_snap",
         dest="inpaint_palette_snap",
@@ -1092,6 +1128,7 @@ def main():
                     "preserve_known": bool(inpaint_args.get("preserve_known", True)),
                     "generation_steps": args.inpaint_steps,
                     "generation_temperature": args.inpaint_temperature,
+                    "rgb_decode": args.inpaint_rgb_decode,
                     "palette_snap": args.inpaint_palette_snap,
                     "palette_min_confidence": args.inpaint_palette_min_confidence,
                     "evidence_lock_threshold": args.inpaint_evidence_lock_threshold,
@@ -1182,6 +1219,7 @@ def main():
                     steps=args.inpaint_steps,
                     temperature=args.inpaint_temperature,
                     seed=args.inpaint_seed,
+                    rgb_decode=args.inpaint_rgb_decode,
                     # Final color propagation is applied below for both current
                     # and legacy generator signatures.
                     palette_snap=False,
@@ -1215,7 +1253,7 @@ def main():
         output_path = Path(args.output)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         tensor_to_rgba_image(pred_uv.detach().cpu()).save(output_path)
-        print(f"Saved {output_path}")
+        print(f"Saved completed_uv={output_path}")
 
 
 if __name__ == "__main__":

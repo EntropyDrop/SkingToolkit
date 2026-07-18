@@ -97,12 +97,16 @@ print(
 }
 
 PYTHON_BIN="${PYTHON_BIN:-python}"
+PARSER_ONLY="${PARSER_ONLY:-false}"
 
 INPAINT_MODEL="${INPAINT_MODEL:-topology_maskgit}"
 INPAINT_RUNS_DIR="${INPAINT_RUNS_DIR:-../semantic_uv_reconstruction/runs}"
 INPAINT_RUN_PREFIX="${INPAINT_RUN_PREFIX:-semantic_uv_reconstruction_${INPAINT_MODEL}_v}"
 INPAINT_CHECKPOINT_NAME="${INPAINT_CHECKPOINT_NAME:-best.pt}"
 INPAINT_CHECKPOINT="${INPAINT_CHECKPOINT:-}"
+if [[ "$PARSER_ONLY" == "true" ]]; then
+  INPAINT_CHECKPOINT="none"
+fi
 if [[ "$INPAINT_CHECKPOINT" == "none" ]]; then
   INPAINT_CHECKPOINT=""
 elif [[ -z "$INPAINT_CHECKPOINT" ]]; then
@@ -155,8 +159,18 @@ if [[ ${OUTPUT+x} ]]; then
   OUTPUT_WAS_SET=true
 fi
 OUTPUT="${OUTPUT-outputs/pred_uv.png}"
+if [[ "$PARSER_ONLY" == "true" ]]; then
+  OUTPUT=""
+fi
 CONDITIONING_OUTPUT="${CONDITIONING_OUTPUT-outputs/parser_conditioning.png}"
+PARSER_UV_OUTPUT_WAS_SET=false
+if [[ ${PARSER_UV_OUTPUT+x} ]]; then
+  PARSER_UV_OUTPUT_WAS_SET=true
+fi
 PARSER_UV_OUTPUT="${PARSER_UV_OUTPUT-outputs/parser_pred_uv.png}"
+if [[ "$PARSER_ONLY" == "true" && "$PARSER_UV_OUTPUT_WAS_SET" == "false" ]]; then
+  PARSER_UV_OUTPUT="outputs/parser_only_uv.png"
+fi
 DEBUG_OUTPUT="${DEBUG_OUTPUT-outputs/parser_debug.png}"
 OVERLAY_OUTPUT="${OVERLAY_OUTPUT-outputs/parser_debug_overlay.png}"
 INNER_CUTOUT_OUTPUT="${INNER_CUTOUT_OUTPUT-outputs/parser_debug_inner.png}"
@@ -231,11 +245,15 @@ OVERLAY_ALPHA="${OVERLAY_ALPHA:-0.45}"
 INPAINT_STEPS="${INPAINT_STEPS:-4}"
 INPAINT_TEMPERATURE="${INPAINT_TEMPERATURE:-0.0}"
 INPAINT_SEED="${INPAINT_SEED:-1234}"
+INPAINT_RGB_DECODE="${INPAINT_RGB_DECODE:-mean}"
 INPAINT_PALETTE_SNAP="${INPAINT_PALETTE_SNAP:-true}"
 INPAINT_PALETTE_MIN_CONFIDENCE="${INPAINT_PALETTE_MIN_CONFIDENCE:-0.75}"
 INPAINT_EVIDENCE_LOCK_THRESHOLD="${INPAINT_EVIDENCE_LOCK_THRESHOLD:-0.0}"
 
 echo "Using routing profile: $ROUTING_PROFILE"
+if [[ "$PARSER_ONLY" == "true" ]]; then
+  echo "Parser-only mode: topology completion is disabled."
+fi
 
 args=(
   infer.py
@@ -257,6 +275,7 @@ args=(
   --inpaint_steps "$INPAINT_STEPS"
   --inpaint_temperature "$INPAINT_TEMPERATURE"
   --inpaint_seed "$INPAINT_SEED"
+  --inpaint_rgb_decode "$INPAINT_RGB_DECODE"
   --inpaint_palette_min_confidence "$INPAINT_PALETTE_MIN_CONFIDENCE"
   --inpaint_evidence_lock_threshold "$INPAINT_EVIDENCE_LOCK_THRESHOLD"
   --device "$DEVICE"
@@ -393,7 +412,7 @@ if [[ -n "$CONDITIONING_OUTPUT" ]]; then
   echo "Conditioning output: $CONDITIONING_OUTPUT"
 fi
 if [[ -n "$PARSER_UV_OUTPUT" ]]; then
-  echo "Preliminary parser UV output: $PARSER_UV_OUTPUT"
+  echo "Partial parser UV output: $PARSER_UV_OUTPUT"
 fi
 if [[ -n "$DEBUG_OUTPUT" ]]; then
   echo "Debug output: $DEBUG_OUTPUT"

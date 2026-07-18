@@ -170,6 +170,8 @@ Common overrides:
 ```bash
 FRONT=/path/to/front.png BACK=/path/to/back.png ./run_infer.sh
 COMBINED=/path/to/combined.png ./run_infer.sh
+# Writes the partial atlas to outputs/parser_only_uv.png and skips completion.
+PARSER_ONLY=true COMBINED=/path/to/combined.png ./run_infer.sh
 PARSER_CHECKPOINT=runs/dense_uv_parser_v3/best.pt ./run_infer.sh
 INPAINT_CHECKPOINT=../semantic_uv_reconstruction/runs/semantic_uv_reconstruction_topology_maskgit_v3/best.pt ./run_infer.sh
 OUTPUT= CONDITIONING_OUTPUT=outputs/parser_conditioning.png ./run_infer.sh
@@ -215,9 +217,12 @@ completion. Set `OUTER_GEOMETRY_RESCUE=false` for an ablation, or tune
 
 Topology inference enables `INPAINT_PALETTE_SNAP=true` and locks all routed
 parser evidence (`INPAINT_EVIDENCE_LOCK_THRESHOLD=0`) by default. Generated RGB
-is copied from nearby observed evidence on the same body part/layer/face, while
-parser RGBA is reapplied byte-exact after generation. This suppresses unrelated
-dataset-prior colors without retraining. Production applies this final pass in
-`infer.py` even for legacy topology checkpoints and propagates repeated stable
-colors before isolated evidence outliers. Set `INPAINT_PALETTE_SNAP=false` for
-an ablation, or adjust `INPAINT_PALETTE_MIN_CONFIDENCE` (default `0.75`).
+uses distribution-mean decoding (`INPAINT_RGB_DECODE=mean`) and is projected onto
+complete observed RGB triplets on the same body part/layer/face. Color similarity
+drives selection and spatial distance breaks close ties, while parser RGBA is
+reapplied byte-exact after generation. This suppresses unrelated dataset-prior
+colors without retraining. Production applies this final pass in `infer.py` even
+for legacy topology checkpoints and propagates repeated stable colors before
+isolated evidence outliers. Set `INPAINT_PALETTE_SNAP=false` or
+`INPAINT_RGB_DECODE=argmax` only for ablation, or adjust
+`INPAINT_PALETTE_MIN_CONFIDENCE` (default `0.75`).
