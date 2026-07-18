@@ -510,6 +510,7 @@ def hard_uv_conditioning_metrics(
             views=views,
             group_size=group_size,
             bg_color=args.bg_color,
+            color_aggregation=args.splat_color_aggregation,
         )
     else:
         predicted = splat_predictions_to_uv_conditioning(
@@ -1161,7 +1162,7 @@ def build_arg_parser():
     parser.add_argument(
         "--splat_color_aggregation",
         choices=SPLAT_COLOR_AGGREGATIONS,
-        default="exact_mode",
+        default="texel_center",
     )
     parser.add_argument("--allow_semantic_fallback", action="store_true")
     parser.add_argument("--augment", dest="augment", action="store_true", default=False)

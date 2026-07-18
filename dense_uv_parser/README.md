@@ -87,7 +87,7 @@ ROUTE_OUTER_CLASS_WEIGHT_CAP=0.75 \
 ./run_dense_uv_parser_training.sh
 ```
 
-`geometry_fit` training also uses a differentiable photometric branch. Route-role and surface logits are converted to probabilities, softly splatted through the fixed renderer UV candidates, and merged into a provisional skin. That skin is rendered back through the direct inner/outer cuboids for every configured view. Soft-UV RGB/alpha errors and multi-view render RGB/alpha errors are added to the supervised classification losses, so wrong inner/outer or exact-surface choices receive color and silhouette gradients in addition to cross-entropy. Inference remains hard-routed and continues to use exact-color aggregation.
+`geometry_fit` training also uses a differentiable photometric branch. Route-role and surface logits are converted to probabilities, softly splatted through the fixed renderer UV candidates, and merged into a provisional skin. That skin is rendered back through the direct inner/outer cuboids for every configured view. Soft-UV RGB/alpha errors and multi-view render RGB/alpha errors are added to the supervised classification losses, so wrong inner/outer or exact-surface choices receive color and silhouette gradients in addition to cross-entropy. Inference remains hard-routed and selects the real source pixel nearest each integer UV texel center.
 
 Alpha consistency is weighted more strongly than RGB consistency because a wrong opaque outer texel is more damaging than leaving an uncertain texel for inpainting. In addition, the layer-recall losses count the GT projections that are actually visible in each inner/outer UV texel and compare them with the predicted per-layer splat weight. This avoids diluting recall with geometrically possible but occluded projections. Half of each recall loss focuses on the worst 10% of visible texels by default, so eyes, exposed face pixels, and other small regions cannot disappear while the whole-image average still improves:
 
@@ -124,8 +124,10 @@ to decide whether a region is inner, outer, or secondary; fixed cuboids still ow
 body-part, face, and UV coordinates. Exact-surface logits disambiguate deeper
 renderer slots. Projected-texel voting and conservative outer footprint
 rejection are enabled for production-aligned validation. For
-each layer/UV texel, color aggregation selects a real source color and never
-averages colors.
+each layer/UV texel, color aggregation selects the real source sample closest
+to the integer UV center and never averages colors. This is important because
+the renderer uses bilinear texture sampling: scan-order or modal selection can
+otherwise choose a boundary blend even when the projected grid is correct.
 
 The learned route-confidence head is fused with the ordinary route score by a
 geometric mean. The trust target already represents route correctness, so this

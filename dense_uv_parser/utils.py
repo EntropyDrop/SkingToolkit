@@ -22,7 +22,7 @@ ROUTE_INNER_PRIMARY = 0
 ROUTE_OUTER_PRIMARY = 1
 ROUTE_SECONDARY = 2
 UV_SIZE = 64
-SPLAT_COLOR_AGGREGATIONS = ("exact_mode", "best")
+SPLAT_COLOR_AGGREGATIONS = ("texel_center", "exact_mode", "best")
 SOLID_BACKGROUND_COLOR_TOLERANCE = 16.0 / 255.0
 SOLID_BACKGROUND_MIN_CORNER_SUPPORT = 0.5
 SECONDARY_TEXEL_MIN_PROBABILITY = 0.5
@@ -80,7 +80,16 @@ def _renderer_surface_cache(renderer):
 
 
 def _surface_metadata(grids, is_outer, lookups):
-    x, y = _grid_to_xy(grids)
+    uv_px = _grid_to_uv01(grids) * (UV_SIZE - 1)
+    rounded_uv_px = uv_px.round()
+    x = rounded_uv_px[..., 0].long().clamp(0, UV_SIZE - 1)
+    y = rounded_uv_px[..., 1].long().clamp(0, UV_SIZE - 1)
+    center_distance_sq = (uv_px - rounded_uv_px).square().sum(dim=-1)
+    # A bilinear renderer is exact at integer UV centers and increasingly
+    # mixes neighboring texels toward a cell boundary.  Keep a normalized
+    # quality score for inverse color sampling; geometry/UV ownership still
+    # uses the same rounded integer coordinates as before.
+    texel_center_score = (1.0 - 2.0 * center_distance_sq).clamp(0.0, 1.0)
     inner_part = lookups["inner_part"][y, x]
     inner_face = lookups["inner_face"][y, x]
     outer_part = lookups["outer_part"][y, x]
@@ -91,6 +100,7 @@ def _surface_metadata(grids, is_outer, lookups):
         "part": torch.where(is_outer, outer_part, inner_part),
         "face": torch.where(is_outer, outer_face, inner_face),
         "outer_part": outer_part,
+        "texel_center_score": texel_center_score,
     }
 
 
@@ -163,6 +173,7 @@ def build_static_surface_routing(renderer, view, device):
         "part": metadata["part"],
         "face": metadata["face"],
         "layer_face": metadata["layer_face"],
+        "texel_center_score": metadata["texel_center_score"],
         "direct_count": 2,
         "composite_count": composite_count,
         "geometry_count": geometry_count,
@@ -183,7 +194,14 @@ def _select_static_surface(static, surface):
     safe_surface = surface.clamp(0, max(surface_count - 1, 0))
 
     selected = {}
-    for name in ("masks", "flat_uv", "layer", "part", "face"):
+    for name in (
+        "masks",
+        "flat_uv",
+        "layer",
+        "part",
+        "face",
+        "texel_center_score",
+    ):
         values = static[name].unsqueeze(0).expand(B, -1, -1, -1)
         selected[name] = values.gather(1, safe_surface.unsqueeze(1)).squeeze(1)
     selected["valid"] = in_range & selected["masks"]
@@ -745,6 +763,7 @@ def _routing_from_affine_outputs(renderer, views, outputs, fg_threshold=0.5, sem
     confidence = torch.zeros_like(foreground_prob)
     confidence_margin = torch.zeros_like(foreground_prob)
     confidence_margin_ratio = torch.zeros_like(foreground_prob)
+    texel_center_score = torch.zeros_like(foreground_prob)
     semantic_fallback = torch.zeros_like(foreground_prob, dtype=torch.bool)
     expected_part = torch.full_like(layer, IGNORE_INDEX)
     expected_face = torch.full_like(layer, IGNORE_INDEX)
@@ -861,6 +880,7 @@ def _routing_from_affine_outputs(renderer, views, outputs, fg_threshold=0.5, sem
         confidence_margin_ratio[selection] = route_margin_ratio
         expected_part[selection] = selected_part
         expected_face[selection] = selected_face
+        texel_center_score[selection] = routed["texel_center_score"]
 
     return {
         "foreground": fg,
@@ -873,6 +893,7 @@ def _routing_from_affine_outputs(renderer, views, outputs, fg_threshold=0.5, sem
         "semantic_fallback": semantic_fallback,
         "part": expected_part,
         "face": expected_face,
+        "texel_center_score": texel_center_score,
     }
 
 
@@ -941,6 +962,7 @@ def _routing_from_geometry_outputs(
     confidence = torch.zeros_like(outer_prob)
     confidence_margin = torch.zeros_like(outer_prob)
     confidence_margin_ratio = torch.zeros_like(outer_prob)
+    texel_center_score = torch.zeros_like(outer_prob)
     part = torch.full_like(layer, IGNORE_INDEX)
     face = torch.full_like(layer, IGNORE_INDEX)
     for view_index, view in enumerate(views):
@@ -1036,6 +1058,12 @@ def _routing_from_geometry_outputs(
         outer_part = static["part"][1].unsqueeze(0).expand_as(layer[selection])
         inner_face = static["face"][0].unsqueeze(0).expand_as(layer[selection])
         outer_face = static["face"][1].unsqueeze(0).expand_as(layer[selection])
+        inner_center_score = static["texel_center_score"][0].unsqueeze(0).expand_as(
+            confidence[selection]
+        )
+        outer_center_score = static["texel_center_score"][1].unsqueeze(0).expand_as(
+            confidence[selection]
+        )
 
         fg[selection] = selected_fg
         layer[selection] = choose_outer.long()
@@ -1062,6 +1090,9 @@ def _routing_from_geometry_outputs(
         confidence_margin_ratio[selection] = (
             margin / selected_confidence.clamp_min(1e-8)
         ).clamp(0.0, 1.0)
+        texel_center_score[selection] = torch.where(
+            choose_outer, outer_center_score, inner_center_score
+        )
 
     secondary = (route_role == ROUTE_SECONDARY) & (foreground_prob > fg_threshold)
     return {
@@ -1078,6 +1109,7 @@ def _routing_from_geometry_outputs(
         "raw_route_role": raw_route_role,
         "route_role": route_role,
         "secondary": secondary,
+        "texel_center_score": texel_center_score,
     }
 
 
@@ -1155,6 +1187,7 @@ def _routing_from_geometry_surface_outputs(
     confidence = torch.zeros_like(foreground_prob)
     confidence_margin = torch.zeros_like(foreground_prob)
     confidence_margin_ratio = torch.zeros_like(foreground_prob)
+    texel_center_score = torch.zeros_like(foreground_prob)
     part = torch.full_like(layer, IGNORE_INDEX)
     face = torch.full_like(layer, IGNORE_INDEX)
 
@@ -1365,6 +1398,7 @@ def _routing_from_geometry_surface_outputs(
         confidence_margin_ratio[selection] = selected_margin_ratio
         part[selection] = routed["part"]
         face[selection] = routed["face"]
+        texel_center_score[selection] = routed["texel_center_score"]
 
     secondary = fg & (route_role == ROUTE_SECONDARY)
     return {
@@ -1382,6 +1416,7 @@ def _routing_from_geometry_surface_outputs(
         "route_role": route_role,
         "secondary": secondary,
         "secondary_routed": secondary,
+        "texel_center_score": texel_center_score,
         "learned_trust": (
             torch.sigmoid(outputs["route_confidence"][:, 0].float())
             if "route_confidence" in outputs
@@ -1813,7 +1848,7 @@ def splat_parser_predictions_to_uv_conditioning(
     outer_rescue_confidence_threshold=0.60,
     outer_rescue_margin_threshold=0.25,
     outer_rescue_min_coverage=0.10,
-    color_aggregation="exact_mode",
+    color_aggregation="texel_center",
     geometry_outer_threshold=0.5,
     geometry_route_texel_consensus=True,
     observed_foreground=None,
@@ -2102,6 +2137,7 @@ def splat_parser_predictions_to_uv_conditioning(
         group_size=group_size,
         bg_color=bg_color,
         confidence=routing["confidence"],
+        sampling_quality=routing.get("texel_center_score"),
         color_aggregation=color_aggregation,
         include_confidence=include_confidence,
     )
@@ -2142,6 +2178,7 @@ def splat_parser_predictions_to_uv_conditioning(
             group_size=group_size,
             bg_color=bg_color,
             confidence=routing["confidence"],
+            sampling_quality=routing.get("texel_center_score"),
             color_aggregation=color_aggregation,
             include_confidence=True,
         )
@@ -2168,6 +2205,7 @@ def splat_parser_predictions_to_uv_conditioning(
                 group_size=group_size,
                 bg_color=bg_color,
                 confidence=routing["confidence"],
+                sampling_quality=routing.get("texel_center_score"),
                 color_aggregation=color_aggregation,
                 include_confidence=True,
             )
@@ -2194,6 +2232,7 @@ def splat_deterministic_targets_to_uv_conditioning(
     views,
     group_size=1,
     bg_color=(128, 128, 128),
+    color_aggregation="texel_center",
 ):
     """Splat ground-truth labels through the same fixed mapping used by affine mode."""
     views = parse_views(views)
@@ -2206,6 +2245,7 @@ def splat_deterministic_targets_to_uv_conditioning(
     fg = torch.zeros_like(requested_surface, dtype=torch.bool)
     routed_layer = torch.zeros_like(requested_surface)
     flat_uv = torch.zeros_like(requested_surface)
+    texel_center_score = canonical_rendered.new_zeros(requested_surface.shape)
 
     for view_index, view in enumerate(views):
         selection = slice(view_index, N, len(views))
@@ -2222,6 +2262,7 @@ def splat_deterministic_targets_to_uv_conditioning(
         )
         routed_layer[selection] = routed["layer"]
         flat_uv[selection] = routed["flat_uv"]
+        texel_center_score[selection] = routed["texel_center_score"]
 
     return splat_to_uv_conditioning(
         canonical_rendered,
@@ -2230,6 +2271,8 @@ def splat_deterministic_targets_to_uv_conditioning(
         flat_uv,
         group_size=group_size,
         bg_color=bg_color,
+        sampling_quality=texel_center_score,
+        color_aggregation=color_aggregation,
     )
 
 
@@ -2377,6 +2420,7 @@ def splat_to_uv_conditioning(
     group_size=1,
     bg_color=(128, 128, 128),
     confidence=None,
+    sampling_quality=None,
     color_aggregation="exact_mode",
     include_confidence=False,
 ):
@@ -2405,6 +2449,10 @@ def splat_to_uv_conditioning(
         select_highest_confidence = False
     else:
         select_highest_confidence = True
+    if sampling_quality is None:
+        sampling_quality = rendered.new_ones(fg.shape)
+    elif sampling_quality.shape != fg.shape:
+        raise ValueError("sampling_quality must have the same shape as fg.")
 
     for group in range(groups):
         group_start = group * group_size
@@ -2413,6 +2461,7 @@ def splat_to_uv_conditioning(
             candidate_values = []
             candidate_uv = []
             candidate_confidence = []
+            candidate_sampling_quality = []
             for item in range(group_start, group_end):
                 item_mask = fg[item] & (layer[item] == layer_index)
                 if not item_mask.any():
@@ -2420,12 +2469,58 @@ def splat_to_uv_conditioning(
                 candidate_values.append(rendered[item, :, item_mask])
                 candidate_uv.append(flat_uv[item, item_mask])
                 candidate_confidence.append(confidence[item, item_mask])
+                candidate_sampling_quality.append(
+                    sampling_quality[item, item_mask]
+                )
             if not candidate_uv:
                 continue
 
             values = torch.cat(candidate_values, dim=1)
             target_uv = torch.cat(candidate_uv, dim=0)
             scores = torch.cat(candidate_confidence, dim=0).float()
+            quality = torch.cat(candidate_sampling_quality, dim=0).float()
+            if color_aggregation == "texel_center":
+                # Lexicographic selection: prefer the source sample closest to
+                # the integer UV center, then use parser confidence only to
+                # break effectively equal geometric samples. This recovers an
+                # original texel from bilinear renders instead of choosing a
+                # top/left boundary blend by scan order.
+                selection_score = quality + scores.clamp(0.0, 1.0) * 1e-6
+                best_quality = selection_score.new_full(
+                    (UV_SIZE * UV_SIZE,), -torch.inf
+                )
+                best_quality.scatter_reduce_(
+                    0,
+                    target_uv,
+                    selection_score,
+                    reduce="amax",
+                    include_self=True,
+                )
+                is_best = selection_score >= (
+                    best_quality[target_uv] - 1e-7
+                )
+                candidate_indices = torch.arange(
+                    target_uv.shape[0], device=device
+                )
+                first_best = torch.full(
+                    (UV_SIZE * UV_SIZE,),
+                    target_uv.shape[0],
+                    dtype=torch.long,
+                    device=device,
+                )
+                first_best.scatter_reduce_(
+                    0,
+                    target_uv[is_best],
+                    candidate_indices[is_best],
+                    reduce="amin",
+                    include_self=True,
+                )
+                selected_indices = first_best[
+                    first_best < target_uv.shape[0]
+                ]
+                values = values[:, selected_indices]
+                target_uv = target_uv[selected_indices]
+                scores = scores[selected_indices]
             if color_aggregation == "exact_mode":
                 values, target_uv, scores = _select_exact_mode_candidates(
                     values, target_uv, scores

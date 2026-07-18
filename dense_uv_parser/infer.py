@@ -67,7 +67,12 @@ def image_to_render_tensor(image, view_size, bg_color=(128, 128, 128)):
         tensor = F.interpolate(
             tensor.unsqueeze(0),
             size=view_size,
-            mode="nearest",
+            # PyTorch's legacy nearest mode samples the top/left member of an
+            # integer resize block.  Inputs are commonly rendered at exactly
+            # 2x the mapping resolution, so that introduces a stable half-pixel
+            # phase shift before otherwise-correct UV routing. nearest-exact
+            # follows pixel-center semantics while retaining unblended colors.
+            mode="nearest-exact",
         ).squeeze(0)
     tensor = tensor.clamp(0.0, 1.0)
     return torch.cat([tensor, torch.ones_like(tensor[:1])], dim=0)
@@ -1445,9 +1450,16 @@ def main():
             )
         expected_color_aggregation = inpaint_args.get("parser_splat_color_aggregation")
         if expected_color_aggregation is not None and expected_color_aggregation != args.color_aggregation:
-            raise ValueError(
-                "Parser color aggregation does not match the semantic_uv_reconstruction checkpoint: "
-                f"checkpoint={expected_color_aggregation}, requested={args.color_aggregation}."
+            print(
+                "inpaint_warning="
+                + json.dumps(
+                    {
+                        "message": "using inference-time parser color aggregation",
+                        "checkpoint_color_aggregation": expected_color_aggregation,
+                        "requested_color_aggregation": args.color_aggregation,
+                    },
+                    sort_keys=True,
+                )
             )
         with torch.no_grad():
             if hasattr(inpaint_model, "hard_lock_threshold"):

@@ -196,6 +196,7 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         self.assertEqual(parser_args.route_confidence_threshold, 0.0)
         self.assertEqual(parser_args.route_margin_threshold, 0.0)
         self.assertEqual(parser_args.background_color_tolerance, 0.25)
+        self.assertEqual(parser_args.splat_color_aggregation, "texel_center")
         self.assertEqual(parser_args.outer_route_confidence_threshold, 0.80)
         self.assertEqual(parser_args.outer_route_margin_threshold, 0.55)
         self.assertEqual(parser_args.outer_uv_min_coverage, 0.25)
@@ -1706,6 +1707,35 @@ class GlobalAffineRoutingTest(unittest.TestCase):
 
         self.assertTrue(torch.equal(conditioning[0, :3, 0, 0], torch.tensor([1.0, 0.0, 0.0])))
         self.assertTrue(torch.equal(conditioning[0, 5:8, 0, 0], torch.tensor([0.0, 0.0, 1.0])))
+
+    def test_texel_center_sampling_beats_boundary_confidence(self):
+        rendered = torch.zeros(2, 4, 1, 1)
+        rendered[0, 0, 0, 0] = 1.0
+        rendered[1, 2, 0, 0] = 1.0
+        rendered[:, 3, 0, 0] = 1.0
+        fg = torch.ones(2, 1, 1, dtype=torch.bool)
+        layer = torch.zeros(2, 1, 1, dtype=torch.long)
+        flat_uv = torch.zeros(2, 1, 1, dtype=torch.long)
+        confidence = torch.tensor([0.99, 0.50]).view(2, 1, 1)
+        sampling_quality = torch.tensor([0.20, 1.0]).view(2, 1, 1)
+
+        conditioning = splat_to_uv_conditioning(
+            rendered,
+            fg,
+            layer,
+            flat_uv,
+            group_size=2,
+            confidence=confidence,
+            sampling_quality=sampling_quality,
+            color_aggregation="texel_center",
+        )
+
+        self.assertTrue(
+            torch.equal(
+                conditioning[0, :3, 0, 0],
+                torch.tensor([0.0, 0.0, 1.0]),
+            )
+        )
 
     def test_uv_classification_reranks_ambiguous_surface_candidates(self):
         renderer = FakeRenderer(valid_pixels=1)
