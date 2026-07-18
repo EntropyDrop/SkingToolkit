@@ -439,6 +439,7 @@ class TopologyAwareUVCompletionNet(nn.Module):
         outputs,
         target_uv,
         lambda_rgb_token=1.0,
+        lambda_rgb_distribution=2.0,
         lambda_alpha_token=0.5,
         ignore_covered_inner=True,
         covered_inner_alpha_threshold=0.1,
@@ -465,6 +466,34 @@ class TopologyAwareUVCompletionNet(nn.Module):
         rgb_weight = rgb_mask.unsqueeze(-1).to(dtype=rgb_loss.dtype)
         loss_rgb_token = (rgb_loss * rgb_weight).sum() / (rgb_weight.sum() * 3.0).clamp_min(1.0)
 
+        # Cross entropy treats every wrong 8-bit bin equally. Add an ordinal
+        # distribution penalty so probability mass at an extreme (0 or 255) is
+        # much more expensive when the target is a moderate color. This aligns
+        # categorical MaskGIT training with deterministic distribution-mean
+        # decoding and suppresses high-saturation channel modes.
+        rgb_probabilities = outputs["rgb_logits"].float().softmax(dim=-1)
+        levels = torch.linspace(
+            0.0,
+            1.0,
+            RGB_LEVELS,
+            device=rgb_probabilities.device,
+            dtype=rgb_probabilities.dtype,
+        )
+        target_rgb_unit = target_rgb.to(dtype=rgb_probabilities.dtype) / 255.0
+        level_values = levels.view(1, 1, 1, -1)
+        predicted_mean = (rgb_probabilities * level_values).sum(dim=-1)
+        predicted_second_moment = (
+            rgb_probabilities * level_values.square()
+        ).sum(dim=-1)
+        rgb_distribution = (
+            predicted_second_moment
+            - 2.0 * target_rgb_unit * predicted_mean
+            + target_rgb_unit.square()
+        ).clamp_min(0.0)
+        loss_rgb_distribution = (
+            rgb_distribution * rgb_weight
+        ).sum() / (rgb_weight.sum() * 3.0).clamp_min(1.0)
+
         alpha_mask = unknown & is_outer
         alpha_loss = F.binary_cross_entropy_with_logits(
             outputs["alpha_logits"].float(), target_alpha, reduction="none"
@@ -473,6 +502,7 @@ class TopologyAwareUVCompletionNet(nn.Module):
         loss_alpha_token = (alpha_loss * alpha_weight).sum() / alpha_weight.sum().clamp_min(1.0)
         loss_token = (
             float(lambda_rgb_token) * loss_rgb_token
+            + float(lambda_rgb_distribution) * loss_rgb_distribution
             + float(lambda_alpha_token) * loss_alpha_token
         )
 
@@ -484,6 +514,7 @@ class TopologyAwareUVCompletionNet(nn.Module):
         return {
             "loss_token": loss_token,
             "loss_rgb_token": loss_rgb_token,
+            "loss_rgb_distribution": loss_rgb_distribution,
             "loss_alpha_token": loss_alpha_token,
             "acc_unknown_rgb_exact": rgb_exact,
             "unknown_texel_fraction": (unknown & valid).float().sum()
@@ -519,14 +550,136 @@ class TopologyAwareUVCompletionNet(nn.Module):
                 flat[:, self.outer_confidence_channel],
             )
 
+    def _snap_generated_rgb_to_evidence_palette(
+        self,
+        result,
+        reference_observed,
+        reference_evidence,
+        reference_confidence,
+        generated,
+        min_confidence=0.5,
+    ):
+        """Project generated RGB onto observed topology-aware color triplets.
+
+        Invisible texels have no evidence for inventing a new character color.
+        Generated opaque texels therefore select a complete observed RGB triplet
+        on the same part/layer/face. Sparse groups fall back through the same
+        part/layer, the same part, and finally all visible evidence. Candidate
+        colors are ranked primarily by distance to the model prediction, with a
+        small spatial tie-break. This prevents independent channel decoding from
+        assembling saturated RGB combinations that never occurred on the skin.
+        """
+        if not 0.0 <= min_confidence <= 1.0:
+            raise ValueError("palette min_confidence must be in [0, 1].")
+        snapped = result.clone()
+        valid = self.valid_tokens[:, 0].bool().view(1, -1)
+        opaque_reference = reference_observed[..., 3] > 0.5
+        strong_reference = (
+            (reference_evidence[..., 0] > 0.5)
+            & (reference_confidence[..., 0] >= float(min_confidence))
+            & opaque_reference
+            & valid
+        )
+        all_reference = (
+            (reference_evidence[..., 0] > 0.5)
+            & opaque_reference
+            & valid
+        )
+        opaque_generated = generated & (result[..., 3] > 0.5) & valid
+        layer = self.layer_map.view(1, -1)
+        part = self.part_map.view(1, -1)
+        face = self.face_map.view(1, -1)
+        coordinates = self.local_uv.float()
+
+        for batch_index in range(result.shape[0]):
+            strong = strong_reference[batch_index]
+            fallback = all_reference[batch_index]
+            if not fallback.any():
+                continue
+            for part_index in range(PART_COUNT):
+                part_mask = part[0] == part_index
+                for layer_index in range(LAYER_COUNT):
+                    group_target = (
+                        opaque_generated[batch_index]
+                        & part_mask
+                        & (layer[0] == layer_index)
+                    )
+                    if not group_target.any():
+                        continue
+                    for face_index in range(FACE_COUNT):
+                        target = group_target & (face[0] == face_index)
+                        if not target.any():
+                            continue
+                        masks = (
+                            strong & part_mask & (layer[0] == layer_index) & (face[0] == face_index),
+                            fallback & part_mask & (layer[0] == layer_index) & (face[0] == face_index),
+                            strong & part_mask & (layer[0] == layer_index),
+                            fallback & part_mask & (layer[0] == layer_index),
+                            strong & part_mask,
+                            fallback & part_mask,
+                            strong,
+                            fallback,
+                        )
+                        local_reference = next(
+                            (candidate for candidate in masks if candidate.any()),
+                            None,
+                        )
+                        if local_reference is None:
+                            continue
+                        target_indices = target.nonzero(as_tuple=False).flatten()
+                        reference_indices = local_reference.nonzero(
+                            as_tuple=False
+                        ).flatten()
+                        predicted_rgb = snapped[
+                            batch_index, target_indices, :3
+                        ].float()
+                        reference_rgb = reference_observed[
+                            batch_index, reference_indices, :3
+                        ].float()
+                        color_distance = torch.cdist(
+                            predicted_rgb,
+                            reference_rgb,
+                        )
+                        spatial_distance = torch.cdist(
+                            coordinates[target_indices],
+                            coordinates[reference_indices],
+                        )
+                        nearest = (
+                            color_distance + 0.05 * spatial_distance
+                        ).argmin(dim=1)
+                        source_indices = reference_indices[nearest]
+                        snapped[batch_index, target_indices, :3] = (
+                            reference_observed[
+                                batch_index, source_indices, :3
+                            ].to(dtype=snapped.dtype)
+                        )
+        return snapped
+
     @torch.no_grad()
-    def generate(self, conditioning, steps=4, temperature=0.0, seed=1234):
+    def generate(
+        self,
+        conditioning,
+        steps=4,
+        temperature=0.0,
+        seed=1234,
+        palette_snap=False,
+        palette_min_confidence=0.5,
+        rgb_decode="mean",
+    ):
         if steps < 1:
             raise ValueError("Generation steps must be positive.")
         if temperature < 0.0:
             raise ValueError("temperature must be non-negative.")
+        if rgb_decode not in ("mean", "argmax"):
+            raise ValueError("rgb_decode must be 'mean' or 'argmax'.")
         working = conditioning.clone()
-        _, original_known, valid, _, _ = self._merged_conditioning(conditioning)
+        (
+            original_observed,
+            original_known,
+            valid,
+            original_evidence,
+            original_confidence,
+        ) = self._merged_conditioning(conditioning)
         initial_unknown = (original_known[..., 0] <= 0.5) & (valid[..., 0] > 0.5)
         total_unknown = initial_unknown.sum(dim=1)
         generator = None
@@ -540,7 +693,20 @@ class TopologyAwareUVCompletionNet(nn.Module):
             outputs = self.predict_distributions(working)
             rgb_probabilities = outputs["rgb_logits"].float().softmax(dim=-1)
             if temperature == 0.0:
-                rgb = rgb_probabilities.argmax(dim=-1)
+                if rgb_decode == "mean":
+                    levels = torch.arange(
+                        RGB_LEVELS,
+                        device=rgb_probabilities.device,
+                        dtype=rgb_probabilities.dtype,
+                    )
+                    rgb = (
+                        (rgb_probabilities * levels).sum(dim=-1)
+                        .round()
+                        .clamp(0, RGB_LEVELS - 1)
+                        .long()
+                    )
+                else:
+                    rgb = rgb_probabilities.argmax(dim=-1)
             else:
                 adjusted = (outputs["rgb_logits"].float() / temperature).softmax(dim=-1)
                 rgb = torch.multinomial(
@@ -582,6 +748,15 @@ class TopologyAwareUVCompletionNet(nn.Module):
 
         observed, _, valid, _, _ = self._merged_conditioning(working)
         result = observed * valid
+        if palette_snap:
+            result = self._snap_generated_rgb_to_evidence_palette(
+                result,
+                original_observed,
+                original_evidence,
+                original_confidence,
+                initial_unknown,
+                min_confidence=palette_min_confidence,
+            )
         return result.transpose(1, 2).reshape(-1, 4, UV_SIZE, UV_SIZE)
 
 

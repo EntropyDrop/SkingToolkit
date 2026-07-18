@@ -137,7 +137,10 @@ cd SkingToolkit/dense_uv_parser
 FRONT=/path/to/front.png BACK=/path/to/back.png ./run_infer.sh
 ```
 
-By default the launcher selects the newest parser checkpoint and the newest `../semantic_uv_reconstruction/runs/semantic_uv_reconstruction_topology_maskgit_v*/best.pt`. Important outputs include:
+By default the launcher selects the newest topology checkpoint and reads its
+`config.json` to recover the exact parser checkpoint used for topology training.
+It falls back to the highest available parser version when that recorded path is
+unavailable. Important outputs include:
 
 - `outputs/parser_pred_uv.png`: preliminary UV assembled from parser-visible texels.
 - `outputs/parser_conditioning.png`: inner/outer conditioning preview.

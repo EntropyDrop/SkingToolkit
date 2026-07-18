@@ -123,14 +123,18 @@ TOPOLOGY_CHANNELS="${TOPOLOGY_CHANNELS:-128}"
 TOPOLOGY_LAYERS="${TOPOLOGY_LAYERS:-4}"
 TOPOLOGY_ATTENTION_HEADS="${TOPOLOGY_ATTENTION_HEADS:-4}"
 TOPOLOGY_DROPOUT="${TOPOLOGY_DROPOUT:-0.05}"
-TOPOLOGY_HARD_LOCK_THRESHOLD="${TOPOLOGY_HARD_LOCK_THRESHOLD:-0.85}"
+TOPOLOGY_HARD_LOCK_THRESHOLD="${TOPOLOGY_HARD_LOCK_THRESHOLD:-0.0}"
 TOPOLOGY_DROP_KNOWN_MIN="${TOPOLOGY_DROP_KNOWN_MIN:-0.1}"
 TOPOLOGY_DROP_KNOWN_MAX="${TOPOLOGY_DROP_KNOWN_MAX:-0.5}"
 TOPOLOGY_TEACHER_REVEAL_UNKNOWN="${TOPOLOGY_TEACHER_REVEAL_UNKNOWN:-0.1}"
 LAMBDA_RGB_TOKEN="${LAMBDA_RGB_TOKEN:-1.0}"
+LAMBDA_RGB_DISTRIBUTION="${LAMBDA_RGB_DISTRIBUTION:-2.0}"
 LAMBDA_ALPHA_TOKEN="${LAMBDA_ALPHA_TOKEN:-0.5}"
 PREVIEW_GENERATION_STEPS="${PREVIEW_GENERATION_STEPS:-4}"
 PREVIEW_GENERATION_TEMPERATURE="${PREVIEW_GENERATION_TEMPERATURE:-0.0}"
+PREVIEW_RGB_DECODE="${PREVIEW_RGB_DECODE:-mean}"
+PREVIEW_PALETTE_SNAP="${PREVIEW_PALETTE_SNAP:-true}"
+PREVIEW_PALETTE_MIN_CONFIDENCE="${PREVIEW_PALETTE_MIN_CONFIDENCE:-0.75}"
 
 # --- Dense parser conditioning ---
 PARSER_RUNS_DIR="${PARSER_RUNS_DIR:-../dense_uv_parser/runs}"
@@ -144,10 +148,14 @@ PARSER_AFFINE_REFINE_TRANSLATION_PX="${PARSER_AFFINE_REFINE_TRANSLATION_PX:-0.0}
 PARSER_AFFINE_REFINE_SCALE="${PARSER_AFFINE_REFINE_SCALE:-0.0}"
 PARSER_ROUTE_CONFIDENCE_THRESHOLD="${PARSER_ROUTE_CONFIDENCE_THRESHOLD:-0.0}"
 PARSER_ROUTE_MARGIN_THRESHOLD="${PARSER_ROUTE_MARGIN_THRESHOLD:-0.0}"
-PARSER_OUTER_ROUTE_CONFIDENCE_THRESHOLD="${PARSER_OUTER_ROUTE_CONFIDENCE_THRESHOLD:-0.55}"
-PARSER_OUTER_ROUTE_MARGIN_THRESHOLD="${PARSER_OUTER_ROUTE_MARGIN_THRESHOLD:-0.35}"
-PARSER_OUTER_UV_MIN_COVERAGE="${PARSER_OUTER_UV_MIN_COVERAGE:-0.0}"
-PARSER_GEOMETRY_ROUTE_TEXEL_CONSENSUS="${PARSER_GEOMETRY_ROUTE_TEXEL_CONSENSUS:-false}"
+PARSER_OUTER_ROUTE_CONFIDENCE_THRESHOLD="${PARSER_OUTER_ROUTE_CONFIDENCE_THRESHOLD:-0.80}"
+PARSER_OUTER_ROUTE_MARGIN_THRESHOLD="${PARSER_OUTER_ROUTE_MARGIN_THRESHOLD:-0.55}"
+PARSER_OUTER_UV_MIN_COVERAGE="${PARSER_OUTER_UV_MIN_COVERAGE:-0.25}"
+PARSER_OUTER_GEOMETRY_RESCUE="${PARSER_OUTER_GEOMETRY_RESCUE:-true}"
+PARSER_OUTER_RESCUE_CONFIDENCE_THRESHOLD="${PARSER_OUTER_RESCUE_CONFIDENCE_THRESHOLD:-0.60}"
+PARSER_OUTER_RESCUE_MARGIN_THRESHOLD="${PARSER_OUTER_RESCUE_MARGIN_THRESHOLD:-0.25}"
+PARSER_OUTER_RESCUE_MIN_COVERAGE="${PARSER_OUTER_RESCUE_MIN_COVERAGE:-0.10}"
+PARSER_GEOMETRY_ROUTE_TEXEL_CONSENSUS="${PARSER_GEOMETRY_ROUTE_TEXEL_CONSENSUS:-true}"
 PARSER_SPLAT_COLOR_AGGREGATION="${PARSER_SPLAT_COLOR_AGGREGATION:-exact_mode}"
 PARSER_ALLOW_SEMANTIC_FALLBACK="${PARSER_ALLOW_SEMANTIC_FALLBACK:-false}"
 PARSER_BACKGROUND_AUGMENT="${PARSER_BACKGROUND_AUGMENT:-true}"
@@ -188,6 +196,12 @@ if [[ "$PRESERVE_KNOWN" == "true" ]]; then
 else
   preserve_known_args=(--no_preserve_known)
 fi
+preview_palette_args=()
+if [[ "$PREVIEW_PALETTE_SNAP" == "true" ]]; then
+  preview_palette_args=(--preview_palette_snap)
+else
+  preview_palette_args=(--no_preview_palette_snap)
+fi
 if [[ -z "$PARSER_CHECKPOINT" ]]; then
   PARSER_CHECKPOINT="$(find_latest_checkpoint "$PARSER_RUNS_DIR" "$PARSER_RUN_PREFIX" "$PARSER_CHECKPOINT_NAME")"
 fi
@@ -206,6 +220,9 @@ conditioning_args=(
   --parser_outer_route_confidence_threshold "$PARSER_OUTER_ROUTE_CONFIDENCE_THRESHOLD"
   --parser_outer_route_margin_threshold "$PARSER_OUTER_ROUTE_MARGIN_THRESHOLD"
   --parser_outer_uv_min_coverage "$PARSER_OUTER_UV_MIN_COVERAGE"
+  --parser_outer_rescue_confidence_threshold "$PARSER_OUTER_RESCUE_CONFIDENCE_THRESHOLD"
+  --parser_outer_rescue_margin_threshold "$PARSER_OUTER_RESCUE_MARGIN_THRESHOLD"
+  --parser_outer_rescue_min_coverage "$PARSER_OUTER_RESCUE_MIN_COVERAGE"
   --parser_splat_color_aggregation "$PARSER_SPLAT_COLOR_AGGREGATION"
 )
 if [[ "$PARSER_ALLOW_SEMANTIC_FALLBACK" == "true" ]]; then
@@ -215,6 +232,11 @@ if [[ "$PARSER_GEOMETRY_ROUTE_TEXEL_CONSENSUS" == "true" ]]; then
   conditioning_args+=(--parser_geometry_route_texel_consensus)
 else
   conditioning_args+=(--no_parser_geometry_route_texel_consensus)
+fi
+if [[ "$PARSER_OUTER_GEOMETRY_RESCUE" == "true" ]]; then
+  conditioning_args+=(--parser_outer_geometry_rescue)
+else
+  conditioning_args+=(--no_parser_outer_geometry_rescue)
 fi
 if [[ "$PARSER_SEMANTIC_GATE" == "true" ]]; then
   conditioning_args+=(--parser_semantic_gate)
@@ -274,9 +296,12 @@ python train.py \
   --topology_drop_known_max "$TOPOLOGY_DROP_KNOWN_MAX" \
   --topology_teacher_reveal_unknown "$TOPOLOGY_TEACHER_REVEAL_UNKNOWN" \
   --lambda_rgb_token "$LAMBDA_RGB_TOKEN" \
+  --lambda_rgb_distribution "$LAMBDA_RGB_DISTRIBUTION" \
   --lambda_alpha_token "$LAMBDA_ALPHA_TOKEN" \
   --preview_generation_steps "$PREVIEW_GENERATION_STEPS" \
   --preview_generation_temperature "$PREVIEW_GENERATION_TEMPERATURE" \
+  --preview_rgb_decode "$PREVIEW_RGB_DECODE" \
+  --preview_palette_min_confidence "$PREVIEW_PALETTE_MIN_CONFIDENCE" \
   --batch_size "$BATCH_SIZE" \
   --num_workers "$NUM_WORKERS" \
   --prefetch_factor "$PREFETCH_FACTOR" \
@@ -290,6 +315,7 @@ python train.py \
   --matmul_precision "$MATMUL_PRECISION" \
   ${conditioning_args[@]+"${conditioning_args[@]}"} \
   ${preserve_known_args[@]+"${preserve_known_args[@]}"} \
+  ${preview_palette_args[@]+"${preview_palette_args[@]}"} \
   ${parser_background_args[@]+"${parser_background_args[@]}"} \
   --best_metric "$BEST_METRIC" \
   --scheduler "$SCHEDULER" \

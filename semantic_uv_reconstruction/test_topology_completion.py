@@ -105,6 +105,32 @@ class TopologyAwareCompletionTest(unittest.TestCase):
         quantized = first[:, :3] * 255.0
         self.assertTrue(torch.equal(quantized, quantized.round()))
 
+    def test_mean_decode_avoids_uniform_logit_argmax_extreme(self):
+        model = self.build_model().eval()
+        with torch.no_grad():
+            model.rgb_head.weight.zero_()
+            model.rgb_head.bias.zero_()
+        conditioning = torch.zeros(1, 10, 64, 64)
+        topology = build_uv_topology()
+        inner_flat = ((topology.layer == 0) & topology.valid).reshape(-1).nonzero()[0, 0]
+        y, x = divmod(int(inner_flat), 64)
+
+        mean = model.generate(
+            conditioning,
+            steps=1,
+            temperature=0.0,
+            rgb_decode="mean",
+        )
+        legacy = model.generate(
+            conditioning,
+            steps=1,
+            temperature=0.0,
+            rgb_decode="argmax",
+        )
+
+        self.assertTrue(torch.equal(mean[0, :3, y, x], torch.full((3,), 128.0 / 255.0)))
+        self.assertTrue(torch.equal(legacy[0, :3, y, x], torch.zeros(3)))
+
     def test_confidence_aware_input_only_locks_high_confidence_evidence(self):
         model = TopologyAwareUVCompletionNet(
             input_channels=12,
@@ -138,6 +164,136 @@ class TopologyAwareCompletionTest(unittest.TestCase):
                 conditioning[0, 0:4, high_y, high_x],
             )
         )
+
+    def test_palette_snap_prevents_generated_unobserved_colors(self):
+        model = TopologyAwareUVCompletionNet(
+            input_channels=12,
+            hidden_channels=32,
+            layers=1,
+            attention_heads=4,
+            dropout=0.0,
+        ).eval()
+        topology = build_uv_topology()
+        conditioning = torch.zeros(1, 12, 64, 64)
+        reference_flat = (
+            ((topology.layer == 0) & topology.valid)
+            .reshape(-1)
+            .nonzero(as_tuple=False)[0, 0]
+        )
+        reference_y, reference_x = divmod(int(reference_flat), 64)
+        reference_rgb = torch.tensor([17.0, 93.0, 201.0]) / 255.0
+        conditioning[0, 0:3, reference_y, reference_x] = reference_rgb
+        conditioning[0, 3, reference_y, reference_x] = 1.0
+        conditioning[0, 4, reference_y, reference_x] = 1.0
+        conditioning[0, 5, reference_y, reference_x] = 1.0
+
+        generated = model.generate(
+            conditioning,
+            steps=1,
+            temperature=0.0,
+            palette_snap=True,
+        )
+        generated_rgb = generated[0, :3].permute(1, 2, 0)
+        opaque_inner = (topology.layer == 0) & topology.valid
+        self.assertTrue(
+            torch.equal(
+                generated_rgb[opaque_inner],
+                reference_rgb.expand(int(opaque_inner.sum()), -1),
+            )
+        )
+
+    def test_palette_snap_copies_nearest_same_surface_evidence(self):
+        model = TopologyAwareUVCompletionNet(
+            input_channels=12,
+            hidden_channels=32,
+            layers=1,
+            attention_heads=4,
+            dropout=0.0,
+        ).eval()
+        topology = build_uv_topology()
+        surface_indices = (topology.surface.reshape(-1) == 0).nonzero(
+            as_tuple=False
+        ).flatten()
+        target_index = surface_indices[len(surface_indices) // 2]
+        distances = torch.cdist(
+            topology.local_uv.reshape(-1, 2)[target_index].view(1, 2),
+            topology.local_uv.reshape(-1, 2)[surface_indices],
+        )[0]
+        order = distances.argsort()
+        near_index = surface_indices[order[1]]
+        far_index = surface_indices[order[-1]]
+
+        result = torch.zeros(1, 64 * 64, 4)
+        result[0, target_index, 3] = 1.0
+        observed = torch.zeros_like(result)
+        near_color = torch.tensor([0.1, 0.2, 0.3])
+        far_color = torch.tensor([0.8, 0.7, 0.6])
+        observed[0, near_index, :3] = near_color
+        observed[0, far_index, :3] = far_color
+        observed[0, near_index, 3] = 1.0
+        observed[0, far_index, 3] = 1.0
+        evidence = torch.zeros(1, 64 * 64, 1)
+        confidence = torch.zeros_like(evidence)
+        evidence[0, near_index] = 1.0
+        evidence[0, far_index] = 1.0
+        confidence[0, near_index] = 1.0
+        confidence[0, far_index] = 1.0
+        generated_mask = torch.zeros(1, 64 * 64, dtype=torch.bool)
+        generated_mask[0, target_index] = True
+
+        snapped = model._snap_generated_rgb_to_evidence_palette(
+            result,
+            observed,
+            evidence,
+            confidence,
+            generated_mask,
+            min_confidence=0.75,
+        )
+
+        self.assertTrue(torch.equal(snapped[0, target_index, :3], near_color))
+
+    def test_palette_snap_keeps_joint_observed_rgb_triplets(self):
+        model = TopologyAwareUVCompletionNet(
+            input_channels=12,
+            hidden_channels=32,
+            layers=1,
+            attention_heads=4,
+            dropout=0.0,
+        ).eval()
+        topology = build_uv_topology()
+        surface_indices = (topology.surface.reshape(-1) == 0).nonzero(
+            as_tuple=False
+        ).flatten()
+        red_index, green_index, target_index = surface_indices[:3]
+        result = torch.zeros(1, 64 * 64, 4)
+        result[0, target_index] = torch.tensor([1.0, 1.0, 0.0, 1.0])
+        observed = torch.zeros_like(result)
+        observed[0, red_index] = torch.tensor([1.0, 0.0, 0.0, 1.0])
+        observed[0, green_index] = torch.tensor([0.0, 1.0, 0.0, 1.0])
+        evidence = torch.zeros(1, 64 * 64, 1)
+        confidence = torch.zeros_like(evidence)
+        evidence[0, red_index] = 1.0
+        evidence[0, green_index] = 1.0
+        confidence[0, red_index] = 1.0
+        confidence[0, green_index] = 1.0
+        generated = torch.zeros(1, 64 * 64, dtype=torch.bool)
+        generated[0, target_index] = True
+
+        snapped = model._snap_generated_rgb_to_evidence_palette(
+            result,
+            observed,
+            evidence,
+            confidence,
+            generated,
+            min_confidence=0.75,
+        )
+
+        snapped_rgb = snapped[0, target_index, :3]
+        candidates = torch.stack(
+            [observed[0, red_index, :3], observed[0, green_index, :3]]
+        )
+        self.assertTrue((candidates == snapped_rgb).all(dim=1).any())
+        self.assertFalse(torch.equal(snapped_rgb, torch.tensor([1.0, 1.0, 0.0])))
 
 
 if __name__ == "__main__":

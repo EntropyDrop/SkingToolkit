@@ -5,15 +5,99 @@ from pathlib import Path
 
 import torch
 
-from SkingToolkit.dense_uv_parser.infer import load_inpaint
+from SkingToolkit.dense_uv_parser.infer import (
+    generate_topology_completion,
+    load_inpaint,
+    lock_completed_parser_evidence,
+    propagate_completed_unknown_colors,
+)
 from SkingToolkit.semantic_uv_reconstruction.model import UVInpaintingNet
 from SkingToolkit.semantic_uv_reconstruction.topology_model import (
     TopologyAwareUVCompletionNet,
 )
+from SkingToolkit.semantic_uv_reconstruction.topology import build_uv_topology
 from SkingToolkit.semantic_uv_reconstruction.train import Logger
 
 
 class InpaintCheckpointCompatibilityTest(unittest.TestCase):
+    def test_final_color_propagation_ignores_single_observed_outlier(self):
+        topology = build_uv_topology()
+        indices = (topology.surface.reshape(-1) == 0).nonzero(
+            as_tuple=False
+        ).flatten()[:4]
+        stable_color = torch.tensor([0.25, 0.10, 0.55, 1.0])
+        outlier_color = torch.tensor([1.0, 0.0, 1.0, 1.0])
+        conditioning = torch.zeros(1, 12, 64, 64)
+        for source_index in indices[:2]:
+            y, x = divmod(int(source_index), 64)
+            conditioning[0, 0:4, y, x] = stable_color
+            conditioning[0, 4, y, x] = 1.0
+            conditioning[0, 5, y, x] = 1.0
+        outlier_y, outlier_x = divmod(int(indices[2]), 64)
+        conditioning[0, 0:4, outlier_y, outlier_x] = outlier_color
+        conditioning[0, 4, outlier_y, outlier_x] = 1.0
+        conditioning[0, 5, outlier_y, outlier_x] = 1.0
+        target_y, target_x = divmod(int(indices[3]), 64)
+        completed = torch.zeros(1, 4, 64, 64)
+        completed[0, :, target_y, target_x] = outlier_color
+
+        propagated, stats = propagate_completed_unknown_colors(
+            completed,
+            conditioning,
+            min_confidence=0.75,
+        )
+
+        self.assertTrue(
+            torch.equal(propagated[0, :, target_y, target_x], stable_color)
+        )
+        self.assertEqual(stats["generated_opaque_texels"], 1)
+        self.assertEqual(stats["topology_color_propagated_texels"], 1)
+        self.assertEqual(stats["uncolored_generated_texels"], 0)
+
+    def test_post_generation_lock_restores_all_routed_evidence(self):
+        conditioning = torch.zeros(1, 12, 64, 64)
+        conditioning[0, 0:4, 8, 8] = torch.tensor([0.2, 0.4, 0.6, 1.0])
+        conditioning[0, 4, 8, 8] = 1.0
+        conditioning[0, 5, 8, 8] = 0.55
+        conditioning[0, 6:10, 16, 16] = torch.tensor([0.9, 0.3, 0.1, 1.0])
+        conditioning[0, 10, 16, 16] = 1.0
+        conditioning[0, 11, 16, 16] = 0.60
+        completed = torch.ones(1, 4, 64, 64)
+
+        locked, stats = lock_completed_parser_evidence(
+            completed,
+            conditioning,
+            confidence_threshold=0.0,
+        )
+
+        self.assertTrue(
+            torch.equal(locked[0, :, 8, 8], conditioning[0, 0:4, 8, 8])
+        )
+        self.assertTrue(
+            torch.equal(locked[0, :, 16, 16], conditioning[0, 6:10, 16, 16])
+        )
+        self.assertEqual(stats["locked_evidence_texels"], 2)
+        self.assertEqual(stats["model_overwrote_locked_texels"], 2)
+
+    def test_legacy_topology_generate_signature_still_runs(self):
+        class LegacyGenerator:
+            def generate(self, conditioning, steps, temperature, seed):
+                self.arguments = (steps, temperature, seed)
+                return conditioning[:, :4]
+
+        generator = LegacyGenerator()
+        conditioning = torch.zeros(1, 12, 64, 64)
+        result = generate_topology_completion(
+            generator,
+            conditioning,
+            steps=4,
+            temperature=0.0,
+            seed=1234,
+            palette_snap=True,
+        )
+        self.assertEqual(tuple(result.shape), (1, 4, 64, 64))
+        self.assertEqual(generator.arguments, (4, 0.0, 1234))
+
     def test_training_logger_preserves_terminal_capabilities(self):
         stream = io.StringIO()
         with tempfile.TemporaryDirectory() as directory:

@@ -193,6 +193,10 @@ def build_dense_parser_conditioning(
     outer_route_confidence_threshold=0.55,
     outer_route_margin_threshold=0.35,
     outer_uv_min_coverage=0.0,
+    outer_geometry_rescue=True,
+    outer_rescue_confidence_threshold=0.60,
+    outer_rescue_margin_threshold=0.25,
+    outer_rescue_min_coverage=0.10,
     color_aggregation="exact_mode",
     geometry_route_texel_consensus=False,
     reject_semantic_fallback=True,
@@ -245,6 +249,10 @@ def build_dense_parser_conditioning(
             outer_route_confidence_threshold=outer_route_confidence_threshold,
             outer_route_margin_threshold=outer_route_margin_threshold,
             outer_uv_min_coverage=outer_uv_min_coverage,
+            outer_geometry_rescue=outer_geometry_rescue,
+            outer_rescue_confidence_threshold=outer_rescue_confidence_threshold,
+            outer_rescue_margin_threshold=outer_rescue_margin_threshold,
+            outer_rescue_min_coverage=outer_rescue_min_coverage,
             color_aggregation=color_aggregation,
             geometry_route_texel_consensus=geometry_route_texel_consensus,
             observed_foreground=observed_foreground,
@@ -277,6 +285,10 @@ def build_training_conditioning(
     parser_outer_route_confidence_threshold=0.55,
     parser_outer_route_margin_threshold=0.35,
     parser_outer_uv_min_coverage=0.0,
+    parser_outer_geometry_rescue=True,
+    parser_outer_rescue_confidence_threshold=0.60,
+    parser_outer_rescue_margin_threshold=0.25,
+    parser_outer_rescue_min_coverage=0.10,
     parser_splat_color_aggregation="exact_mode",
     parser_geometry_route_texel_consensus=False,
     parser_reject_semantic_fallback=True,
@@ -304,6 +316,10 @@ def build_training_conditioning(
         outer_route_confidence_threshold=parser_outer_route_confidence_threshold,
         outer_route_margin_threshold=parser_outer_route_margin_threshold,
         outer_uv_min_coverage=parser_outer_uv_min_coverage,
+        outer_geometry_rescue=parser_outer_geometry_rescue,
+        outer_rescue_confidence_threshold=parser_outer_rescue_confidence_threshold,
+        outer_rescue_margin_threshold=parser_outer_rescue_margin_threshold,
+        outer_rescue_min_coverage=parser_outer_rescue_min_coverage,
         color_aggregation=parser_splat_color_aggregation,
         geometry_route_texel_consensus=parser_geometry_route_texel_consensus,
         reject_semantic_fallback=parser_reject_semantic_fallback,
@@ -338,6 +354,10 @@ def run_epoch(
     parser_outer_route_confidence_threshold=0.55,
     parser_outer_route_margin_threshold=0.35,
     parser_outer_uv_min_coverage=0.0,
+    parser_outer_geometry_rescue=True,
+    parser_outer_rescue_confidence_threshold=0.60,
+    parser_outer_rescue_margin_threshold=0.25,
+    parser_outer_rescue_min_coverage=0.10,
     parser_splat_color_aggregation="exact_mode",
     parser_geometry_route_texel_consensus=False,
     parser_reject_semantic_fallback=True,
@@ -347,6 +367,7 @@ def run_epoch(
     topology_drop_known_max=0.5,
     topology_teacher_reveal_unknown=0.1,
     lambda_rgb_token=1.0,
+    lambda_rgb_distribution=2.0,
     lambda_alpha_token=0.5,
     ignore_covered_inner=True,
     covered_inner_alpha_threshold=0.1,
@@ -386,6 +407,10 @@ def run_epoch(
                 parser_outer_route_confidence_threshold=parser_outer_route_confidence_threshold,
                 parser_outer_route_margin_threshold=parser_outer_route_margin_threshold,
                 parser_outer_uv_min_coverage=parser_outer_uv_min_coverage,
+                parser_outer_geometry_rescue=parser_outer_geometry_rescue,
+                parser_outer_rescue_confidence_threshold=parser_outer_rescue_confidence_threshold,
+                parser_outer_rescue_margin_threshold=parser_outer_rescue_margin_threshold,
+                parser_outer_rescue_min_coverage=parser_outer_rescue_min_coverage,
                 parser_splat_color_aggregation=parser_splat_color_aggregation,
                 parser_geometry_route_texel_consensus=parser_geometry_route_texel_consensus,
                 parser_reject_semantic_fallback=parser_reject_semantic_fallback,
@@ -419,6 +444,7 @@ def run_epoch(
                         model_outputs,
                         batch["uv"],
                         lambda_rgb_token=lambda_rgb_token,
+                        lambda_rgb_distribution=lambda_rgb_distribution,
                         lambda_alpha_token=lambda_alpha_token,
                         ignore_covered_inner=ignore_covered_inner,
                         covered_inner_alpha_threshold=covered_inner_alpha_threshold,
@@ -580,14 +606,34 @@ def build_arg_parser():
     parser.add_argument("--topology_layers", type=int, default=4)
     parser.add_argument("--topology_attention_heads", type=int, default=4)
     parser.add_argument("--topology_dropout", type=float, default=0.05)
-    parser.add_argument("--topology_hard_lock_threshold", type=float, default=0.85)
+    parser.add_argument("--topology_hard_lock_threshold", type=float, default=0.0)
     parser.add_argument("--topology_drop_known_min", type=float, default=0.1)
     parser.add_argument("--topology_drop_known_max", type=float, default=0.5)
     parser.add_argument("--topology_teacher_reveal_unknown", type=float, default=0.1)
     parser.add_argument("--lambda_rgb_token", type=float, default=1.0)
+    parser.add_argument("--lambda_rgb_distribution", type=float, default=2.0)
     parser.add_argument("--lambda_alpha_token", type=float, default=0.5)
     parser.add_argument("--preview_generation_steps", type=int, default=4)
     parser.add_argument("--preview_generation_temperature", type=float, default=0.0)
+    parser.add_argument(
+        "--preview_rgb_decode",
+        choices=["mean", "argmax"],
+        default="mean",
+        help="Deterministic topology RGB decoder used by epoch previews.",
+    )
+    parser.add_argument(
+        "--preview_palette_snap",
+        dest="preview_palette_snap",
+        action="store_true",
+        default=True,
+        help="Constrain generated preview colors to observed parser RGB triplets.",
+    )
+    parser.add_argument(
+        "--no_preview_palette_snap",
+        dest="preview_palette_snap",
+        action="store_false",
+    )
+    parser.add_argument("--preview_palette_min_confidence", type=float, default=0.75)
     parser.add_argument("--augment", dest="augment", action="store_true", default=False, help="Enable optional render-space geometric augmentation.")
     parser.add_argument("--no_augment", dest="augment", action="store_false")
     parser.add_argument("--augment_validation", dest="augment_validation", action="store_true", default=False)
@@ -648,9 +694,23 @@ def build_arg_parser():
     parser.add_argument("--parser_affine_refine_scale", type=float, default=None)
     parser.add_argument("--parser_route_confidence_threshold", type=float, default=0.0)
     parser.add_argument("--parser_route_margin_threshold", type=float, default=0.0)
-    parser.add_argument("--parser_outer_route_confidence_threshold", type=float, default=0.55)
-    parser.add_argument("--parser_outer_route_margin_threshold", type=float, default=0.35)
+    parser.add_argument("--parser_outer_route_confidence_threshold", type=float, default=0.80)
+    parser.add_argument("--parser_outer_route_margin_threshold", type=float, default=0.55)
     parser.add_argument("--parser_outer_uv_min_coverage", type=float, default=None)
+    parser.add_argument(
+        "--parser_outer_geometry_rescue",
+        dest="parser_outer_geometry_rescue",
+        action="store_true",
+        default=True,
+    )
+    parser.add_argument(
+        "--no_parser_outer_geometry_rescue",
+        dest="parser_outer_geometry_rescue",
+        action="store_false",
+    )
+    parser.add_argument("--parser_outer_rescue_confidence_threshold", type=float, default=0.60)
+    parser.add_argument("--parser_outer_rescue_margin_threshold", type=float, default=0.25)
+    parser.add_argument("--parser_outer_rescue_min_coverage", type=float, default=0.10)
     parser.add_argument(
         "--parser_geometry_route_texel_consensus",
         dest="parser_geometry_route_texel_consensus",
@@ -746,10 +806,16 @@ def main():
         raise ValueError("--topology_layers must be positive.")
     if not 0.0 <= args.topology_dropout < 1.0:
         raise ValueError("--topology_dropout must be in [0, 1).")
-    if args.lambda_rgb_token < 0.0 or args.lambda_alpha_token < 0.0:
+    if (
+        args.lambda_rgb_token < 0.0
+        or args.lambda_rgb_distribution < 0.0
+        or args.lambda_alpha_token < 0.0
+    ):
         raise ValueError("Topology token-loss weights must be non-negative.")
     if args.preview_generation_steps < 1 or args.preview_generation_temperature < 0.0:
         raise ValueError("Preview generation requires positive steps and non-negative temperature.")
+    if not 0.0 <= args.preview_palette_min_confidence <= 1.0:
+        raise ValueError("--preview_palette_min_confidence must be in [0, 1].")
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -1005,6 +1071,10 @@ def main():
             parser_outer_route_confidence_threshold=args.parser_outer_route_confidence_threshold,
             parser_outer_route_margin_threshold=args.parser_outer_route_margin_threshold,
             parser_outer_uv_min_coverage=args.parser_outer_uv_min_coverage,
+            parser_outer_geometry_rescue=args.parser_outer_geometry_rescue,
+            parser_outer_rescue_confidence_threshold=args.parser_outer_rescue_confidence_threshold,
+            parser_outer_rescue_margin_threshold=args.parser_outer_rescue_margin_threshold,
+            parser_outer_rescue_min_coverage=args.parser_outer_rescue_min_coverage,
             parser_splat_color_aggregation=args.parser_splat_color_aggregation,
             parser_geometry_route_texel_consensus=args.parser_geometry_route_texel_consensus,
             parser_reject_semantic_fallback=not args.parser_allow_semantic_fallback,
@@ -1013,6 +1083,7 @@ def main():
             topology_drop_known_max=args.topology_drop_known_max,
             topology_teacher_reveal_unknown=args.topology_teacher_reveal_unknown,
             lambda_rgb_token=args.lambda_rgb_token,
+            lambda_rgb_distribution=args.lambda_rgb_distribution,
             lambda_alpha_token=args.lambda_alpha_token,
             ignore_covered_inner=not args.supervise_covered_inner,
             covered_inner_alpha_threshold=args.covered_inner_alpha_threshold,
@@ -1044,6 +1115,10 @@ def main():
                     parser_outer_route_confidence_threshold=args.parser_outer_route_confidence_threshold,
                     parser_outer_route_margin_threshold=args.parser_outer_route_margin_threshold,
                     parser_outer_uv_min_coverage=args.parser_outer_uv_min_coverage,
+                    parser_outer_geometry_rescue=args.parser_outer_geometry_rescue,
+                    parser_outer_rescue_confidence_threshold=args.parser_outer_rescue_confidence_threshold,
+                    parser_outer_rescue_margin_threshold=args.parser_outer_rescue_margin_threshold,
+                    parser_outer_rescue_min_coverage=args.parser_outer_rescue_min_coverage,
                     parser_splat_color_aggregation=args.parser_splat_color_aggregation,
                     parser_geometry_route_texel_consensus=args.parser_geometry_route_texel_consensus,
                     parser_reject_semantic_fallback=not args.parser_allow_semantic_fallback,
@@ -1052,6 +1127,7 @@ def main():
                     topology_drop_known_max=args.topology_drop_known_max,
                     topology_teacher_reveal_unknown=args.topology_teacher_reveal_unknown,
                     lambda_rgb_token=args.lambda_rgb_token,
+                    lambda_rgb_distribution=args.lambda_rgb_distribution,
                     lambda_alpha_token=args.lambda_alpha_token,
                     ignore_covered_inner=not args.supervise_covered_inner,
                     covered_inner_alpha_threshold=args.covered_inner_alpha_threshold,
@@ -1094,6 +1170,10 @@ def main():
                     parser_outer_route_confidence_threshold=args.parser_outer_route_confidence_threshold,
                     parser_outer_route_margin_threshold=args.parser_outer_route_margin_threshold,
                     parser_outer_uv_min_coverage=args.parser_outer_uv_min_coverage,
+                    parser_outer_geometry_rescue=args.parser_outer_geometry_rescue,
+                    parser_outer_rescue_confidence_threshold=args.parser_outer_rescue_confidence_threshold,
+                    parser_outer_rescue_margin_threshold=args.parser_outer_rescue_margin_threshold,
+                    parser_outer_rescue_min_coverage=args.parser_outer_rescue_min_coverage,
                     parser_splat_color_aggregation=args.parser_splat_color_aggregation,
                     parser_geometry_route_texel_consensus=args.parser_geometry_route_texel_consensus,
                     parser_reject_semantic_fallback=not args.parser_allow_semantic_fallback,
@@ -1108,6 +1188,9 @@ def main():
                         steps=args.preview_generation_steps,
                         temperature=args.preview_generation_temperature,
                         seed=args.seed,
+                        palette_snap=args.preview_palette_snap,
+                        palette_min_confidence=args.preview_palette_min_confidence,
+                        rgb_decode=args.preview_rgb_decode,
                     )
                 else:
                     pred_uv = model(preview_cond)

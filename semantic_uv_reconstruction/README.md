@@ -35,8 +35,8 @@ To solve this, `dense_uv_parser` performs coordinate-guided routing first and `s
   secondary/deeper surfaces.
 * Fixed mappings route them into 12 channels: inner RGBA, evidence, and learned
   confidence, followed by the same outer fields.
-* Unknown and low-confidence texels remain generatable, turning the task into
-  confidence-aware UV completion rather than camera-coordinate translation.
+* Routed evidence remains confidence-aware context, but the production default
+  locks all of it and generates only texels with no parser evidence.
 
 ### 2. Topology-Aware Masked Generator (`TopologyAwareUVCompletionNet`)
 * Every valid atlas texel carries its body part, cuboid face, inner/outer layer,
@@ -47,9 +47,9 @@ To solve this, `dense_uv_parser` performs coordinate-guided routing first and `s
   context with a compact transformer before broadcasting it back to texels.
 * RGB is generated as three 256-way categorical tokens and outer alpha as a
   binary token. Inference iteratively reveals the most confident unknown texels.
-* Parser evidence above `--topology_hard_lock_threshold` is copied byte-for-byte.
-  Lower-confidence evidence is visible to the model but may be repaired. Invalid
-  atlas padding remains transparent.
+* Routed parser evidence is copied byte-for-byte by default
+  (`--topology_hard_lock_threshold 0`). The model writes only genuinely unknown
+  texels; invalid atlas padding remains transparent.
 
 The previous `UVInpaintingNet` U-Net is still loadable and trainable with
 `COMPLETION_MODEL=unet`, including legacy checkpoints.
@@ -129,19 +129,30 @@ Useful knobs:
 - `--topology_teacher_reveal_unknown`: fraction of originally invisible GT
   texels exposed as self-conditioning during training; defaults to `0.1`.
 - `--topology_hard_lock_threshold`: minimum calibrated parser confidence copied
-  exactly into the result; defaults to `0.85`.
+  exactly into the result; defaults to `0.0`, preserving every routed texel.
 - `--lambda_rgb_token` / `--lambda_alpha_token`: discrete unknown-texel loss weights.
+- `--lambda_rgb_distribution`: ordinal 8-bit RGB distribution loss. It penalizes
+  probability mass in distant color bins and defaults to `2.0`, preventing
+  moderate target colors from retaining extreme 0/255 channel modes.
 - `--preview_generation_steps` / `--preview_generation_temperature`: iterative
   preview sampling controls. Temperature `0` is deterministic.
+- `--preview_rgb_decode`: deterministic RGB decoding; `mean` is the default and
+  matches the continuous reconstruction objective. Legacy per-channel `argmax`
+  can combine channel modes into colors that never appeared on the skin.
+- `--preview_palette_snap` / `--preview_palette_min_confidence`: constrain epoch
+  preview completion to complete RGB triplets observed by the dense parser.
 
 Performance notes:
 
 - `run_parser_conditioned_training.sh` disables geometric augmentation by default: `AUGMENT=false`, `TRANSLATION_SCALE=0.0`, `SCALE_RANGE=0.0`, and `PERSPECTIVE_SCALE=0.0`.
 - Validation also uses fixed canonical geometry, and parser affine refinement is disabled. Pure solid-background randomization remains enabled.
-- Parser conditioning uses the same semantics-conditioned geometry routing as
-  production inference: outer confidence `0.55`, relative margin `0.35`,
-  projected-texel consensus disabled, and geometric UV coverage filtering
-  disabled (`0`). Fixed geometry remains responsible for coordinates.
+- Parser conditioning uses the same precision-first geometry routing as
+  production inference: inner confidence/margin `0.0/0.0`, outer
+  confidence/margin `0.80/0.55`, projected-texel consensus enabled, and outer
+  footprint coverage `0.25`. Geometry-proven outer-only and secondary/backface
+  texels use the relaxed `0.60/0.25` gate and `0.10` coverage floor. Fixed geometry
+  remains responsible for coordinates; uncertain evidence is left for topology
+  completion.
 - For lower console overhead on fast GPUs, raise `LOG_EVERY` (for example `LOG_EVERY=100`).
 
 ### Train From Dense Parser Conditioning
@@ -183,10 +194,20 @@ FRONT=/path/to/front.png BACK=/path/to/back.png ./run_infer.sh
 
 `dense_uv_parser/infer.py` reads the completion architecture from the checkpoint,
 performs parser splatting, and writes the completed skin to `outputs/pred_uv.png`.
-Topology checkpoints default to four deterministic reveal steps. Override them
-with `INPAINT_STEPS`, `INPAINT_TEMPERATURE`, and `INPAINT_SEED`; a positive
-temperature enables stochastic alternatives while preserving every observed
-texel.
+Topology checkpoints default to four deterministic reveal steps and distribution-
+mean RGB decoding. Override them with `INPAINT_STEPS`, `INPAINT_TEMPERATURE`,
+`INPAINT_SEED`, and `INPAINT_RGB_DECODE`; a positive temperature enables
+stochastic alternatives while preserving every observed texel.
+
+Production inference projects generated RGB onto complete observed RGB triplets
+on the same body part/layer/face by default, with topology-aware fallbacks. Color
+similarity selects the triplet and spatial distance breaks close ties. It also
+reapplies locked parser RGBA after generation, including for legacy checkpoints.
+Repeated observed colors are preferred so one isolated parser outlier cannot
+spread across an unknown surface.
+Use `INPAINT_PALETTE_SNAP=false` to disable topology color propagation,
+`INPAINT_PALETTE_MIN_CONFIDENCE` to select reference evidence, or
+`INPAINT_EVIDENCE_LOCK_THRESHOLD` to deliberately permit low-confidence repair.
 
 ## Semantic Fixed-View UV Reconstruction
 
