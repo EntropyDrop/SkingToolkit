@@ -153,6 +153,12 @@ Performance notes:
   texels use the relaxed `0.60/0.25` gate and `0.10` coverage floor. Fixed geometry
   remains responsible for coordinates; uncertain evidence is left for topology
   completion.
+- Rejected pixels with moderate route confidence are retained in 12-channel
+  conditioning as unlocked RGB context. High-confidence context anchors the
+  corresponding UV texel; weaker context supplies reference texture without
+  being copied by the hard evidence lock. Part-level outer presence and coverage
+  semantics selectively recover clothing detail that the global conservative
+  gate would otherwise remove.
 - For lower console overhead on fast GPUs, raise `LOG_EVERY` (for example `LOG_EVERY=100`).
 
 ### Train From Dense Parser Conditioning

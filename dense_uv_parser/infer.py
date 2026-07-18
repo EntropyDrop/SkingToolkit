@@ -313,10 +313,18 @@ def propagate_completed_unknown_colors(completed, conditioning, min_confidence=0
     else:
         confidence = evidence.to(dtype=completed.dtype)
 
+    context_source = (~evidence) & (confidence >= float(min_confidence))
     result = completed.flatten(2).transpose(1, 2).clone()
     generated = (~evidence) & valid.view(1, -1) & (result[..., 3] > 0.5)
-    opaque_source = evidence & (observed[..., 3] > 0.5)
+    opaque_source = (evidence | context_source) & (observed[..., 3] > 0.5)
     strong_source = opaque_source & (confidence >= float(min_confidence))
+    direct_context = context_source & generated & (observed[..., 3] > 0.5)
+    result[..., :3] = torch.where(
+        direct_context.unsqueeze(-1),
+        observed[..., :3].to(dtype=result.dtype),
+        result[..., :3],
+    )
+    generated_for_propagation = generated & ~direct_context
 
     def stable_indices(mask, colors):
         indices = mask.nonzero(as_tuple=False).flatten()
@@ -332,7 +340,7 @@ def propagate_completed_unknown_colors(completed, conditioning, min_confidence=0
         stable = counts[inverse] >= 2
         return (indices[stable] if stable.any() else None), indices
 
-    recolored = 0
+    recolored = int(direct_context.sum().item())
     for batch_index in range(result.shape[0]):
         strong = strong_source[batch_index]
         fallback = opaque_source[batch_index]
@@ -342,7 +350,11 @@ def propagate_completed_unknown_colors(completed, conditioning, min_confidence=0
         for part_index in range(PART_COUNT):
             part_mask = part == part_index
             for layer_index in range(LAYER_COUNT):
-                group_target = generated[batch_index] & part_mask & (layer == layer_index)
+                group_target = (
+                    generated_for_propagation[batch_index]
+                    & part_mask
+                    & (layer == layer_index)
+                )
                 if not group_target.any():
                     continue
                 for face_index in range(FACE_COUNT):
@@ -391,6 +403,7 @@ def propagate_completed_unknown_colors(completed, conditioning, min_confidence=0
     result = result.transpose(1, 2).reshape_as(completed)
     return result, {
         "generated_opaque_texels": int(generated.sum().item()),
+        "direct_context_texels": int(direct_context.sum().item()),
         "topology_color_propagated_texels": recolored,
         "uncolored_generated_texels": int(generated.sum().item()) - recolored,
     }
@@ -790,6 +803,20 @@ def build_arg_parser():
         dest="outer_geometry_rescue",
         action="store_false",
     )
+    parser.add_argument(
+        "--outer_semantic_rescue",
+        dest="outer_semantic_rescue",
+        action="store_true",
+        default=True,
+        help="Relax outer gates only on parts whose global semantic heads predict a substantial outer layer.",
+    )
+    parser.add_argument(
+        "--no_outer_semantic_rescue",
+        dest="outer_semantic_rescue",
+        action="store_false",
+    )
+    parser.add_argument("--outer_semantic_presence_threshold", type=float, default=0.80)
+    parser.add_argument("--outer_semantic_coverage_threshold", type=float, default=0.20)
     parser.add_argument("--outer_rescue_confidence_threshold", type=float, default=0.60)
     parser.add_argument("--outer_rescue_margin_threshold", type=float, default=0.25)
     parser.add_argument("--outer_rescue_min_coverage", type=float, default=0.10)
@@ -816,6 +843,20 @@ def build_arg_parser():
         action="store_true",
         help="Keep pixels whose strict semantic routing had no valid candidate.",
     )
+    parser.add_argument(
+        "--rejected_context",
+        dest="include_rejected_context",
+        action="store_true",
+        default=True,
+        help="Pass moderately confident rejected pixels to topology completion as unlocked RGB context.",
+    )
+    parser.add_argument(
+        "--no_rejected_context",
+        dest="include_rejected_context",
+        action="store_false",
+    )
+    parser.add_argument("--rejected_context_confidence_threshold", type=float, default=0.35)
+    parser.add_argument("--rejected_context_margin_threshold", type=float, default=0.10)
     parser.add_argument("--no_semantic_gate", dest="semantic_gate", action="store_false", default=None)
     parser.add_argument("--affine_refine", dest="affine_refine", action="store_true", default=None)
     parser.add_argument("--no_affine_refine", dest="affine_refine", action="store_false")
@@ -935,6 +976,9 @@ def main():
             outer_route_margin_threshold=args.outer_route_margin_threshold,
             outer_uv_min_coverage=outer_uv_min_coverage,
             outer_geometry_rescue=args.outer_geometry_rescue,
+            outer_semantic_rescue=args.outer_semantic_rescue,
+            outer_semantic_presence_threshold=args.outer_semantic_presence_threshold,
+            outer_semantic_coverage_threshold=args.outer_semantic_coverage_threshold,
             outer_rescue_confidence_threshold=args.outer_rescue_confidence_threshold,
             outer_rescue_margin_threshold=args.outer_rescue_margin_threshold,
             outer_rescue_min_coverage=args.outer_rescue_min_coverage,
@@ -942,6 +986,9 @@ def main():
             geometry_route_texel_consensus=geometry_route_texel_consensus,
             background_color_tolerance=args.background_color_tolerance,
             reject_semantic_fallback=not args.allow_semantic_fallback,
+            include_rejected_context=args.include_rejected_context,
+            rejected_context_confidence_threshold=args.rejected_context_confidence_threshold,
+            rejected_context_margin_threshold=args.rejected_context_margin_threshold,
             include_confidence=(
                 getattr(inpaint_model, "input_channels", 10) == 12
             ),
@@ -982,6 +1029,15 @@ def main():
         outer_geometry_rescued_count = int(
             routing.get("outer_geometry_rescued", torch.zeros_like(raw_outer)).sum().item()
         )
+        outer_semantic_supported_count = int(
+            routing.get("outer_semantic_supported", torch.zeros_like(raw_outer)).sum().item()
+        )
+        outer_semantic_rescued_count = int(
+            routing.get("outer_semantic_rescued", torch.zeros_like(raw_outer)).sum().item()
+        )
+        rejected_context_count = int(
+            routing.get("rejected_context", torch.zeros_like(raw_outer)).sum().item()
+        )
         outer_geometry_supported_rejected_count = int(
             (
                 routing.get("outer_geometry_supported", torch.zeros_like(raw_outer))
@@ -1020,6 +1076,9 @@ def main():
                     "outer_geometry_supported_pixels": outer_geometry_supported_count,
                     "outer_geometry_rescued_pixels": outer_geometry_rescued_count,
                     "outer_geometry_supported_rejected_pixels": outer_geometry_supported_rejected_count,
+                    "outer_semantic_supported_pixels": outer_semantic_supported_count,
+                    "outer_semantic_rescued_pixels": outer_semantic_rescued_count,
+                    "rejected_context_pixels": rejected_context_count,
                     "background_rejected_pixels": background_rejected_count,
                     "background_color_tolerance": round(
                         float(args.background_color_tolerance), 6

@@ -1509,6 +1509,48 @@ def _geometry_supported_outer_texels(routing, renderer, views):
     return selected_outer & supported_texel
 
 
+def _semantic_supported_outer_pixels(
+    outputs,
+    routing,
+    group_size,
+    presence_threshold=0.80,
+    coverage_threshold=0.20,
+):
+    """Use image-level part semantics to identify plausible outer-layer pixels."""
+    selected_outer = routing["layer"] == 1
+    presence_logits = outputs.get("outer_presence_logits")
+    predicted_coverage = outputs.get("outer_coverage")
+    routed_part = routing.get("part")
+    if (
+        presence_logits is None
+        or predicted_coverage is None
+        or routed_part is None
+    ):
+        return torch.zeros_like(selected_outer)
+    group_count = selected_outer.shape[0] // group_size
+    if presence_logits.shape[:2] != (group_count, PART_CLASSES):
+        return torch.zeros_like(selected_outer)
+    if predicted_coverage.shape[:2] != (group_count, PART_CLASSES):
+        return torch.zeros_like(selected_outer)
+
+    item_groups = torch.arange(
+        selected_outer.shape[0], device=selected_outer.device
+    ) // group_size
+    safe_part = routed_part.clamp(0, PART_CLASSES - 1)
+    valid_part = routed_part != IGNORE_INDEX
+    expanded_groups = item_groups.view(-1, 1, 1).expand_as(safe_part)
+    presence = torch.sigmoid(presence_logits.float())[
+        expanded_groups, safe_part
+    ]
+    coverage = predicted_coverage.float()[expanded_groups, safe_part]
+    return (
+        selected_outer
+        & valid_part
+        & (presence >= float(presence_threshold))
+        & (coverage >= float(coverage_threshold))
+    )
+
+
 def _scatter_soft_uv(rgb_sum, weight_sum, source_rgb, weight, flat_uv, valid):
     """Differentiably accumulate weighted render pixels into fixed UV indices."""
     if not valid.any():
@@ -1744,6 +1786,9 @@ def splat_parser_predictions_to_uv_conditioning(
     outer_route_margin_threshold=None,
     outer_uv_min_coverage=0.5,
     outer_geometry_rescue=False,
+    outer_semantic_rescue=True,
+    outer_semantic_presence_threshold=0.80,
+    outer_semantic_coverage_threshold=0.20,
     outer_rescue_confidence_threshold=0.60,
     outer_rescue_margin_threshold=0.25,
     outer_rescue_min_coverage=0.10,
@@ -1754,6 +1799,9 @@ def splat_parser_predictions_to_uv_conditioning(
     background_color_tolerance=SOLID_BACKGROUND_COLOR_TOLERANCE,
     reject_semantic_fallback=False,
     reject_inner_semantic_fallback=False,
+    include_rejected_context=True,
+    rejected_context_confidence_threshold=0.35,
+    rejected_context_margin_threshold=0.10,
     include_confidence=False,
     return_details=False,
 ):
@@ -1778,6 +1826,14 @@ def splat_parser_predictions_to_uv_conditioning(
         raise ValueError("outer_rescue_margin_threshold must be in [0, 1].")
     if not 0.0 <= outer_rescue_min_coverage <= 1.0:
         raise ValueError("outer_rescue_min_coverage must be in [0, 1].")
+    if not 0.0 <= outer_semantic_presence_threshold <= 1.0:
+        raise ValueError("outer_semantic_presence_threshold must be in [0, 1].")
+    if not 0.0 <= outer_semantic_coverage_threshold <= 1.0:
+        raise ValueError("outer_semantic_coverage_threshold must be in [0, 1].")
+    if not 0.0 <= rejected_context_confidence_threshold <= 1.0:
+        raise ValueError("rejected_context_confidence_threshold must be in [0, 1].")
+    if not 0.0 <= rejected_context_margin_threshold <= 1.0:
+        raise ValueError("rejected_context_margin_threshold must be in [0, 1].")
     if not 0.0 <= background_color_tolerance <= 1.0:
         raise ValueError("background_color_tolerance must be in [0, 1].")
     if "affine" not in outputs:
@@ -1894,7 +1950,9 @@ def splat_parser_predictions_to_uv_conditioning(
         )
         strict_trusted = strict_trusted & ~rejected_fallback
     geometry_supported_outer = torch.zeros_like(selected_outer)
+    semantic_supported_outer = torch.zeros_like(selected_outer)
     outer_geometry_rescued = torch.zeros_like(selected_outer)
+    outer_semantic_rescued = torch.zeros_like(selected_outer)
     if outer_geometry_rescue:
         geometry_supported_outer = _geometry_supported_outer_texels(
             routing,
@@ -1917,6 +1975,28 @@ def splat_parser_predictions_to_uv_conditioning(
         trusted = strict_trusted | rescue_trusted
     else:
         trusted = strict_trusted
+    if outer_semantic_rescue:
+        semantic_supported_outer = _semantic_supported_outer_pixels(
+            canonical_outputs,
+            routing,
+            group_size,
+            presence_threshold=outer_semantic_presence_threshold,
+            coverage_threshold=outer_semantic_coverage_threshold,
+        )
+        semantic_rescue_trusted = (
+            raw_foreground
+            & canonical_observed_foreground
+            & semantic_supported_outer
+            & (routing["confidence"] >= outer_rescue_confidence_threshold)
+            & (
+                routing["confidence_margin_ratio"]
+                >= outer_rescue_margin_threshold
+            )
+        )
+        if reject_semantic_fallback:
+            semantic_rescue_trusted = semantic_rescue_trusted & ~rejected_fallback
+        outer_semantic_rescued = semantic_rescue_trusted & ~trusted
+        trusted = trusted | semantic_rescue_trusted
     outer_uv_coverage = torch.ones_like(routing["confidence"])
     outer_required_coverage = torch.zeros_like(routing["confidence"])
     if outer_uv_min_coverage > 0.0:
@@ -1955,9 +2035,9 @@ def splat_parser_predictions_to_uv_conditioning(
             pixel_coverage = coverage[item_groups.view(-1, 1, 1), routing["flat_uv"]]
         outer_uv_coverage = torch.where(selected_outer, pixel_coverage, outer_uv_coverage)
         required_coverage = torch.full_like(pixel_coverage, outer_uv_min_coverage)
-        if outer_geometry_rescue:
+        if outer_geometry_rescue or outer_semantic_rescue:
             required_coverage = torch.where(
-                geometry_supported_outer,
+                geometry_supported_outer | semantic_supported_outer,
                 required_coverage.new_tensor(
                     min(outer_uv_min_coverage, outer_rescue_min_coverage)
                 ),
@@ -1975,6 +2055,8 @@ def splat_parser_predictions_to_uv_conditioning(
     routing["rejected"] = raw_foreground & ~trusted
     routing["outer_geometry_supported"] = geometry_supported_outer
     routing["outer_geometry_rescued"] = outer_geometry_rescued & trusted
+    routing["outer_semantic_supported"] = semantic_supported_outer
+    routing["outer_semantic_rescued"] = outer_semantic_rescued & trusted
     routing["outer_required_coverage"] = outer_required_coverage
     routing["foreground"] = trusted
     if "secondary_routed" in routing:
@@ -1992,6 +2074,45 @@ def splat_parser_predictions_to_uv_conditioning(
         color_aggregation=color_aggregation,
         include_confidence=include_confidence,
     )
+    rejected_context = (
+        raw_foreground
+        & canonical_observed_foreground
+        & ~trusted
+        & (routing["confidence"] >= rejected_context_confidence_threshold)
+        & (
+            routing["confidence_margin_ratio"]
+            >= rejected_context_margin_threshold
+        )
+    )
+    if reject_semantic_fallback:
+        rejected_context = rejected_context & ~rejected_fallback
+    if include_rejected_context and include_confidence and rejected_context.any():
+        context = splat_to_uv_conditioning(
+            canonical_rendered,
+            rejected_context,
+            routing["layer"],
+            routing["flat_uv"],
+            group_size=group_size,
+            bg_color=bg_color,
+            confidence=routing["confidence"],
+            color_aggregation=color_aggregation,
+            include_confidence=True,
+        )
+        for offset in (0, 6):
+            trusted_evidence = conditioning[:, offset + 4 : offset + 5] > 0.5
+            context_evidence = context[:, offset + 4 : offset + 5] > 0.5
+            fill = ~trusted_evidence & context_evidence
+            conditioning[:, offset : offset + 4] = torch.where(
+                fill.expand(-1, 4, -1, -1),
+                context[:, offset : offset + 4],
+                conditioning[:, offset : offset + 4],
+            )
+            conditioning[:, offset + 5 : offset + 6] = torch.where(
+                fill,
+                context[:, offset + 5 : offset + 6],
+                conditioning[:, offset + 5 : offset + 6],
+            )
+    routing["rejected_context"] = rejected_context
     if return_details:
         return conditioning, {
             "rendered": canonical_rendered,

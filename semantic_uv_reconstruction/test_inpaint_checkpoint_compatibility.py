@@ -20,6 +20,42 @@ from SkingToolkit.semantic_uv_reconstruction.train import Logger
 
 
 class InpaintCheckpointCompatibilityTest(unittest.TestCase):
+    def test_rejected_context_guides_color_without_becoming_locked_evidence(self):
+        topology = build_uv_topology()
+        indices = (topology.surface.reshape(-1) == 0).nonzero(
+            as_tuple=False
+        ).flatten()[:3]
+        context_color = torch.tensor([0.55, 0.08, 0.12, 1.0])
+        conditioning = torch.zeros(1, 12, 64, 64)
+        for source_index in indices[:2]:
+            y, x = divmod(int(source_index), 64)
+            conditioning[0, 0:4, y, x] = context_color
+            conditioning[0, 4, y, x] = 0.0
+            conditioning[0, 5, y, x] = 0.9
+        target_y, target_x = divmod(int(indices[2]), 64)
+        completed = torch.zeros(1, 4, 64, 64)
+        completed[0, :, target_y, target_x] = torch.tensor(
+            [0.0, 1.0, 1.0, 1.0]
+        )
+
+        propagated, stats = propagate_completed_unknown_colors(
+            completed,
+            conditioning,
+            min_confidence=0.75,
+        )
+        locked, lock_stats = lock_completed_parser_evidence(
+            propagated,
+            conditioning,
+            confidence_threshold=0.0,
+        )
+
+        self.assertTrue(
+            torch.equal(propagated[0, :, target_y, target_x], context_color)
+        )
+        self.assertTrue(torch.equal(locked, propagated))
+        self.assertEqual(stats["topology_color_propagated_texels"], 1)
+        self.assertEqual(lock_stats["locked_evidence_texels"], 0)
+
     def test_final_color_propagation_ignores_single_observed_outlier(self):
         topology = build_uv_topology()
         indices = (topology.surface.reshape(-1) == 0).nonzero(

@@ -215,6 +215,23 @@ completion. Set `OUTER_GEOMETRY_RESCUE=false` for an ablation, or tune
 `OUTER_RESCUE_CONFIDENCE_THRESHOLD`, `OUTER_RESCUE_MARGIN_THRESHOLD`, and
 `OUTER_RESCUE_MIN_COVERAGE`. The `balanced` profile disables this rescue.
 
+The conservative profile also enables part-semantic outer rescue. A pixel must
+still pass the relaxed `0.60/0.25` route gate, but it may bypass the global
+`0.80/0.55` gate when the image-level heads predict both outer presence and
+meaningful outer coverage for that body part. Tune
+`OUTER_SEMANTIC_PRESENCE_THRESHOLD` (default `0.80`) and
+`OUTER_SEMANTIC_COVERAGE_THRESHOLD` (default `0.20`), or disable it with
+`OUTER_SEMANTIC_RESCUE=false`.
+
+Moderately confident pixels rejected by the strict output filter are retained
+as unlocked topology context (`REJECTED_CONTEXT=true`). They do not appear in
+`parser_pred_uv.png` and are never restored by the parser evidence lock. Context
+at or above `INPAINT_PALETTE_MIN_CONFIDENCE` anchors RGB at its exact UV texel;
+weaker context only conditions the generator. Tune
+`REJECTED_CONTEXT_CONFIDENCE_THRESHOLD` and
+`REJECTED_CONTEXT_MARGIN_THRESHOLD`, or disable this path with
+`REJECTED_CONTEXT=false`.
+
 Topology inference enables `INPAINT_PALETTE_SNAP=true` and locks all routed
 parser evidence (`INPAINT_EVIDENCE_LOCK_THRESHOLD=0`) by default. Generated RGB
 uses distribution-mean decoding (`INPAINT_RGB_DECODE=mean`) and is projected onto

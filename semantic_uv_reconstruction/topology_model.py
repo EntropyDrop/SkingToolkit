@@ -574,18 +574,40 @@ class TopologyAwareUVCompletionNet(nn.Module):
         snapped = result.clone()
         valid = self.valid_tokens[:, 0].bool().view(1, -1)
         opaque_reference = reference_observed[..., 3] > 0.5
+        evidence_reference = reference_evidence[..., 0] > 0.5
+        context_reference = (
+            ~evidence_reference
+            & (reference_confidence[..., 0] >= float(min_confidence))
+        )
+        available_reference = evidence_reference | context_reference
         strong_reference = (
-            (reference_evidence[..., 0] > 0.5)
+            available_reference
             & (reference_confidence[..., 0] >= float(min_confidence))
             & opaque_reference
             & valid
         )
         all_reference = (
-            (reference_evidence[..., 0] > 0.5)
+            available_reference
             & opaque_reference
             & valid
         )
-        opaque_generated = generated & (result[..., 3] > 0.5) & valid
+        direct_context = (
+            context_reference
+            & generated
+            & (result[..., 3] > 0.5)
+            & valid
+        )
+        snapped[..., :3] = torch.where(
+            direct_context.unsqueeze(-1),
+            reference_observed[..., :3].to(dtype=snapped.dtype),
+            snapped[..., :3],
+        )
+        opaque_generated = (
+            generated
+            & (result[..., 3] > 0.5)
+            & valid
+            & ~direct_context
+        )
         layer = self.layer_map.view(1, -1)
         part = self.part_map.view(1, -1)
         face = self.face_map.view(1, -1)
