@@ -24,6 +24,9 @@ from SkingToolkit.dense_uv_parser.utils import (  # noqa: E402
 from SkingToolkit.fixed_view_foreground.augmentation import (  # noqa: E402
     composite_random_background,
 )
+from SkingToolkit.fixed_view_foreground.inference import (  # noqa: E402
+    build_geometry_prior,
+)
 from SkingToolkit.fixed_view_foreground.model import (  # noqa: E402
     FixedViewForegroundNet,
     count_parameters,
@@ -96,6 +99,15 @@ def build_training_batch(uv, renderer, views, args):
         stack_views(backgrounds),
         stack_views(parts),
         view_ids,
+        build_geometry_prior(
+            renderer,
+            views,
+            batch_size=batch,
+            device=uv.device,
+            dtype=uv.dtype,
+        )
+        if args.geometry_prior
+        else None,
     )
 
 
@@ -106,6 +118,7 @@ def foreground_loss(logits, target, images, backgrounds, parts, args):
         F.max_pool2d(target, 3, stride=1, padding=1)
         + F.max_pool2d(-target, 3, stride=1, padding=1)
     ).clamp(0.0, 1.0)
+    interior = -F.max_pool2d(-target, 5, stride=1, padding=2)
     low_contrast = (
         (images.float() - backgrounds.float()).abs().amax(dim=1, keepdim=True)
         <= args.low_contrast_threshold
@@ -120,6 +133,7 @@ def foreground_loss(logits, target, images, backgrounds, parts, args):
     pixel_weight = pixel_weight + args.boundary_weight * boundary
     pixel_weight = pixel_weight + args.low_contrast_weight * low_contrast.float()
     pixel_weight = pixel_weight + args.arm_weight * arms.float()
+    pixel_weight = pixel_weight + args.interior_weight * interior
 
     bce_map = F.binary_cross_entropy_with_logits(
         logits.float(), target, reduction="none"
@@ -129,11 +143,24 @@ def foreground_loss(logits, target, images, backgrounds, parts, args):
     denominator = probability.sum(dim=(1, 2, 3)) + target.sum(dim=(1, 2, 3))
     loss_dice = (1.0 - (2.0 * intersection + 1.0) / (denominator + 1.0)).mean()
     loss_boundary = (bce_map * boundary).sum() / boundary.sum().clamp_min(1.0)
-    total = loss_bce + args.lambda_dice * loss_dice + args.lambda_boundary * loss_boundary
+    positive_probability = probability.clamp_min(1e-6)
+    hard_false_negative = (
+        -(1.0 - positive_probability).square()
+        * positive_probability.log()
+        * target
+    )
+    loss_recall = hard_false_negative.sum() / target.sum().clamp_min(1.0)
+    total = (
+        loss_bce
+        + args.lambda_dice * loss_dice
+        + args.lambda_boundary * loss_boundary
+        + args.lambda_recall * loss_recall
+    )
     return total, {
         "loss_bce": loss_bce,
         "loss_dice": loss_dice,
         "loss_boundary": loss_boundary,
+        "loss_recall": loss_recall,
         "low_contrast_pixels": low_contrast.sum(),
         "arm_pixels": arms.sum(),
     }
@@ -142,6 +169,7 @@ def foreground_loss(logits, target, images, backgrounds, parts, args):
 def metric_counts(probability, target, parts, threshold):
     predicted = probability >= threshold
     target = target > 0.5
+    interior_target = -F.max_pool2d(-target.float(), 5, stride=1, padding=2) > 0.5
     true_positive = (predicted & target).sum()
     false_positive = (predicted & ~target).sum()
     false_negative = (~predicted & target).sum()
@@ -151,6 +179,8 @@ def metric_counts(probability, target, parts, threshold):
         "true_positive": true_positive,
         "false_positive": false_positive,
         "false_negative": false_negative,
+        "interior_true_positive": (predicted & interior_target).sum(),
+        "interior_target": interior_target.sum(),
         "arm_true_positive": arm_true_positive,
         "arm_target": arm_target.sum(),
     }
@@ -187,9 +217,12 @@ def run_epoch(
         "loss_bce": 0.0,
         "loss_dice": 0.0,
         "loss_boundary": 0.0,
+        "loss_recall": 0.0,
         "true_positive": 0.0,
         "false_positive": 0.0,
         "false_negative": 0.0,
+        "interior_true_positive": 0.0,
+        "interior_target": 0.0,
         "arm_true_positive": 0.0,
         "arm_target": 0.0,
     }
@@ -198,13 +231,24 @@ def run_epoch(
     iterator = tqdm(loader, leave=False) if tqdm is not None else loader
     for batch in iterator:
         uv = batch["uv"].to(device, non_blocking=True)
-        images, target, backgrounds, parts, view_ids = build_training_batch(
+        (
+            images,
+            target,
+            backgrounds,
+            parts,
+            view_ids,
+            geometry_prior,
+        ) = build_training_batch(
             uv, renderer, views, args
         )
         if train:
             optimizer.zero_grad(set_to_none=True)
         with torch.set_grad_enabled(train), autocast_context(device, args.mixed_precision):
-            logits = model(images, view_ids=view_ids)
+            logits = model(
+                images,
+                view_ids=view_ids,
+                geometry_prior=geometry_prior,
+            )
             loss, details = foreground_loss(
                 logits, target, images, backgrounds, parts, args
             )
@@ -225,7 +269,7 @@ def run_epoch(
         current = images.shape[0]
         sample_count += current
         sums["loss"] += float(loss.detach().item()) * current
-        for name in ("loss_bce", "loss_dice", "loss_boundary"):
+        for name in ("loss_bce", "loss_dice", "loss_boundary", "loss_recall"):
             sums[name] += float(details[name].detach().item()) * current
         for name, value in counts.items():
             sums[name] += float(value.detach().item())
@@ -246,14 +290,19 @@ def run_epoch(
         "loss_bce": sums["loss_bce"] / sample_count,
         "loss_dice": sums["loss_dice"] / sample_count,
         "loss_boundary": sums["loss_boundary"] / sample_count,
+        "loss_recall": sums["loss_recall"] / sample_count,
         "precision": true_positive / max(true_positive + false_positive, 1.0),
         "recall": true_positive / max(true_positive + false_negative, 1.0),
         "iou": true_positive
         / max(true_positive + false_positive + false_negative, 1.0),
+        "interior_recall": sums["interior_true_positive"]
+        / max(sums["interior_target"], 1.0),
         "arm_recall": sums["arm_true_positive"] / max(sums["arm_target"], 1.0),
     }
     metrics["selection"] = (
         1.0 - metrics["iou"]
+        + args.recall_selection_weight * (1.0 - metrics["recall"])
+        + args.interior_selection_weight * (1.0 - metrics["interior_recall"])
         + args.arm_selection_weight * (1.0 - metrics["arm_recall"])
     )
     return metrics, preview
@@ -273,6 +322,7 @@ def save_checkpoint(path, model, optimizer, scaler, epoch, args, metrics, best_m
             "base_channels": model.base_channels,
             "view_classes": model.view_classes,
             "coordinate_channels": model.coordinate_channels,
+            "geometry_channels": model.geometry_channels,
             "dropout": model.dropout_probability,
         },
     }
@@ -299,6 +349,12 @@ def build_arg_parser():
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument("--base_channels", type=int, default=24)
     parser.add_argument("--dropout", type=float, default=0.05)
+    parser.add_argument(
+        "--geometry_prior", dest="geometry_prior", action="store_true", default=True
+    )
+    parser.add_argument(
+        "--no_geometry_prior", dest="geometry_prior", action="store_false"
+    )
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--num_workers", type=int, default=8)
     parser.add_argument("--prefetch_factor", type=int, default=4)
@@ -312,14 +368,18 @@ def build_arg_parser():
         "--mixed_precision", choices=["no", "fp16", "bf16"], default="bf16"
     )
     parser.add_argument("--target_alpha_threshold", type=float, default=0.5)
-    parser.add_argument("--threshold", type=float, default=0.5)
+    parser.add_argument("--threshold", type=float, default=0.35)
     parser.add_argument("--positive_weight_max", type=float, default=4.0)
     parser.add_argument("--boundary_weight", type=float, default=1.0)
     parser.add_argument("--low_contrast_threshold", type=float, default=0.25)
     parser.add_argument("--low_contrast_weight", type=float, default=2.0)
     parser.add_argument("--arm_weight", type=float, default=2.0)
+    parser.add_argument("--interior_weight", type=float, default=2.0)
     parser.add_argument("--lambda_dice", type=float, default=1.0)
     parser.add_argument("--lambda_boundary", type=float, default=0.5)
+    parser.add_argument("--lambda_recall", type=float, default=0.75)
+    parser.add_argument("--recall_selection_weight", type=float, default=0.5)
+    parser.add_argument("--interior_selection_weight", type=float, default=0.5)
     parser.add_argument("--arm_selection_weight", type=float, default=0.5)
     parser.add_argument("--bg_color", nargs=3, type=int, default=(128, 128, 128))
     return parser
@@ -387,6 +447,7 @@ def main():
     model = FixedViewForegroundNet(
         base_channels=args.base_channels,
         view_classes=len(views),
+        geometry_channels=2 if args.geometry_prior else 0,
         dropout=args.dropout,
     ).to(device)
     optimizer = torch.optim.AdamW(
@@ -402,6 +463,15 @@ def main():
         if expected_views and parse_views(expected_views) != views:
             raise ValueError(
                 f"Resume checkpoint views {expected_views!r} do not match {views}."
+            )
+        checkpoint_geometry_channels = checkpoint.get("model_config", {}).get(
+            "geometry_channels", 0
+        )
+        if checkpoint_geometry_channels != model.geometry_channels:
+            raise ValueError(
+                "Cannot resume after changing foreground geometry conditioning: "
+                f"checkpoint={checkpoint_geometry_channels}, "
+                f"requested={model.geometry_channels}. Start a new run."
             )
         model.load_state_dict(checkpoint["model"])
         optimizer.load_state_dict(checkpoint["optimizer"])

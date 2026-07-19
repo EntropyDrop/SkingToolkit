@@ -59,6 +59,7 @@ class FixedViewForegroundNet(nn.Module):
         base_channels=24,
         view_classes=2,
         coordinate_channels=True,
+        geometry_channels=2,
         dropout=0.05,
     ):
         super().__init__()
@@ -70,13 +71,19 @@ class FixedViewForegroundNet(nn.Module):
         self.base_channels = int(base_channels)
         self.view_classes = int(view_classes)
         self.coordinate_channels = bool(coordinate_channels)
+        self.geometry_channels = int(geometry_channels)
         self.dropout_probability = float(dropout)
+        if self.geometry_channels < 0:
+            raise ValueError("geometry_channels must be non-negative.")
 
         conditioning_channels = self.view_classes
         if self.coordinate_channels:
             conditioning_channels += 2
         c = self.base_channels
-        self.stem = ConvBlock(self.input_channels + conditioning_channels, c)
+        self.stem = ConvBlock(
+            self.input_channels + conditioning_channels + self.geometry_channels,
+            c,
+        )
         self.down1 = DownBlock(c, c * 2)
         self.down2 = DownBlock(c * 2, c * 4)
         self.down3 = DownBlock(c * 4, c * 8)
@@ -128,13 +135,27 @@ class FixedViewForegroundNet(nn.Module):
             )
         return torch.cat(channels, dim=1)
 
-    def forward(self, images, view_ids):
+    def forward(self, images, view_ids, geometry_prior=None):
         if images.dim() != 4 or images.shape[1] != self.input_channels:
             raise ValueError(
                 f"Expected NCHW input with {self.input_channels} channels, got "
                 f"{tuple(images.shape)}."
             )
-        tensor = torch.cat([images, self._conditioning(images, view_ids)], dim=1)
+        inputs = [images, self._conditioning(images, view_ids)]
+        if self.geometry_channels > 0:
+            expected = (
+                images.shape[0],
+                self.geometry_channels,
+                images.shape[2],
+                images.shape[3],
+            )
+            if geometry_prior is None or geometry_prior.shape != expected:
+                raise ValueError(
+                    f"Expected geometry_prior shape {expected}, got "
+                    f"{None if geometry_prior is None else tuple(geometry_prior.shape)}."
+                )
+            inputs.append(geometry_prior.to(device=images.device, dtype=images.dtype))
+        tensor = torch.cat(inputs, dim=1)
         skip0 = self.stem(tensor)
         skip1 = self.down1(skip0)
         skip2 = self.down2(skip1)

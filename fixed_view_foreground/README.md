@@ -6,8 +6,11 @@ the front/back Minecraft views used by `dense_uv_parser`.
 The renderer supplies exact foreground labels, so no hand-authored masks are
 required. Training composites each rendered character over difficult procedural
 backgrounds: solid colors, gray gradients, low-frequency textures, and colors
-sampled near the character palette. Low-contrast pixels, arm pixels, and
-silhouette boundaries receive extra loss weight.
+sampled near the character palette. The network also receives the fixed-view
+inner/outer geometry silhouettes as two conditioning channels. Low-contrast
+pixels, arm pixels, opaque interiors, and silhouette boundaries receive extra
+loss weight; checkpoint selection explicitly penalizes global and arm false
+negatives.
 
 ## Train
 
@@ -29,7 +32,7 @@ runs/fixed_view_foreground_v1/
 
 The preview rows are input, probability, thresholded prediction, target, and
 background-removed cutout. `best.pt` minimizes validation foreground IoU error
-plus an explicit arm-recall penalty.
+plus explicit global, opaque-interior, and arm-recall penalties.
 
 Common overrides:
 
@@ -41,10 +44,18 @@ EPOCHS=30 \
 ./run_training.sh
 ```
 
-Resume the highest current run:
+Resume the highest current run (only when its architecture matches):
 
 ```bash
 RESUME=latest EPOCHS=45 ./run_training.sh
+```
+
+Geometry conditioning changes the first convolution and therefore cannot be
+added by resuming a pre-geometry checkpoint. Start without `RESUME`; the launcher
+automatically chooses the next unused `fixed_view_foreground_vN` directory:
+
+```bash
+./run_training.sh
 ```
 
 ## Dense Parser Integration
@@ -58,10 +69,17 @@ Inference writes these intermediate products by default:
 
 ```text
 dense_uv_parser/outputs/foreground_probability.png
+dense_uv_parser/outputs/foreground_mask_raw.png
 dense_uv_parser/outputs/foreground_mask.png
 dense_uv_parser/outputs/foreground_cutout.png
 dense_uv_parser/outputs/foreground_parser_input.png
 ```
+
+`foreground_mask_raw.png` is the thresholded network output.
+`foreground_mask.png` is the mask actually consumed by the parser: it restores
+only an eroded, guaranteed inner-layer geometry core and fills background holes
+that are completely enclosed by foreground. Gaps connected to the exterior and
+optional outer-layer texels are not force-filled.
 
 `foreground_cutout.png` is an RGBA image whose rejected background has zero
 alpha. Internally, dense parser features receive the same cutout composited over
@@ -87,5 +105,6 @@ FOREGROUND_CHECKPOINT=none ./run_infer.sh
 ```
 
 When disabled, inference falls back to the existing border-connected background
-color estimator. `FOREGROUND_THRESHOLD` defaults to `0.5`; lower it only when
-validation shows foreground false negatives, especially on hands or pale hair.
+color estimator. `FOREGROUND_THRESHOLD` defaults to `0.35`, favoring recall;
+dense UV routing still requires a valid fixed-geometry candidate, which limits
+the effect of residual background false positives.

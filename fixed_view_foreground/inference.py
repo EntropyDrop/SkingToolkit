@@ -34,6 +34,8 @@ def load_foreground_model(checkpoint_path, device):
         base_channels=config.get("base_channels", 24),
         view_classes=config.get("view_classes", 2),
         coordinate_channels=config.get("coordinate_channels", True),
+        # Checkpoints created before geometry conditioning remain loadable.
+        geometry_channels=config.get("geometry_channels", 0),
         dropout=config.get("dropout", 0.05),
     ).to(device)
     model.load_state_dict(checkpoint["model"])
@@ -41,9 +43,87 @@ def load_foreground_model(checkpoint_path, device):
     return model, checkpoint.get("args", {}), checkpoint
 
 
+def build_geometry_prior(renderer, views, batch_size, device, dtype):
+    """Return fixed direct inner/outer silhouettes in grouped BxV order."""
+    priors = []
+    for view in views:
+        inner = getattr(renderer, f"{view}_inner_mask").to(
+            device=device, dtype=dtype
+        )
+        outer = getattr(renderer, f"{view}_outer_mask").to(
+            device=device, dtype=dtype
+        )
+        priors.append(torch.stack([inner, outer], dim=0))
+    prior = torch.stack(priors, dim=0)
+    return (
+        prior.unsqueeze(0)
+        .expand(batch_size, -1, -1, -1, -1)
+        .reshape(batch_size * len(views), 2, *prior.shape[-2:])
+    )
+
+
+def fill_enclosed_holes(mask):
+    """Fill background components that cannot reach an image border."""
+    if mask.dim() == 3:
+        mask = mask.unsqueeze(1)
+    mask = mask.bool()
+    background = ~mask
+    connected = torch.zeros_like(background)
+    connected[:, :, 0, :] = background[:, :, 0, :]
+    connected[:, :, -1, :] = background[:, :, -1, :]
+    connected[:, :, :, 0] |= background[:, :, :, 0]
+    connected[:, :, :, -1] |= background[:, :, :, -1]
+    for _ in range(max(mask.shape[-2:])):
+        expanded = F.max_pool2d(
+            connected.float(), kernel_size=3, stride=1, padding=1
+        ).bool()
+        updated = connected | (background & expanded)
+        if torch.equal(updated, connected):
+            break
+        connected = updated
+    holes = background & ~connected
+    return mask | holes
+
+
+def refine_foreground_mask(raw_mask, geometry_prior=None, core_radius=2):
+    """Protect guaranteed base-layer interior and remove enclosed mask holes."""
+    if raw_mask.dim() == 3:
+        raw_mask = raw_mask.unsqueeze(1)
+    refined = raw_mask.bool()
+    if geometry_prior is not None:
+        if geometry_prior.dim() != 4 or geometry_prior.shape[1] < 1:
+            raise ValueError("geometry_prior must be NCHW with an inner channel.")
+        if (
+            geometry_prior.shape[0] != refined.shape[0]
+            or geometry_prior.shape[-2:] != refined.shape[-2:]
+        ):
+            raise ValueError(
+                "geometry_prior must match the foreground mask batch and size."
+            )
+        inner = (geometry_prior[:, 0:1] > 0.5).float()
+        if core_radius > 0:
+            kernel = core_radius * 2 + 1
+            padded = F.pad(
+                inner,
+                (core_radius, core_radius, core_radius, core_radius),
+                value=0.0,
+            )
+            inner = -F.max_pool2d(
+                -padded, kernel_size=kernel, stride=1, padding=0
+            )
+        refined = refined | (inner > 0.5)
+    return fill_enclosed_holes(refined)
+
+
 @torch.no_grad()
-def predict_foreground(model, rendered, view_ids):
-    probability = torch.sigmoid(model(rendered[:, :3], view_ids=view_ids).float())
+def predict_foreground(model, rendered, view_ids, geometry_prior=None):
+    probability = torch.sigmoid(
+        model(
+            rendered[:, :3],
+            view_ids=view_ids,
+            geometry_prior=geometry_prior,
+        ).float()
+    )
     return probability.clamp(0.0, 1.0)
 
 
@@ -173,11 +253,14 @@ def save_foreground_outputs(
     threshold,
     view_count,
     probability_output=None,
+    raw_mask_output=None,
     mask_output=None,
     cutout_output=None,
     bg_color=(128, 128, 128),
+    geometry_prior=None,
 ):
-    mask = probability >= threshold
+    raw_mask = probability >= threshold
+    mask = refine_foreground_mask(raw_mask, geometry_prior=geometry_prior)
     # Keep source RGB under alpha so the saved PNG is a reusable transparent
     # cutout rather than a gray-background preview.
     cutout = torch.cat(
@@ -185,6 +268,7 @@ def save_foreground_outputs(
     )
     for tensor, path in (
         (probability, probability_output),
+        (raw_mask.to(dtype=rendered.dtype), raw_mask_output),
         (mask.to(dtype=rendered.dtype), mask_output),
         (cutout, cutout_output),
     ):

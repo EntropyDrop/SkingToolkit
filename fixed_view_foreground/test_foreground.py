@@ -9,8 +9,11 @@ from SkingToolkit.fixed_view_foreground.augmentation import (
     composite_random_background,
 )
 from SkingToolkit.fixed_view_foreground.inference import (
+    build_geometry_prior,
     build_parser_input,
+    fill_enclosed_holes,
     find_latest_checkpoint,
+    refine_foreground_mask,
     save_foreground_outputs,
 )
 from SkingToolkit.fixed_view_foreground.model import FixedViewForegroundNet
@@ -18,10 +21,59 @@ from SkingToolkit.fixed_view_foreground.model import FixedViewForegroundNet
 
 class FixedViewForegroundTest(unittest.TestCase):
     def test_model_preserves_spatial_shape_and_uses_view_ids(self):
-        model = FixedViewForegroundNet(base_channels=8, view_classes=2)
+        model = FixedViewForegroundNet(
+            base_channels=8, view_classes=2, geometry_channels=2
+        )
         images = torch.rand(2, 3, 32, 48)
-        logits = model(images, torch.tensor([0, 1]))
+        geometry = torch.rand(2, 2, 32, 48)
+        logits = model(images, torch.tensor([0, 1]), geometry_prior=geometry)
         self.assertEqual(tuple(logits.shape), (2, 1, 32, 48))
+
+    def test_geometry_conditioned_model_requires_matching_prior(self):
+        model = FixedViewForegroundNet(
+            base_channels=8, view_classes=2, geometry_channels=2
+        )
+        images = torch.rand(2, 3, 16, 16)
+        with self.assertRaisesRegex(ValueError, "geometry_prior"):
+            model(images, torch.tensor([0, 1]))
+
+    def test_geometry_prior_uses_batch_then_view_order(self):
+        class Renderer:
+            front_inner_mask = torch.tensor([[1, 0], [0, 0]])
+            front_outer_mask = torch.tensor([[0, 1], [0, 0]])
+            back_inner_mask = torch.tensor([[0, 0], [1, 0]])
+            back_outer_mask = torch.tensor([[0, 0], [0, 1]])
+
+        prior = build_geometry_prior(
+            Renderer(),
+            ["front", "back"],
+            batch_size=2,
+            device=torch.device("cpu"),
+            dtype=torch.float32,
+        )
+        self.assertEqual(tuple(prior.shape), (4, 2, 2, 2))
+        self.assertTrue(torch.equal(prior[0], prior[2]))
+        self.assertTrue(torch.equal(prior[1], prior[3]))
+        self.assertEqual(float(prior[0, 0, 0, 0]), 1.0)
+        self.assertEqual(float(prior[1, 1, 1, 1]), 1.0)
+
+    def test_refinement_fills_holes_and_only_rescues_inner_core(self):
+        raw = torch.zeros(1, 1, 11, 11, dtype=torch.bool)
+        raw[:, :, 2:9, 2:9] = True
+        raw[:, :, 5, 5] = False
+        filled = fill_enclosed_holes(raw)
+        self.assertTrue(bool(filled[0, 0, 5, 5]))
+        self.assertFalse(bool(filled[0, 0, 0, 0]))
+
+        geometry = torch.zeros(1, 2, 11, 11)
+        geometry[:, 0, 2:9, 2:9] = 1.0
+        geometry[:, 1, 0:2, 0:2] = 1.0
+        refined = refine_foreground_mask(
+            torch.zeros_like(raw), geometry_prior=geometry, core_radius=2
+        )
+        self.assertTrue(bool(refined[0, 0, 5, 5]))
+        self.assertFalse(bool(refined[0, 0, 2, 2]))
+        self.assertFalse(bool(refined[0, 0, 0, 0]))
 
     def test_random_background_composition_preserves_opaque_pixels(self):
         rendered = torch.zeros(2, 4, 16, 16)

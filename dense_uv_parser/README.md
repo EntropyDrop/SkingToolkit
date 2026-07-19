@@ -157,8 +157,11 @@ Use the latest parser checkpoint automatically:
 Inference also looks for the numerically highest
 `../fixed_view_foreground/runs/fixed_view_foreground_vN/best.pt` before running
 the dense parser. When found, its fixed-view foreground mask replaces the
-color-distance background gate. It saves `foreground_probability.png`,
+color-distance background gate. It saves `foreground_probability.png`, the
+thresholded network output `foreground_mask_raw.png`, the geometry-refined mask
 `foreground_mask.png`, and `foreground_cutout.png` under `outputs/` by default.
+The refinement restores only a safely eroded inner-geometry core and completely
+enclosed holes; it does not force optional outer-layer regions to foreground.
 Train that model with `../fixed_view_foreground/run_training.sh`, select one with
 `FOREGROUND_CHECKPOINT=/path/to/best.pt`, or disable it with
 `FOREGROUND_CHECKPOINT=none`. If no checkpoint exists, inference logs a warning

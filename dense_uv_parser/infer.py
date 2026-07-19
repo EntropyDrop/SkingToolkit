@@ -41,6 +41,7 @@ from SkingToolkit.dense_uv_parser.utils import (  # noqa: E402
     surface_class_count,
 )
 from SkingToolkit.fixed_view_foreground.inference import (  # noqa: E402
+    build_geometry_prior,
     build_parser_input,
     find_latest_checkpoint as find_latest_foreground_checkpoint,
     load_foreground_model,
@@ -825,7 +826,7 @@ def build_arg_parser():
             "fixed_view_foreground_v*/best.pt; 'none' uses color-based fallback."
         ),
     )
-    parser.add_argument("--foreground_threshold", type=float, default=0.5)
+    parser.add_argument("--foreground_threshold", type=float, default=0.35)
     parser.add_argument(
         "--foreground_parser_background",
         choices=["adaptive", "neutral"],
@@ -841,6 +842,11 @@ def build_arg_parser():
         "--foreground_mask_output",
         default="outputs/foreground_mask.png",
         help="Thresholded fixed-view foreground mask used by dense parsing.",
+    )
+    parser.add_argument(
+        "--foreground_raw_mask_output",
+        default="outputs/foreground_mask_raw.png",
+        help="Thresholded model mask before geometry-core and hole repair.",
     )
     parser.add_argument(
         "--foreground_cutout_output",
@@ -1184,8 +1190,22 @@ def main():
         observed_foreground = None
         parser_rendered = rendered
         if foreground_model is not None:
+            foreground_geometry_prior = build_geometry_prior(
+                renderer,
+                views,
+                batch_size=rendered.shape[0] // len(views),
+                device=rendered.device,
+                dtype=rendered.dtype,
+            )
             foreground_probability = predict_foreground(
-                foreground_model, rendered, view_ids
+                foreground_model,
+                rendered,
+                view_ids,
+                geometry_prior=(
+                    foreground_geometry_prior
+                    if foreground_model.geometry_channels > 0
+                    else None
+                ),
             )
             observed_foreground = save_foreground_outputs(
                 rendered,
@@ -1193,10 +1213,13 @@ def main():
                 threshold=args.foreground_threshold,
                 view_count=len(views),
                 probability_output=args.foreground_probability_output,
+                raw_mask_output=args.foreground_raw_mask_output,
                 mask_output=args.foreground_mask_output,
                 cutout_output=args.foreground_cutout_output,
                 bg_color=bg_color,
+                geometry_prior=foreground_geometry_prior,
             )
+            raw_foreground_mask = foreground_probability[:, 0] >= args.foreground_threshold
             (
                 parser_rendered,
                 parser_background_rgb,
@@ -1223,6 +1246,10 @@ def main():
                     {
                         "checkpoint": str(foreground_checkpoint),
                         "kept_pixels": int(observed_foreground.sum().item()),
+                        "raw_kept_pixels": int(raw_foreground_mask.sum().item()),
+                        "geometry_or_hole_restored_pixels": int(
+                            (observed_foreground & ~raw_foreground_mask).sum().item()
+                        ),
                         "mean_probability": round(
                             float(foreground_probability.mean().item()), 6
                         ),
