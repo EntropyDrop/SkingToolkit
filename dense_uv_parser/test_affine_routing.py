@@ -24,6 +24,7 @@ from SkingToolkit.dense_uv_parser.utils import (
     classify_route_role,
     conditioning_to_pred_uv,
     estimate_solid_background_foreground,
+    estimate_top_left_flood_foreground,
     fill_geometry_grid_debug,
     overlay_geometry_grid_debug,
     refine_parser_affine,
@@ -785,6 +786,49 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         self.assertFalse(foreground[0, 0, 0])
         self.assertTrue(foreground[0, 5, 5])
         self.assertTrue(foreground[0, 7, 7])
+
+    def test_top_left_flood_preserves_enclosed_matching_color(self):
+        rendered = torch.zeros(1, 4, 16, 16)
+        background = torch.tensor([0.2, 0.7, 0.8]).view(1, 3, 1, 1)
+        rendered[:, :3] = background
+        rendered[:, 3] = 1.0
+        rendered[:, :3, 4:12, 4:12] = 0.9
+        rendered[:, :3, 7:9, 7:9] = background
+
+        foreground = estimate_top_left_flood_foreground(rendered)
+
+        self.assertFalse(foreground[0, 0, 0])
+        self.assertTrue(foreground[0, 5, 5])
+        self.assertTrue(foreground[0, 7, 7])
+
+    def test_top_left_flood_does_not_seed_disconnected_other_corners(self):
+        rendered = torch.full((1, 4, 16, 16), 0.9)
+        rendered[:, 3] = 1.0
+        seed_color = torch.tensor([0.2, 0.7, 0.8]).view(1, 3, 1, 1)
+        rendered[:, :3, :3, :3] = seed_color
+        rendered[:, :3, -3:, -3:] = seed_color
+
+        foreground = estimate_top_left_flood_foreground(rendered)
+
+        self.assertFalse(foreground[0, 1, 1])
+        self.assertTrue(foreground[0, -2, -2])
+
+    def test_top_left_flood_uses_configurable_color_tolerance(self):
+        rendered = torch.full((1, 4, 16, 16), 0.9)
+        rendered[:, 3] = 1.0
+        rendered[:, :3, :4] = 0.20
+        rendered[:, :3, 4:8] = 0.23
+
+        narrow = estimate_top_left_flood_foreground(
+            rendered, color_tolerance=0.01
+        )
+        wide = estimate_top_left_flood_foreground(
+            rendered, color_tolerance=0.04
+        )
+
+        self.assertTrue(narrow[0, 5, 0])
+        self.assertFalse(wide[0, 5, 0])
+        self.assertTrue(wide[0, 10, 0])
 
     def test_wider_inference_tolerance_rejects_antialiased_background_edge(self):
         rendered = torch.zeros(1, 4, 16, 16)

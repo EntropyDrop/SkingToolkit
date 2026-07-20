@@ -510,6 +510,41 @@ def estimate_solid_background_foreground(
     return ~connected_to_border
 
 
+def estimate_top_left_flood_foreground(rendered, color_tolerance=8.0 / 255.0):
+    """Remove only seed-colored pixels connected to the top-left image pixel.
+
+    Each image in the batch owns its own RGB seed. Pixels with the same color
+    elsewhere inside the character remain foreground unless a path of
+    seed-colored pixels connects them to the top-left corner.
+    """
+    if rendered.dim() != 4 or rendered.shape[1] < 3:
+        raise ValueError(f"Expected NCHW RGB(A), got {tuple(rendered.shape)}.")
+    if not 0.0 <= color_tolerance <= 1.0:
+        raise ValueError("color_tolerance must be in [0, 1].")
+
+    rgb = rendered[:, :3].float()
+    seed_rgb = rgb[:, :, :1, :1]
+    background_candidate = (
+        (rgb - seed_rgb).abs().amax(dim=1) <= color_tolerance
+    )
+    connected = torch.zeros_like(background_candidate)
+    connected[:, 0, 0] = background_candidate[:, 0, 0]
+    height, width = rendered.shape[-2:]
+    for _ in range(height + width):
+        # Four-connected expansion cannot leak diagonally through a one-pixel
+        # corner where two foreground blocks merely touch.
+        expanded = connected.clone()
+        expanded[:, 1:, :] |= connected[:, :-1, :]
+        expanded[:, :-1, :] |= connected[:, 1:, :]
+        expanded[:, :, 1:] |= connected[:, :, :-1]
+        expanded[:, :, :-1] |= connected[:, :, 1:]
+        updated = connected | (background_candidate & expanded)
+        if torch.equal(updated, connected):
+            break
+        connected = updated
+    return ~connected
+
+
 def affine_to_canonical_grid(affine, output_shape):
     """Build a grid that samples an augmented render at canonical coordinates."""
     if affine.dim() != 2 or affine.shape[1] != 3:

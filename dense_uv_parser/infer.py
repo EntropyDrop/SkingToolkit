@@ -34,6 +34,7 @@ from SkingToolkit.dense_uv_parser.utils import (  # noqa: E402
     colorize_surface,
     colorize_uv,
     conditioning_to_pred_uv,
+    estimate_top_left_flood_foreground,
     flat_uv_to_uv01,
     parse_views,
     prediction_uv01,
@@ -819,12 +820,28 @@ def build_arg_parser():
     parser = argparse.ArgumentParser(description="Infer UV conditioning with a dense UV parser.")
     parser.add_argument("--parser_checkpoint", required=True)
     parser.add_argument(
+        "--foreground_method",
+        choices=["flood", "model", "legacy"],
+        default="flood",
+        help=(
+            "Background removal before dense parsing. 'flood' uses the top-left "
+            "pixel as a connected-color seed; 'model' uses a foreground "
+            "checkpoint; 'legacy' leaves removal to the former routing fallback."
+        ),
+    )
+    parser.add_argument(
         "--foreground_checkpoint",
         default="auto",
         help=(
-            "Fixed-view foreground checkpoint. 'auto' selects the latest "
-            "fixed_view_foreground_v*/best.pt; 'none' uses color-based fallback."
+            "Checkpoint used only with --foreground_method model. 'auto' selects "
+            "the latest fixed_view_foreground_v*/best.pt."
         ),
+    )
+    parser.add_argument(
+        "--foreground_flood_tolerance",
+        type=float,
+        default=8.0 / 255.0,
+        help="Maximum per-channel RGB distance from the top-left flood seed.",
     )
     parser.add_argument("--foreground_threshold", type=float, default=0.35)
     parser.add_argument(
@@ -836,7 +853,10 @@ def build_arg_parser():
     parser.add_argument(
         "--foreground_probability_output",
         default="outputs/foreground_probability.png",
-        help="Grayscale foreground probability produced before dense parsing.",
+        help=(
+            "Grayscale foreground score produced before dense parsing; this is "
+            "a binary mask when top-left flood fill is selected."
+        ),
     )
     parser.add_argument(
         "--foreground_mask_output",
@@ -846,7 +866,7 @@ def build_arg_parser():
     parser.add_argument(
         "--foreground_raw_mask_output",
         default="outputs/foreground_mask_raw.png",
-        help="Thresholded model mask before geometry-core and hole repair.",
+        help="Foreground mask before optional model geometry-core repair.",
     )
     parser.add_argument(
         "--foreground_cutout_output",
@@ -1055,6 +1075,8 @@ def main():
         raise ValueError("Inpaint generation requires positive steps and non-negative temperature.")
     if not 0.0 <= args.background_color_tolerance <= 1.0:
         raise ValueError("--background_color_tolerance must be in [0, 1].")
+    if not 0.0 <= args.foreground_flood_tolerance <= 1.0:
+        raise ValueError("--foreground_flood_tolerance must be in [0, 1].")
     if not 0.0 <= args.foreground_threshold <= 1.0:
         raise ValueError("--foreground_threshold must be in [0, 1].")
     if not 0.0 <= args.inpaint_palette_min_confidence <= 1.0:
@@ -1109,23 +1131,23 @@ def main():
         )
     foreground_model = None
     foreground_checkpoint = args.foreground_checkpoint
-    if foreground_checkpoint == "auto":
+    if args.foreground_method == "model" and foreground_checkpoint == "auto":
         latest_foreground = find_latest_foreground_checkpoint()
         foreground_checkpoint = str(latest_foreground) if latest_foreground else None
         if foreground_checkpoint is None:
-            print(
-                "foreground_warning="
-                + json.dumps(
-                    {
-                        "message": "no fixed-view foreground checkpoint found; using color-based background fallback",
-                        "runs_dir": str(TOOLKIT_ROOT / "fixed_view_foreground" / "runs"),
-                    },
-                    sort_keys=True,
-                )
+            raise FileNotFoundError(
+                "No fixed-view foreground checkpoint found under "
+                f"{TOOLKIT_ROOT / 'fixed_view_foreground' / 'runs'}."
             )
     elif foreground_checkpoint.lower() in ("none", "off", "false"):
         foreground_checkpoint = None
-    if foreground_checkpoint is not None:
+    if args.foreground_method != "model":
+        foreground_checkpoint = None
+    elif foreground_checkpoint is None:
+        raise ValueError(
+            "--foreground_method model requires --foreground_checkpoint."
+        )
+    if args.foreground_method == "model":
         checkpoint_path = Path(foreground_checkpoint)
         if not checkpoint_path.is_file():
             raise FileNotFoundError(
@@ -1189,7 +1211,26 @@ def main():
     with torch.no_grad():
         observed_foreground = None
         parser_rendered = rendered
-        if foreground_model is not None:
+        foreground_probability = None
+        foreground_geometry_prior = None
+        foreground_log = None
+        if args.foreground_method == "flood":
+            observed_foreground = estimate_top_left_flood_foreground(
+                rendered,
+                color_tolerance=args.foreground_flood_tolerance,
+            )
+            foreground_probability = observed_foreground.unsqueeze(1).to(
+                dtype=rendered.dtype
+            )
+            foreground_log = {
+                "method": "top_left_flood",
+                "seed_rgb": [
+                    [int(round(channel * 255.0)) for channel in color]
+                    for color in rendered[:, :3, 0, 0].detach().cpu().tolist()
+                ],
+                "tolerance": round(float(args.foreground_flood_tolerance), 6),
+            }
+        elif foreground_model is not None:
             foreground_geometry_prior = build_geometry_prior(
                 renderer,
                 views,
@@ -1207,10 +1248,21 @@ def main():
                     else None
                 ),
             )
+            foreground_log = {
+                "method": "model",
+                "checkpoint": str(foreground_checkpoint),
+            }
+
+        if foreground_probability is not None:
+            output_threshold = (
+                args.foreground_threshold
+                if args.foreground_method == "model"
+                else 0.5
+            )
             observed_foreground = save_foreground_outputs(
                 rendered,
                 foreground_probability,
-                threshold=args.foreground_threshold,
+                threshold=output_threshold,
                 view_count=len(views),
                 probability_output=args.foreground_probability_output,
                 raw_mask_output=args.foreground_raw_mask_output,
@@ -1219,7 +1271,7 @@ def main():
                 bg_color=bg_color,
                 geometry_prior=foreground_geometry_prior,
             )
-            raw_foreground_mask = foreground_probability[:, 0] >= args.foreground_threshold
+            raw_foreground_mask = foreground_probability[:, 0] >= output_threshold
             (
                 parser_rendered,
                 parser_background_rgb,
@@ -1240,29 +1292,32 @@ def main():
                     parser_input_path,
                     nrow=len(views),
                 )
+            foreground_log.update(
+                {
+                    "kept_pixels": int(observed_foreground.sum().item()),
+                    "raw_kept_pixels": int(raw_foreground_mask.sum().item()),
+                    "restored_pixels": int(
+                        (observed_foreground & ~raw_foreground_mask).sum().item()
+                    ),
+                    "rejected_background_pixels": int(
+                        (~observed_foreground).sum().item()
+                    ),
+                    "parser_background_mode": args.foreground_parser_background,
+                    "parser_background_rgb": [
+                        [int(round(channel * 255.0)) for channel in color]
+                        for color in parser_background_rgb.detach().cpu().tolist()
+                    ],
+                    "parser_background_indices": parser_background_indices,
+                    "threshold": output_threshold,
+                }
+            )
+            if args.foreground_method == "model":
+                foreground_log["mean_probability"] = round(
+                    float(foreground_probability.mean().item()), 6
+                )
             print(
                 "foreground_filter="
-                + json.dumps(
-                    {
-                        "checkpoint": str(foreground_checkpoint),
-                        "kept_pixels": int(observed_foreground.sum().item()),
-                        "raw_kept_pixels": int(raw_foreground_mask.sum().item()),
-                        "geometry_or_hole_restored_pixels": int(
-                            (observed_foreground & ~raw_foreground_mask).sum().item()
-                        ),
-                        "mean_probability": round(
-                            float(foreground_probability.mean().item()), 6
-                        ),
-                        "parser_background_mode": args.foreground_parser_background,
-                        "parser_background_rgb": [
-                            [int(round(channel * 255.0)) for channel in color]
-                            for color in parser_background_rgb.detach().cpu().tolist()
-                        ],
-                        "parser_background_indices": parser_background_indices,
-                        "threshold": args.foreground_threshold,
-                    },
-                    sort_keys=True,
-                )
+                + json.dumps(foreground_log, sort_keys=True)
             )
         # Background removal affects parser features, while routing/splatting
         # below still reads exact foreground colors from the original input.

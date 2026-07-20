@@ -60,10 +60,10 @@ automatically chooses the next unused `fixed_view_foreground_vN` directory:
 
 ## Dense Parser Integration
 
-`dense_uv_parser/run_infer.sh` automatically selects the numerically highest
-`fixed_view_foreground_vN/best.pt`. The predicted mask replaces the former
-solid-background color gate; inner/outer/secondary routing remains owned by the
-dense parser.
+`dense_uv_parser/run_infer.sh` now defaults to deterministic top-left flood-fill
+background removal. The learned foreground model is retained as an optional
+ablation and is selected explicitly with `FOREGROUND_METHOD=model`; it does not
+replace inner/outer/secondary routing owned by the dense parser.
 
 Inference writes these intermediate products by default:
 
@@ -75,7 +75,8 @@ dense_uv_parser/outputs/foreground_cutout.png
 dense_uv_parser/outputs/foreground_parser_input.png
 ```
 
-`foreground_mask_raw.png` is the thresholded network output.
+In the default flood mode these score/mask images are binary and identical. In
+model mode, `foreground_mask_raw.png` is the thresholded network output and
 `foreground_mask.png` is the mask actually consumed by the parser: it restores
 only an eroded, guaranteed inner-layer geometry core and fills background holes
 that are completely enclosed by foreground. Gaps connected to the exterior and
@@ -98,13 +99,13 @@ FOREGROUND_PARSER_BACKGROUND=neutral ./run_infer.sh
 Choose or disable the checkpoint explicitly:
 
 ```bash
+FOREGROUND_METHOD=model \
 FOREGROUND_CHECKPOINT=../fixed_view_foreground/runs/fixed_view_foreground_v2/best.pt \
 ./run_infer.sh
 
-FOREGROUND_CHECKPOINT=none ./run_infer.sh
+FOREGROUND_METHOD=flood ./run_infer.sh
 ```
 
-When disabled, inference falls back to the existing border-connected background
-color estimator. `FOREGROUND_THRESHOLD` defaults to `0.35`, favoring recall;
-dense UV routing still requires a valid fixed-geometry candidate, which limits
-the effect of residual background false positives.
+In model mode, `FOREGROUND_THRESHOLD` defaults to `0.35`, favoring recall; dense
+UV routing still requires a valid fixed-geometry candidate, which limits the
+effect of residual background false positives.

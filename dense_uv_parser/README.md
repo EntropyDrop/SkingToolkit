@@ -154,18 +154,34 @@ Use the latest parser checkpoint automatically:
 ./run_infer.sh
 ```
 
-Inference also looks for the numerically highest
-`../fixed_view_foreground/runs/fixed_view_foreground_vN/best.pt` before running
-the dense parser. When found, its fixed-view foreground mask replaces the
-color-distance background gate. It saves `foreground_probability.png`, the
-thresholded network output `foreground_mask_raw.png`, the geometry-refined mask
-`foreground_mask.png`, and `foreground_cutout.png` under `outputs/` by default.
-The refinement restores only a safely eroded inner-geometry core and completely
-enclosed holes; it does not force optional outer-layer regions to foreground.
-Train that model with `../fixed_view_foreground/run_training.sh`, select one with
-`FOREGROUND_CHECKPOINT=/path/to/best.pt`, or disable it with
-`FOREGROUND_CHECKPOINT=none`. If no checkpoint exists, inference logs a warning
-and retains the legacy color-based fallback.
+Foreground removal defaults to a deterministic four-connected flood fill. Each
+view uses its own top-left pixel as the background RGB seed and removes only
+seed-colored pixels connected to that corner. Matching colors enclosed inside
+the character are preserved. The default RGB tolerance is `8/255`, independent
+of the later parser routing tolerance:
+
+```bash
+FOREGROUND_METHOD=flood \
+FOREGROUND_FLOOD_TOLERANCE=0.031372549 \
+./run_infer.sh
+```
+
+It writes a binary `foreground_probability.png`, `foreground_mask_raw.png`,
+`foreground_mask.png`, transparent `foreground_cutout.png`, and the exact
+adaptive-background `foreground_parser_input.png` consumed by the dense parser.
+Original source RGB remains untouched for UV splatting.
+
+The learned foreground model remains an explicit ablation rather than the
+default. Select it with:
+
+```bash
+FOREGROUND_METHOD=model \
+FOREGROUND_CHECKPOINT=../fixed_view_foreground/runs/fixed_view_foreground_v2/best.pt \
+./run_infer.sh
+```
+
+`FOREGROUND_METHOD=legacy` skips pre-parser removal and retains the older
+four-corner routing fallback.
 
 By default it first selects the highest topology-completion version, then reads
 that run's `config.json` and reuses the exact parser checkpoint used during
