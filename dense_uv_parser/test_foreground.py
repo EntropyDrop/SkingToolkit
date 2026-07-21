@@ -10,10 +10,21 @@ from SkingToolkit.dense_uv_parser.foreground import (
     build_parser_input,
     save_flood_outputs,
 )
-from SkingToolkit.dense_uv_parser.infer import _raw_debug_foreground
+from SkingToolkit.dense_uv_parser.infer import (
+    _raw_debug_foreground,
+    build_arg_parser,
+)
 
 
 class DenseParserForegroundTest(unittest.TestCase):
+    def test_production_inference_defaults(self):
+        args = build_arg_parser().parse_args(["--parser_checkpoint", "unused.pt"])
+
+        self.assertEqual(args.foreground_method, "flood")
+        self.assertEqual(args.foreground_flood_tolerance, 0.03)
+        self.assertEqual(args.color_aggregation, "grid_mode")
+        self.assertEqual(args.outer_uv_min_source_pixels, 15)
+
     def test_raw_face_debug_uses_observed_not_filtered_foreground(self):
         outputs = {"foreground": torch.full((1, 1, 2, 2), -10.0)}
         observed = torch.tensor([[[True, True], [True, False]]])

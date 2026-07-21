@@ -826,7 +826,7 @@ def save_preview(
                 outer_route_margin_threshold=args.outer_route_margin_threshold,
                 outer_uv_min_coverage=args.outer_uv_min_coverage,
                 outer_uv_min_source_pixels=getattr(
-                    args, "outer_uv_min_source_pixels", 3
+                    args, "outer_uv_min_source_pixels", 15
                 ),
                 outer_geometry_rescue=getattr(args, "outer_geometry_rescue", False),
                 outer_rescue_confidence_threshold=getattr(
@@ -1192,7 +1192,7 @@ def build_arg_parser():
     parser.add_argument("--outer_route_confidence_threshold", type=float, default=0.80)
     parser.add_argument("--outer_route_margin_threshold", type=float, default=0.55)
     parser.add_argument("--outer_uv_min_coverage", type=float, default=0.25)
-    parser.add_argument("--outer_uv_min_source_pixels", type=int, default=3)
+    parser.add_argument("--outer_uv_min_source_pixels", type=int, default=15)
     parser.add_argument(
         "--outer_geometry_rescue",
         dest="outer_geometry_rescue",

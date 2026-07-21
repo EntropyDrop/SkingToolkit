@@ -171,10 +171,11 @@ foreground samples are preferred; only boundary samples that are within
 `8/255` of the detected source background are excluded. This prevents an
 antialiased or isolated background pocket from winning a grid cell, while a
 real interior skin texel is still allowed to equal the background color.
-Outer texels also require multiple routed source pixels. The conservative
-profile requires three and the balanced profile requires two, preventing one
-or two residual background pixels from becoming persistent outer-layer
-evidence without globally raising the outer confidence threshold.
+Outer texels also require multiple routed source pixels. Both production
+profiles default to 15, matching parser training validation and
+parser-conditioned completion training. This prevents a small residual
+background fragment from becoming persistent outer-layer evidence without
+globally raising the outer confidence threshold.
 
 The learned route-confidence head is fused with the ordinary route score by a
 geometric mean. The trust target already represents route correctness, so this
@@ -204,12 +205,12 @@ Use the latest parser checkpoint automatically:
 Foreground removal defaults to a deterministic four-connected flood fill. Each
 view uses its own top-left pixel as the background RGB seed and removes only
 seed-colored pixels connected to that corner. Matching colors enclosed inside
-the character are preserved. The default RGB tolerance is `8/255`, independent
+the character are preserved. The default RGB tolerance is `0.03`, independent
 of the later parser routing tolerance:
 
 ```bash
 FOREGROUND_METHOD=flood \
-FOREGROUND_FLOOD_TOLERANCE=0.031372549 \
+FOREGROUND_FLOOD_TOLERANCE=0.03 \
 ./run_infer.sh
 ```
 
@@ -253,7 +254,7 @@ OUTPUT= PARSER_UV_OUTPUT=outputs/parser_pred_uv.png ./run_infer.sh
 GEOMETRY_ROUTE_TEXEL_CONSENSUS=false OUTER_UV_MIN_COVERAGE=0 ./run_infer.sh
 BACKGROUND_COLOR_TOLERANCE=0.1882352941 ./run_infer.sh
 COLOR_BACKGROUND_TOLERANCE=0.031372549 COLOR_FOREGROUND_INSET=1 ./run_infer.sh
-OUTER_UV_MIN_SOURCE_PIXELS=3 ./run_infer.sh
+OUTER_UV_MIN_SOURCE_PIXELS=15 ./run_infer.sh
 ROUTING_PROFILE=conservative COMBINED=/path/to/combined.png ./run_infer.sh
 ```
 

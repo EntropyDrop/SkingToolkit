@@ -193,6 +193,7 @@ def build_dense_parser_conditioning(
     outer_route_confidence_threshold=0.55,
     outer_route_margin_threshold=0.35,
     outer_uv_min_coverage=0.0,
+    outer_uv_min_source_pixels=15,
     outer_geometry_rescue=True,
     outer_rescue_confidence_threshold=0.60,
     outer_rescue_margin_threshold=0.25,
@@ -249,6 +250,7 @@ def build_dense_parser_conditioning(
             outer_route_confidence_threshold=outer_route_confidence_threshold,
             outer_route_margin_threshold=outer_route_margin_threshold,
             outer_uv_min_coverage=outer_uv_min_coverage,
+            outer_uv_min_source_pixels=outer_uv_min_source_pixels,
             outer_geometry_rescue=outer_geometry_rescue,
             outer_rescue_confidence_threshold=outer_rescue_confidence_threshold,
             outer_rescue_margin_threshold=outer_rescue_margin_threshold,
@@ -285,6 +287,7 @@ def build_training_conditioning(
     parser_outer_route_confidence_threshold=0.55,
     parser_outer_route_margin_threshold=0.35,
     parser_outer_uv_min_coverage=0.0,
+    parser_outer_uv_min_source_pixels=15,
     parser_outer_geometry_rescue=True,
     parser_outer_rescue_confidence_threshold=0.60,
     parser_outer_rescue_margin_threshold=0.25,
@@ -316,6 +319,7 @@ def build_training_conditioning(
         outer_route_confidence_threshold=parser_outer_route_confidence_threshold,
         outer_route_margin_threshold=parser_outer_route_margin_threshold,
         outer_uv_min_coverage=parser_outer_uv_min_coverage,
+        outer_uv_min_source_pixels=parser_outer_uv_min_source_pixels,
         outer_geometry_rescue=parser_outer_geometry_rescue,
         outer_rescue_confidence_threshold=parser_outer_rescue_confidence_threshold,
         outer_rescue_margin_threshold=parser_outer_rescue_margin_threshold,
@@ -354,6 +358,7 @@ def run_epoch(
     parser_outer_route_confidence_threshold=0.55,
     parser_outer_route_margin_threshold=0.35,
     parser_outer_uv_min_coverage=0.0,
+    parser_outer_uv_min_source_pixels=15,
     parser_outer_geometry_rescue=True,
     parser_outer_rescue_confidence_threshold=0.60,
     parser_outer_rescue_margin_threshold=0.25,
@@ -407,6 +412,7 @@ def run_epoch(
                 parser_outer_route_confidence_threshold=parser_outer_route_confidence_threshold,
                 parser_outer_route_margin_threshold=parser_outer_route_margin_threshold,
                 parser_outer_uv_min_coverage=parser_outer_uv_min_coverage,
+                parser_outer_uv_min_source_pixels=parser_outer_uv_min_source_pixels,
                 parser_outer_geometry_rescue=parser_outer_geometry_rescue,
                 parser_outer_rescue_confidence_threshold=parser_outer_rescue_confidence_threshold,
                 parser_outer_rescue_margin_threshold=parser_outer_rescue_margin_threshold,
@@ -698,6 +704,9 @@ def build_arg_parser():
     parser.add_argument("--parser_outer_route_margin_threshold", type=float, default=0.55)
     parser.add_argument("--parser_outer_uv_min_coverage", type=float, default=None)
     parser.add_argument(
+        "--parser_outer_uv_min_source_pixels", type=int, default=15
+    )
+    parser.add_argument(
         "--parser_outer_geometry_rescue",
         dest="parser_outer_geometry_rescue",
         action="store_true",
@@ -816,6 +825,10 @@ def main():
         raise ValueError("Preview generation requires positive steps and non-negative temperature.")
     if not 0.0 <= args.preview_palette_min_confidence <= 1.0:
         raise ValueError("--preview_palette_min_confidence must be in [0, 1].")
+    if args.parser_outer_uv_min_source_pixels < 1:
+        raise ValueError(
+            "--parser_outer_uv_min_source_pixels must be positive."
+        )
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -1071,6 +1084,7 @@ def main():
             parser_outer_route_confidence_threshold=args.parser_outer_route_confidence_threshold,
             parser_outer_route_margin_threshold=args.parser_outer_route_margin_threshold,
             parser_outer_uv_min_coverage=args.parser_outer_uv_min_coverage,
+            parser_outer_uv_min_source_pixels=args.parser_outer_uv_min_source_pixels,
             parser_outer_geometry_rescue=args.parser_outer_geometry_rescue,
             parser_outer_rescue_confidence_threshold=args.parser_outer_rescue_confidence_threshold,
             parser_outer_rescue_margin_threshold=args.parser_outer_rescue_margin_threshold,
@@ -1115,6 +1129,7 @@ def main():
                     parser_outer_route_confidence_threshold=args.parser_outer_route_confidence_threshold,
                     parser_outer_route_margin_threshold=args.parser_outer_route_margin_threshold,
                     parser_outer_uv_min_coverage=args.parser_outer_uv_min_coverage,
+                    parser_outer_uv_min_source_pixels=args.parser_outer_uv_min_source_pixels,
                     parser_outer_geometry_rescue=args.parser_outer_geometry_rescue,
                     parser_outer_rescue_confidence_threshold=args.parser_outer_rescue_confidence_threshold,
                     parser_outer_rescue_margin_threshold=args.parser_outer_rescue_margin_threshold,
@@ -1170,6 +1185,7 @@ def main():
                     parser_outer_route_confidence_threshold=args.parser_outer_route_confidence_threshold,
                     parser_outer_route_margin_threshold=args.parser_outer_route_margin_threshold,
                     parser_outer_uv_min_coverage=args.parser_outer_uv_min_coverage,
+                    parser_outer_uv_min_source_pixels=args.parser_outer_uv_min_source_pixels,
                     parser_outer_geometry_rescue=args.parser_outer_geometry_rescue,
                     parser_outer_rescue_confidence_threshold=args.parser_outer_rescue_confidence_threshold,
                     parser_outer_rescue_margin_threshold=args.parser_outer_rescue_margin_threshold,

@@ -879,7 +879,7 @@ def build_arg_parser():
     parser.add_argument(
         "--foreground_flood_tolerance",
         type=float,
-        default=8.0 / 255.0,
+        default=0.03,
         help="Maximum per-channel RGB distance from the top-left flood seed.",
     )
     parser.add_argument(
@@ -1032,7 +1032,7 @@ def build_arg_parser():
     parser.add_argument(
         "--outer_uv_min_source_pixels",
         type=int,
-        default=3,
+        default=15,
         help="Minimum routed source pixels required to keep an outer UV texel.",
     )
     parser.add_argument(
@@ -1670,6 +1670,29 @@ def main():
                         "message": "using stricter inference outer-coverage filtering",
                         "checkpoint_outer_uv_min_coverage": float(expected_outer_coverage),
                         "requested_outer_uv_min_coverage": float(outer_uv_min_coverage),
+                    },
+                    sort_keys=True,
+                )
+            )
+        expected_outer_source_pixels = inpaint_args.get(
+            "parser_outer_uv_min_source_pixels"
+        )
+        if (
+            expected_outer_source_pixels is not None
+            and int(expected_outer_source_pixels)
+            != int(args.outer_uv_min_source_pixels)
+        ):
+            print(
+                "inpaint_warning="
+                + json.dumps(
+                    {
+                        "message": "parser outer source-pixel filter differs from checkpoint",
+                        "checkpoint_outer_uv_min_source_pixels": int(
+                            expected_outer_source_pixels
+                        ),
+                        "requested_outer_uv_min_source_pixels": int(
+                            args.outer_uv_min_source_pixels
+                        ),
                     },
                     sort_keys=True,
                 )
