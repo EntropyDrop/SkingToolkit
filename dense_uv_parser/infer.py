@@ -612,7 +612,7 @@ def save_parser_uv(
 
 
 def save_simple_inpaint_uv(conditioning, output_path, alpha_threshold=0.5):
-    """Save deterministic symmetry/3D-nearest repair of the partial parser UV."""
+    """Repair inner UV holes while preserving the parser's outer layer."""
     parser_uv = conditioning_to_pred_uv(conditioning)
     if parser_uv.dim() != 4 or parser_uv.shape[0] != 1:
         raise ValueError(
@@ -994,8 +994,9 @@ def build_arg_parser():
         "--simple_inpaint_output",
         default=None,
         help=(
-            "Optional deterministic parser repair: use known left/right "
-            "symmetry first, then the nearest known texel in 3D character space."
+            "Optional deterministic inner-layer repair: use known left/right "
+            "symmetry first, then the nearest known texel in 3D character "
+            "space; preserve the outer layer unchanged."
         ),
     )
     parser.add_argument("--debug_output", default=None, help="Optional path to write a debug preview grid of predictions.")

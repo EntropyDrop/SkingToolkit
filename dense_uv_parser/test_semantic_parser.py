@@ -117,6 +117,7 @@ class SemanticDenseUVParserTest(unittest.TestCase):
             self.assertEqual(image.size, (64, 64))
             self.assertEqual(image.getpixel((8, 8)), (255, 0, 0, 255))
             self.assertEqual(image.getpixel((20, 20)), (255, 0, 0, 255))
+            self.assertEqual(image.getpixel((40, 8)), (0, 0, 0, 0))
             self.assertEqual(image.getpixel((63, 0)), (0, 0, 0, 0))
 
 

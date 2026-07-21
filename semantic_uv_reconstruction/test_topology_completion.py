@@ -105,6 +105,31 @@ class UVTopologyTest(unittest.TestCase):
         self.assertGreater(stats["nearest_3d_filled_texels"], 0)
         self.assertEqual(stats["unresolved_texels"], 0)
 
+    def test_simple_inpaint_preserves_outer_layer_exactly(self):
+        topology = build_uv_topology()
+        outer_indices = (
+            topology.valid & (topology.layer == 1)
+        ).reshape(-1).nonzero(as_tuple=False).flatten()
+        inner_source = int(
+            (
+                topology.valid & (topology.layer == 0)
+            ).reshape(-1).nonzero(as_tuple=False).flatten()[0]
+        )
+        uv = torch.zeros(4, 64, 64)
+        flat = uv.reshape(4, -1)
+        flat[:, inner_source] = torch.tensor([0.4, 0.5, 0.6, 1.0])
+        flat[:, int(outer_indices[0])] = torch.tensor([0.9, 0.2, 0.1, 1.0])
+        flat[:, int(outer_indices[1])] = torch.tensor([0.3, 0.7, 0.8, 0.0])
+        outer_before = flat[:, outer_indices].clone()
+
+        repaired, stats = simple_symmetry_nearest_inpaint(uv)
+
+        self.assertTrue(
+            torch.equal(repaired.reshape(4, -1)[:, outer_indices], outer_before)
+        )
+        self.assertEqual(stats["preserved_outer_texels"], int(outer_indices.numel()))
+        self.assertEqual(stats["unresolved_texels"], 0)
+
 
 class TopologyAwareCompletionTest(unittest.TestCase):
     def build_model(self):

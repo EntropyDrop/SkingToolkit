@@ -260,11 +260,12 @@ def build_uv_topology(is_slim=False):
 
 
 def simple_symmetry_nearest_inpaint(uv, alpha_threshold=0.5, chunk_size=512):
-    """Fill unknown atlas texels with symmetry, then 3D nearest colours.
+    """Fill unknown inner texels with symmetry, then 3D nearest colours.
 
-    Horizontal symmetry is restricted to the same inner/outer layer. The
-    nearest-neighbour fallback searches every known texel in character space,
-    including the other skin layer. Existing opaque RGBA values are untouched.
+    Horizontal symmetry stays on the inner layer. The nearest-neighbour
+    fallback searches every known texel in character space, including known
+    outer-layer texels. The outer layer itself is never filled or cleared, and
+    every existing opaque RGBA value is untouched.
     """
     squeeze_batch = uv.dim() == 3
     if squeeze_batch:
@@ -294,9 +295,9 @@ def simple_symmetry_nearest_inpaint(uv, alpha_threshold=0.5, chunk_size=512):
         original_known = valid & (
             result[batch_index, :, 3] > float(alpha_threshold)
         )
-        unknown = valid & ~original_known
+        unknown_inner = valid & (layer == 0) & ~original_known
 
-        symmetry_target = unknown & original_known[mirrored]
+        symmetry_target = unknown_inner & original_known[mirrored]
         symmetry_indices = symmetry_target.nonzero(as_tuple=False).flatten()
         if symmetry_indices.numel() > 0:
             result[batch_index, symmetry_indices] = result[
@@ -304,7 +305,7 @@ def simple_symmetry_nearest_inpaint(uv, alpha_threshold=0.5, chunk_size=512):
             ]
 
         known = original_known | symmetry_target
-        nearest_target = valid & ~known
+        nearest_target = valid & (layer == 0) & ~known
         target_indices = nearest_target.nonzero(as_tuple=False).flatten()
         source_indices = known.nonzero(as_tuple=False).flatten()
         nearest_filled = 0
@@ -319,9 +320,9 @@ def simple_symmetry_nearest_inpaint(uv, alpha_threshold=0.5, chunk_size=512):
                 ]
             nearest_filled = int(target_indices.numel())
 
-        resolved = original_known | symmetry_target
+        resolved_inner = (original_known & (layer == 0)) | symmetry_target
         if nearest_filled:
-            resolved = resolved | nearest_target
+            resolved_inner = resolved_inner | nearest_target
         stats.append(
             {
                 "known_texels": int(original_known.sum().item()),
@@ -333,7 +334,10 @@ def simple_symmetry_nearest_inpaint(uv, alpha_threshold=0.5, chunk_size=512):
                 ),
                 "symmetry_filled_texels": int(symmetry_indices.numel()),
                 "nearest_3d_filled_texels": nearest_filled,
-                "unresolved_texels": int((valid & ~resolved).sum().item()),
+                "preserved_outer_texels": int((valid & (layer == 1)).sum().item()),
+                "unresolved_texels": int(
+                    (valid & (layer == 0) & ~resolved_inner).sum().item()
+                ),
             }
         )
 
