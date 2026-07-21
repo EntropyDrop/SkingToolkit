@@ -13,6 +13,16 @@ from SkingToolkit.dense_uv_parser.foreground import (
 
 
 class DenseParserForegroundTest(unittest.TestCase):
+    def test_run_infer_defines_versioned_checkpoint_lookup_before_use(self):
+        script = (Path(__file__).parent / "run_infer.sh").read_text(
+            encoding="utf-8"
+        )
+        definition = script.index("find_latest_checkpoint()")
+        parser_lookup = script.index(
+            'PARSER_CHECKPOINT="$(find_latest_checkpoint '
+        )
+        self.assertLess(definition, parser_lookup)
+
     def test_dense_infer_does_not_import_removed_foreground_package(self):
         import SkingToolkit.dense_uv_parser.infer  # noqa: F401
 

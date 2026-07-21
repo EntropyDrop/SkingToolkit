@@ -3,6 +3,31 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
+find_latest_checkpoint() {
+  local root="$1"
+  local prefix="$2"
+  local checkpoint_name="$3"
+  local best_v=-1
+  local best_checkpoint=""
+  local dir base suffix v
+
+  shopt -s nullglob
+  for dir in "$root"/"${prefix}"*; do
+    [[ -d "$dir" && -f "$dir/$checkpoint_name" ]] || continue
+    base="$(basename "$dir")"
+    suffix="${base#"$prefix"}"
+    [[ "$suffix" =~ ^[0-9]+$ ]] || continue
+    v=$((10#$suffix))
+    if (( v > best_v )); then
+      best_v="$v"
+      best_checkpoint="$dir/$checkpoint_name"
+    fi
+  done
+  shopt -u nullglob
+
+  printf '%s\n' "$best_checkpoint"
+}
+
 find_latest_family_checkpoint() {
   local root="$1"
   local family="$2"
