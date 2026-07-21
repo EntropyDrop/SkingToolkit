@@ -165,6 +165,11 @@ each layer/UV texel, color aggregation selects the real source sample closest
 to the integer UV center and never averages colors. This is important because
 the renderer uses bilinear texture sampling: scan-order or modal selection can
 otherwise choose a boundary blend even when the projected grid is correct.
+Color pickup additionally uses a mask distinct from route occupancy. Interior
+foreground samples are preferred; only boundary samples that are within
+`8/255` of the detected source background are excluded. This prevents an
+antialiased or isolated background pocket from winning `texel_center`, while a
+real interior skin texel is still allowed to equal the background color.
 
 The learned route-confidence head is fused with the ordinary route score by a
 geometric mean. The trust target already represents route correctness, so this
@@ -225,6 +230,7 @@ training. If the recorded path is unavailable, it falls back to the highest
 - `outputs/parser_debug_geometry_overlay.png`: inner (cyan) and outer (magenta) fitted grids overlaid on the canonicalized source views
 - `outputs/parser_debug_geometry_routed_overlay.png`: the same grids over only pixels routed to their matching inner/outer layer
 - `outputs/parser_debug_geometry_fill.png`: only source RGB actually routed to inner/outer; unclassified pixels are gray
+- `outputs/parser_debug_color_source.png`: source pixels that are allowed to contribute RGB to the UV atlas after boundary/background safety filtering
 - `outputs/parser_debug_secondary.png`: secondary/deeper source pixels, including those recovered by exact surface routing
 - `outputs/pred_uv.png` when a `semantic_uv_reconstruction` compatibility checkpoint is found
 
@@ -241,6 +247,7 @@ OUTPUT= CONDITIONING_OUTPUT=outputs/parser_conditioning.png ./run_infer.sh
 OUTPUT= PARSER_UV_OUTPUT=outputs/parser_pred_uv.png ./run_infer.sh
 GEOMETRY_ROUTE_TEXEL_CONSENSUS=false OUTER_UV_MIN_COVERAGE=0 ./run_infer.sh
 BACKGROUND_COLOR_TOLERANCE=0.1882352941 ./run_infer.sh
+COLOR_BACKGROUND_TOLERANCE=0.031372549 COLOR_FOREGROUND_INSET=1 ./run_infer.sh
 ROUTING_PROFILE=conservative COMBINED=/path/to/combined.png ./run_infer.sh
 ```
 

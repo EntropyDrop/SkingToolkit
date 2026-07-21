@@ -642,6 +642,7 @@ def save_debug_preview(
     inner_cutout_output=None,
     outer_cutout_output=None,
     secondary_cutout_output=None,
+    color_source_output=None,
     face_output=None,
     layer_face_output=None,
     raw_face_output=None,
@@ -800,6 +801,7 @@ def save_debug_preview(
         or inner_cutout_output is not None
         or outer_cutout_output is not None
         or secondary_cutout_output is not None
+        or color_source_output is not None
     ):
         rgb = rendered[:, :3]
         mask = pred_fg.unsqueeze(1)
@@ -815,6 +817,14 @@ def save_debug_preview(
         inner_cutout = torch.where(inner_mask, rgb, bg.expand_as(rgb))
         outer_cutout = torch.where(outer_mask, rgb, bg.expand_as(rgb))
         secondary_cutout = torch.where(secondary_mask, rgb, bg.expand_as(rgb))
+        color_source_mask = (
+            routing.get("color_foreground", pred_fg)
+            if routing is not None
+            else pred_fg
+        ).unsqueeze(1)
+        color_source_cutout = torch.where(
+            color_source_mask, rgb, bg.expand_as(rgb)
+        )
 
         def save_cutout(cutout, path):
             if path is None:
@@ -825,6 +835,7 @@ def save_debug_preview(
         save_cutout(inner_cutout, inner_cutout_output)
         save_cutout(outer_cutout, outer_cutout_output)
         save_cutout(secondary_cutout, secondary_cutout_output)
+        save_cutout(color_source_cutout, color_source_output)
 
         def overlay(colorized):
             blended = rgb * (1.0 - overlay_alpha) + colorized * overlay_alpha
@@ -960,6 +971,11 @@ def build_arg_parser():
         default=None,
         help="Original-color cutout for secondary/deeper surface pixels.",
     )
+    parser.add_argument(
+        "--color_source_output",
+        default=None,
+        help="Original RGB pixels permitted to contribute colors to parser UV output.",
+    )
     parser.add_argument("--face_output", default=None, help="Six-class routed cube-face visualization.")
     parser.add_argument("--layer_face_output", default=None, help="Twelve-class inner/outer-by-face visualization.")
     parser.add_argument("--raw_face_output", default=None, help="Six-class raw face-head visualization.")
@@ -987,6 +1003,21 @@ def build_arg_parser():
         type=float,
         default=48.0 / 255.0,
         help="RGB distance used to reject solid-background and antialiased edge pixels.",
+    )
+    parser.add_argument(
+        "--color_background_tolerance",
+        type=float,
+        default=8.0 / 255.0,
+        help=(
+            "Reject background-like RGB candidates only on the foreground "
+            "boundary before inverse UV color sampling."
+        ),
+    )
+    parser.add_argument(
+        "--color_foreground_inset",
+        type=int,
+        default=1,
+        help="Foreground boundary width demoted during texel-center color selection.",
     )
     parser.add_argument("--route_confidence_threshold", type=float, default=0.0)
     parser.add_argument("--route_margin_threshold", type=float, default=0.0)
@@ -1102,6 +1133,10 @@ def main():
         raise ValueError("Inpaint generation requires positive steps and non-negative temperature.")
     if not 0.0 <= args.background_color_tolerance <= 1.0:
         raise ValueError("--background_color_tolerance must be in [0, 1].")
+    if not 0.0 <= args.color_background_tolerance <= 1.0:
+        raise ValueError("--color_background_tolerance must be in [0, 1].")
+    if args.color_foreground_inset < 0:
+        raise ValueError("--color_foreground_inset must be non-negative.")
     if not 0.0 <= args.foreground_flood_tolerance <= 1.0:
         raise ValueError("--foreground_flood_tolerance must be in [0, 1].")
     if not 0.0 <= args.inpaint_palette_min_confidence <= 1.0:
@@ -1128,6 +1163,7 @@ def main():
             args.inner_cutout_output,
             args.outer_cutout_output,
             args.secondary_cutout_output,
+            args.color_source_output,
             args.face_output,
             args.layer_face_output,
             args.raw_face_output,
@@ -1140,7 +1176,8 @@ def main():
     ):
         raise ValueError(
             "Provide --output, --conditioning_output, --parser_uv_output, --debug_output, --overlay_output, "
-            "--inner_cutout_output, --outer_cutout_output, and/or --secondary_cutout_output."
+            "--inner_cutout_output, --outer_cutout_output, --secondary_cutout_output, "
+            "and/or --color_source_output."
         )
 
     device = get_device(args.device)
@@ -1287,6 +1324,8 @@ def main():
             geometry_route_texel_consensus=geometry_route_texel_consensus,
             observed_foreground=observed_foreground,
             background_color_tolerance=args.background_color_tolerance,
+            color_background_tolerance=args.color_background_tolerance,
+            color_foreground_inset=args.color_foreground_inset,
             reject_semantic_fallback=not args.allow_semantic_fallback,
             include_rejected_context=args.include_rejected_context,
             rejected_context_confidence_threshold=args.rejected_context_confidence_threshold,
@@ -1349,6 +1388,9 @@ def main():
         )
         background_rejected_count = int(
             routing.get("background_rejected", torch.zeros_like(raw_outer)).sum().item()
+        )
+        color_rejected_count = int(
+            routing.get("color_rejected", torch.zeros_like(raw_outer)).sum().item()
         )
         outer_geometry_supported_count = int(
             routing.get("outer_geometry_supported", torch.zeros_like(raw_outer)).sum().item()
@@ -1436,6 +1478,11 @@ def main():
                     "background_color_tolerance": round(
                         float(args.background_color_tolerance), 6
                     ),
+                    "color_source_rejected_pixels": color_rejected_count,
+                    "color_background_tolerance": round(
+                        float(args.color_background_tolerance), 6
+                    ),
+                    "color_foreground_inset": int(args.color_foreground_inset),
                     "secondary_backface_pixels": secondary_count,
                     "routed_secondary_pixels": routed_secondary_count,
                     "rejected_secondary_pixels": rejected_secondary_count,
@@ -1476,6 +1523,7 @@ def main():
             args.inner_cutout_output,
             args.outer_cutout_output,
             args.secondary_cutout_output,
+            args.color_source_output,
             args.face_output,
             args.layer_face_output,
             args.raw_face_output,
@@ -1500,6 +1548,9 @@ def main():
             outer_cutout_output=Path(args.outer_cutout_output) if args.outer_cutout_output else None,
             secondary_cutout_output=(
                 Path(args.secondary_cutout_output) if args.secondary_cutout_output else None
+            ),
+            color_source_output=(
+                Path(args.color_source_output) if args.color_source_output else None
             ),
             face_output=Path(args.face_output) if args.face_output else None,
             layer_face_output=Path(args.layer_face_output) if args.layer_face_output else None,

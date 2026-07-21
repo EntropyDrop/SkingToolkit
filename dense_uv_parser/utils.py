@@ -545,6 +545,69 @@ def estimate_top_left_flood_foreground(rendered, color_tolerance=8.0 / 255.0):
     return ~connected
 
 
+def build_color_sampling_support(
+    rendered,
+    observed_foreground,
+    background_rgb,
+    background_tolerance=None,
+    foreground_inset=1,
+):
+    """Separate route occupancy from source pixels that are safe for RGB pickup.
+
+    Flood fill intentionally keeps colors that merely resemble the background
+    when they are not connected to the image border.  That is correct for
+    occupancy, but an isolated background pocket or antialiased silhouette
+    fringe must not beat a real character sample during inverse UV splatting.
+    Only background-like *boundary* candidates are rejected.  Interior pixels
+    remain valid even when a skin intentionally uses the background color.
+    """
+    if rendered.dim() != 4 or rendered.shape[1] < 3:
+        raise ValueError(f"Expected NCHW RGB(A), got {tuple(rendered.shape)}.")
+    expected = rendered.shape[:1] + rendered.shape[-2:]
+    if observed_foreground.shape != expected:
+        raise ValueError(
+            f"Expected observed_foreground shape {expected}, got "
+            f"{tuple(observed_foreground.shape)}."
+        )
+    if background_rgb.shape not in ((rendered.shape[0], 3), (rendered.shape[0], 3, 1, 1)):
+        raise ValueError(
+            "background_rgb must have shape (N, 3) or (N, 3, 1, 1)."
+        )
+    if background_tolerance is not None and not 0.0 <= background_tolerance <= 1.0:
+        raise ValueError("background_tolerance must be in [0, 1].")
+    if foreground_inset < 0:
+        raise ValueError("foreground_inset must be non-negative.")
+
+    observed = observed_foreground.to(device=rendered.device, dtype=torch.bool)
+    interior = observed
+    for _ in range(int(foreground_inset)):
+        adjacent_background = F.max_pool2d(
+            (~interior).unsqueeze(1).float(),
+            kernel_size=3,
+            stride=1,
+            padding=1,
+        )[:, 0] > 0.0
+        interior = interior & ~adjacent_background
+
+    background = background_rgb.to(
+        device=rendered.device, dtype=rendered.dtype
+    ).reshape(rendered.shape[0], 3, 1, 1)
+    background_like = (
+        (rendered[:, :3] - background).abs().amax(dim=1)
+        <= float(background_tolerance)
+        if background_tolerance is not None
+        else torch.zeros_like(observed)
+    )
+    boundary = observed & ~interior
+    rejected = boundary & background_like
+    return {
+        "valid": observed & ~rejected,
+        "interior": interior,
+        "background_like": background_like,
+        "rejected": rejected,
+    }
+
+
 def affine_to_canonical_grid(affine, output_shape):
     """Build a grid that samples an augmented render at canonical coordinates."""
     if affine.dim() != 2 or affine.shape[1] != 3:
@@ -1892,6 +1955,8 @@ def splat_parser_predictions_to_uv_conditioning(
     geometry_route_texel_consensus=True,
     observed_foreground=None,
     background_color_tolerance=SOLID_BACKGROUND_COLOR_TOLERANCE,
+    color_background_tolerance=None,
+    color_foreground_inset=1,
     reject_semantic_fallback=False,
     reject_inner_semantic_fallback=False,
     include_rejected_context=True,
@@ -1941,6 +2006,13 @@ def splat_parser_predictions_to_uv_conditioning(
         )
     if not 0.0 <= background_color_tolerance <= 1.0:
         raise ValueError("background_color_tolerance must be in [0, 1].")
+    if (
+        color_background_tolerance is not None
+        and not 0.0 <= color_background_tolerance <= 1.0
+    ):
+        raise ValueError("color_background_tolerance must be in [0, 1].")
+    if color_foreground_inset < 0:
+        raise ValueError("color_foreground_inset must be non-negative.")
     if "affine" not in outputs:
         conditioning = splat_predictions_to_uv_conditioning(
             rendered,
@@ -2002,6 +2074,13 @@ def splat_parser_predictions_to_uv_conditioning(
         routing_outputs["affine"],
         mode="nearest",
     )[:, 0] > 0.5
+    color_support = build_color_sampling_support(
+        canonical_rendered,
+        canonical_observed_foreground,
+        source_background_rgb,
+        background_tolerance=color_background_tolerance,
+        foreground_inset=color_foreground_inset,
+    )
     canonical_outputs = canonicalize_parser_outputs(routing_outputs)
     if "surface" in canonical_outputs and "part" not in canonical_outputs:
         routing = _routing_from_geometry_surface_outputs(
@@ -2164,19 +2243,29 @@ def splat_parser_predictions_to_uv_conditioning(
     routing["outer_semantic_rescued"] = outer_semantic_rescued & trusted
     routing["outer_required_coverage"] = outer_required_coverage
     routing["foreground"] = trusted
+    color_foreground = trusted & color_support["valid"]
+    routing["color_foreground"] = color_foreground
+    routing["color_interior"] = color_support["interior"]
+    routing["color_background_like"] = color_support["background_like"]
+    routing["color_rejected"] = trusted & color_support["rejected"]
     if "secondary_routed" in routing:
         routing["secondary_rejected"] = routing["secondary"] & ~trusted
         routing["secondary_routed"] = routing["secondary"] & trusted
     routing["outer_uv_coverage"] = outer_uv_coverage
     conditioning = splat_to_uv_conditioning(
         canonical_rendered,
-        routing["foreground"],
+        color_foreground,
         routing["layer"],
         routing["flat_uv"],
         group_size=group_size,
         bg_color=bg_color,
         confidence=routing["confidence"],
-        sampling_quality=routing.get("texel_center_score"),
+        sampling_quality=(
+            routing.get("texel_center_score")
+            + 0.05 * color_support["interior"].to(
+                dtype=routing["confidence"].dtype
+            )
+        ),
         color_aggregation=color_aggregation,
         include_confidence=include_confidence,
     )
@@ -2184,6 +2273,7 @@ def splat_parser_predictions_to_uv_conditioning(
         raw_foreground
         & canonical_observed_foreground
         & ~trusted
+        & color_support["valid"]
         & (routing["confidence"] >= rejected_context_confidence_threshold)
         & (
             routing["confidence_margin_ratio"]
@@ -2217,7 +2307,12 @@ def splat_parser_predictions_to_uv_conditioning(
             group_size=group_size,
             bg_color=bg_color,
             confidence=routing["confidence"],
-            sampling_quality=routing.get("texel_center_score"),
+            sampling_quality=(
+                routing.get("texel_center_score")
+                + 0.05 * color_support["interior"].to(
+                    dtype=routing["confidence"].dtype
+                )
+            ),
             color_aggregation=color_aggregation,
             include_confidence=True,
         )
@@ -2244,7 +2339,12 @@ def splat_parser_predictions_to_uv_conditioning(
                 group_size=group_size,
                 bg_color=bg_color,
                 confidence=routing["confidence"],
-                sampling_quality=routing.get("texel_center_score"),
+                sampling_quality=(
+                    routing.get("texel_center_score")
+                    + 0.05 * color_support["interior"].to(
+                        dtype=routing["confidence"].dtype
+                    )
+                ),
                 color_aggregation=color_aggregation,
                 include_confidence=True,
             )

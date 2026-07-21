@@ -24,6 +24,7 @@ from SkingToolkit.dense_uv_parser.utils import (
     augment_dense_batch,
     canonicalize_parser_render,
     canonicalize_tensor,
+    build_color_sampling_support,
     classify_route_role,
     conditioning_to_pred_uv,
     estimate_solid_background_foreground,
@@ -89,6 +90,54 @@ def dense_targets(batch, height, width):
 
 
 class GlobalAffineRoutingTest(unittest.TestCase):
+    def test_inverse_color_sampling_does_not_pick_background_boundary(self):
+        mask = torch.ones(5, 5)
+        renderer = FakeRenderer(mask=mask)
+        rendered = torch.full((1, 4, 5, 5), 0.5)
+        rendered[:, 3] = 1.0
+        rendered[:, :3, 2, 2] = torch.tensor([0.9, 0.2, 0.1]).view(1, 3)
+        outputs = {
+            "foreground": torch.full((1, 1, 5, 5), 10.0),
+            "layer": torch.cat(
+                [
+                    torch.full((1, 1, 5, 5), 10.0),
+                    torch.full((1, 2, 5, 5), -10.0),
+                ],
+                dim=1,
+            ),
+            "surface": torch.cat(
+                [
+                    torch.full((1, 1, 5, 5), 10.0),
+                    torch.full((1, 1, 5, 5), -10.0),
+                ],
+                dim=1,
+            ),
+            "affine": torch.zeros(1, 3),
+        }
+        observed = torch.zeros(1, 5, 5, dtype=torch.bool)
+        observed[:, 1:4, 1:4] = True
+
+        conditioning, details = splat_parser_predictions_to_uv_conditioning(
+            rendered,
+            outputs,
+            renderer=renderer,
+            views=["front"],
+            group_size=1,
+            affine_refine=False,
+            observed_foreground=observed,
+            color_background_tolerance=8.0 / 255.0,
+            color_foreground_inset=1,
+            return_details=True,
+        )
+
+        self.assertEqual(int(details["routing"]["color_rejected"].sum()), 8)
+        self.assertTrue(
+            torch.allclose(
+                conditioning[0, :3, 0, 0],
+                torch.tensor([0.9, 0.2, 0.1]),
+            )
+        )
+
     def test_primary_route_swap_loss_is_macro_balanced(self):
         pair_logits = torch.tensor(
             [[[[2.0, -1.0]], [[-1.0, 2.0]], [[-4.0, -4.0]]]]
@@ -968,6 +1017,46 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         self.assertTrue(narrow[0, 5, 0])
         self.assertFalse(wide[0, 5, 0])
         self.assertTrue(wide[0, 10, 0])
+
+    def test_color_sampling_rejects_only_background_like_boundary_pixels(self):
+        rendered = torch.full((1, 4, 7, 7), 0.5)
+        rendered[:, 3] = 1.0
+        foreground = torch.zeros(1, 7, 7, dtype=torch.bool)
+        foreground[:, 1:6, 1:6] = True
+        # A real non-background boundary color must remain usable.
+        rendered[:, :3, 1, 3] = torch.tensor([0.9, 0.2, 0.1]).view(1, 3)
+
+        support = build_color_sampling_support(
+            rendered,
+            foreground,
+            torch.tensor([[0.5, 0.5, 0.5]]),
+            background_tolerance=8.0 / 255.0,
+            foreground_inset=1,
+        )
+
+        self.assertTrue(support["rejected"][0, 1, 1])
+        self.assertFalse(support["valid"][0, 1, 1])
+        self.assertTrue(support["valid"][0, 1, 3])
+        self.assertTrue(support["valid"][0, 3, 3])
+        self.assertTrue(support["interior"][0, 3, 3])
+
+    def test_color_sampling_keeps_interior_skin_matching_background(self):
+        rendered = torch.full((1, 4, 7, 7), 0.5)
+        rendered[:, 3] = 1.0
+        foreground = torch.zeros(1, 7, 7, dtype=torch.bool)
+        foreground[:, 1:6, 1:6] = True
+
+        support = build_color_sampling_support(
+            rendered,
+            foreground,
+            torch.tensor([[0.5, 0.5, 0.5]]),
+            background_tolerance=8.0 / 255.0,
+            foreground_inset=1,
+        )
+
+        self.assertTrue(support["background_like"][0, 3, 3])
+        self.assertTrue(support["valid"][0, 3, 3])
+        self.assertFalse(support["rejected"][0, 3, 3])
 
     def test_wider_inference_tolerance_rejects_antialiased_background_edge(self):
         rendered = torch.zeros(1, 4, 16, 16)

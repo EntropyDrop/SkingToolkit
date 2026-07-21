@@ -501,6 +501,10 @@ def hard_uv_conditioning_metrics(
             ),
             observed_foreground=None,
             background_color_tolerance=args.background_color_tolerance,
+            color_background_tolerance=getattr(
+                args, "color_background_tolerance", 8.0 / 255.0
+            ),
+            color_foreground_inset=getattr(args, "color_foreground_inset", 1),
             reject_semantic_fallback=not args.allow_semantic_fallback,
         )
         expected = splat_deterministic_targets_to_uv_conditioning(
@@ -835,6 +839,15 @@ def save_preview(
                     args, "geometry_route_texel_consensus", False
                 ),
                 observed_foreground=None,
+                background_color_tolerance=getattr(
+                    args, "background_color_tolerance", 0.25
+                ),
+                color_background_tolerance=getattr(
+                    args, "color_background_tolerance", 8.0 / 255.0
+                ),
+                color_foreground_inset=getattr(
+                    args, "color_foreground_inset", 1
+                ),
                 reject_semantic_fallback=not args.allow_semantic_fallback,
                 return_details=True,
             )
@@ -1168,6 +1181,10 @@ def build_arg_parser():
     parser.add_argument(
         "--background_color_tolerance", type=float, default=0.25
     )
+    parser.add_argument(
+        "--color_background_tolerance", type=float, default=8.0 / 255.0
+    )
+    parser.add_argument("--color_foreground_inset", type=int, default=1)
     parser.add_argument("--outer_route_confidence_threshold", type=float, default=0.80)
     parser.add_argument("--outer_route_margin_threshold", type=float, default=0.55)
     parser.add_argument("--outer_uv_min_coverage", type=float, default=0.25)
@@ -1324,6 +1341,10 @@ def main():
         raise ValueError("--hard_rgb_selection_weight must be non-negative.")
     if not 0.0 <= args.background_color_tolerance <= 1.0:
         raise ValueError("--background_color_tolerance must be in [0, 1].")
+    if not 0.0 <= args.color_background_tolerance <= 1.0:
+        raise ValueError("--color_background_tolerance must be in [0, 1].")
+    if args.color_foreground_inset < 0:
+        raise ValueError("--color_foreground_inset must be non-negative.")
     if args.lr <= 0:
         raise ValueError("--lr must be positive.")
     if not 0.0 <= args.min_lr_ratio <= 1.0:
@@ -1681,6 +1702,8 @@ def main():
         "semantic_gate": args.semantic_gate,
         "geometry_route_texel_consensus": args.geometry_route_texel_consensus,
         "background_color_tolerance": args.background_color_tolerance,
+        "color_background_tolerance": args.color_background_tolerance,
+        "color_foreground_inset": args.color_foreground_inset,
         "affine_refine": args.affine_refine,
         "affine_refine_translation_px": args.affine_refine_translation_px,
         "affine_refine_scale": args.affine_refine_scale,

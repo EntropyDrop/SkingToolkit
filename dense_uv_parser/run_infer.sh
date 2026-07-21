@@ -189,6 +189,7 @@ OVERLAY_OUTPUT="${OVERLAY_OUTPUT-outputs/parser_debug_overlay.png}"
 INNER_CUTOUT_OUTPUT="${INNER_CUTOUT_OUTPUT-outputs/parser_debug_inner.png}"
 OUTER_CUTOUT_OUTPUT="${OUTER_CUTOUT_OUTPUT-outputs/parser_debug_outer.png}"
 SECONDARY_CUTOUT_OUTPUT="${SECONDARY_CUTOUT_OUTPUT-outputs/parser_debug_secondary.png}"
+COLOR_SOURCE_OUTPUT="${COLOR_SOURCE_OUTPUT-outputs/parser_debug_color_source.png}"
 FACE_OUTPUT="${FACE_OUTPUT-outputs/parser_debug_face.png}"
 LAYER_FACE_OUTPUT="${LAYER_FACE_OUTPUT-outputs/parser_debug_layer_face.png}"
 RAW_FACE_OUTPUT="${RAW_FACE_OUTPUT-outputs/parser_debug_face_raw.png}"
@@ -242,6 +243,8 @@ case "$ROUTING_PROFILE" in
 esac
 FG_THRESHOLD="${FG_THRESHOLD:-0.5}"
 FOREGROUND_FLOOD_TOLERANCE="${FOREGROUND_FLOOD_TOLERANCE:-0.031372549}"
+COLOR_BACKGROUND_TOLERANCE="${COLOR_BACKGROUND_TOLERANCE:-0.031372549}"
+COLOR_FOREGROUND_INSET="${COLOR_FOREGROUND_INSET:-1}"
 FOREGROUND_PARSER_BACKGROUND="${FOREGROUND_PARSER_BACKGROUND:-adaptive}"
 BACKGROUND_COLOR_TOLERANCE="${BACKGROUND_COLOR_TOLERANCE:-$DEFAULT_BACKGROUND_COLOR_TOLERANCE}"
 ROUTE_CONFIDENCE_THRESHOLD="${ROUTE_CONFIDENCE_THRESHOLD:-$DEFAULT_ROUTE_CONFIDENCE_THRESHOLD}"
@@ -292,6 +295,8 @@ args=(
   --parser_checkpoint "$PARSER_CHECKPOINT"
   --foreground_method "$FOREGROUND_METHOD"
   --foreground_flood_tolerance "$FOREGROUND_FLOOD_TOLERANCE"
+  --color_background_tolerance "$COLOR_BACKGROUND_TOLERANCE"
+  --color_foreground_inset "$COLOR_FOREGROUND_INSET"
   --foreground_parser_background "$FOREGROUND_PARSER_BACKGROUND"
   --fg_threshold "$FG_THRESHOLD"
   --background_color_tolerance "$BACKGROUND_COLOR_TOLERANCE"
@@ -427,6 +432,10 @@ if [[ -n "$SECONDARY_CUTOUT_OUTPUT" ]]; then
   args+=(--secondary_cutout_output "$SECONDARY_CUTOUT_OUTPUT")
 fi
 
+if [[ -n "$COLOR_SOURCE_OUTPUT" ]]; then
+  args+=(--color_source_output "$COLOR_SOURCE_OUTPUT")
+fi
+
 if [[ -n "$FACE_OUTPUT" ]]; then
   args+=(--face_output "$FACE_OUTPUT")
 fi
@@ -471,7 +480,7 @@ if [[ -n "$OUTPUT" ]]; then
   fi
 fi
 
-if [[ -z "$CONDITIONING_OUTPUT" && -z "$PARSER_UV_OUTPUT" && -z "$DEBUG_OUTPUT" && -z "$OVERLAY_OUTPUT" && -z "$INNER_CUTOUT_OUTPUT" && -z "$OUTER_CUTOUT_OUTPUT" && -z "$SECONDARY_CUTOUT_OUTPUT" && -z "$FACE_OUTPUT" && -z "$LAYER_FACE_OUTPUT" && -z "$RAW_FACE_OUTPUT" && -z "$RAW_LAYER_FACE_OUTPUT" && -z "$GEOMETRY_GRID_OUTPUT" && -z "$GEOMETRY_OVERLAY_OUTPUT" && -z "$GEOMETRY_ROUTED_OVERLAY_OUTPUT" && -z "$GEOMETRY_FILL_OUTPUT" && ( -z "$OUTPUT" || -z "$INPAINT_CHECKPOINT" ) ]]; then
+if [[ -z "$CONDITIONING_OUTPUT" && -z "$PARSER_UV_OUTPUT" && -z "$DEBUG_OUTPUT" && -z "$OVERLAY_OUTPUT" && -z "$INNER_CUTOUT_OUTPUT" && -z "$OUTER_CUTOUT_OUTPUT" && -z "$SECONDARY_CUTOUT_OUTPUT" && -z "$COLOR_SOURCE_OUTPUT" && -z "$FACE_OUTPUT" && -z "$LAYER_FACE_OUTPUT" && -z "$RAW_FACE_OUTPUT" && -z "$RAW_LAYER_FACE_OUTPUT" && -z "$GEOMETRY_GRID_OUTPUT" && -z "$GEOMETRY_OVERLAY_OUTPUT" && -z "$GEOMETRY_ROUTED_OVERLAY_OUTPUT" && -z "$GEOMETRY_FILL_OUTPUT" && ( -z "$OUTPUT" || -z "$INPAINT_CHECKPOINT" ) ]]; then
   echo "Nothing to write. Set a debug/conditioning output or OUTPUT with a valid INPAINT_CHECKPOINT." >&2
   exit 1
 fi
@@ -523,6 +532,9 @@ if [[ -n "$OUTER_CUTOUT_OUTPUT" ]]; then
 fi
 if [[ -n "$SECONDARY_CUTOUT_OUTPUT" ]]; then
   echo "Secondary/deeper-surface output: $SECONDARY_CUTOUT_OUTPUT"
+fi
+if [[ -n "$COLOR_SOURCE_OUTPUT" ]]; then
+  echo "Color-safe source output: $COLOR_SOURCE_OUTPUT"
 fi
 if [[ -n "$FACE_OUTPUT" ]]; then
   echo "Face output: $FACE_OUTPUT"
