@@ -3,34 +3,6 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
-find_latest_checkpoint() {
-  local root="$1"
-  local prefix="$2"
-  local checkpoint_name="$3"
-  local best_v=-1
-  local best_checkpoint=""
-  local dir base suffix v
-
-  shopt -s nullglob
-  for dir in "$root"/"${prefix}"*; do
-    [[ -d "$dir" ]] || continue
-    [[ -f "$dir/$checkpoint_name" ]] || continue
-
-    base="$(basename "$dir")"
-    suffix="${base#"$prefix"}"
-    [[ "$suffix" =~ ^[0-9]+$ ]] || continue
-
-    v=$((10#$suffix))
-    if (( v > best_v )); then
-      best_v="$v"
-      best_checkpoint="$dir/$checkpoint_name"
-    fi
-  done
-  shopt -u nullglob
-
-  printf '%s\n' "$best_checkpoint"
-}
-
 find_latest_family_checkpoint() {
   local root="$1"
   local family="$2"
@@ -147,38 +119,19 @@ if [[ ! -f "$PARSER_CHECKPOINT" ]]; then
   exit 1
 fi
 
-FOREGROUND_RUNS_DIR="${FOREGROUND_RUNS_DIR:-../fixed_view_foreground/runs}"
-FOREGROUND_RUN_PREFIX="${FOREGROUND_RUN_PREFIX:-fixed_view_foreground_v}"
-FOREGROUND_CHECKPOINT_NAME="${FOREGROUND_CHECKPOINT_NAME:-best.pt}"
 FOREGROUND_METHOD="${FOREGROUND_METHOD:-flood}"
-FOREGROUND_CHECKPOINT="${FOREGROUND_CHECKPOINT:-auto}"
 case "$FOREGROUND_METHOD" in
   flood|legacy)
-    FOREGROUND_CHECKPOINT=""
-    ;;
-  model)
-    if [[ "$FOREGROUND_CHECKPOINT" == "auto" || "$FOREGROUND_CHECKPOINT" == "latest" ]]; then
-      FOREGROUND_CHECKPOINT="$(find_latest_checkpoint "$FOREGROUND_RUNS_DIR" "$FOREGROUND_RUN_PREFIX" "$FOREGROUND_CHECKPOINT_NAME")"
-    fi
-    if [[ "$FOREGROUND_CHECKPOINT" == "none" || "$FOREGROUND_CHECKPOINT" == "off" || -z "$FOREGROUND_CHECKPOINT" ]]; then
-      echo "FOREGROUND_METHOD=model requires a foreground checkpoint." >&2
-      exit 1
-    elif [[ ! -f "$FOREGROUND_CHECKPOINT" ]]; then
-      echo "Foreground checkpoint not found: $FOREGROUND_CHECKPOINT" >&2
-      exit 1
-    fi
     ;;
   *)
-    echo "Unknown FOREGROUND_METHOD=$FOREGROUND_METHOD; expected flood, model, or legacy." >&2
+    echo "Unknown FOREGROUND_METHOD=$FOREGROUND_METHOD; expected flood or legacy." >&2
     exit 1
     ;;
 esac
 
 echo "Using parser checkpoint: $PARSER_CHECKPOINT"
 echo "Using foreground method: $FOREGROUND_METHOD"
-if [[ "$FOREGROUND_METHOD" == "model" ]]; then
-  echo "Using foreground checkpoint: $FOREGROUND_CHECKPOINT"
-elif [[ "$FOREGROUND_METHOD" == "flood" ]]; then
+if [[ "$FOREGROUND_METHOD" == "flood" ]]; then
   echo "Using top-left pixel color flood-fill background removal."
 else
   echo "Using legacy background removal inside UV routing."
@@ -263,7 +216,6 @@ case "$ROUTING_PROFILE" in
     ;;
 esac
 FG_THRESHOLD="${FG_THRESHOLD:-0.5}"
-FOREGROUND_THRESHOLD="${FOREGROUND_THRESHOLD:-0.35}"
 FOREGROUND_FLOOD_TOLERANCE="${FOREGROUND_FLOOD_TOLERANCE:-0.031372549}"
 FOREGROUND_PARSER_BACKGROUND="${FOREGROUND_PARSER_BACKGROUND:-adaptive}"
 BACKGROUND_COLOR_TOLERANCE="${BACKGROUND_COLOR_TOLERANCE:-$DEFAULT_BACKGROUND_COLOR_TOLERANCE}"
@@ -314,9 +266,7 @@ args=(
   infer.py
   --parser_checkpoint "$PARSER_CHECKPOINT"
   --foreground_method "$FOREGROUND_METHOD"
-  --foreground_checkpoint "${FOREGROUND_CHECKPOINT:-none}"
   --foreground_flood_tolerance "$FOREGROUND_FLOOD_TOLERANCE"
-  --foreground_threshold "$FOREGROUND_THRESHOLD"
   --foreground_parser_background "$FOREGROUND_PARSER_BACKGROUND"
   --fg_threshold "$FG_THRESHOLD"
   --background_color_tolerance "$BACKGROUND_COLOR_TOLERANCE"
@@ -508,11 +458,7 @@ fi
 echo "Parser checkpoint: $PARSER_CHECKPOINT"
 echo "Foreground method: $FOREGROUND_METHOD"
 if [[ "$FOREGROUND_METHOD" != "legacy" ]]; then
-  if [[ "$FOREGROUND_METHOD" == "model" ]]; then
-    echo "Foreground checkpoint: $FOREGROUND_CHECKPOINT"
-  else
-    echo "Foreground flood tolerance: $FOREGROUND_FLOOD_TOLERANCE"
-  fi
+  echo "Foreground flood tolerance: $FOREGROUND_FLOOD_TOLERANCE"
   if [[ -n "$FOREGROUND_PROBABILITY_OUTPUT" ]]; then
     echo "Foreground probability output: $FOREGROUND_PROBABILITY_OUTPUT"
   fi

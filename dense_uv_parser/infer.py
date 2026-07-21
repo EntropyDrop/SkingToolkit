@@ -16,6 +16,10 @@ if str(WORKSPACE_ROOT) not in sys.path:
     sys.path.insert(0, str(WORKSPACE_ROOT))
 
 from SkingToolkit.dense_uv_parser.model import DenseUVParserNet  # noqa: E402
+from SkingToolkit.dense_uv_parser.foreground import (  # noqa: E402
+    build_parser_input,
+    save_flood_outputs,
+)
 from SkingToolkit.dense_uv_parser.semantic import attach_siglip_runtime  # noqa: E402
 from SkingToolkit.dense_uv_parser.utils import (  # noqa: E402
     FACE_PALETTE,
@@ -40,14 +44,6 @@ from SkingToolkit.dense_uv_parser.utils import (  # noqa: E402
     prediction_uv01,
     splat_parser_predictions_to_uv_conditioning,
     surface_class_count,
-)
-from SkingToolkit.fixed_view_foreground.inference import (  # noqa: E402
-    build_geometry_prior,
-    build_parser_input,
-    find_latest_checkpoint as find_latest_foreground_checkpoint,
-    load_foreground_model,
-    predict_foreground,
-    save_foreground_outputs,
 )
 from SkingToolkit.semantic_uv_reconstruction.dataset import finalize_minecraft_alpha, tensor_to_rgba_image, view_native_size  # noqa: E402
 from SkingToolkit.semantic_uv_reconstruction.model import UVInpaintingNet  # noqa: E402
@@ -821,20 +817,12 @@ def build_arg_parser():
     parser.add_argument("--parser_checkpoint", required=True)
     parser.add_argument(
         "--foreground_method",
-        choices=["flood", "model", "legacy"],
+        choices=["flood", "legacy"],
         default="flood",
         help=(
             "Background removal before dense parsing. 'flood' uses the top-left "
-            "pixel as a connected-color seed; 'model' uses a foreground "
-            "checkpoint; 'legacy' leaves removal to the former routing fallback."
-        ),
-    )
-    parser.add_argument(
-        "--foreground_checkpoint",
-        default="auto",
-        help=(
-            "Checkpoint used only with --foreground_method model. 'auto' selects "
-            "the latest fixed_view_foreground_v*/best.pt."
+            "pixel as a connected-color seed; 'legacy' leaves removal to the "
+            "former routing fallback."
         ),
     )
     parser.add_argument(
@@ -843,7 +831,6 @@ def build_arg_parser():
         default=8.0 / 255.0,
         help="Maximum per-channel RGB distance from the top-left flood seed.",
     )
-    parser.add_argument("--foreground_threshold", type=float, default=0.35)
     parser.add_argument(
         "--foreground_parser_background",
         choices=["adaptive", "neutral"],
@@ -866,7 +853,7 @@ def build_arg_parser():
     parser.add_argument(
         "--foreground_raw_mask_output",
         default="outputs/foreground_mask_raw.png",
-        help="Foreground mask before optional model geometry-core repair.",
+        help="Binary foreground mask produced directly by top-left flood fill.",
     )
     parser.add_argument(
         "--foreground_cutout_output",
@@ -1077,8 +1064,6 @@ def main():
         raise ValueError("--background_color_tolerance must be in [0, 1].")
     if not 0.0 <= args.foreground_flood_tolerance <= 1.0:
         raise ValueError("--foreground_flood_tolerance must be in [0, 1].")
-    if not 0.0 <= args.foreground_threshold <= 1.0:
-        raise ValueError("--foreground_threshold must be in [0, 1].")
     if not 0.0 <= args.inpaint_palette_min_confidence <= 1.0:
         raise ValueError("--inpaint_palette_min_confidence must be in [0, 1].")
     if not 0.0 <= args.inpaint_context_min_confidence <= 1.0:
@@ -1129,45 +1114,6 @@ def main():
         raise ValueError(
             f"Parser checkpoint expects {parser_model.view_classes} views, but its metadata lists {len(views)}: {views}"
         )
-    foreground_model = None
-    foreground_checkpoint = args.foreground_checkpoint
-    if args.foreground_method == "model" and foreground_checkpoint == "auto":
-        latest_foreground = find_latest_foreground_checkpoint()
-        foreground_checkpoint = str(latest_foreground) if latest_foreground else None
-        if foreground_checkpoint is None:
-            raise FileNotFoundError(
-                "No fixed-view foreground checkpoint found under "
-                f"{TOOLKIT_ROOT / 'fixed_view_foreground' / 'runs'}."
-            )
-    elif foreground_checkpoint.lower() in ("none", "off", "false"):
-        foreground_checkpoint = None
-    if args.foreground_method != "model":
-        foreground_checkpoint = None
-    elif foreground_checkpoint is None:
-        raise ValueError(
-            "--foreground_method model requires --foreground_checkpoint."
-        )
-    if args.foreground_method == "model":
-        checkpoint_path = Path(foreground_checkpoint)
-        if not checkpoint_path.is_file():
-            raise FileNotFoundError(
-                f"Foreground checkpoint not found: {foreground_checkpoint}"
-            )
-        foreground_model, foreground_args, _ = load_foreground_model(
-            checkpoint_path, device
-        )
-        foreground_views = parse_views(foreground_args.get("views", views))
-        if foreground_views != views:
-            raise ValueError(
-                "Foreground/parser view mismatch: "
-                f"foreground={foreground_views}, parser={views}."
-            )
-        if foreground_model.view_classes != len(views):
-            raise ValueError(
-                "Foreground checkpoint view-class mismatch: "
-                f"checkpoint={foreground_model.view_classes}, requested={len(views)}."
-            )
-        print(f"Using foreground checkpoint: {checkpoint_path}")
     mappings_dir = args.mappings_dir or parser_args.get("mappings_dir")
     renderer = DifferentiableRenderer(mappings_dir=mappings_dir)
     missing_views = [view for view in views if view not in renderer.views]
@@ -1211,16 +1157,10 @@ def main():
     with torch.no_grad():
         observed_foreground = None
         parser_rendered = rendered
-        foreground_probability = None
-        foreground_geometry_prior = None
-        foreground_log = None
         if args.foreground_method == "flood":
             observed_foreground = estimate_top_left_flood_foreground(
                 rendered,
                 color_tolerance=args.foreground_flood_tolerance,
-            )
-            foreground_probability = observed_foreground.unsqueeze(1).to(
-                dtype=rendered.dtype
             )
             foreground_log = {
                 "method": "top_left_flood",
@@ -1230,48 +1170,15 @@ def main():
                 ],
                 "tolerance": round(float(args.foreground_flood_tolerance), 6),
             }
-        elif foreground_model is not None:
-            foreground_geometry_prior = build_geometry_prior(
-                renderer,
-                views,
-                batch_size=rendered.shape[0] // len(views),
-                device=rendered.device,
-                dtype=rendered.dtype,
-            )
-            foreground_probability = predict_foreground(
-                foreground_model,
+            observed_foreground = save_flood_outputs(
                 rendered,
-                view_ids,
-                geometry_prior=(
-                    foreground_geometry_prior
-                    if foreground_model.geometry_channels > 0
-                    else None
-                ),
-            )
-            foreground_log = {
-                "method": "model",
-                "checkpoint": str(foreground_checkpoint),
-            }
-
-        if foreground_probability is not None:
-            output_threshold = (
-                args.foreground_threshold
-                if args.foreground_method == "model"
-                else 0.5
-            )
-            observed_foreground = save_foreground_outputs(
-                rendered,
-                foreground_probability,
-                threshold=output_threshold,
+                observed_foreground,
                 view_count=len(views),
                 probability_output=args.foreground_probability_output,
                 raw_mask_output=args.foreground_raw_mask_output,
                 mask_output=args.foreground_mask_output,
                 cutout_output=args.foreground_cutout_output,
-                bg_color=bg_color,
-                geometry_prior=foreground_geometry_prior,
             )
-            raw_foreground_mask = foreground_probability[:, 0] >= output_threshold
             (
                 parser_rendered,
                 parser_background_rgb,
@@ -1281,7 +1188,6 @@ def main():
                 observed_foreground,
                 bg_color=bg_color,
                 background_mode=args.foreground_parser_background,
-                foreground_probability=foreground_probability,
                 return_background=True,
             )
             if args.foreground_parser_input_output:
@@ -1295,10 +1201,6 @@ def main():
             foreground_log.update(
                 {
                     "kept_pixels": int(observed_foreground.sum().item()),
-                    "raw_kept_pixels": int(raw_foreground_mask.sum().item()),
-                    "restored_pixels": int(
-                        (observed_foreground & ~raw_foreground_mask).sum().item()
-                    ),
                     "rejected_background_pixels": int(
                         (~observed_foreground).sum().item()
                     ),
@@ -1308,13 +1210,8 @@ def main():
                         for color in parser_background_rgb.detach().cpu().tolist()
                     ],
                     "parser_background_indices": parser_background_indices,
-                    "threshold": output_threshold,
                 }
             )
-            if args.foreground_method == "model":
-                foreground_log["mean_probability"] = round(
-                    float(foreground_probability.mean().item()), 6
-                )
             print(
                 "foreground_filter="
                 + json.dumps(foreground_log, sort_keys=True)

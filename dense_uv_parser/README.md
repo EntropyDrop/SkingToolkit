@@ -171,15 +171,6 @@ It writes a binary `foreground_probability.png`, `foreground_mask_raw.png`,
 adaptive-background `foreground_parser_input.png` consumed by the dense parser.
 Original source RGB remains untouched for UV splatting.
 
-The learned foreground model remains an explicit ablation rather than the
-default. Select it with:
-
-```bash
-FOREGROUND_METHOD=model \
-FOREGROUND_CHECKPOINT=../fixed_view_foreground/runs/fixed_view_foreground_v2/best.pt \
-./run_infer.sh
-```
-
 `FOREGROUND_METHOD=legacy` skips pre-parser removal and retains the older
 four-corner routing fallback.
 
