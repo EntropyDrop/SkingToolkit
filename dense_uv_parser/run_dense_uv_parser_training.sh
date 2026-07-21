@@ -57,7 +57,7 @@ fi
 
 DATA_DIR="${DATA_DIR:-../skins}"
 MAPPINGS_SIZE="${MAPPINGS_SIZE:-256x512}"
-VIEWS="${VIEWS:-walk_front_both_layer_ortho,walk_back_both_layer_ortho}"
+VIEWS="${VIEWS:-front_left,back_left}"
 
 resolve_mappings_dir() {
   local requested="${MAPPINGS_DIR:-}"
@@ -86,7 +86,7 @@ resolve_mappings_dir() {
 resolve_mappings_dir
 
 PARSER_MODE="${PARSER_MODE:-geometry_fit}"
-MAX_SAMPLES="${MAX_SAMPLES:-30000}"
+MAX_SAMPLES="${MAX_SAMPLES:-100000}"
 BASE_CHANNELS="${BASE_CHANNELS:-32}"
 FEATURE_DROPOUT="${FEATURE_DROPOUT:-0.10}"
 ROUTE_ROLE_SPATIAL_PRIOR="${ROUTE_ROLE_SPATIAL_PRIOR:-true}"
