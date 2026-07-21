@@ -160,15 +160,16 @@ local pixels, the configured view identity, and fused front/back SigLIP2 context
 to decide whether a region is inner, outer, or secondary; fixed cuboids still own
 body-part, face, and UV coordinates. Exact-surface logits disambiguate deeper
 renderer slots. Projected-texel voting and conservative outer footprint
-rejection are enabled for production-aligned validation. For
-each layer/UV texel, color aggregation selects the real source sample closest
-to the integer UV center and never averages colors. This is important because
-the renderer uses bilinear texture sampling: scan-order or modal selection can
-otherwise choose a boundary blend even when the projected grid is correct.
+rejection are enabled for production-aligned validation. The default
+`grid_mode` takes colors directly from each fitted layer/UV grid cell: it
+selects the most frequent real 8-bit RGB among that cell's safe routed pixels
+and never averages colors. UV-center quality breaks ties only when two colors
+have equal support. This is more robust than letting one center pixel decide an
+entire cell when the source contains residual background or subpixel shifts.
 Color pickup additionally uses a mask distinct from route occupancy. Interior
 foreground samples are preferred; only boundary samples that are within
 `8/255` of the detected source background are excluded. This prevents an
-antialiased or isolated background pocket from winning `texel_center`, while a
+antialiased or isolated background pocket from winning a grid cell, while a
 real interior skin texel is still allowed to equal the background color.
 Outer texels also require multiple routed source pixels. The conservative
 profile requires three and the balanced profile requires two, preventing one

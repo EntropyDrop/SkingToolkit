@@ -1079,8 +1079,8 @@ def build_arg_parser():
     parser.add_argument(
         "--color_aggregation",
         choices=SPLAT_COLOR_AGGREGATIONS,
-        default="exact_mode",
-        help="How source colors mapping to the same UV texel are selected.",
+        default="grid_mode",
+        help="How colors inside each fitted layer/UV grid cell are selected.",
     )
     parser.add_argument(
         "--allow_semantic_fallback",

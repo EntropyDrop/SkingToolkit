@@ -1222,7 +1222,7 @@ def build_arg_parser():
     parser.add_argument(
         "--splat_color_aggregation",
         choices=SPLAT_COLOR_AGGREGATIONS,
-        default="texel_center",
+        default="grid_mode",
     )
     parser.add_argument("--allow_semantic_fallback", action="store_true")
     parser.add_argument("--augment", dest="augment", action="store_true", default=False)

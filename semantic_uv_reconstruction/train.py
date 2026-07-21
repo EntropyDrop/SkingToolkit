@@ -197,7 +197,7 @@ def build_dense_parser_conditioning(
     outer_rescue_confidence_threshold=0.60,
     outer_rescue_margin_threshold=0.25,
     outer_rescue_min_coverage=0.10,
-    color_aggregation="texel_center",
+    color_aggregation="grid_mode",
     geometry_route_texel_consensus=False,
     reject_semantic_fallback=True,
     confidence_aware_conditioning=False,
@@ -289,7 +289,7 @@ def build_training_conditioning(
     parser_outer_rescue_confidence_threshold=0.60,
     parser_outer_rescue_margin_threshold=0.25,
     parser_outer_rescue_min_coverage=0.10,
-    parser_splat_color_aggregation="texel_center",
+    parser_splat_color_aggregation="grid_mode",
     parser_geometry_route_texel_consensus=False,
     parser_reject_semantic_fallback=True,
     confidence_aware_conditioning=False,
@@ -358,7 +358,7 @@ def run_epoch(
     parser_outer_rescue_confidence_threshold=0.60,
     parser_outer_rescue_margin_threshold=0.25,
     parser_outer_rescue_min_coverage=0.10,
-    parser_splat_color_aggregation="texel_center",
+    parser_splat_color_aggregation="grid_mode",
     parser_geometry_route_texel_consensus=False,
     parser_reject_semantic_fallback=True,
     bg_color=(128, 128, 128),
@@ -725,7 +725,7 @@ def build_arg_parser():
     parser.add_argument(
         "--parser_splat_color_aggregation",
         choices=SPLAT_COLOR_AGGREGATIONS,
-        default="texel_center",
+        default="grid_mode",
     )
     parser.add_argument(
         "--parser_allow_semantic_fallback",

@@ -22,7 +22,7 @@ ROUTE_INNER_PRIMARY = 0
 ROUTE_OUTER_PRIMARY = 1
 ROUTE_SECONDARY = 2
 UV_SIZE = 64
-SPLAT_COLOR_AGGREGATIONS = ("texel_center", "exact_mode", "best")
+SPLAT_COLOR_AGGREGATIONS = ("grid_mode", "texel_center", "exact_mode", "best")
 SOLID_BACKGROUND_COLOR_TOLERANCE = 16.0 / 255.0
 SOLID_BACKGROUND_MIN_CORNER_SUPPORT = 0.5
 SECONDARY_TEXEL_MIN_PROBABILITY = 0.5
@@ -1951,7 +1951,7 @@ def splat_parser_predictions_to_uv_conditioning(
     outer_rescue_confidence_threshold=0.60,
     outer_rescue_margin_threshold=0.25,
     outer_rescue_min_coverage=0.10,
-    color_aggregation="texel_center",
+    color_aggregation="grid_mode",
     geometry_outer_threshold=0.5,
     geometry_route_texel_consensus=True,
     observed_foreground=None,
@@ -2405,7 +2405,7 @@ def splat_deterministic_targets_to_uv_conditioning(
     views,
     group_size=1,
     bg_color=(128, 128, 128),
-    color_aggregation="texel_center",
+    color_aggregation="grid_mode",
 ):
     """Splat ground-truth labels through the same fixed mapping used by affine mode."""
     views = parse_views(views)
@@ -2512,7 +2512,12 @@ def splat_targets_to_uv_conditioning(rendered, targets, group_size=1, bg_color=(
     return splat_to_uv_conditioning(rendered, fg, safe_layer, flat_uv, group_size=group_size, bg_color=bg_color)
 
 
-def _select_exact_mode_candidates(values, target_uv, scores):
+def _select_exact_mode_candidates(
+    values,
+    target_uv,
+    scores,
+    color_tie_break=None,
+):
     """Select one real source pixel from the most frequent 8-bit RGB value per UV texel."""
     if target_uv.numel() == 0:
         return values, target_uv, scores
@@ -2524,6 +2529,10 @@ def _select_exact_mode_candidates(values, target_uv, scores):
     unique_keys, inverse = torch.unique(combined_key, sorted=False, return_inverse=True)
     votes = scores.new_zeros(unique_keys.shape[0])
     votes.index_add_(0, inverse, torch.ones_like(scores))
+    tie_break_votes = None
+    if color_tie_break is not None:
+        tie_break_votes = scores.new_zeros(unique_keys.shape[0])
+        tie_break_votes.index_add_(0, inverse, color_tie_break.float())
 
     positions = torch.arange(target_uv.shape[0], device=target_uv.device)
     first_position = torch.full(
@@ -2538,6 +2547,20 @@ def _select_exact_mode_candidates(values, target_uv, scores):
     best_votes = votes.new_full((UV_SIZE * UV_SIZE,), -torch.inf)
     best_votes.scatter_reduce_(0, unique_uv, votes, reduce="amax", include_self=True)
     tied_winner = votes >= (best_votes[unique_uv] - 1e-7)
+    if tie_break_votes is not None:
+        best_tie_break = tie_break_votes.new_full(
+            (UV_SIZE * UV_SIZE,), -torch.inf
+        )
+        best_tie_break.scatter_reduce_(
+            0,
+            unique_uv[tied_winner],
+            tie_break_votes[tied_winner],
+            reduce="amax",
+            include_self=True,
+        )
+        tied_winner = tied_winner & (
+            tie_break_votes >= (best_tie_break[unique_uv] - 1e-7)
+        )
     earliest_winner = torch.full(
         (UV_SIZE * UV_SIZE,),
         target_uv.shape[0],
@@ -2594,7 +2617,7 @@ def splat_to_uv_conditioning(
     bg_color=(128, 128, 128),
     confidence=None,
     sampling_quality=None,
-    color_aggregation="exact_mode",
+    color_aggregation="grid_mode",
     include_confidence=False,
 ):
     if rendered.dim() != 4:
@@ -2694,6 +2717,16 @@ def splat_to_uv_conditioning(
                 values = values[:, selected_indices]
                 target_uv = target_uv[selected_indices]
                 scores = scores[selected_indices]
+            if color_aggregation == "grid_mode":
+                # The fitted renderer grid owns UV membership. Select the
+                # dominant real 8-bit RGB within each layer/UV cell; UV-center
+                # quality is only a tie-break between equally frequent colors.
+                values, target_uv, scores = _select_exact_mode_candidates(
+                    values,
+                    target_uv,
+                    scores,
+                    color_tie_break=quality,
+                )
             if color_aggregation == "exact_mode":
                 values, target_uv, scores = _select_exact_mode_candidates(
                     values, target_uv, scores
