@@ -89,6 +89,11 @@ PARSER_MODE="${PARSER_MODE:-geometry_fit}"
 MAX_SAMPLES="${MAX_SAMPLES:-30000}"
 BASE_CHANNELS="${BASE_CHANNELS:-32}"
 FEATURE_DROPOUT="${FEATURE_DROPOUT:-0.10}"
+ROUTE_ROLE_SPATIAL_PRIOR="${ROUTE_ROLE_SPATIAL_PRIOR:-true}"
+ROUTE_PRIOR_HEIGHT="${ROUTE_PRIOR_HEIGHT:-32}"
+ROUTE_PRIOR_WIDTH="${ROUTE_PRIOR_WIDTH:-16}"
+ROUTE_PRIOR_LOGIT_CAP="${ROUTE_PRIOR_LOGIT_CAP:-1.5}"
+ROUTE_PRIOR_DROPOUT="${ROUTE_PRIOR_DROPOUT:-0.10}"
 SEMANTIC_BACKBONE="${SEMANTIC_BACKBONE:-siglip2}"
 SIGLIP_MODEL="${SIGLIP_MODEL:-google/siglip2-base-patch16-224}"
 SIGLIP_LOCAL_FILES_ONLY="${SIGLIP_LOCAL_FILES_ONLY:-false}"
@@ -149,15 +154,20 @@ LAMBDA_UV="${LAMBDA_UV:-0.25}"
 LAMBDA_UV_CLASS="${LAMBDA_UV_CLASS:-1.0}"
 LAMBDA_AFFINE="${LAMBDA_AFFINE:-1.0}"
 LAMBDA_SURFACE="${LAMBDA_SURFACE:-1.0}"
-LAMBDA_OUTER_FALSE_POSITIVE="${LAMBDA_OUTER_FALSE_POSITIVE:-1.50}"
-LAMBDA_OUTER_FALSE_NEGATIVE="${LAMBDA_OUTER_FALSE_NEGATIVE:-0.40}"
+LAMBDA_OUTER_FALSE_POSITIVE="${LAMBDA_OUTER_FALSE_POSITIVE:-0.75}"
+LAMBDA_OUTER_FALSE_NEGATIVE="${LAMBDA_OUTER_FALSE_NEGATIVE:-0.75}"
 LAMBDA_ROUTE_CONFIDENCE="${LAMBDA_ROUTE_CONFIDENCE:-0.25}"
+LAMBDA_PRIMARY_ROUTE_SWAP="${LAMBDA_PRIMARY_ROUTE_SWAP:-1.0}"
+LAMBDA_ROUTE_TEXEL_CONSISTENCY="${LAMBDA_ROUTE_TEXEL_CONSISTENCY:-0.25}"
+LAMBDA_ROUTE_PRIOR_REGULARIZATION="${LAMBDA_ROUTE_PRIOR_REGULARIZATION:-0.001}"
 LAMBDA_SEMANTIC_PRESENCE="${LAMBDA_SEMANTIC_PRESENCE:-0.25}"
 LAMBDA_SEMANTIC_COVERAGE="${LAMBDA_SEMANTIC_COVERAGE:-0.25}"
 OUTER_FALSE_POSITIVE_GAMMA="${OUTER_FALSE_POSITIVE_GAMMA:-2.0}"
 OUTER_FALSE_NEGATIVE_GAMMA="${OUTER_FALSE_NEGATIVE_GAMMA:-2.0}"
+PRIMARY_ROUTE_SWAP_GAMMA="${PRIMARY_ROUTE_SWAP_GAMMA:-2.0}"
+ROUTE_PRIOR_TV_WEIGHT="${ROUTE_PRIOR_TV_WEIGHT:-1.0}"
 ROUTE_CLASS_WEIGHT_FLOOR="${ROUTE_CLASS_WEIGHT_FLOOR:-0.75}"
-ROUTE_OUTER_CLASS_WEIGHT_CAP="${ROUTE_OUTER_CLASS_WEIGHT_CAP:-0.75}"
+ROUTE_OUTER_CLASS_WEIGHT_CAP="${ROUTE_OUTER_CLASS_WEIGHT_CAP:-1.0}"
 LAMBDA_SOFT_UV_RGB="${LAMBDA_SOFT_UV_RGB:-0.25}"
 LAMBDA_SOFT_UV_ALPHA="${LAMBDA_SOFT_UV_ALPHA:-0.35}"
 LAMBDA_SOFT_UV_INNER_RECALL="${LAMBDA_SOFT_UV_INNER_RECALL:-0.50}"
@@ -188,6 +198,12 @@ if [[ "$AUGMENT_VALIDATION" == "true" ]]; then
   augment_args+=(--augment_validation)
 else
   augment_args+=(--no_augment_validation)
+fi
+route_prior_args=()
+if [[ "$ROUTE_ROLE_SPATIAL_PRIOR" == "true" ]]; then
+  route_prior_args=(--route_role_spatial_prior)
+else
+  route_prior_args=(--no_route_role_spatial_prior)
 fi
 uv_class_args=()
 if [[ "$UV_CLASSIFICATION" == "true" ]]; then
@@ -284,6 +300,10 @@ python train.py \
   --max_samples "$MAX_SAMPLES" \
   --base_channels "$BASE_CHANNELS" \
   --feature_dropout "$FEATURE_DROPOUT" \
+  --route_prior_height "$ROUTE_PRIOR_HEIGHT" \
+  --route_prior_width "$ROUTE_PRIOR_WIDTH" \
+  --route_prior_logit_cap "$ROUTE_PRIOR_LOGIT_CAP" \
+  --route_prior_dropout "$ROUTE_PRIOR_DROPOUT" \
   "${semantic_args[@]}" \
   --batch_size "$BATCH_SIZE" \
   --num_workers "$NUM_WORKERS" \
@@ -308,10 +328,15 @@ python train.py \
   --lambda_outer_false_positive "$LAMBDA_OUTER_FALSE_POSITIVE" \
   --lambda_outer_false_negative "$LAMBDA_OUTER_FALSE_NEGATIVE" \
   --lambda_route_confidence "$LAMBDA_ROUTE_CONFIDENCE" \
+  --lambda_primary_route_swap "$LAMBDA_PRIMARY_ROUTE_SWAP" \
+  --lambda_route_texel_consistency "$LAMBDA_ROUTE_TEXEL_CONSISTENCY" \
+  --lambda_route_prior_regularization "$LAMBDA_ROUTE_PRIOR_REGULARIZATION" \
   --lambda_semantic_presence "$LAMBDA_SEMANTIC_PRESENCE" \
   --lambda_semantic_coverage "$LAMBDA_SEMANTIC_COVERAGE" \
   --outer_false_positive_gamma "$OUTER_FALSE_POSITIVE_GAMMA" \
   --outer_false_negative_gamma "$OUTER_FALSE_NEGATIVE_GAMMA" \
+  --primary_route_swap_gamma "$PRIMARY_ROUTE_SWAP_GAMMA" \
+  --route_prior_tv_weight "$ROUTE_PRIOR_TV_WEIGHT" \
   --route_class_weight_floor "$ROUTE_CLASS_WEIGHT_FLOOR" \
   --route_outer_class_weight_cap "$ROUTE_OUTER_CLASS_WEIGHT_CAP" \
   --lambda_soft_uv_rgb "$LAMBDA_SOFT_UV_RGB" \
@@ -341,6 +366,7 @@ python train.py \
   --outer_rescue_min_coverage "$OUTER_RESCUE_MIN_COVERAGE" \
   --splat_color_aggregation "$SPLAT_COLOR_AGGREGATION" \
   "${augment_args[@]}" \
+  "${route_prior_args[@]}" \
   "${background_args[@]}" \
   "${semantic_gate_args[@]}" \
   "${affine_refine_args[@]}" \

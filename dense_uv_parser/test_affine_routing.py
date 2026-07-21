@@ -12,8 +12,11 @@ from SkingToolkit.dense_uv_parser.losses import (
     _balanced_cross_entropy,
     outer_false_negative_loss,
     outer_false_positive_loss,
+    primary_route_swap_loss,
+    projected_texel_consistency_loss,
 )
 from SkingToolkit.dense_uv_parser.model import DenseUVParserNet
+from SkingToolkit.dense_uv_parser.infer import load_parser
 from SkingToolkit.dense_uv_parser import train as parser_train
 from SkingToolkit.semantic_uv_reconstruction import train as inpainting_train
 from SkingToolkit.dense_uv_parser.utils import (
@@ -86,6 +89,137 @@ def dense_targets(batch, height, width):
 
 
 class GlobalAffineRoutingTest(unittest.TestCase):
+    def test_primary_route_swap_loss_is_macro_balanced(self):
+        pair_logits = torch.tensor(
+            [[[[2.0, -1.0]], [[-1.0, 2.0]], [[-4.0, -4.0]]]]
+        )
+        pair_target = torch.tensor([[[0, 1]]])
+        pair_loss = primary_route_swap_loss(pair_logits, pair_target)
+
+        repeated_logits = torch.cat(
+            [pair_logits[..., :1].expand(-1, -1, -1, 5), pair_logits[..., 1:]],
+            dim=-1,
+        )
+        repeated_target = torch.tensor([[[0, 0, 0, 0, 0, 1]]])
+        repeated_loss = primary_route_swap_loss(
+            repeated_logits, repeated_target
+        )
+
+        self.assertTrue(torch.allclose(pair_loss, repeated_loss, atol=1e-7))
+
+    def test_projected_texel_consistency_penalizes_split_role_probabilities(self):
+        uv = torch.zeros(1, 2, 1, 2)
+        target = torch.zeros(1, 1, 2, dtype=torch.long)
+        consistent = torch.tensor(
+            [[[[3.0, 3.0]], [[0.0, 0.0]], [[-2.0, -2.0]]]]
+        )
+        split = torch.tensor(
+            [[[[3.0, 0.0]], [[0.0, 3.0]], [[-2.0, -2.0]]]]
+        )
+
+        consistent_loss = projected_texel_consistency_loss(
+            consistent, target, uv
+        )
+        split_loss = projected_texel_consistency_loss(split, target, uv)
+
+        self.assertLess(float(consistent_loss), 1e-8)
+        self.assertGreater(float(split_loss), float(consistent_loss))
+
+    def test_fixed_view_route_prior_is_bounded_and_view_conditioned(self):
+        model = DenseUVParserNet(
+            base_channels=8,
+            geometry_only=True,
+            view_classes=2,
+            route_role_spatial_prior=True,
+            route_prior_height=4,
+            route_prior_width=2,
+            route_prior_logit_cap=1.25,
+            route_prior_dropout=0.0,
+        ).eval()
+        with torch.no_grad():
+            model.route_role_prior[0, 0].fill_(10.0)
+            model.route_role_prior[1, 1].fill_(10.0)
+        outputs = model(
+            torch.zeros(2, 4, 32, 16),
+            view_ids=torch.tensor([0, 1]),
+        )
+        prior = outputs["route_role_prior"]
+
+        self.assertEqual(tuple(prior.shape), (2, 3, 32, 16))
+        self.assertLessEqual(float(prior.detach().abs().max()), 1.25 + 1e-6)
+        self.assertGreater(float(prior[0, 0].detach().mean()), 1.0)
+        self.assertGreater(float(prior[1, 1].detach().mean()), 1.0)
+        self.assertLess(float(prior[0, 1].detach().abs().max()), 1e-7)
+
+    def test_route_prior_checkpoint_round_trip(self):
+        model = DenseUVParserNet(
+            base_channels=8,
+            geometry_only=True,
+            view_classes=2,
+            route_role_spatial_prior=True,
+            route_prior_height=4,
+            route_prior_width=2,
+            route_prior_logit_cap=1.25,
+            route_prior_dropout=0.15,
+        )
+        checkpoint = {
+            "model": model.state_dict(),
+            "model_config": {
+                "base_channels": 8,
+                "uv_size": 64,
+                "view_classes": 2,
+                "parser_mode": "geometry_fit",
+                "predict_affine": False,
+                "surface_classes": 0,
+                "layer_classes": 3,
+                "geometry_only": True,
+                "route_role_spatial_prior": True,
+                "route_prior_height": 4,
+                "route_prior_width": 2,
+                "route_prior_logit_cap": 1.25,
+                "route_prior_dropout": 0.15,
+            },
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "prior.pt"
+            torch.save(checkpoint, path)
+            loaded, _ = load_parser(path, torch.device("cpu"))
+
+        self.assertTrue(loaded.route_role_spatial_prior)
+        self.assertEqual(tuple(loaded.route_role_prior.shape), (2, 3, 4, 2))
+        self.assertEqual(loaded.route_prior_logit_cap, 1.25)
+
+    def test_route_prior_and_new_route_losses_backpropagate_together(self):
+        model = DenseUVParserNet(
+            base_channels=8,
+            geometry_only=True,
+            view_classes=2,
+            route_role_spatial_prior=True,
+            route_prior_height=4,
+            route_prior_width=2,
+            route_prior_dropout=0.0,
+        ).train()
+        outputs = model(
+            torch.rand(2, 4, 32, 16),
+            view_ids=torch.tensor([0, 1]),
+        )
+        targets = dense_targets(2, 32, 16)
+        targets["route_role"][:, :, 8:] = 1
+        criterion = DenseUVParserLoss(
+            lambda_primary_route_swap=1.0,
+            lambda_route_texel_consistency=0.25,
+            lambda_route_prior_regularization=0.001,
+        )
+
+        losses = criterion(outputs, targets)
+        losses["loss_total"].backward()
+
+        self.assertTrue(torch.isfinite(losses["loss_primary_route_swap"]))
+        self.assertTrue(torch.isfinite(losses["loss_route_texel_consistency"]))
+        self.assertTrue(torch.isfinite(losses["loss_route_prior_regularization"]))
+        self.assertIsNotNone(model.route_role_prior.grad)
+        self.assertGreater(float(model.route_role_prior.grad.abs().sum()), 0.0)
+
     def test_soft_geometry_splat_backpropagates_to_role_and_surface_logits(self):
         renderer = FakeRenderer(valid_pixels=1)
         composite_grid = renderer.front_inner_grid.unsqueeze(0).clone()
@@ -189,9 +323,14 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         self.assertEqual(parser_args.lr_schedule, "cosine")
         self.assertEqual(parser_args.min_lr_ratio, 0.05)
         self.assertEqual(parser_args.route_class_weight_floor, 0.75)
-        self.assertEqual(parser_args.lambda_outer_false_positive, 1.50)
-        self.assertEqual(parser_args.lambda_outer_false_negative, 0.40)
-        self.assertEqual(parser_args.route_outer_class_weight_cap, 0.75)
+        self.assertEqual(parser_args.lambda_outer_false_positive, 0.75)
+        self.assertEqual(parser_args.lambda_outer_false_negative, 0.75)
+        self.assertEqual(parser_args.route_outer_class_weight_cap, 1.0)
+        self.assertEqual(parser_args.lambda_primary_route_swap, 1.0)
+        self.assertEqual(parser_args.lambda_route_texel_consistency, 0.25)
+        self.assertTrue(parser_args.route_role_spatial_prior)
+        self.assertEqual(parser_args.route_prior_height, 32)
+        self.assertEqual(parser_args.route_prior_width, 16)
         self.assertEqual(parser_args.best_metric, "loss_hard_uv_color_selection")
         self.assertEqual(parser_args.hard_rgb_selection_weight, 1.0)
         self.assertEqual(parser_args.route_confidence_threshold, 0.0)

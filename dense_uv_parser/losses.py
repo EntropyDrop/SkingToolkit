@@ -75,6 +75,105 @@ def outer_false_negative_loss(logits, target, outer_index=1, gamma=2.0):
     return focal_positive[positive].mean()
 
 
+def primary_route_swap_loss(logits, target, gamma=2.0):
+    """Macro-balanced focal loss for inner/outer swaps.
+
+    Inner pixels are much more common than visible outer pixels.  Computing one
+    mean per primary role before averaging prevents the abundant inner class
+    from deciding the gradient while still leaving secondary/backface handling
+    to the ordinary three-class route loss.
+    """
+    if logits.shape[1] < 2:
+        raise ValueError("Primary route swap loss requires inner and outer logits.")
+    if gamma < 0:
+        raise ValueError("gamma must be non-negative.")
+    probability = torch.softmax(logits[:, :2].float(), dim=1).clamp(
+        1e-6, 1.0 - 1e-6
+    )
+    class_losses = []
+    for role in (0, 1):
+        selected = target == role
+        if not selected.any():
+            continue
+        correct = probability[:, role][selected]
+        class_losses.append(
+            ((1.0 - correct).pow(gamma) * -correct.log()).mean()
+        )
+    if not class_losses:
+        return logits.new_zeros((), dtype=torch.float32)
+    return torch.stack(class_losses).mean()
+
+
+def projected_texel_consistency_loss(logits, target, uv, uv_size=64):
+    """Make pixels from the same projected UV texel agree on route role.
+
+    Groups are kept per rendered item and ground-truth role.  Including the
+    role in the key avoids forcing a rare legitimate secondary observation to
+    agree with a primary observation of the same atlas texel.
+    """
+    if logits.dim() != 4 or target.shape != logits.shape[:1] + logits.shape[-2:]:
+        raise ValueError("Route logits and targets must be NCHW and NHW.")
+    if uv.shape != (logits.shape[0], 2, *logits.shape[-2:]):
+        raise ValueError(
+            f"Expected UV target shape {(logits.shape[0], 2, *logits.shape[-2:])}, "
+            f"got {tuple(uv.shape)}."
+        )
+    if uv_size < 1:
+        raise ValueError("uv_size must be positive.")
+    valid = target != IGNORE_INDEX
+    if not valid.any():
+        return logits.new_zeros((), dtype=torch.float32)
+
+    probabilities = torch.softmax(logits.float(), dim=1)
+    x = (uv[:, 0].clamp(0.0, 1.0) * (uv_size - 1)).round().long()
+    y = (uv[:, 1].clamp(0.0, 1.0) * (uv_size - 1)).round().long()
+    flat_uv = y * uv_size + x
+    role_count = logits.shape[1]
+    uv_count = uv_size * uv_size
+    item = torch.arange(logits.shape[0], device=logits.device).view(-1, 1, 1)
+    safe_target = target.clamp(0, role_count - 1)
+    group = item * (role_count * uv_count) + safe_target * uv_count + flat_uv
+
+    flat_probabilities = probabilities.permute(0, 2, 3, 1).reshape(-1, role_count)
+    flat_group = group.reshape(-1)
+    flat_valid = valid.reshape(-1)
+    selected_group = flat_group[flat_valid]
+    selected_probabilities = flat_probabilities[flat_valid]
+    group_count = logits.shape[0] * role_count * uv_count
+    sums = probabilities.new_zeros(group_count, role_count)
+    sums.index_add_(0, selected_group, selected_probabilities)
+    counts = probabilities.new_zeros(group_count, 1)
+    counts.index_add_(
+        0,
+        selected_group,
+        probabilities.new_ones(selected_group.shape[0], 1),
+    )
+    means = sums / counts.clamp_min(1.0)
+    selected_means = means.index_select(0, selected_group)
+    repeated = counts.index_select(0, selected_group)[:, 0] > 1
+    if not repeated.any():
+        return logits.new_zeros((), dtype=torch.float32)
+    return (
+        selected_probabilities[repeated] - selected_means[repeated]
+    ).square().sum(dim=1).mean()
+
+
+def route_prior_regularization(outputs, tv_weight=1.0):
+    """Keep the learned fixed-view prior smooth and weaker than image evidence."""
+    prior = outputs.get("route_role_prior_raw")
+    if prior is None:
+        return outputs["layer"].new_zeros((), dtype=torch.float32)
+    prior = prior.float()
+    l2 = prior.square().mean()
+    tv_terms = []
+    if prior.shape[-2] > 1:
+        tv_terms.append((prior[..., 1:, :] - prior[..., :-1, :]).square().mean())
+    if prior.shape[-1] > 1:
+        tv_terms.append((prior[..., :, 1:] - prior[..., :, :-1]).square().mean())
+    tv = torch.stack(tv_terms).mean() if tv_terms else l2 * 0.0
+    return l2 + float(tv_weight) * tv
+
+
 class DenseUVParserLoss(nn.Module):
     def __init__(
         self,
@@ -90,8 +189,13 @@ class DenseUVParserLoss(nn.Module):
         lambda_outer_false_positive=0.75,
         lambda_outer_false_negative=0.75,
         lambda_route_confidence=0.25,
+        lambda_primary_route_swap=1.0,
+        lambda_route_texel_consistency=0.25,
+        lambda_route_prior_regularization=0.001,
         outer_false_positive_gamma=2.0,
         outer_false_negative_gamma=2.0,
+        primary_route_swap_gamma=2.0,
+        route_prior_tv_weight=1.0,
         route_class_weight_floor=0.75,
         route_outer_class_weight_cap=1.0,
         uv_size=64,
@@ -113,8 +217,17 @@ class DenseUVParserLoss(nn.Module):
         self.lambda_outer_false_positive = lambda_outer_false_positive
         self.lambda_outer_false_negative = lambda_outer_false_negative
         self.lambda_route_confidence = float(lambda_route_confidence)
+        self.lambda_primary_route_swap = float(lambda_primary_route_swap)
+        self.lambda_route_texel_consistency = float(
+            lambda_route_texel_consistency
+        )
+        self.lambda_route_prior_regularization = float(
+            lambda_route_prior_regularization
+        )
         self.outer_false_positive_gamma = outer_false_positive_gamma
         self.outer_false_negative_gamma = outer_false_negative_gamma
+        self.primary_route_swap_gamma = float(primary_route_swap_gamma)
+        self.route_prior_tv_weight = float(route_prior_tv_weight)
         self.route_class_weight_floor = route_class_weight_floor
         self.route_outer_class_weight_cap = route_outer_class_weight_cap
         self.uv_size = uv_size
@@ -154,6 +267,28 @@ class DenseUVParserLoss(nn.Module):
             )
             if geometry_route_roles
             else F.cross_entropy(outputs["layer"], layer_target, ignore_index=IGNORE_INDEX)
+        )
+        loss_primary_route_swap = (
+            primary_route_swap_loss(
+                outputs["layer"],
+                layer_target,
+                gamma=self.primary_route_swap_gamma,
+            )
+            if geometry_route_roles
+            else zero
+        )
+        loss_route_texel_consistency = (
+            projected_texel_consistency_loss(
+                outputs["layer"],
+                layer_target,
+                targets["uv"],
+                uv_size=self.uv_size,
+            )
+            if geometry_route_roles
+            else zero
+        )
+        loss_route_prior_regularization = route_prior_regularization(
+            outputs, tv_weight=self.route_prior_tv_weight
         )
         loss_outer_false_positive = (
             outer_false_positive_loss(
@@ -288,19 +423,31 @@ class DenseUVParserLoss(nn.Module):
             precision_trusted_route = zero
             coverage_trusted_route = zero
 
-        geometry_route_roles = outputs["layer"].shape[1] == 3 and "route_role" in targets
         loss_routing = (
             loss_layer
             + loss_affine
             + loss_surface
             + weighted_outer_false_positive
             + weighted_outer_false_negative
+            + self.lambda_primary_route_swap * loss_primary_route_swap
+            + self.lambda_route_texel_consistency
+            * loss_route_texel_consistency
+            + self.lambda_route_prior_regularization
+            * loss_route_prior_regularization
             if geometry_route_roles
             else loss_surface + loss_uv_class + loss_layer_face
         )
         loss_geometry = loss_foreground + loss_layer + loss_affine + (
             loss_surface if geometry_route_roles else zero
-        ) + weighted_outer_false_positive + weighted_outer_false_negative
+        ) + weighted_outer_false_positive + weighted_outer_false_negative + (
+            self.lambda_primary_route_swap * loss_primary_route_swap
+            + self.lambda_route_texel_consistency
+            * loss_route_texel_consistency
+            + self.lambda_route_prior_regularization
+            * loss_route_prior_regularization
+            if geometry_route_roles
+            else zero
+        )
 
         loss_total = (
             self.lambda_foreground * loss_foreground
@@ -315,6 +462,11 @@ class DenseUVParserLoss(nn.Module):
             + weighted_outer_false_positive
             + weighted_outer_false_negative
             + self.lambda_route_confidence * loss_route_confidence
+            + self.lambda_primary_route_swap * loss_primary_route_swap
+            + self.lambda_route_texel_consistency
+            * loss_route_texel_consistency
+            + self.lambda_route_prior_regularization
+            * loss_route_prior_regularization
         )
 
         metrics = {
@@ -342,6 +494,9 @@ class DenseUVParserLoss(nn.Module):
             "loss_outer_false_negative": loss_outer_false_negative,
             "loss_outer_false_negative_weighted": weighted_outer_false_negative,
             "loss_route_confidence": loss_route_confidence,
+            "loss_primary_route_swap": loss_primary_route_swap,
+            "loss_route_texel_consistency": loss_route_texel_consistency,
+            "loss_route_prior_regularization": loss_route_prior_regularization,
             "confidence_mae": confidence_mae,
             "precision_trusted_route": precision_trusted_route,
             "coverage_trusted_route": coverage_trusted_route,

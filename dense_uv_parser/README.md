@@ -5,6 +5,7 @@ This module trains a geometry-fitted parser for slightly transformed Steve rende
 ```text
 front/back render pixels
   -> high-resolution CNN + frozen SigLIP2 multi-view context
+  -> image evidence + bounded fixed-view route prior
   -> global translation/scale + confidence-calibrated inner/outer/backface routing
   -> fixed Steve cuboids provide body part + face + exact UV
   -> splat visible pixels and trust into 64x64 UV conditioning
@@ -23,7 +24,10 @@ walk_front_both_layer_ortho,walk_back_both_layer_ortho
 ./run_dense_uv_parser_training.sh
 ```
 
-Exact surface-slot routing adds a new prediction head to `geometry_fit`. Start a fresh run after upgrading; checkpoints without this head remain usable for legacy inference but cannot be resumed into the new architecture.
+Exact surface-slot routing and the learned fixed-view route prior add parameters to
+`geometry_fit`. Start a fresh run after upgrading. Older checkpoints remain usable
+for inference, but enabling the prior while resuming an older run is intentionally
+rejected because the optimizer has never trained those parameters.
 
 The standard launcher uses `geometry_fit` plus a frozen SigLIP2 vision tower.
 SigLIP2 is not trained: its per-view global features are cached once, fused across
@@ -71,21 +75,54 @@ Set `BACKGROUND_AUGMENT=false` to use a fixed gray RGB background; the input sti
 Training previews are saved under `runs/<run>/previews`:
 
 - `epoch_XXXX.png`: predicted inner/outer RGB rows, followed by GT inner/outer RGB rows.
-- `epoch_XXXX_debug.png`: semantic diagnostics plus fitted inner/outer grids and RGB-filled grid previews.
+- `epoch_XXXX_debug.png`: semantic diagnostics plus predicted/GT route roles, the prior-only route-role map, fitted inner/outer grids, and RGB-filled grid previews.
 
-For good parser splatting, watch `hard_iou_inner`, `hard_precision_outer`, `hard_recall_outer`, `hard_iou_outer`, `hard_rgb_mae_inner`, `hard_rgb_mae_outer`, `loss_soft_uv_inner_recall_hard`, `loss_soft_uv_outer_recall_hard`, `precision_secondary`, `recall_secondary`, `acc_route_role`, `confidence_mae`, `precision_trusted_route`, and `coverage_trusted_route`. Validation runs the same configured routing, confidence gates, background rejection, and UV splat used by inference. `best.pt` defaults to the lowest `loss_hard_uv_color_selection`: the former hard inner/outer occupancy score plus mean hard inner/outer RGB MAE. This prevents a sparse or incorrectly colored atlas from winning checkpoint selection merely because its occupancy precision is high. Hard counts and color errors are accumulated over the complete validation set. The occupancy-only `loss_hard_uv_selection` and older soft-classification `loss_outer_selection` remain logged as diagnostics.
+For good parser splatting, watch `hard_iou_inner`, `hard_precision_outer`, `hard_recall_outer`, `hard_iou_outer`, `hard_rgb_mae_inner`, `hard_rgb_mae_outer`, `loss_primary_route_swap`, `loss_route_texel_consistency`, `loss_soft_uv_inner_recall_hard`, `loss_soft_uv_outer_recall_hard`, `precision_secondary`, `recall_secondary`, `acc_route_role`, `confidence_mae`, `precision_trusted_route`, and `coverage_trusted_route`. Validation runs the same configured routing, confidence gates, background rejection, and UV splat used by inference. `best.pt` defaults to the lowest `loss_hard_uv_color_selection`: the former hard inner/outer occupancy score plus mean hard inner/outer RGB MAE. This prevents a sparse or incorrectly colored atlas from winning checkpoint selection merely because its occupancy precision is high. Hard counts and color errors are accumulated over the complete validation set. The occupancy-only `loss_hard_uv_selection` and older soft-classification `loss_outer_selection` remain logged as diagnostics.
 
-Route-role training uses complementary focal terms. The false-positive term penalizes high-confidence outer predictions on GT inner/secondary pixels, while the false-negative term penalizes visible GT outer pixels that receive too little outer probability. The abundant inner class has a minimum balanced weight of `0.75`, while automatic balancing cannot raise the outer target class above `0.75`. Defaults deliberately prefer outer precision: uncertain outer pixels become topology-completion holes instead of permanently moving inner colors onto the outer layer.
+Route-role training now gives inner and outer equal macro weight in a dedicated
+swap loss, regardless of their pixel-count imbalance. A projected-texel
+consistency loss also makes multiple source pixels that map to the same GT
+layer/UV texel agree. The complementary false-positive and false-negative focal
+terms remain, but use symmetric defaults; the ordinary three-class loss still
+handles secondary/backface observations.
 
 ```bash
-LAMBDA_OUTER_FALSE_POSITIVE=1.50 \
-LAMBDA_OUTER_FALSE_NEGATIVE=0.40 \
+LAMBDA_OUTER_FALSE_POSITIVE=0.75 \
+LAMBDA_OUTER_FALSE_NEGATIVE=0.75 \
+LAMBDA_PRIMARY_ROUTE_SWAP=1.0 \
+LAMBDA_ROUTE_TEXEL_CONSISTENCY=0.25 \
 OUTER_FALSE_POSITIVE_GAMMA=2.0 \
 OUTER_FALSE_NEGATIVE_GAMMA=2.0 \
+PRIMARY_ROUTE_SWAP_GAMMA=2.0 \
 ROUTE_CLASS_WEIGHT_FLOOR=0.75 \
-ROUTE_OUTER_CLASS_WEIGHT_CAP=0.75 \
+ROUTE_OUTER_CLASS_WEIGHT_CAP=1.0 \
 ./run_dense_uv_parser_training.sh
 ```
+
+For canonical fixed views, the launcher also enables a learned per-view spatial
+prior over `inner`, `outer`, and `secondary`. Across a large dataset it learns
+where common structures such as bangs, hat brims, and rear hair usually occur.
+It is a soft statistical bias rather than a hard template: logits are capped,
+the whole prior is randomly dropped for some training items, and L2/total-
+variation regularization keeps it weak and smooth. The image-conditioned CNN
+can therefore override the prior for uncommon skins.
+
+```bash
+ROUTE_ROLE_SPATIAL_PRIOR=true \
+ROUTE_PRIOR_HEIGHT=32 \
+ROUTE_PRIOR_WIDTH=16 \
+ROUTE_PRIOR_LOGIT_CAP=1.5 \
+ROUTE_PRIOR_DROPOUT=0.10 \
+LAMBDA_ROUTE_PRIOR_REGULARIZATION=0.001 \
+ROUTE_PRIOR_TV_WEIGHT=1.0 \
+./run_dense_uv_parser_training.sh
+```
+
+The prior assumes the canonical front/back coordinates. Geometric translation
+or scale augmentation cannot be combined with it. To continue a legacy
+checkpoint without the new prior, explicitly set
+`ROUTE_ROLE_SPATIAL_PRIOR=false`; this preserves compatibility but does not learn
+the common-pattern bias.
 
 `geometry_fit` training also uses a differentiable photometric branch. Route-role and surface logits are converted to probabilities, softly splatted through the fixed renderer UV candidates, and merged into a provisional skin. That skin is rendered back through the direct inner/outer cuboids for every configured view. Soft-UV RGB/alpha errors and multi-view render RGB/alpha errors are added to the supervised classification losses, so wrong inner/outer or exact-surface choices receive color and silhouette gradients in addition to cross-entropy. Inference remains hard-routed and selects the real source pixel nearest each integer UV texel center.
 

@@ -628,7 +628,11 @@ def canonicalize_parser_outputs(outputs):
     affine = outputs["affine"]
     canonical = {}
     for name, value in outputs.items():
-        if name == "affine" or not torch.is_tensor(value) or value.dim() != 4:
+        if (
+            name in ("affine", "route_role_prior_raw")
+            or not torch.is_tensor(value)
+            or value.dim() != 4
+        ):
             canonical[name] = value
         else:
             canonical[name] = canonicalize_tensor(value, affine, mode="bilinear")

@@ -180,6 +180,11 @@ class DenseUVParserNet(nn.Module):
         semantic_layers=1,
         semantic_dropout=0.05,
         predict_confidence=False,
+        route_role_spatial_prior=False,
+        route_prior_height=32,
+        route_prior_width=16,
+        route_prior_logit_cap=1.5,
+        route_prior_dropout=0.10,
     ):
         super().__init__()
         self.geometry_only = bool(geometry_only)
@@ -198,6 +203,23 @@ class DenseUVParserNet(nn.Module):
         self.semantic_layers = int(semantic_layers)
         self.semantic_dropout = float(semantic_dropout)
         self.predict_confidence = bool(predict_confidence)
+        self.route_role_spatial_prior = bool(route_role_spatial_prior)
+        self.route_prior_height = int(route_prior_height)
+        self.route_prior_width = int(route_prior_width)
+        self.route_prior_logit_cap = float(route_prior_logit_cap)
+        self.route_prior_dropout = float(route_prior_dropout)
+        if self.route_prior_height < 1 or self.route_prior_width < 1:
+            raise ValueError("Route-prior dimensions must be positive.")
+        if self.route_prior_logit_cap <= 0.0:
+            raise ValueError("route_prior_logit_cap must be positive.")
+        if not 0.0 <= self.route_prior_dropout < 1.0:
+            raise ValueError("route_prior_dropout must be in [0, 1).")
+        if self.route_role_spatial_prior and (
+            not self.geometry_only or self.view_classes < 1
+        ):
+            raise ValueError(
+                "The fixed-view route-role prior requires geometry_only with view classes."
+            )
         self.feature_dropout_probability = float(feature_dropout)
         if not 0.0 <= self.feature_dropout_probability < 1.0:
             raise ValueError("feature_dropout must be in [0, 1).")
@@ -230,6 +252,18 @@ class DenseUVParserNet(nn.Module):
         self.feature_dropout = nn.Dropout2d(self.feature_dropout_probability)
         self.foreground = nn.Conv2d(c, 1, kernel_size=1)
         self.layer = nn.Conv2d(c, self.layer_classes, kernel_size=1)
+        self.route_role_prior = (
+            nn.Parameter(
+                torch.zeros(
+                    self.view_classes,
+                    self.layer_classes,
+                    self.route_prior_height,
+                    self.route_prior_width,
+                )
+            )
+            if self.route_role_spatial_prior
+            else None
+        )
         self.route_confidence = (
             nn.Conv2d(c, 1, kernel_size=1) if self.predict_confidence else None
         )
@@ -330,10 +364,42 @@ class DenseUVParserNet(nn.Module):
         x = self.up0(x, s0)
         x = self.features(x)
         x = self.feature_dropout(x)
+        layer_evidence = self.layer(x)
         outputs = {
             "foreground": self.foreground(x),
-            "layer": self.layer(x),
+            "layer": layer_evidence,
         }
+        if self.route_role_prior is not None:
+            selected_prior_raw = self.route_role_prior.index_select(
+                0, view_ids.long()
+            )
+            selected_prior = self.route_prior_logit_cap * torch.tanh(
+                selected_prior_raw / self.route_prior_logit_cap
+            )
+            if self.training and self.route_prior_dropout > 0.0:
+                keep = (
+                    torch.rand(
+                        selected_prior.shape[0],
+                        1,
+                        1,
+                        1,
+                        device=selected_prior.device,
+                    )
+                    >= self.route_prior_dropout
+                )
+                selected_prior = selected_prior * keep.to(
+                    dtype=selected_prior.dtype
+                )
+            route_prior = F.interpolate(
+                selected_prior,
+                size=layer_evidence.shape[-2:],
+                mode="bilinear",
+                align_corners=False,
+            ).to(dtype=layer_evidence.dtype)
+            outputs["layer"] = layer_evidence + route_prior
+            outputs["route_role_evidence"] = layer_evidence
+            outputs["route_role_prior"] = route_prior
+            outputs["route_role_prior_raw"] = self.route_role_prior
         if self.route_confidence is not None:
             outputs["route_confidence"] = self.route_confidence(x)
         if semantic_summary is not None:

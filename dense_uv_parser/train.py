@@ -969,6 +969,20 @@ def save_preview(
                 colorize_labels(targets_debug["route_role"], ROUTE_ROLE_PALETTE, args.bg_color, rendered_debug),
             ]
         )
+        if "route_role_prior" in debug_outputs:
+            prior_route_role = torch.where(
+                gt_fg,
+                debug_outputs["route_role_prior"].argmax(dim=1),
+                torch.full_like(targets_debug["route_role"], IGNORE_INDEX),
+            )
+            debug_images.append(
+                colorize_labels(
+                    prior_route_role,
+                    ROUTE_ROLE_PALETTE,
+                    args.bg_color,
+                    rendered_debug,
+                )
+            )
     if routing_details is not None:
         geometry_debug = build_geometry_grid_debug(
             renderer,
@@ -1061,6 +1075,11 @@ def save_checkpoint(path, model, optimizer, scaler, epoch, args, metrics, best_m
             "semantic_layers": model.semantic_layers,
             "semantic_dropout": model.semantic_dropout,
             "predict_confidence": model.predict_confidence,
+            "route_role_spatial_prior": model.route_role_spatial_prior,
+            "route_prior_height": model.route_prior_height,
+            "route_prior_width": model.route_prior_width,
+            "route_prior_logit_cap": model.route_prior_logit_cap,
+            "route_prior_dropout": model.route_prior_dropout,
             "arm_model": "steve",
         },
     }
@@ -1088,6 +1107,25 @@ def build_arg_parser():
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument("--base_channels", type=int, default=32)
     parser.add_argument("--feature_dropout", type=float, default=0.10)
+    parser.add_argument(
+        "--route_role_spatial_prior",
+        dest="route_role_spatial_prior",
+        action="store_true",
+        default=True,
+        help=(
+            "Learn a bounded per-view canonical route-role prior for common "
+            "fixed-view patterns such as bangs, hat brims, and back hair."
+        ),
+    )
+    parser.add_argument(
+        "--no_route_role_spatial_prior",
+        dest="route_role_spatial_prior",
+        action="store_false",
+    )
+    parser.add_argument("--route_prior_height", type=int, default=32)
+    parser.add_argument("--route_prior_width", type=int, default=16)
+    parser.add_argument("--route_prior_logit_cap", type=float, default=1.5)
+    parser.add_argument("--route_prior_dropout", type=float, default=0.10)
     parser.add_argument(
         "--semantic_backbone",
         choices=["none", "siglip2"],
@@ -1185,15 +1223,24 @@ def build_arg_parser():
     parser.add_argument("--lambda_uv_class", type=float, default=1.0)
     parser.add_argument("--lambda_affine", type=float, default=1.0)
     parser.add_argument("--lambda_surface", type=float, default=1.0)
-    parser.add_argument("--lambda_outer_false_positive", type=float, default=1.50)
-    parser.add_argument("--lambda_outer_false_negative", type=float, default=0.40)
+    parser.add_argument("--lambda_outer_false_positive", type=float, default=0.75)
+    parser.add_argument("--lambda_outer_false_negative", type=float, default=0.75)
     parser.add_argument("--lambda_route_confidence", type=float, default=0.25)
+    parser.add_argument("--lambda_primary_route_swap", type=float, default=1.0)
+    parser.add_argument(
+        "--lambda_route_texel_consistency", type=float, default=0.25
+    )
+    parser.add_argument(
+        "--lambda_route_prior_regularization", type=float, default=0.001
+    )
     parser.add_argument("--lambda_semantic_presence", type=float, default=0.25)
     parser.add_argument("--lambda_semantic_coverage", type=float, default=0.25)
     parser.add_argument("--outer_false_positive_gamma", type=float, default=2.0)
     parser.add_argument("--outer_false_negative_gamma", type=float, default=2.0)
+    parser.add_argument("--primary_route_swap_gamma", type=float, default=2.0)
+    parser.add_argument("--route_prior_tv_weight", type=float, default=1.0)
     parser.add_argument("--route_class_weight_floor", type=float, default=0.75)
-    parser.add_argument("--route_outer_class_weight_cap", type=float, default=0.75)
+    parser.add_argument("--route_outer_class_weight_cap", type=float, default=1.0)
     parser.add_argument("--lambda_soft_uv_rgb", type=float, default=0.25)
     parser.add_argument("--lambda_soft_uv_alpha", type=float, default=0.35)
     parser.add_argument("--lambda_soft_uv_inner_recall", type=float, default=0.50)
@@ -1244,6 +1291,25 @@ def main():
         raise ValueError("--scale_range must be in [0, 1).")
     if not 0.0 <= args.feature_dropout < 1.0:
         raise ValueError("--feature_dropout must be in [0, 1).")
+    if args.route_prior_height < 1 or args.route_prior_width < 1:
+        raise ValueError("Route-prior dimensions must be positive.")
+    if args.route_prior_logit_cap <= 0:
+        raise ValueError("--route_prior_logit_cap must be positive.")
+    if not 0.0 <= args.route_prior_dropout < 1.0:
+        raise ValueError("--route_prior_dropout must be in [0, 1).")
+    if args.route_role_spatial_prior and args.parser_mode != "geometry_fit":
+        raise ValueError(
+            "--route_role_spatial_prior is supported only by geometry_fit."
+        )
+    if (
+        args.route_role_spatial_prior
+        and args.augment
+        and (args.translation_scale > 0.0 or args.scale_range > 0.0)
+    ):
+        raise ValueError(
+            "The canonical route prior requires fixed geometry; disable geometric "
+            "augmentation or disable the spatial prior."
+        )
     differentiable_weights = (
         args.lambda_soft_uv_rgb,
         args.lambda_soft_uv_alpha,
@@ -1272,10 +1338,13 @@ def main():
         raise ValueError("--lambda_outer_false_negative must be non-negative.")
     if min(
         args.lambda_route_confidence,
+        args.lambda_primary_route_swap,
+        args.lambda_route_texel_consistency,
+        args.lambda_route_prior_regularization,
         args.lambda_semantic_presence,
         args.lambda_semantic_coverage,
     ) < 0:
-        raise ValueError("Semantic and confidence loss weights must be non-negative.")
+        raise ValueError("Route, semantic, and confidence loss weights must be non-negative.")
     if args.semantic_channels < 1 or args.semantic_layers < 1:
         raise ValueError("Semantic channels and layers must be positive.")
     if args.semantic_attention_heads < 1:
@@ -1288,6 +1357,10 @@ def main():
         raise ValueError("--outer_false_positive_gamma must be non-negative.")
     if args.outer_false_negative_gamma < 0:
         raise ValueError("--outer_false_negative_gamma must be non-negative.")
+    if args.primary_route_swap_gamma < 0:
+        raise ValueError("--primary_route_swap_gamma must be non-negative.")
+    if args.route_prior_tv_weight < 0:
+        raise ValueError("--route_prior_tv_weight must be non-negative.")
     if not 0 <= args.route_class_weight_floor <= 4.0:
         raise ValueError("--route_class_weight_floor must be in [0, 4].")
     if args.route_outer_class_weight_cap <= 0:
@@ -1399,6 +1472,13 @@ def main():
         semantic_layers=args.semantic_layers,
         semantic_dropout=args.semantic_dropout,
         predict_confidence=args.semantic_backbone != "none",
+        route_role_spatial_prior=(
+            geometry_only and args.route_role_spatial_prior
+        ),
+        route_prior_height=args.route_prior_height,
+        route_prior_width=args.route_prior_width,
+        route_prior_logit_cap=args.route_prior_logit_cap,
+        route_prior_dropout=args.route_prior_dropout,
     ).to(device)
     if runtime_semantic_backbone is not None:
         attach_siglip_runtime(
@@ -1421,8 +1501,15 @@ def main():
         lambda_outer_false_positive=args.lambda_outer_false_positive,
         lambda_outer_false_negative=args.lambda_outer_false_negative,
         lambda_route_confidence=args.lambda_route_confidence,
+        lambda_primary_route_swap=args.lambda_primary_route_swap,
+        lambda_route_texel_consistency=args.lambda_route_texel_consistency,
+        lambda_route_prior_regularization=(
+            args.lambda_route_prior_regularization
+        ),
         outer_false_positive_gamma=args.outer_false_positive_gamma,
         outer_false_negative_gamma=args.outer_false_negative_gamma,
+        primary_route_swap_gamma=args.primary_route_swap_gamma,
+        route_prior_tv_weight=args.route_prior_tv_weight,
         route_class_weight_floor=args.route_class_weight_floor,
         route_outer_class_weight_cap=args.route_outer_class_weight_cap,
         uv_size=UV_SIZE,
@@ -1492,6 +1579,28 @@ def main():
                 "This geometry checkpoint predates exact surface-slot routing. "
                 "Start a new parser run instead of resuming it."
             )
+        checkpoint_config = checkpoint.get("model_config", {})
+        checkpoint_route_prior = checkpoint_config.get(
+            "route_role_spatial_prior",
+            "route_role_prior" in checkpoint["model"],
+        )
+        if geometry_only and checkpoint_route_prior != model.route_role_spatial_prior:
+            raise ValueError(
+                "Cannot add or remove the learned route-role spatial prior while "
+                "resuming. Start a new parser run, or explicitly disable the prior "
+                "to continue a legacy checkpoint."
+            )
+        if checkpoint_route_prior:
+            prior_shape = tuple(checkpoint["model"]["route_role_prior"].shape[-2:])
+            expected_prior_shape = (
+                model.route_prior_height,
+                model.route_prior_width,
+            )
+            if prior_shape != expected_prior_shape:
+                raise ValueError(
+                    "Route-prior grid mismatch while resuming: "
+                    f"checkpoint={prior_shape}, requested={expected_prior_shape}."
+                )
         if args.parser_mode == "global_affine" and not any(
             key.startswith("layer_face.") for key in checkpoint["model"]
         ):
@@ -1547,6 +1656,11 @@ def main():
         "semantic_channels": args.semantic_channels,
         "semantic_layers": args.semantic_layers,
         "predict_confidence": model.predict_confidence,
+        "route_role_spatial_prior": model.route_role_spatial_prior,
+        "route_prior_height": model.route_prior_height,
+        "route_prior_width": model.route_prior_width,
+        "route_prior_logit_cap": model.route_prior_logit_cap,
+        "route_prior_dropout": model.route_prior_dropout,
         "device": str(device),
         "parser_mode": args.parser_mode,
         "uv_classification": model.uv_classification,
@@ -1581,10 +1695,17 @@ def main():
         "lambda_outer_false_positive": args.lambda_outer_false_positive,
         "lambda_outer_false_negative": args.lambda_outer_false_negative,
         "lambda_route_confidence": args.lambda_route_confidence,
+        "lambda_primary_route_swap": args.lambda_primary_route_swap,
+        "lambda_route_texel_consistency": args.lambda_route_texel_consistency,
+        "lambda_route_prior_regularization": (
+            args.lambda_route_prior_regularization
+        ),
         "lambda_semantic_presence": args.lambda_semantic_presence,
         "lambda_semantic_coverage": args.lambda_semantic_coverage,
         "outer_false_positive_gamma": args.outer_false_positive_gamma,
         "outer_false_negative_gamma": args.outer_false_negative_gamma,
+        "primary_route_swap_gamma": args.primary_route_swap_gamma,
+        "route_prior_tv_weight": args.route_prior_tv_weight,
         "route_class_weight_floor": args.route_class_weight_floor,
         "route_outer_class_weight_cap": args.route_outer_class_weight_cap,
         "outer_selection_precision_weight": args.outer_selection_precision_weight,
