@@ -485,6 +485,7 @@ def hard_uv_conditioning_metrics(
             outer_route_confidence_threshold=args.outer_route_confidence_threshold,
             outer_route_margin_threshold=args.outer_route_margin_threshold,
             outer_uv_min_coverage=args.outer_uv_min_coverage,
+            outer_uv_min_source_pixels=args.outer_uv_min_source_pixels,
             outer_geometry_rescue=getattr(args, "outer_geometry_rescue", False),
             outer_rescue_confidence_threshold=getattr(
                 args, "outer_rescue_confidence_threshold", 0.60
@@ -824,6 +825,9 @@ def save_preview(
                 outer_route_confidence_threshold=args.outer_route_confidence_threshold,
                 outer_route_margin_threshold=args.outer_route_margin_threshold,
                 outer_uv_min_coverage=args.outer_uv_min_coverage,
+                outer_uv_min_source_pixels=getattr(
+                    args, "outer_uv_min_source_pixels", 3
+                ),
                 outer_geometry_rescue=getattr(args, "outer_geometry_rescue", False),
                 outer_rescue_confidence_threshold=getattr(
                     args, "outer_rescue_confidence_threshold", 0.60
@@ -1188,6 +1192,7 @@ def build_arg_parser():
     parser.add_argument("--outer_route_confidence_threshold", type=float, default=0.80)
     parser.add_argument("--outer_route_margin_threshold", type=float, default=0.55)
     parser.add_argument("--outer_uv_min_coverage", type=float, default=0.25)
+    parser.add_argument("--outer_uv_min_source_pixels", type=int, default=3)
     parser.add_argument(
         "--outer_geometry_rescue",
         dest="outer_geometry_rescue",
@@ -1345,6 +1350,8 @@ def main():
         raise ValueError("--color_background_tolerance must be in [0, 1].")
     if args.color_foreground_inset < 0:
         raise ValueError("--color_foreground_inset must be non-negative.")
+    if args.outer_uv_min_source_pixels < 1:
+        raise ValueError("--outer_uv_min_source_pixels must be positive.")
     if args.lr <= 0:
         raise ValueError("--lr must be positive.")
     if not 0.0 <= args.min_lr_ratio <= 1.0:
@@ -1701,6 +1708,7 @@ def main():
         "background_augment_prob": args.background_augment_prob,
         "semantic_gate": args.semantic_gate,
         "geometry_route_texel_consensus": args.geometry_route_texel_consensus,
+        "outer_uv_min_source_pixels": args.outer_uv_min_source_pixels,
         "background_color_tolerance": args.background_color_tolerance,
         "color_background_tolerance": args.color_background_tolerance,
         "color_foreground_inset": args.color_foreground_inset,

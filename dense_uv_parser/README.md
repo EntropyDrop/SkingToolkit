@@ -170,6 +170,10 @@ foreground samples are preferred; only boundary samples that are within
 `8/255` of the detected source background are excluded. This prevents an
 antialiased or isolated background pocket from winning `texel_center`, while a
 real interior skin texel is still allowed to equal the background color.
+Outer texels also require multiple routed source pixels. The conservative
+profile requires three and the balanced profile requires two, preventing one
+or two residual background pixels from becoming persistent outer-layer
+evidence without globally raising the outer confidence threshold.
 
 The learned route-confidence head is fused with the ordinary route score by a
 geometric mean. The trust target already represents route correctness, so this
@@ -248,6 +252,7 @@ OUTPUT= PARSER_UV_OUTPUT=outputs/parser_pred_uv.png ./run_infer.sh
 GEOMETRY_ROUTE_TEXEL_CONSENSUS=false OUTER_UV_MIN_COVERAGE=0 ./run_infer.sh
 BACKGROUND_COLOR_TOLERANCE=0.1882352941 ./run_infer.sh
 COLOR_BACKGROUND_TOLERANCE=0.031372549 COLOR_FOREGROUND_INSET=1 ./run_infer.sh
+OUTER_UV_MIN_SOURCE_PIXELS=3 ./run_infer.sh
 ROUTING_PROFILE=conservative COMBINED=/path/to/combined.png ./run_infer.sh
 ```
 

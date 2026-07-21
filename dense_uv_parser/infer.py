@@ -1030,6 +1030,12 @@ def build_arg_parser():
         help="Reject outer UV texels supported by less than this fraction of their projected footprint.",
     )
     parser.add_argument(
+        "--outer_uv_min_source_pixels",
+        type=int,
+        default=3,
+        help="Minimum routed source pixels required to keep an outer UV texel.",
+    )
+    parser.add_argument(
         "--outer_geometry_rescue",
         dest="outer_geometry_rescue",
         action="store_true",
@@ -1137,6 +1143,8 @@ def main():
         raise ValueError("--color_background_tolerance must be in [0, 1].")
     if args.color_foreground_inset < 0:
         raise ValueError("--color_foreground_inset must be non-negative.")
+    if args.outer_uv_min_source_pixels < 1:
+        raise ValueError("--outer_uv_min_source_pixels must be positive.")
     if not 0.0 <= args.foreground_flood_tolerance <= 1.0:
         raise ValueError("--foreground_flood_tolerance must be in [0, 1].")
     if not 0.0 <= args.inpaint_palette_min_confidence <= 1.0:
@@ -1313,6 +1321,7 @@ def main():
             outer_route_confidence_threshold=args.outer_route_confidence_threshold,
             outer_route_margin_threshold=args.outer_route_margin_threshold,
             outer_uv_min_coverage=outer_uv_min_coverage,
+            outer_uv_min_source_pixels=args.outer_uv_min_source_pixels,
             outer_geometry_rescue=args.outer_geometry_rescue,
             outer_semantic_rescue=args.outer_semantic_rescue,
             outer_semantic_presence_threshold=args.outer_semantic_presence_threshold,
@@ -1392,6 +1401,11 @@ def main():
         color_rejected_count = int(
             routing.get("color_rejected", torch.zeros_like(raw_outer)).sum().item()
         )
+        outer_source_rejected_count = int(
+            routing.get(
+                "outer_source_rejected", torch.zeros_like(raw_outer)
+            ).sum().item()
+        )
         outer_geometry_supported_count = int(
             routing.get("outer_geometry_supported", torch.zeros_like(raw_outer)).sum().item()
         )
@@ -1465,6 +1479,10 @@ def main():
                         quantile_or_zero(outer_margin_ratio, 0.75), 6
                     ),
                     "outer_coverage_rejected_pixels": int(coverage_rejected_outer.sum().item()),
+                    "outer_source_rejected_pixels": outer_source_rejected_count,
+                    "outer_uv_min_source_pixels": int(
+                        args.outer_uv_min_source_pixels
+                    ),
                     "outer_geometry_supported_pixels": outer_geometry_supported_count,
                     "outer_geometry_rescued_pixels": outer_geometry_rescued_count,
                     "outer_geometry_supported_rejected_pixels": outer_geometry_supported_rejected_count,

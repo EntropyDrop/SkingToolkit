@@ -138,6 +138,70 @@ class GlobalAffineRoutingTest(unittest.TestCase):
             )
         )
 
+    def test_sparse_outer_texel_requires_minimum_source_pixel_support(self):
+        mask = torch.zeros(5, 5)
+        mask[2, 1:4] = 1
+        renderer = FakeRenderer(mask=mask)
+        renderer.front_outer_mask.copy_(renderer.front_inner_mask)
+        rendered = torch.full((1, 4, 5, 5), 0.5)
+        rendered[:, 3] = 1.0
+        rendered[:, :3, 2, 1:4] = torch.tensor([0.9, 0.2, 0.1]).view(
+            1, 3, 1
+        )
+        outputs = {
+            "foreground": torch.full((1, 1, 5, 5), 10.0),
+            "layer": torch.cat(
+                [
+                    torch.full((1, 1, 5, 5), -10.0),
+                    torch.full((1, 1, 5, 5), 10.0),
+                    torch.full((1, 1, 5, 5), -10.0),
+                ],
+                dim=1,
+            ),
+            "surface": torch.zeros(1, 2, 5, 5),
+            "affine": torch.zeros(1, 3),
+        }
+        sparse_observed = torch.zeros(1, 5, 5, dtype=torch.bool)
+        sparse_observed[:, 2, 1:3] = True
+        supported_observed = sparse_observed.clone()
+        supported_observed[:, 2, 3] = True
+
+        sparse, sparse_details = splat_parser_predictions_to_uv_conditioning(
+            rendered,
+            outputs,
+            renderer=renderer,
+            views=["front"],
+            group_size=1,
+            affine_refine=False,
+            observed_foreground=sparse_observed,
+            outer_uv_min_coverage=0.0,
+            outer_uv_min_source_pixels=3,
+            color_background_tolerance=8.0 / 255.0,
+            return_details=True,
+        )
+        supported, supported_details = splat_parser_predictions_to_uv_conditioning(
+            rendered,
+            outputs,
+            renderer=renderer,
+            views=["front"],
+            group_size=1,
+            affine_refine=False,
+            observed_foreground=supported_observed,
+            outer_uv_min_coverage=0.0,
+            outer_uv_min_source_pixels=3,
+            color_background_tolerance=8.0 / 255.0,
+            return_details=True,
+        )
+
+        self.assertEqual(int(sparse[:, 9:10].sum()), 0)
+        self.assertEqual(
+            int(sparse_details["routing"]["outer_source_rejected"].sum()), 2
+        )
+        self.assertEqual(int(supported[:, 9:10].sum()), 1)
+        self.assertEqual(
+            int(supported_details["routing"]["outer_source_rejected"].sum()), 0
+        )
+
     def test_primary_route_swap_loss_is_macro_balanced(self):
         pair_logits = torch.tensor(
             [[[[2.0, -1.0]], [[-1.0, 2.0]], [[-4.0, -4.0]]]]

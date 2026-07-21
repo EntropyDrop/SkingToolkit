@@ -1943,6 +1943,7 @@ def splat_parser_predictions_to_uv_conditioning(
     outer_route_confidence_threshold=None,
     outer_route_margin_threshold=None,
     outer_uv_min_coverage=0.5,
+    outer_uv_min_source_pixels=1,
     outer_geometry_rescue=False,
     outer_semantic_rescue=True,
     outer_semantic_presence_threshold=0.80,
@@ -1982,6 +1983,8 @@ def splat_parser_predictions_to_uv_conditioning(
         raise ValueError("outer_route_margin_threshold must be in [0, 1].")
     if not 0.0 <= outer_uv_min_coverage <= 1.0:
         raise ValueError("outer_uv_min_coverage must be in [0, 1].")
+    if outer_uv_min_source_pixels < 1:
+        raise ValueError("outer_uv_min_source_pixels must be positive.")
     if not 0.0 <= outer_rescue_confidence_threshold <= 1.0:
         raise ValueError("outer_rescue_confidence_threshold must be in [0, 1].")
     if not 0.0 <= outer_rescue_margin_threshold <= 1.0:
@@ -2233,6 +2236,35 @@ def splat_parser_predictions_to_uv_conditioning(
             outer_required_coverage,
         )
         trusted = trusted & (~selected_outer | (pixel_coverage >= required_coverage))
+    outer_source_support = torch.zeros_like(routing["flat_uv"])
+    outer_source_rejected = torch.zeros_like(selected_outer)
+    if outer_uv_min_source_pixels > 1:
+        views_per_group = len(views)
+        group_count = trusted.shape[0] // views_per_group
+        item_groups = (
+            torch.arange(trusted.shape[0], device=trusted.device)
+            // views_per_group
+        )
+        grouped_uv = routing["flat_uv"] + item_groups.view(-1, 1, 1) * (
+            UV_SIZE * UV_SIZE
+        )
+        outer_candidates = trusted & selected_outer
+        source_counts = torch.zeros(
+            group_count * UV_SIZE * UV_SIZE,
+            dtype=torch.long,
+            device=trusted.device,
+        )
+        source_counts.scatter_add_(
+            0,
+            grouped_uv[outer_candidates],
+            torch.ones_like(grouped_uv[outer_candidates]),
+        )
+        outer_source_support = source_counts[grouped_uv]
+        outer_source_rejected = (
+            outer_candidates
+            & (outer_source_support < int(outer_uv_min_source_pixels))
+        )
+        trusted = trusted & ~outer_source_rejected
     routing["raw_foreground"] = raw_foreground
     routing["observed_foreground"] = canonical_observed_foreground
     routing["background_rejected"] = raw_foreground & ~canonical_observed_foreground
@@ -2242,6 +2274,8 @@ def splat_parser_predictions_to_uv_conditioning(
     routing["outer_semantic_supported"] = semantic_supported_outer
     routing["outer_semantic_rescued"] = outer_semantic_rescued & trusted
     routing["outer_required_coverage"] = outer_required_coverage
+    routing["outer_source_support"] = outer_source_support
+    routing["outer_source_rejected"] = outer_source_rejected
     routing["foreground"] = trusted
     color_foreground = trusted & color_support["valid"]
     routing["color_foreground"] = color_foreground
