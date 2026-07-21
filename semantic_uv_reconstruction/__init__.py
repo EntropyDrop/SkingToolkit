@@ -8,7 +8,11 @@ from .semantic_dataset import SemanticUVPairDataset
 from .semantic_losses import SemanticUVReconstructionLoss
 from .semantic_model import SemanticUVReconstructor
 from .semantic_backbone import SigLIP2VisionBackbone
-from .topology import UVTopology, build_uv_topology
+from .topology import (
+    UVTopology,
+    build_uv_topology,
+    simple_symmetry_nearest_inpaint,
+)
 from .topology_model import TopologyAwareUVCompletionNet
 
 __all__ = [
@@ -22,5 +26,6 @@ __all__ = [
     "SigLIP2VisionBackbone",
     "UVTopology",
     "build_uv_topology",
+    "simple_symmetry_nearest_inpaint",
     "TopologyAwareUVCompletionNet",
 ]

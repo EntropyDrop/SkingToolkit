@@ -53,6 +53,7 @@ from SkingToolkit.semantic_uv_reconstruction.topology import (  # noqa: E402
     LAYER_COUNT,
     PART_COUNT,
     build_uv_topology,
+    simple_symmetry_nearest_inpaint,
 )
 from SkingToolkit.semantic_uv_reconstruction.train import get_device  # noqa: E402
 from SkingToolkit.renderer import DifferentiableRenderer  # noqa: E402
@@ -610,6 +611,34 @@ def save_parser_uv(
     print(f"Saved parser_partial_uv={output_path}")
 
 
+def save_simple_inpaint_uv(conditioning, output_path, alpha_threshold=0.5):
+    """Save deterministic symmetry/3D-nearest repair of the partial parser UV."""
+    parser_uv = conditioning_to_pred_uv(conditioning)
+    if parser_uv.dim() != 4 or parser_uv.shape[0] != 1:
+        raise ValueError(
+            "Simple parser UV inpainting requires exactly one conditioning "
+            f"sample, got {tuple(parser_uv.shape)}."
+        )
+    repaired, stats = simple_symmetry_nearest_inpaint(
+        parser_uv[0], alpha_threshold=alpha_threshold
+    )
+    repaired = finalize_minecraft_alpha(
+        repaired,
+        alpha_threshold=alpha_threshold,
+        enforce_base_alpha=False,
+    )
+    opaque = repaired[3:4] > 0.5
+    repaired[:3] = torch.where(
+        opaque.expand_as(repaired[:3]),
+        repaired[:3],
+        torch.zeros_like(repaired[:3]),
+    )
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    tensor_to_rgba_image(repaired.detach().cpu()).save(output_path)
+    print("simple_inpaint_stats=" + json.dumps(stats, sort_keys=True))
+    print(f"Saved parser_simple_inpaint_uv={output_path}")
+
+
 def _raw_debug_foreground(outputs, routing, fg_threshold):
     """Mask raw semantic heads with observed input foreground when available.
 
@@ -961,6 +990,14 @@ def build_arg_parser():
         default=None,
         help="Optional preliminary RGBA skin merged directly from parser conditioning.",
     )
+    parser.add_argument(
+        "--simple_inpaint_output",
+        default=None,
+        help=(
+            "Optional deterministic parser repair: use known left/right "
+            "symmetry first, then the nearest known texel in 3D character space."
+        ),
+    )
     parser.add_argument("--debug_output", default=None, help="Optional path to write a debug preview grid of predictions.")
     parser.add_argument("--overlay_output", default=None, help="Optional path for segmentation overlays on canonicalized input views.")
     parser.add_argument("--overlay_alpha", type=float, default=0.45)
@@ -1166,6 +1203,7 @@ def main():
             args.output,
             args.conditioning_output,
             args.parser_uv_output,
+            args.simple_inpaint_output,
             args.debug_output,
             args.overlay_output,
             args.inner_cutout_output,
@@ -1183,7 +1221,8 @@ def main():
         )
     ):
         raise ValueError(
-            "Provide --output, --conditioning_output, --parser_uv_output, --debug_output, --overlay_output, "
+            "Provide --output, --conditioning_output, --parser_uv_output, --simple_inpaint_output, "
+            "--debug_output, --overlay_output, "
             "--inner_cutout_output, --outer_cutout_output, --secondary_cutout_output, "
             "and/or --color_source_output."
         )
@@ -1597,6 +1636,13 @@ def main():
             Path(args.parser_uv_output),
             alpha_threshold=args.alpha_threshold,
             enforce_base_alpha=False,
+        )
+
+    if args.simple_inpaint_output:
+        save_simple_inpaint_uv(
+            conditioning.detach().cpu(),
+            Path(args.simple_inpaint_output),
+            alpha_threshold=args.alpha_threshold,
         )
 
     if args.output:

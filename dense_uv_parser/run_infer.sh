@@ -184,6 +184,7 @@ PARSER_UV_OUTPUT="${PARSER_UV_OUTPUT-outputs/parser_pred_uv.png}"
 if [[ "$PARSER_ONLY" == "true" && "$PARSER_UV_OUTPUT_WAS_SET" == "false" ]]; then
   PARSER_UV_OUTPUT="outputs/parser_only_uv.png"
 fi
+SIMPLE_INPAINT_OUTPUT="${SIMPLE_INPAINT_OUTPUT-outputs/parser_pred_uv_simple_inpainting.png}"
 DEBUG_OUTPUT="${DEBUG_OUTPUT-outputs/parser_debug.png}"
 OVERLAY_OUTPUT="${OVERLAY_OUTPUT-outputs/parser_debug_overlay.png}"
 INNER_CUTOUT_OUTPUT="${INNER_CUTOUT_OUTPUT-outputs/parser_debug_inner.png}"
@@ -418,6 +419,10 @@ if [[ -n "$PARSER_UV_OUTPUT" ]]; then
   args+=(--parser_uv_output "$PARSER_UV_OUTPUT")
 fi
 
+if [[ -n "$SIMPLE_INPAINT_OUTPUT" ]]; then
+  args+=(--simple_inpaint_output "$SIMPLE_INPAINT_OUTPUT")
+fi
+
 if [[ -n "$DEBUG_OUTPUT" ]]; then
   args+=(--debug_output "$DEBUG_OUTPUT")
 fi
@@ -485,7 +490,7 @@ if [[ -n "$OUTPUT" ]]; then
   fi
 fi
 
-if [[ -z "$CONDITIONING_OUTPUT" && -z "$PARSER_UV_OUTPUT" && -z "$DEBUG_OUTPUT" && -z "$OVERLAY_OUTPUT" && -z "$INNER_CUTOUT_OUTPUT" && -z "$OUTER_CUTOUT_OUTPUT" && -z "$SECONDARY_CUTOUT_OUTPUT" && -z "$COLOR_SOURCE_OUTPUT" && -z "$FACE_OUTPUT" && -z "$LAYER_FACE_OUTPUT" && -z "$RAW_FACE_OUTPUT" && -z "$RAW_LAYER_FACE_OUTPUT" && -z "$GEOMETRY_GRID_OUTPUT" && -z "$GEOMETRY_OVERLAY_OUTPUT" && -z "$GEOMETRY_ROUTED_OVERLAY_OUTPUT" && -z "$GEOMETRY_FILL_OUTPUT" && ( -z "$OUTPUT" || -z "$INPAINT_CHECKPOINT" ) ]]; then
+if [[ -z "$CONDITIONING_OUTPUT" && -z "$PARSER_UV_OUTPUT" && -z "$SIMPLE_INPAINT_OUTPUT" && -z "$DEBUG_OUTPUT" && -z "$OVERLAY_OUTPUT" && -z "$INNER_CUTOUT_OUTPUT" && -z "$OUTER_CUTOUT_OUTPUT" && -z "$SECONDARY_CUTOUT_OUTPUT" && -z "$COLOR_SOURCE_OUTPUT" && -z "$FACE_OUTPUT" && -z "$LAYER_FACE_OUTPUT" && -z "$RAW_FACE_OUTPUT" && -z "$RAW_LAYER_FACE_OUTPUT" && -z "$GEOMETRY_GRID_OUTPUT" && -z "$GEOMETRY_OVERLAY_OUTPUT" && -z "$GEOMETRY_ROUTED_OVERLAY_OUTPUT" && -z "$GEOMETRY_FILL_OUTPUT" && ( -z "$OUTPUT" || -z "$INPAINT_CHECKPOINT" ) ]]; then
   echo "Nothing to write. Set a debug/conditioning output or OUTPUT with a valid INPAINT_CHECKPOINT." >&2
   exit 1
 fi
@@ -522,6 +527,9 @@ if [[ -n "$CONDITIONING_OUTPUT" ]]; then
 fi
 if [[ -n "$PARSER_UV_OUTPUT" ]]; then
   echo "Partial parser UV output: $PARSER_UV_OUTPUT"
+fi
+if [[ -n "$SIMPLE_INPAINT_OUTPUT" ]]; then
+  echo "Simple parser UV repair output: $SIMPLE_INPAINT_OUTPUT"
 fi
 if [[ -n "$DEBUG_OUTPUT" ]]; then
   echo "Debug output: $DEBUG_OUTPUT"

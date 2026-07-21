@@ -37,6 +37,19 @@ class UVTopology:
     neighbour_valid: torch.Tensor
     paired_layer_texel: torch.Tensor
     surface_pool: torch.Tensor
+    world_position: torch.Tensor
+    mirrored_texel: torch.Tensor
+
+
+PART_CENTRES = (
+    (0.0, 28.0, 0.0),   # head
+    (0.0, 18.0, 0.0),   # body
+    (6.0, 18.0, 0.0),   # left arm
+    (-6.0, 18.0, 0.0),  # right arm
+    (2.0, 6.0, 0.0),    # left leg
+    (-2.0, 6.0, 0.0),   # right leg
+)
+MIRRORED_PART = (0, 1, 3, 2, 5, 4)
 
 
 def _axis_coordinate(index, size):
@@ -79,6 +92,7 @@ def build_uv_topology(is_slim=False):
     face_map = torch.full((UV_SIZE * UV_SIZE,), INVALID_FACE, dtype=torch.long)
     surface_map = torch.full((UV_SIZE * UV_SIZE,), INVALID_SURFACE, dtype=torch.long)
     local_uv = torch.zeros(UV_SIZE * UV_SIZE, 2, dtype=torch.float32)
+    world_position = torch.zeros(UV_SIZE * UV_SIZE, 3, dtype=torch.float32)
     paired = torch.arange(UV_SIZE * UV_SIZE, dtype=torch.long)
 
     rects = minecraft_layer_rects(is_slim=False)
@@ -118,6 +132,27 @@ def build_uv_topology(is_slim=False):
                         local_uv[flat, 1] = (v + 0.5) / max(face_height, 1)
                         coordinate = _surface_coordinate(
                             face, u, v, width, height, depth
+                        )
+                        # The renderer expands the head overlay by one block
+                        # and every other outer cuboid by half a block. Scale
+                        # texel centres away from the part centre so inner and
+                        # outer texels occupy their actual rendered shells.
+                        if layer == 1:
+                            expansion = 1.0 if part == 0 else 0.5
+                            coordinate = tuple(
+                                value * (size + expansion) / size
+                                for value, size in zip(
+                                    coordinate, (width, height, depth)
+                                )
+                            )
+                        centre = PART_CENTRES[part]
+                        world_position[flat] = torch.tensor(
+                            [
+                                coordinate[0] + centre[0],
+                                coordinate[1] + centre[1],
+                                coordinate[2] + centre[2],
+                            ],
+                            dtype=torch.float32,
                         )
                         cell = {
                             "flat": flat,
@@ -187,6 +222,27 @@ def build_uv_topology(is_slim=False):
             raise RuntimeError(f"Surface {surface} has no texels.")
         surface_pool[surface, members] = 1.0 / count
 
+    # A horizontal character-space reflection gives an exact correspondence
+    # for every Steve texel. Restrict candidates to the matching layer and the
+    # mirrored body part so touching cuboids cannot steal the correspondence.
+    mirrored = torch.arange(UV_SIZE * UV_SIZE, dtype=torch.long)
+    for layer in range(LAYER_COUNT):
+        for part in range(PART_COUNT):
+            targets = (
+                valid & (layer_map == layer) & (part_map == part)
+            ).nonzero(as_tuple=False).flatten()
+            candidates = (
+                valid
+                & (layer_map == layer)
+                & (part_map == MIRRORED_PART[part])
+            ).nonzero(as_tuple=False).flatten()
+            reflected = world_position[targets].clone()
+            reflected[:, 0] = -reflected[:, 0]
+            nearest = torch.cdist(
+                reflected, world_position[candidates]
+            ).argmin(dim=1)
+            mirrored[targets] = candidates[nearest]
+
     return UVTopology(
         valid=valid.reshape(UV_SIZE, UV_SIZE),
         layer=layer_map.reshape(UV_SIZE, UV_SIZE),
@@ -198,4 +254,91 @@ def build_uv_topology(is_slim=False):
         neighbour_valid=neighbour_valid,
         paired_layer_texel=paired.reshape(UV_SIZE, UV_SIZE),
         surface_pool=surface_pool,
+        world_position=world_position.reshape(UV_SIZE, UV_SIZE, 3),
+        mirrored_texel=mirrored.reshape(UV_SIZE, UV_SIZE),
     )
+
+
+def simple_symmetry_nearest_inpaint(uv, alpha_threshold=0.5, chunk_size=512):
+    """Fill unknown atlas texels with symmetry, then 3D nearest colours.
+
+    Horizontal symmetry is restricted to the same inner/outer layer. The
+    nearest-neighbour fallback searches every known texel in character space,
+    including the other skin layer. Existing opaque RGBA values are untouched.
+    """
+    squeeze_batch = uv.dim() == 3
+    if squeeze_batch:
+        uv = uv.unsqueeze(0)
+    if uv.dim() != 4 or uv.shape[1:] != (4, UV_SIZE, UV_SIZE):
+        raise ValueError(
+            f"Expected 4x{UV_SIZE}x{UV_SIZE} or Bx4x{UV_SIZE}x{UV_SIZE} UV, "
+            f"got {tuple(uv.shape)}."
+        )
+    if not 0.0 <= alpha_threshold <= 1.0:
+        raise ValueError("alpha_threshold must be in [0, 1].")
+    if chunk_size < 1:
+        raise ValueError("chunk_size must be positive.")
+
+    topology = build_uv_topology()
+    device = uv.device
+    valid = topology.valid.reshape(-1).to(device=device)
+    layer = topology.layer.reshape(-1).to(device=device)
+    mirrored = topology.mirrored_texel.reshape(-1).to(device=device)
+    positions = topology.world_position.reshape(-1, 3).to(
+        device=device, dtype=torch.float32
+    )
+    result = uv.flatten(2).transpose(1, 2).clone()
+    stats = []
+
+    for batch_index in range(result.shape[0]):
+        original_known = valid & (
+            result[batch_index, :, 3] > float(alpha_threshold)
+        )
+        unknown = valid & ~original_known
+
+        symmetry_target = unknown & original_known[mirrored]
+        symmetry_indices = symmetry_target.nonzero(as_tuple=False).flatten()
+        if symmetry_indices.numel() > 0:
+            result[batch_index, symmetry_indices] = result[
+                batch_index, mirrored[symmetry_indices]
+            ]
+
+        known = original_known | symmetry_target
+        nearest_target = valid & ~known
+        target_indices = nearest_target.nonzero(as_tuple=False).flatten()
+        source_indices = known.nonzero(as_tuple=False).flatten()
+        nearest_filled = 0
+        if target_indices.numel() > 0 and source_indices.numel() > 0:
+            for start in range(0, target_indices.numel(), chunk_size):
+                target_chunk = target_indices[start : start + chunk_size]
+                nearest = torch.cdist(
+                    positions[target_chunk], positions[source_indices]
+                ).argmin(dim=1)
+                result[batch_index, target_chunk] = result[
+                    batch_index, source_indices[nearest]
+                ]
+            nearest_filled = int(target_indices.numel())
+
+        resolved = original_known | symmetry_target
+        if nearest_filled:
+            resolved = resolved | nearest_target
+        stats.append(
+            {
+                "known_texels": int(original_known.sum().item()),
+                "known_inner_texels": int(
+                    (original_known & (layer == 0)).sum().item()
+                ),
+                "known_outer_texels": int(
+                    (original_known & (layer == 1)).sum().item()
+                ),
+                "symmetry_filled_texels": int(symmetry_indices.numel()),
+                "nearest_3d_filled_texels": nearest_filled,
+                "unresolved_texels": int((valid & ~resolved).sum().item()),
+            }
+        )
+
+    result[:, ~valid] = 0.0
+    result = result.transpose(1, 2).reshape_as(uv).clamp(0.0, 1.0)
+    if squeeze_batch:
+        return result[0], stats[0]
+    return result, stats

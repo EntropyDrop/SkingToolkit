@@ -24,6 +24,7 @@ class DenseParserForegroundTest(unittest.TestCase):
         self.assertEqual(args.foreground_flood_tolerance, 0.03)
         self.assertEqual(args.color_aggregation, "grid_mode")
         self.assertEqual(args.outer_uv_min_source_pixels, 15)
+        self.assertIsNone(args.simple_inpaint_output)
 
     def test_raw_face_debug_uses_observed_not_filtered_foreground(self):
         outputs = {"foreground": torch.full((1, 1, 2, 2), -10.0)}

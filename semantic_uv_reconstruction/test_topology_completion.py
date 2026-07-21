@@ -4,8 +4,10 @@ import torch
 
 from SkingToolkit.semantic_uv_reconstruction.topology import (
     INVALID_SURFACE,
+    MIRRORED_PART,
     SURFACE_COUNT,
     build_uv_topology,
+    simple_symmetry_nearest_inpaint,
 )
 from SkingToolkit.semantic_uv_reconstruction.topology_model import (
     TopologyAwareUVCompletionNet,
@@ -41,6 +43,67 @@ class UVTopologyTest(unittest.TestCase):
         self.assertTrue(torch.equal(paired[paired[valid_indices]], valid_indices))
         layer = topology.layer.reshape(-1)
         self.assertTrue(torch.equal(layer[paired[valid_indices]], 1 - layer[valid_indices]))
+
+    def test_character_space_mirror_is_exact_and_involutive(self):
+        topology = build_uv_topology()
+        valid = topology.valid.reshape(-1)
+        indices = valid.nonzero(as_tuple=False).flatten()
+        mirrored = topology.mirrored_texel.reshape(-1)
+        layer = topology.layer.reshape(-1)
+        part = topology.part.reshape(-1)
+        positions = topology.world_position.reshape(-1, 3)
+        expected_positions = positions[indices].clone()
+        expected_positions[:, 0] = -expected_positions[:, 0]
+        mirrored_parts = torch.tensor(MIRRORED_PART, dtype=torch.long)
+
+        self.assertTrue(torch.equal(mirrored[mirrored[indices]], indices))
+        self.assertTrue(torch.equal(layer[mirrored[indices]], layer[indices]))
+        self.assertTrue(
+            torch.equal(part[mirrored[indices]], mirrored_parts[part[indices]])
+        )
+        self.assertTrue(
+            torch.equal(positions[mirrored[indices]], expected_positions)
+        )
+
+    def test_simple_inpaint_prefers_known_symmetry_before_nearest_3d(self):
+        topology = build_uv_topology()
+        valid_inner = (
+            topology.valid & (topology.layer == 0)
+        ).reshape(-1).nonzero(as_tuple=False).flatten()
+        target = int(valid_inner[len(valid_inner) // 3])
+        mirrored = int(topology.mirrored_texel.reshape(-1)[target])
+        paired = int(topology.paired_layer_texel.reshape(-1)[target])
+        uv = torch.zeros(4, 64, 64)
+        flat = uv.reshape(4, -1)
+        mirror_rgba = torch.tensor([0.9, 0.1, 0.2, 1.0])
+        nearer_rgba = torch.tensor([0.1, 0.8, 0.3, 1.0])
+        flat[:, mirrored] = mirror_rgba
+        flat[:, paired] = nearer_rgba
+
+        repaired, stats = simple_symmetry_nearest_inpaint(uv)
+
+        self.assertTrue(torch.equal(repaired.reshape(4, -1)[:, target], mirror_rgba))
+        self.assertTrue(torch.equal(repaired.reshape(4, -1)[:, mirrored], mirror_rgba))
+        self.assertGreater(stats["symmetry_filled_texels"], 0)
+        self.assertEqual(stats["unresolved_texels"], 0)
+
+    def test_simple_inpaint_nearest_3d_can_copy_from_outer_layer(self):
+        topology = build_uv_topology()
+        valid_inner = (
+            topology.valid & (topology.layer == 0)
+        ).reshape(-1).nonzero(as_tuple=False).flatten()
+        target = int(valid_inner[len(valid_inner) // 2])
+        outer_source = int(topology.paired_layer_texel.reshape(-1)[target])
+        uv = torch.zeros(4, 64, 64)
+        outer_rgba = torch.tensor([0.2, 0.4, 0.95, 1.0])
+        uv.reshape(4, -1)[:, outer_source] = outer_rgba
+
+        repaired, stats = simple_symmetry_nearest_inpaint(uv)
+
+        self.assertTrue(torch.equal(repaired.reshape(4, -1)[:, target], outer_rgba))
+        self.assertEqual(stats["known_outer_texels"], 1)
+        self.assertGreater(stats["nearest_3d_filled_texels"], 0)
+        self.assertEqual(stats["unresolved_texels"], 0)
 
 
 class TopologyAwareCompletionTest(unittest.TestCase):

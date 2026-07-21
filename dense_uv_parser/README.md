@@ -232,6 +232,10 @@ training. If the recorded path is unavailable, it falls back to the highest
 - `outputs/parser_pred_uv.png`: partial 64x64 RGBA atlas containing only known
   parser texels; unknown base-layer texels intentionally remain transparent, so
   this diagnostic file is not itself a valid finished Minecraft skin
+- `outputs/parser_pred_uv_simple_inpainting.png`: deterministic baseline repair.
+  Each unknown valid texel first copies an available left/right mirrored texel
+  from the same skin layer; remaining holes copy the closest known texel in
+  canonical 3D character space, with both inner and outer layers eligible
 - `outputs/parser_debug_geometry_grid.png`: fitted inner/outer cuboid faces with projected UV texel boundaries
 - `outputs/parser_debug_geometry_overlay.png`: inner (cyan) and outer (magenta) fitted grids overlaid on the canonicalized source views
 - `outputs/parser_debug_geometry_routed_overlay.png`: the same grids over only pixels routed to their matching inner/outer layer
@@ -251,6 +255,9 @@ PARSER_CHECKPOINT=runs/dense_uv_parser_v3/best.pt ./run_infer.sh
 INPAINT_CHECKPOINT=../semantic_uv_reconstruction/runs/semantic_uv_reconstruction_topology_maskgit_v3/best.pt ./run_infer.sh
 OUTPUT= CONDITIONING_OUTPUT=outputs/parser_conditioning.png ./run_infer.sh
 OUTPUT= PARSER_UV_OUTPUT=outputs/parser_pred_uv.png ./run_infer.sh
+SIMPLE_INPAINT_OUTPUT=outputs/simple.png ./run_infer.sh
+# Disable only the simple deterministic repair artifact.
+SIMPLE_INPAINT_OUTPUT= ./run_infer.sh
 GEOMETRY_ROUTE_TEXEL_CONSENSUS=false OUTER_UV_MIN_COVERAGE=0 ./run_infer.sh
 BACKGROUND_COLOR_TOLERANCE=0.1882352941 ./run_infer.sh
 COLOR_BACKGROUND_TOLERANCE=0.031372549 COLOR_FOREGROUND_INSET=1 ./run_infer.sh
