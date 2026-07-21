@@ -10,9 +10,23 @@ from SkingToolkit.dense_uv_parser.foreground import (
     build_parser_input,
     save_flood_outputs,
 )
+from SkingToolkit.dense_uv_parser.infer import _raw_debug_foreground
 
 
 class DenseParserForegroundTest(unittest.TestCase):
+    def test_raw_face_debug_uses_observed_not_filtered_foreground(self):
+        outputs = {"foreground": torch.full((1, 1, 2, 2), -10.0)}
+        observed = torch.tensor([[[True, True], [True, False]]])
+        routing = {
+            "foreground": torch.zeros(1, 2, 2, dtype=torch.bool),
+            "raw_foreground": torch.zeros(1, 2, 2, dtype=torch.bool),
+            "observed_foreground": observed,
+        }
+
+        debug_foreground = _raw_debug_foreground(outputs, routing, 0.5)
+
+        self.assertTrue(torch.equal(debug_foreground, observed))
+
     def test_run_infer_defines_versioned_checkpoint_lookup_before_use(self):
         script = (Path(__file__).parent / "run_infer.sh").read_text(
             encoding="utf-8"

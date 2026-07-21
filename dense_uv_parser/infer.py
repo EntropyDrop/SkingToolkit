@@ -596,6 +596,25 @@ def save_parser_uv(
     print(f"Saved parser_partial_uv={output_path}")
 
 
+def _raw_debug_foreground(outputs, routing, fg_threshold):
+    """Mask raw semantic heads with observed input foreground when available.
+
+    The routed foreground is deliberately stricter: it excludes pixels rejected
+    by route confidence, margin, and UV coverage filters.  Using it for a raw
+    head preview makes those routing rejections look like holes in the semantic
+    prediction, even though the head produced a class at every foreground pixel.
+    """
+    model_foreground = (
+        torch.sigmoid(outputs["foreground"])[:, 0] > fg_threshold
+    )
+    if routing is None:
+        return model_foreground
+    return routing.get(
+        "observed_foreground",
+        routing.get("raw_foreground", model_foreground),
+    )
+
+
 def save_debug_preview(
     rendered,
     outputs,
@@ -630,7 +649,7 @@ def save_debug_preview(
     )
     pred_part = torch.where(pred_fg, pred_part_values, torch.full_like(pred_part_values, IGNORE_INDEX))
     raw_layer_values = outputs["layer"].argmax(dim=1)
-    raw_fg = torch.sigmoid(outputs["foreground"])[:, 0] > fg_threshold
+    raw_fg = _raw_debug_foreground(outputs, routing, fg_threshold)
     pred_layer_values = routing["layer"] if routing is not None else raw_layer_values
     pred_layer = torch.where(
         pred_fg,
@@ -639,7 +658,7 @@ def save_debug_preview(
     )
     raw_face_values = outputs["face"].argmax(dim=1) if "face" in outputs else routing["face"]
     raw_face = torch.where(
-        pred_fg,
+        raw_fg,
         raw_face_values,
         torch.full_like(raw_face_values, IGNORE_INDEX),
     )
@@ -652,13 +671,20 @@ def save_debug_preview(
     if "layer_face" in outputs:
         raw_layer_face_values = outputs["layer_face"].argmax(dim=1)
         raw_layer_face = torch.where(
-            pred_fg,
+            raw_fg,
             raw_layer_face_values,
             torch.full_like(raw_layer_face_values, IGNORE_INDEX),
         )
     else:
-        raw_layer = pred_layer if outputs["layer"].shape[1] == 3 else torch.where(
-            pred_fg, raw_layer_values, torch.full_like(raw_layer_values, IGNORE_INDEX)
+        raw_layer_values_for_debug = (
+            routing["layer"]
+            if routing is not None and outputs["layer"].shape[1] == 3
+            else raw_layer_values
+        )
+        raw_layer = torch.where(
+            raw_fg,
+            raw_layer_values_for_debug,
+            torch.full_like(raw_layer_values_for_debug, IGNORE_INDEX),
         )
         raw_layer_face = combine_layer_face(raw_layer, raw_face)
     pred_layer_face = combine_layer_face(pred_layer, pred_face)
@@ -1265,6 +1291,16 @@ def main():
 
     routing = routing_details.get("routing")
     if routing is not None:
+        observed_routing_foreground = routing.get(
+            "observed_foreground", routing["raw_foreground"]
+        )
+        observed_count = int(observed_routing_foreground.sum().item())
+        unrouted_observed_count = int(
+            (
+                observed_routing_foreground
+                & ~routing["raw_foreground"]
+            ).sum().item()
+        )
         raw_count = int(routing["raw_foreground"].sum().item())
         rejected_count = int(routing["rejected"].sum().item())
         kept = routing["foreground"]
@@ -1337,6 +1373,8 @@ def main():
             "routing_filter="
             + json.dumps(
                 {
+                    "observed_foreground_pixels": observed_count,
+                    "unrouted_observed_pixels": unrouted_observed_count,
                     "raw_pixels": raw_count,
                     "kept_pixels": raw_count - rejected_count,
                     "kept_inner_pixels": kept_inner_count,
