@@ -65,6 +65,25 @@ class UVTopologyTest(unittest.TestCase):
             torch.equal(positions[mirrored[indices]], expected_positions)
         )
 
+    def test_inner_fill_order_is_face_top_down_and_center_out(self):
+        topology = build_uv_topology()
+        # Head-front is the first part/face and occupies x=8..15, y=8..15.
+        expected_first_row = torch.tensor(
+            [8 * 64 + x for x in (11, 12, 10, 13, 9, 14, 8, 15)],
+            dtype=torch.long,
+        )
+        expected_second_row = torch.tensor(
+            [9 * 64 + x for x in (11, 12, 10, 13, 9, 14, 8, 15)],
+            dtype=torch.long,
+        )
+
+        self.assertTrue(
+            torch.equal(topology.inner_fill_order[:8], expected_first_row)
+        )
+        self.assertTrue(
+            torch.equal(topology.inner_fill_order[8:16], expected_second_row)
+        )
+
     def test_simple_inpaint_prefers_known_symmetry_before_nearest_3d(self):
         topology = build_uv_topology()
         valid_inner = (
@@ -85,7 +104,7 @@ class UVTopologyTest(unittest.TestCase):
         self.assertTrue(torch.equal(repaired.reshape(4, -1)[:, target], mirror_rgba))
         self.assertTrue(torch.equal(repaired.reshape(4, -1)[:, mirrored], mirror_rgba))
         self.assertGreater(stats["symmetry_filled_texels"], 0)
-        self.assertEqual(stats["unresolved_texels"], 0)
+        self.assertGreater(stats["unresolved_texels"], 0)
 
     def test_simple_inpaint_nearest_3d_can_copy_from_outer_layer(self):
         topology = build_uv_topology()
@@ -103,7 +122,7 @@ class UVTopologyTest(unittest.TestCase):
         self.assertTrue(torch.equal(repaired.reshape(4, -1)[:, target], outer_rgba))
         self.assertEqual(stats["known_outer_texels"], 1)
         self.assertGreater(stats["nearest_3d_filled_texels"], 0)
-        self.assertEqual(stats["unresolved_texels"], 0)
+        self.assertGreater(stats["unresolved_texels"], 0)
 
     def test_simple_inpaint_preserves_outer_layer_exactly(self):
         topology = build_uv_topology()
@@ -128,7 +147,36 @@ class UVTopologyTest(unittest.TestCase):
             torch.equal(repaired.reshape(4, -1)[:, outer_indices], outer_before)
         )
         self.assertEqual(stats["preserved_outer_texels"], int(outer_indices.numel()))
-        self.assertEqual(stats["unresolved_texels"], 0)
+        self.assertGreater(stats["unresolved_texels"], 0)
+
+    def test_simple_inpaint_does_not_copy_nearest_color_across_parts(self):
+        topology = build_uv_topology()
+        flat_part = topology.part.reshape(-1)
+        flat_layer = topology.layer.reshape(-1)
+        flat_valid = topology.valid.reshape(-1)
+        head_source = int(
+            (flat_valid & (flat_layer == 0) & (flat_part == 0))
+            .nonzero(as_tuple=False)
+            .flatten()[0]
+        )
+        body_target = int(
+            (flat_valid & (flat_layer == 0) & (flat_part == 1))
+            .nonzero(as_tuple=False)
+            .flatten()[0]
+        )
+        uv = torch.zeros(4, 64, 64)
+        uv.reshape(4, -1)[:, head_source] = torch.tensor(
+            [0.8, 0.3, 0.1, 1.0]
+        )
+
+        repaired, stats = simple_symmetry_nearest_inpaint(uv)
+
+        self.assertTrue(
+            torch.equal(
+                repaired.reshape(4, -1)[:, body_target], torch.zeros(4)
+            )
+        )
+        self.assertGreater(stats["unresolved_texels"], 0)
 
 
 class TopologyAwareCompletionTest(unittest.TestCase):

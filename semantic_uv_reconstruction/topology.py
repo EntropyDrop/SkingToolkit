@@ -39,6 +39,7 @@ class UVTopology:
     surface_pool: torch.Tensor
     world_position: torch.Tensor
     mirrored_texel: torch.Tensor
+    inner_fill_order: torch.Tensor
 
 
 PART_CENTRES = (
@@ -243,6 +244,28 @@ def build_uv_topology(is_slim=False):
             ).argmin(dim=1)
             mirrored[targets] = candidates[nearest]
 
+    # Deterministic repair order: process each cuboid face independently from
+    # top to bottom, and within each row start at the horizontal centre before
+    # expanding alternately toward the left and right edges. For an even-width
+    # row this yields, for example, 3, 4, 2, 5, 1, 6, 0, 7.
+    inner_fill_order = []
+    for part in range(PART_COUNT):
+        for face in range(FACE_COUNT):
+            members = (
+                valid
+                & (layer_map == 0)
+                & (part_map == part)
+                & (face_map == face)
+            ).nonzero(as_tuple=False).flatten().tolist()
+            members.sort(
+                key=lambda index: (
+                    float(local_uv[index, 1]),
+                    abs(float(local_uv[index, 0]) - 0.5),
+                    float(local_uv[index, 0]),
+                )
+            )
+            inner_fill_order.extend(members)
+
     return UVTopology(
         valid=valid.reshape(UV_SIZE, UV_SIZE),
         layer=layer_map.reshape(UV_SIZE, UV_SIZE),
@@ -256,16 +279,19 @@ def build_uv_topology(is_slim=False):
         surface_pool=surface_pool,
         world_position=world_position.reshape(UV_SIZE, UV_SIZE, 3),
         mirrored_texel=mirrored.reshape(UV_SIZE, UV_SIZE),
+        inner_fill_order=torch.tensor(inner_fill_order, dtype=torch.long),
     )
 
 
-def simple_symmetry_nearest_inpaint(uv, alpha_threshold=0.5, chunk_size=512):
+def simple_symmetry_nearest_inpaint(uv, alpha_threshold=0.5):
     """Fill unknown inner texels with symmetry, then 3D nearest colours.
 
-    Horizontal symmetry stays on the inner layer. The nearest-neighbour
-    fallback searches every known texel in character space, including known
-    outer-layer texels. The outer layer itself is never filled or cleared, and
-    every existing opaque RGBA value is untouched.
+    Each face is traversed top-to-bottom and horizontal-centre-out. Horizontal
+    symmetry stays on the inner layer. The nearest-neighbour fallback searches
+    known texels only within the target body part, including that part's known
+    outer-layer texels. Newly repaired inner texels become sources for later
+    texels. The outer layer itself is never filled or cleared, and every
+    existing opaque RGBA value is untouched.
     """
     squeeze_batch = uv.dim() == 3
     if squeeze_batch:
@@ -277,13 +303,11 @@ def simple_symmetry_nearest_inpaint(uv, alpha_threshold=0.5, chunk_size=512):
         )
     if not 0.0 <= alpha_threshold <= 1.0:
         raise ValueError("alpha_threshold must be in [0, 1].")
-    if chunk_size < 1:
-        raise ValueError("chunk_size must be positive.")
-
     topology = build_uv_topology()
     device = uv.device
     valid = topology.valid.reshape(-1).to(device=device)
     layer = topology.layer.reshape(-1).to(device=device)
+    part = topology.part.reshape(-1).to(device=device)
     mirrored = topology.mirrored_texel.reshape(-1).to(device=device)
     positions = topology.world_position.reshape(-1, 3).to(
         device=device, dtype=torch.float32
@@ -295,34 +319,38 @@ def simple_symmetry_nearest_inpaint(uv, alpha_threshold=0.5, chunk_size=512):
         original_known = valid & (
             result[batch_index, :, 3] > float(alpha_threshold)
         )
-        unknown_inner = valid & (layer == 0) & ~original_known
-
-        symmetry_target = unknown_inner & original_known[mirrored]
-        symmetry_indices = symmetry_target.nonzero(as_tuple=False).flatten()
-        if symmetry_indices.numel() > 0:
-            result[batch_index, symmetry_indices] = result[
-                batch_index, mirrored[symmetry_indices]
-            ]
-
-        known = original_known | symmetry_target
-        nearest_target = valid & (layer == 0) & ~known
-        target_indices = nearest_target.nonzero(as_tuple=False).flatten()
-        source_indices = known.nonzero(as_tuple=False).flatten()
+        known = original_known.clone()
+        symmetry_filled = 0
         nearest_filled = 0
-        if target_indices.numel() > 0 and source_indices.numel() > 0:
-            for start in range(0, target_indices.numel(), chunk_size):
-                target_chunk = target_indices[start : start + chunk_size]
-                nearest = torch.cdist(
-                    positions[target_chunk], positions[source_indices]
-                ).argmin(dim=1)
-                result[batch_index, target_chunk] = result[
-                    batch_index, source_indices[nearest]
+        for target_index in topology.inner_fill_order.tolist():
+            if bool(known[target_index]):
+                continue
+            mirror_index = int(mirrored[target_index])
+            if bool(known[mirror_index]):
+                result[batch_index, target_index] = result[
+                    batch_index, mirror_index
                 ]
-            nearest_filled = int(target_indices.numel())
+                known[target_index] = True
+                symmetry_filled += 1
+                continue
 
-        resolved_inner = (original_known & (layer == 0)) | symmetry_target
-        if nearest_filled:
-            resolved_inner = resolved_inner | nearest_target
+            target_part = part[target_index]
+            source_indices = (
+                known & valid & (part == target_part)
+            ).nonzero(as_tuple=False).flatten()
+            if source_indices.numel() == 0:
+                continue
+            squared_distance = (
+                positions[source_indices] - positions[target_index]
+            ).square().sum(dim=1)
+            source_index = source_indices[squared_distance.argmin()]
+            result[batch_index, target_index] = result[
+                batch_index, source_index
+            ]
+            known[target_index] = True
+            nearest_filled += 1
+
+        resolved_inner = known & valid & (layer == 0)
         stats.append(
             {
                 "known_texels": int(original_known.sum().item()),
@@ -332,9 +360,10 @@ def simple_symmetry_nearest_inpaint(uv, alpha_threshold=0.5, chunk_size=512):
                 "known_outer_texels": int(
                     (original_known & (layer == 1)).sum().item()
                 ),
-                "symmetry_filled_texels": int(symmetry_indices.numel()),
+                "symmetry_filled_texels": symmetry_filled,
                 "nearest_3d_filled_texels": nearest_filled,
                 "preserved_outer_texels": int((valid & (layer == 1)).sum().item()),
+                "fill_order": "part_face_top_down_center_out",
                 "unresolved_texels": int(
                     (valid & (layer == 0) & ~resolved_inner).sum().item()
                 ),

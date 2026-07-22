@@ -996,7 +996,8 @@ def build_arg_parser():
         help=(
             "Optional deterministic inner-layer repair: use known left/right "
             "symmetry first, then the nearest known texel in 3D character "
-            "space; preserve the outer layer unchanged."
+            "space from the same body part. Traverse each face top-down and "
+            "horizontal-centre-out; preserve the outer layer unchanged."
         ),
     )
     parser.add_argument("--debug_output", default=None, help="Optional path to write a debug preview grid of predictions.")
