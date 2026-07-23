@@ -31,7 +31,9 @@ rejected because the optimizer has never trained those parameters.
 
 The current parser also has a grouped `64x64` outer-UV occupancy head. This is a
 new checkpoint parameter set, so train a fresh run rather than resuming a
-checkpoint that predates `predict_outer_uv_occupancy`.
+checkpoint that predates `predict_outer_uv_occupancy`. Its input features are
+detached from the parser trunk: occupancy loss trains only the auxiliary head
+and cannot shift the primary route-role representation.
 
 The standard launcher uses `geometry_fit` plus a frozen SigLIP2 vision tower.
 SigLIP2 is not trained: its per-view global features are cached once, fused across
@@ -94,11 +96,13 @@ layer/UV texel agree. The complementary false-positive and false-negative focal
 terms remain, but use symmetric defaults; the ordinary three-class loss still
 handles secondary/backface observations.
 
-In addition, center-weighted texel supervision pools route probabilities across
+Optional center-weighted texel supervision pools route probabilities across
 the configured front/back views and directly labels each pooled UV texel as
-inner or outer. Unlike consistency alone, this prevents an entire cell from
-becoming consistently wrong. The grouped occupancy head is supervised with
-balanced BCE plus Dice over valid outer-layer atlas regions.
+inner or outer. It is logged but has zero loss weight by default because
+macro-balanced texel supervision was found to overcorrect toward outer routes.
+The grouped occupancy head uses mildly balanced BCE plus Dice over valid
+outer-layer atlas regions, but does not participate in hard validation routing
+unless `OUTER_UV_OCCUPANCY_ROUTING=true` is explicitly selected.
 
 ```bash
 LAMBDA_OUTER_FALSE_POSITIVE=0.75 \
@@ -323,11 +327,11 @@ GEOMETRY_ROUTE_CONSENSUS_OUTER_MARGIN=0.20 \
 `routing_filter` reports how many pixels consensus changed from inner to outer,
 changed from outer to inner, or preserved as strong raw outer evidence.
 
-New checkpoints also blend a predicted `64x64` outer-UV occupancy prior into
-this decision. The default `0.10` gate only rejects a raw outer route when the
-occupancy head is very certain the texel is transparent. Conversely, occupancy
-at or above `0.70` may rescue an inner prediction when its raw outer
-probability is still at least `0.30`:
+New checkpoints can experimentally blend a predicted `64x64` outer-UV
+occupancy prior into this decision. This is disabled by default. When enabled,
+the `0.10` gate rejects a raw outer route only when the occupancy head is very
+certain the texel is transparent; occupancy at or above `0.70` may rescue an
+inner prediction when its raw outer probability is still at least `0.30`:
 
 ```bash
 OUTER_UV_OCCUPANCY=true \
@@ -339,7 +343,9 @@ OUTER_UV_OCCUPANCY_RESCUE_ROUTE_THRESHOLD=0.30 \
 ```
 
 Legacy checkpoints have no occupancy head, so these settings become a no-op.
-The routing log reports both rescued and rejected pixel counts.
+Keep `OUTER_UV_OCCUPANCY=false` for the precision-first production path. The
+routing log reports both rescued and rejected pixel counts when the experiment
+is enabled.
 
 Inference uses a wider solid-background tolerance of `48/255` than the parser's
 training utility. This rejects green-screen and other solid-background colors

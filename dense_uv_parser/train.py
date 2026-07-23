@@ -191,6 +191,23 @@ def move_batch(batch, device):
     }
 
 
+def clip_parser_gradients(model, max_norm):
+    """Clip the auxiliary occupancy head separately from the parser trunk."""
+    parser_parameters = []
+    occupancy_parameters = []
+    for name, parameter in model.named_parameters():
+        if parameter.grad is None:
+            continue
+        if name.startswith("outer_uv_occupancy_head."):
+            occupancy_parameters.append(parameter)
+        else:
+            parser_parameters.append(parameter)
+    if parser_parameters:
+        torch.nn.utils.clip_grad_norm_(parser_parameters, max_norm)
+    if occupancy_parameters:
+        torch.nn.utils.clip_grad_norm_(occupancy_parameters, max_norm)
+
+
 def stack_view_targets(targets_by_view):
     result = {}
     for key in targets_by_view[0]:
@@ -515,7 +532,9 @@ def outer_uv_occupancy_losses(
     selected_target = target[valid]
     positive = selected_target.sum().clamp_min(1.0)
     negative = (selected_target.numel() - selected_target.sum()).clamp_min(1.0)
-    pos_weight = (negative / positive).clamp(max=10.0)
+    # Full inverse-frequency weighting made 0.5 badly calibrated and caused
+    # the sparse auxiliary head to overpredict outer alpha.
+    pos_weight = (negative / positive).sqrt().clamp(min=1.0, max=4.0)
     loss_bce = F.binary_cross_entropy_with_logits(
         selected_logits,
         selected_target,
@@ -741,7 +760,7 @@ def hard_uv_conditioning_metrics(
                 args, "geometry_route_consensus_outer_margin", 0.20
             ),
             outer_uv_occupancy=getattr(
-                args, "predict_outer_uv_occupancy", False
+                args, "outer_uv_occupancy_routing", False
             ),
             outer_uv_occupancy_blend_weight=getattr(
                 args, "outer_uv_occupancy_blend_weight", 0.30
@@ -1012,12 +1031,12 @@ def run_epoch(
             if scaler is not None:
                 scaler.scale(loss).backward()
                 scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+                clip_parser_gradients(model, args.grad_clip)
                 scaler.step(optimizer)
                 scaler.update()
             else:
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+                clip_parser_gradients(model, args.grad_clip)
                 optimizer.step()
 
         if compute_hard_metrics:
@@ -1166,7 +1185,7 @@ def save_preview(
                     args, "geometry_route_consensus_outer_margin", 0.20
                 ),
                 outer_uv_occupancy=getattr(
-                    args, "predict_outer_uv_occupancy", False
+                    args, "outer_uv_occupancy_routing", False
                 ),
                 outer_uv_occupancy_blend_weight=getattr(
                     args, "outer_uv_occupancy_blend_weight", 0.30
@@ -1621,6 +1640,21 @@ def build_arg_parser():
         "--outer_uv_occupancy_blend_weight", type=float, default=0.30
     )
     parser.add_argument(
+        "--outer_uv_occupancy_routing",
+        dest="outer_uv_occupancy_routing",
+        action="store_true",
+        default=False,
+        help=(
+            "Experimental: let the auxiliary occupancy head alter hard "
+            "routing and checkpoint selection."
+        ),
+    )
+    parser.add_argument(
+        "--no_outer_uv_occupancy_routing",
+        dest="outer_uv_occupancy_routing",
+        action="store_false",
+    )
+    parser.add_argument(
         "--outer_uv_occupancy_gate_threshold", type=float, default=0.10
     )
     parser.add_argument(
@@ -1667,7 +1701,7 @@ def build_arg_parser():
     parser.add_argument(
         "--lambda_route_texel_supervision",
         type=float,
-        default=0.50,
+        default=0.0,
         help="Weight for center-weighted, cross-view UV-texel route supervision.",
     )
     parser.add_argument(
@@ -1683,7 +1717,7 @@ def build_arg_parser():
     parser.add_argument("--lambda_semantic_coverage", type=float, default=0.25)
     parser.add_argument("--lambda_outer_uv_occupancy", type=float, default=0.50)
     parser.add_argument(
-        "--outer_uv_occupancy_dice_weight", type=float, default=1.0
+        "--outer_uv_occupancy_dice_weight", type=float, default=0.25
     )
     parser.add_argument("--outer_false_positive_gamma", type=float, default=2.0)
     parser.add_argument("--outer_false_negative_gamma", type=float, default=2.0)
@@ -2153,6 +2187,7 @@ def main():
         "route_prior_logit_cap": model.route_prior_logit_cap,
         "route_prior_dropout": model.route_prior_dropout,
         "predict_outer_uv_occupancy": model.predict_outer_uv_occupancy,
+        "outer_uv_occupancy_routing": args.outer_uv_occupancy_routing,
         "device": str(device),
         "parser_mode": args.parser_mode,
         "uv_classification": model.uv_classification,

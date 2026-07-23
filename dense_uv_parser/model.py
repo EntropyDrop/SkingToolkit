@@ -445,6 +445,11 @@ class DenseUVParserNet(nn.Module):
                 if semantic_summary is not None
                 else visual_summary
             )
+            # Keep this auxiliary calibration head read-only with respect to
+            # the parser trunk. Joint gradients previously increased outer
+            # recall by shifting the shared route representation, but caused
+            # a larger regression in inner-to-outer precision.
+            occupancy_summary = occupancy_summary.detach()
             outputs["outer_uv_occupancy_logits"] = self.outer_uv_occupancy_head(
                 occupancy_summary.float()
             ).reshape(-1, 1, self.uv_size, self.uv_size)

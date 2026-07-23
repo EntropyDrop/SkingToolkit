@@ -1362,8 +1362,8 @@ def main():
     )
     outer_uv_occupancy = (
         parser_args.get(
-            "predict_outer_uv_occupancy",
-            parser_model.predict_outer_uv_occupancy,
+            "outer_uv_occupancy_routing",
+            False,
         )
         if args.outer_uv_occupancy is None
         else args.outer_uv_occupancy

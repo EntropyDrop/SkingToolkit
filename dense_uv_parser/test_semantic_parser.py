@@ -88,6 +88,24 @@ class SemanticDenseUVParserTest(unittest.TestCase):
         self.assertIsNotNone(logits.grad)
         self.assertGreater(float(logits.grad.abs().sum()), 0.0)
 
+    def test_outer_uv_occupancy_head_does_not_shift_parser_trunk(self):
+        model = self.build_model().train()
+        outputs = model(
+            torch.rand(2, 4, 32, 32),
+            view_ids=torch.tensor([0, 1]),
+            semantic_features=torch.rand(1, 2, 16),
+        )
+
+        outputs["outer_uv_occupancy_logits"].mean().backward()
+
+        self.assertIsNotNone(
+            model.outer_uv_occupancy_head[-1].weight.grad
+        )
+        self.assertIsNone(model.stem.block[0].weight.grad)
+        self.assertIsNone(
+            model.semantic_fusion.input_projection[1].weight.grad
+        )
+
     def test_confidence_head_learns_current_route_correctness(self):
         model = self.build_model()
         with torch.no_grad():
