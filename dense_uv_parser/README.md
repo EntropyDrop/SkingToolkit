@@ -291,6 +291,26 @@ python infer.py \
 
 The conditioning preview shows the predicted inner-layer RGB row and outer-layer RGB row. The precision-first defaults leave the ordinary inner route ungated (`0.0/0.0`) while requiring outer confidence/margin `0.80/0.55`, outer footprint coverage `0.25`, and projected-texel consensus. This asymmetric policy targets inner-to-outer false positives without discarding otherwise correct inner evidence. Geometry-backed outer rescue is enabled: a texel proven by an outer-only silhouette or exact secondary/backface slot may use the relaxed `0.60/0.25` gate and `0.10` coverage floor. Overlapping inner/outer regions still use the strict gate.
 
+Projected-texel consensus is a center-weighted soft blend rather than a hard
+cell-majority replacement. By default it combines `40%` local route probability
+with `60%` cell evidence. A raw outer prediction at or above `0.80` confidence
+and `0.35` margin ratio is preserved, while an inner-to-outer promotion requires
+at least `0.70` fused confidence and `0.20` fused margin ratio. This removes weak
+isolated speckle without erasing strong thin sleeves, bangs, or hat brims:
+
+```bash
+GEOMETRY_ROUTE_TEXEL_CONSENSUS=true \
+GEOMETRY_ROUTE_TEXEL_CONSENSUS_WEIGHT=0.60 \
+GEOMETRY_ROUTE_PRESERVE_OUTER_CONFIDENCE=0.80 \
+GEOMETRY_ROUTE_PRESERVE_OUTER_MARGIN=0.35 \
+GEOMETRY_ROUTE_CONSENSUS_OUTER_CONFIDENCE=0.70 \
+GEOMETRY_ROUTE_CONSENSUS_OUTER_MARGIN=0.20 \
+./run_infer.sh
+```
+
+`routing_filter` reports how many pixels consensus changed from inner to outer,
+changed from outer to inner, or preserved as strong raw outer evidence.
+
 Inference uses a wider solid-background tolerance of `48/255` than the parser's
 training utility. This rejects green-screen and other solid-background colors
 blended into antialiased character boundaries. Override it with

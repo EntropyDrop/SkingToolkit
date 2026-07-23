@@ -999,33 +999,246 @@ def _routing_from_affine_outputs(renderer, views, outputs, fg_threshold=0.5, sem
     }
 
 
-def _aggregate_role_probabilities_by_direct_texel(role_prob, static):
-    """Average route-role probabilities within each projected Minecraft texel."""
+def _aggregate_role_probabilities_by_direct_texel(
+    role_prob,
+    static,
+    foreground_prob=None,
+    center_power=2.0,
+):
+    """Center-weight route probabilities within each projected Minecraft texel."""
     role_prob = role_prob.float()
     batch, role_count, height, width = role_prob.shape
+    if foreground_prob is not None and foreground_prob.shape != (
+        batch,
+        height,
+        width,
+    ):
+        raise ValueError(
+            "foreground_prob must match the route map, got "
+            f"{tuple(foreground_prob.shape)} and {(batch, height, width)}."
+        )
+    if center_power < 0:
+        raise ValueError("center_power must be non-negative.")
     aggregated = []
     for layer_index in range(LAYER_CLASSES):
         valid = static["masks"][layer_index].reshape(1, 1, -1)
         flat_uv = static["flat_uv"][layer_index].reshape(1, 1, -1)
+        center_weight = static["texel_center_score"][layer_index].float()
+        center_weight = center_weight.clamp(0.0, 1.0).pow(center_power)
+        pixel_weight = center_weight.reshape(1, 1, -1) * valid
+        if foreground_prob is not None:
+            pixel_weight = (
+                pixel_weight
+                * foreground_prob.float().clamp(0.0, 1.0).reshape(batch, 1, -1)
+            )
+        pixel_weight = pixel_weight.expand(batch, 1, -1)
         sums = role_prob.new_zeros(batch, role_count, UV_SIZE * UV_SIZE)
         sums.scatter_add_(
             2,
             flat_uv.expand(batch, role_count, -1),
-            role_prob.flatten(2) * valid,
+            role_prob.flatten(2) * pixel_weight,
         )
-        counts = role_prob.new_zeros(UV_SIZE * UV_SIZE)
+        counts = role_prob.new_zeros(batch, 1, UV_SIZE * UV_SIZE)
         counts.scatter_add_(
-            0,
-            flat_uv.reshape(-1),
-            valid.reshape(-1).to(dtype=role_prob.dtype),
+            2,
+            flat_uv.expand(batch, 1, -1),
+            pixel_weight,
         )
-        means = sums / counts.view(1, 1, -1).clamp_min(1.0)
+        means = sums / counts.clamp_min(1e-6)
         aggregated.append(
             means.gather(2, flat_uv.expand(batch, role_count, -1)).reshape(
                 batch, role_count, height, width
             )
         )
     return torch.stack(aggregated, dim=1)
+
+
+def _soft_route_role_consensus(
+    role_prob,
+    static,
+    foreground_prob,
+    consensus_weight=0.60,
+    preserve_outer_confidence=0.80,
+    preserve_outer_margin=0.35,
+    outer_confidence=0.70,
+    outer_margin=0.20,
+):
+    """Denoise route roles without erasing strong local outer-layer evidence."""
+    for name, value in (
+        ("consensus_weight", consensus_weight),
+        ("preserve_outer_confidence", preserve_outer_confidence),
+        ("preserve_outer_margin", preserve_outer_margin),
+        ("outer_confidence", outer_confidence),
+        ("outer_margin", outer_margin),
+    ):
+        if not 0.0 <= float(value) <= 1.0:
+            raise ValueError(f"{name} must be in [0, 1].")
+
+    role_prob = role_prob.float()
+    raw_role = role_prob.argmax(dim=1)
+    raw_top = role_prob.topk(2, dim=1).values
+    raw_margin = raw_top[:, 0] - raw_top[:, 1]
+    raw_selected_score = role_prob.gather(1, raw_role.unsqueeze(1)).squeeze(1)
+    raw_margin_ratio = (
+        raw_margin / raw_selected_score.clamp_min(1e-8)
+    ).clamp(0.0, 1.0)
+
+    direct_scores = _aggregate_role_probabilities_by_direct_texel(
+        role_prob,
+        static,
+        foreground_prob=foreground_prob,
+        center_power=2.0,
+    )
+    batch = role_prob.shape[0]
+    inner_valid = static["masks"][0].unsqueeze(0).expand(batch, -1, -1)
+    outer_valid = static["masks"][1].unsqueeze(0).expand_as(inner_valid)
+    has_direct_candidate = inner_valid | outer_valid
+
+    texel_inner = direct_scores[:, 0, ROUTE_INNER_PRIMARY]
+    texel_outer = direct_scores[:, 1, ROUTE_OUTER_PRIMARY]
+    unavailable = role_prob.new_full(texel_inner.shape, -1.0)
+    texel_secondary = torch.maximum(
+        torch.where(
+            inner_valid,
+            direct_scores[:, 0, ROUTE_SECONDARY],
+            unavailable,
+        ),
+        torch.where(
+            outer_valid,
+            direct_scores[:, 1, ROUTE_SECONDARY],
+            unavailable,
+        ),
+    )
+
+    local_weight = 1.0 - float(consensus_weight)
+    fused_inner = torch.where(
+        inner_valid,
+        local_weight * role_prob[:, ROUTE_INNER_PRIMARY]
+        + float(consensus_weight) * texel_inner,
+        unavailable,
+    )
+    fused_outer = torch.where(
+        outer_valid,
+        local_weight * role_prob[:, ROUTE_OUTER_PRIMARY]
+        + float(consensus_weight) * texel_outer,
+        unavailable,
+    )
+    # Secondary/backface observations remain strict cell-level decisions. The
+    # soft blend is needed for the ambiguous inner/outer pair; retaining an
+    # isolated secondary pixel would reintroduce exactly the speckle that
+    # projected-texel consensus is meant to remove.
+    fused_secondary = torch.where(
+        has_direct_candidate,
+        texel_secondary.clamp_min(0.0),
+        unavailable,
+    )
+
+    raw_outer_score = role_prob[:, ROUTE_OUTER_PRIMARY]
+    raw_outer_competitor = torch.maximum(
+        role_prob[:, ROUTE_INNER_PRIMARY],
+        role_prob[:, ROUTE_SECONDARY],
+    )
+    raw_outer_margin = (raw_outer_score - raw_outer_competitor).clamp_min(0.0)
+    raw_outer_margin_ratio = (
+        raw_outer_margin / raw_outer_score.clamp_min(1e-8)
+    ).clamp(0.0, 1.0)
+    preserve_outer = (
+        outer_valid
+        & (raw_role == ROUTE_OUTER_PRIMARY)
+        & (raw_outer_score >= float(preserve_outer_confidence))
+        & (raw_outer_margin_ratio >= float(preserve_outer_margin))
+    )
+
+    fused_outer_competitor = torch.maximum(fused_inner, fused_secondary)
+    fused_outer_margin = (fused_outer - fused_outer_competitor).clamp_min(0.0)
+    fused_outer_margin_ratio = (
+        fused_outer_margin / fused_outer.clamp_min(1e-8)
+    ).clamp(0.0, 1.0)
+    promote_outer = (
+        outer_valid
+        & (fused_outer >= float(outer_confidence))
+        & (fused_outer_margin_ratio >= float(outer_margin))
+    )
+    allow_outer = (
+        outer_valid
+        & (fused_outer >= fused_outer_competitor)
+        & (
+            (raw_role == ROUTE_OUTER_PRIMARY)
+            | promote_outer
+            | preserve_outer
+        )
+    )
+
+    eligible_outer = torch.where(
+        allow_outer | preserve_outer,
+        fused_outer,
+        unavailable,
+    )
+    eligible_secondary = torch.where(
+        (fused_secondary >= SECONDARY_TEXEL_MIN_PROBABILITY)
+        & has_direct_candidate,
+        fused_secondary,
+        unavailable,
+    )
+    eligible_scores = torch.stack(
+        [fused_inner, eligible_outer, eligible_secondary],
+        dim=1,
+    )
+    selected_score, selected_role = eligible_scores.max(dim=1)
+    selected_role = torch.where(has_direct_candidate, selected_role, raw_role)
+    selected_score = torch.where(
+        has_direct_candidate,
+        selected_score,
+        raw_selected_score,
+    )
+    top_scores = eligible_scores.topk(2, dim=1).values
+    selected_margin = (top_scores[:, 0] - top_scores[:, 1]).clamp_min(0.0)
+    selected_margin_ratio = (
+        selected_margin / selected_score.clamp_min(1e-8)
+    ).clamp(0.0, 1.0)
+
+    # A strong raw outer prediction survives a disagreeing cell mean. The
+    # downstream minimum-source-pixel and coverage filters still remove truly
+    # isolated evidence before it reaches the UV atlas.
+    selected_role = torch.where(
+        preserve_outer,
+        torch.full_like(selected_role, ROUTE_OUTER_PRIMARY),
+        selected_role,
+    )
+    selected_score = torch.where(preserve_outer, raw_outer_score, selected_score)
+    selected_margin = torch.where(
+        preserve_outer,
+        raw_outer_margin,
+        selected_margin,
+    )
+    selected_margin_ratio = torch.where(
+        preserve_outer,
+        raw_outer_margin_ratio,
+        selected_margin_ratio,
+    )
+    return {
+        "role": selected_role,
+        "score": selected_score,
+        "margin": selected_margin,
+        "margin_ratio": selected_margin_ratio,
+        "scores": torch.stack(
+            [fused_inner, fused_outer, fused_secondary],
+            dim=1,
+        ),
+        "has_direct_candidate": has_direct_candidate,
+        "preserved_outer": preserve_outer,
+        "changed": has_direct_candidate & (selected_role != raw_role),
+        "inner_to_outer": (
+            has_direct_candidate
+            & (raw_role == ROUTE_INNER_PRIMARY)
+            & (selected_role == ROUTE_OUTER_PRIMARY)
+        ),
+        "outer_to_inner": (
+            has_direct_candidate
+            & (raw_role == ROUTE_OUTER_PRIMARY)
+            & (selected_role == ROUTE_INNER_PRIMARY)
+        ),
+    }
 
 
 def _routing_from_geometry_outputs(
@@ -1035,6 +1248,11 @@ def _routing_from_geometry_outputs(
     fg_threshold=0.5,
     outer_threshold=0.5,
     texel_consensus=True,
+    texel_consensus_weight=0.60,
+    preserve_outer_confidence=0.80,
+    preserve_outer_margin=0.35,
+    consensus_outer_confidence=0.70,
+    consensus_outer_margin=0.20,
 ):
     """Route a fitted Steve render through fixed inner/outer cuboid UV maps."""
     views = parse_views(views)
@@ -1067,6 +1285,10 @@ def _routing_from_geometry_outputs(
     texel_center_score = torch.zeros_like(outer_prob)
     part = torch.full_like(layer, IGNORE_INDEX)
     face = torch.full_like(layer, IGNORE_INDEX)
+    consensus_changed = torch.zeros_like(fg)
+    consensus_inner_to_outer = torch.zeros_like(fg)
+    consensus_outer_to_inner = torch.zeros_like(fg)
+    consensus_preserved_outer = torch.zeros_like(fg)
     for view_index, view in enumerate(views):
         selection = slice(view_index, N, len(views))
         static = build_static_surface_routing(renderer, view, outer_prob.device)
@@ -1079,68 +1301,41 @@ def _routing_from_geometry_outputs(
         inner_valid = static["masks"][0].unsqueeze(0).expand(outer_prob[selection].shape[0], -1, -1)
         outer_valid = static["masks"][1].unsqueeze(0).expand_as(inner_valid)
         if texel_consensus:
-            direct_scores = _aggregate_role_probabilities_by_direct_texel(
-                role_prob[selection], static
+            consensus = _soft_route_role_consensus(
+                role_prob[selection],
+                static,
+                foreground_prob[selection],
+                consensus_weight=texel_consensus_weight,
+                preserve_outer_confidence=preserve_outer_confidence,
+                preserve_outer_margin=preserve_outer_margin,
+                outer_confidence=consensus_outer_confidence,
+                outer_margin=consensus_outer_margin,
             )
-            unavailable = role_prob.new_tensor(-1.0)
-            inner_score = torch.where(
-                inner_valid,
-                direct_scores[:, 0, ROUTE_INNER_PRIMARY],
-                unavailable,
-            )
-            outer_score = torch.where(
-                outer_valid,
-                direct_scores[:, 1, ROUTE_OUTER_PRIMARY],
-                unavailable,
-            )
-            secondary_score = torch.maximum(
-                torch.where(
-                    inner_valid,
-                    direct_scores[:, 0, ROUTE_SECONDARY],
-                    unavailable,
-                ),
-                torch.where(
-                    outer_valid,
-                    direct_scores[:, 1, ROUTE_SECONDARY],
-                    unavailable,
-                ),
-            )
-            primary_scores = torch.stack([inner_score, outer_score], dim=1)
-            best_primary_score, best_primary_role = primary_scores.max(dim=1)
-            secondary_supported = (
-                (secondary_score >= SECONDARY_TEXEL_MIN_PROBABILITY)
-                & (secondary_score > best_primary_score)
-            )
-            consensus_role = torch.where(
-                secondary_supported,
-                torch.full_like(best_primary_role, ROUTE_SECONDARY),
-                best_primary_role,
-            )
-            consensus_scores = torch.cat(
-                [primary_scores, secondary_score.unsqueeze(1)], dim=1
-            )
-            has_direct_candidate = inner_valid | outer_valid
-            route_role[selection] = torch.where(
-                has_direct_candidate,
-                consensus_role,
-                raw_route_role[selection],
-            )
+            has_direct_candidate = consensus["has_direct_candidate"]
+            route_role[selection] = consensus["role"]
             inner_prob[selection] = torch.where(
                 has_direct_candidate,
-                inner_score.clamp_min(0.0),
+                torch.where(
+                    consensus["role"] == ROUTE_INNER_PRIMARY,
+                    consensus["score"],
+                    consensus["scores"][:, ROUTE_INNER_PRIMARY],
+                ).clamp_min(0.0),
                 inner_prob[selection],
             )
             outer_prob[selection] = torch.where(
                 has_direct_candidate,
-                outer_score.clamp_min(0.0),
+                torch.where(
+                    consensus["role"] == ROUTE_OUTER_PRIMARY,
+                    consensus["score"],
+                    consensus["scores"][:, ROUTE_OUTER_PRIMARY],
+                ).clamp_min(0.0),
                 outer_prob[selection],
             )
-            consensus_top = consensus_scores.topk(2, dim=1).values
-            role_margin[selection] = torch.where(
-                has_direct_candidate,
-                consensus_top[:, 0] - consensus_top[:, 1],
-                role_margin[selection],
-            )
+            role_margin[selection] = consensus["margin"]
+            consensus_changed[selection] = consensus["changed"]
+            consensus_inner_to_outer[selection] = consensus["inner_to_outer"]
+            consensus_outer_to_inner[selection] = consensus["outer_to_inner"]
+            consensus_preserved_outer[selection] = consensus["preserved_outer"]
 
         visible_outer = (
             (route_role[selection] == ROUTE_OUTER_PRIMARY)
@@ -1212,6 +1407,10 @@ def _routing_from_geometry_outputs(
         "route_role": route_role,
         "secondary": secondary,
         "texel_center_score": texel_center_score,
+        "consensus_changed": consensus_changed,
+        "consensus_inner_to_outer": consensus_inner_to_outer,
+        "consensus_outer_to_inner": consensus_outer_to_inner,
+        "consensus_preserved_outer": consensus_preserved_outer,
     }
 
 
@@ -1256,6 +1455,11 @@ def _routing_from_geometry_surface_outputs(
     outputs,
     fg_threshold=0.5,
     texel_consensus=True,
+    texel_consensus_weight=0.60,
+    preserve_outer_confidence=0.80,
+    preserve_outer_margin=0.35,
+    consensus_outer_confidence=0.70,
+    consensus_outer_margin=0.20,
 ):
     """Route primary layers first, then use the surface head for secondary UVs.
 
@@ -1292,6 +1496,10 @@ def _routing_from_geometry_surface_outputs(
     texel_center_score = torch.zeros_like(foreground_prob)
     part = torch.full_like(layer, IGNORE_INDEX)
     face = torch.full_like(layer, IGNORE_INDEX)
+    consensus_changed = torch.zeros_like(fg)
+    consensus_inner_to_outer = torch.zeros_like(fg)
+    consensus_outer_to_inner = torch.zeros_like(fg)
+    consensus_preserved_outer = torch.zeros_like(fg)
 
     for view_index, view in enumerate(views):
         selection = slice(view_index, N, len(views))
@@ -1320,68 +1528,23 @@ def _routing_from_geometry_surface_outputs(
         role_margin = role_top[:, 0] - role_top[:, 1]
 
         if texel_consensus:
-            direct_scores = _aggregate_role_probabilities_by_direct_texel(
-                view_role_prob, static
+            consensus = _soft_route_role_consensus(
+                view_role_prob,
+                static,
+                foreground_prob[selection],
+                consensus_weight=texel_consensus_weight,
+                preserve_outer_confidence=preserve_outer_confidence,
+                preserve_outer_margin=preserve_outer_margin,
+                outer_confidence=consensus_outer_confidence,
+                outer_margin=consensus_outer_margin,
             )
-            inner_valid = static["masks"][0].unsqueeze(0).expand(view_batch, -1, -1)
-            outer_valid = static["masks"][1].unsqueeze(0).expand_as(inner_valid)
-            unavailable = view_role_prob.new_tensor(-1.0)
-            inner_score = torch.where(
-                inner_valid,
-                direct_scores[:, 0, ROUTE_INNER_PRIMARY],
-                unavailable,
-            )
-            outer_score = torch.where(
-                outer_valid,
-                direct_scores[:, 1, ROUTE_OUTER_PRIMARY],
-                unavailable,
-            )
-            secondary_score = torch.maximum(
-                torch.where(
-                    inner_valid,
-                    direct_scores[:, 0, ROUTE_SECONDARY],
-                    unavailable,
-                ),
-                torch.where(
-                    outer_valid,
-                    direct_scores[:, 1, ROUTE_SECONDARY],
-                    unavailable,
-                ),
-            )
-            primary_scores = torch.stack([inner_score, outer_score], dim=1)
-            best_primary_score, best_primary_role = primary_scores.max(dim=1)
-            secondary_supported = (
-                (secondary_score >= SECONDARY_TEXEL_MIN_PROBABILITY)
-                & (secondary_score > best_primary_score)
-            )
-            consensus_role = torch.where(
-                secondary_supported,
-                torch.full_like(best_primary_role, ROUTE_SECONDARY),
-                best_primary_role,
-            )
-            consensus_scores = torch.cat(
-                [primary_scores, secondary_score.unsqueeze(1)], dim=1
-            )
-            has_direct_candidate = inner_valid | outer_valid
-            selected_role = torch.where(
-                has_direct_candidate,
-                consensus_role,
-                selected_role,
-            )
-            consensus_selected_score = consensus_scores.gather(
-                1, consensus_role.unsqueeze(1)
-            ).squeeze(1)
-            selected_role_score = torch.where(
-                has_direct_candidate,
-                consensus_selected_score,
-                selected_role_score,
-            )
-            consensus_top = consensus_scores.topk(2, dim=1).values
-            role_margin = torch.where(
-                has_direct_candidate,
-                consensus_top[:, 0] - consensus_top[:, 1],
-                role_margin,
-            )
+            selected_role = consensus["role"]
+            selected_role_score = consensus["score"]
+            role_margin = consensus["margin"]
+            consensus_changed[selection] = consensus["changed"]
+            consensus_inner_to_outer[selection] = consensus["inner_to_outer"]
+            consensus_outer_to_inner[selection] = consensus["outer_to_inner"]
+            consensus_preserved_outer[selection] = consensus["preserved_outer"]
 
         candidate_score = surface_prob[selection, :surface_count]
         candidate_valid = static["masks"].unsqueeze(0).expand(
@@ -1519,6 +1682,10 @@ def _routing_from_geometry_surface_outputs(
         "secondary": secondary,
         "secondary_routed": secondary,
         "texel_center_score": texel_center_score,
+        "consensus_changed": consensus_changed,
+        "consensus_inner_to_outer": consensus_inner_to_outer,
+        "consensus_outer_to_inner": consensus_outer_to_inner,
+        "consensus_preserved_outer": consensus_preserved_outer,
         "learned_trust": (
             torch.sigmoid(outputs["route_confidence"][:, 0].float())
             if "route_confidence" in outputs
@@ -1954,6 +2121,11 @@ def splat_parser_predictions_to_uv_conditioning(
     color_aggregation="grid_mode",
     geometry_outer_threshold=0.5,
     geometry_route_texel_consensus=True,
+    geometry_route_texel_consensus_weight=0.60,
+    geometry_route_preserve_outer_confidence=0.80,
+    geometry_route_preserve_outer_margin=0.35,
+    geometry_route_consensus_outer_confidence=0.70,
+    geometry_route_consensus_outer_margin=0.20,
     observed_foreground=None,
     background_color_tolerance=SOLID_BACKGROUND_COLOR_TOLERANCE,
     color_background_tolerance=None,
@@ -1995,6 +2167,30 @@ def splat_parser_predictions_to_uv_conditioning(
         raise ValueError("outer_semantic_presence_threshold must be in [0, 1].")
     if not 0.0 <= outer_semantic_coverage_threshold <= 1.0:
         raise ValueError("outer_semantic_coverage_threshold must be in [0, 1].")
+    for name, value in (
+        (
+            "geometry_route_texel_consensus_weight",
+            geometry_route_texel_consensus_weight,
+        ),
+        (
+            "geometry_route_preserve_outer_confidence",
+            geometry_route_preserve_outer_confidence,
+        ),
+        (
+            "geometry_route_preserve_outer_margin",
+            geometry_route_preserve_outer_margin,
+        ),
+        (
+            "geometry_route_consensus_outer_confidence",
+            geometry_route_consensus_outer_confidence,
+        ),
+        (
+            "geometry_route_consensus_outer_margin",
+            geometry_route_consensus_outer_margin,
+        ),
+    ):
+        if not 0.0 <= float(value) <= 1.0:
+            raise ValueError(f"{name} must be in [0, 1].")
     if not 0.0 <= rejected_context_confidence_threshold <= 1.0:
         raise ValueError("rejected_context_confidence_threshold must be in [0, 1].")
     if not 0.0 <= rejected_context_margin_threshold <= 1.0:
@@ -2092,6 +2288,11 @@ def splat_parser_predictions_to_uv_conditioning(
             canonical_outputs,
             fg_threshold=fg_threshold,
             texel_consensus=geometry_route_texel_consensus,
+            texel_consensus_weight=geometry_route_texel_consensus_weight,
+            preserve_outer_confidence=geometry_route_preserve_outer_confidence,
+            preserve_outer_margin=geometry_route_preserve_outer_margin,
+            consensus_outer_confidence=geometry_route_consensus_outer_confidence,
+            consensus_outer_margin=geometry_route_consensus_outer_margin,
         )
     elif "surface" not in canonical_outputs and "part" not in canonical_outputs:
         routing = _routing_from_geometry_outputs(
@@ -2101,6 +2302,11 @@ def splat_parser_predictions_to_uv_conditioning(
             fg_threshold=fg_threshold,
             outer_threshold=geometry_outer_threshold,
             texel_consensus=geometry_route_texel_consensus,
+            texel_consensus_weight=geometry_route_texel_consensus_weight,
+            preserve_outer_confidence=geometry_route_preserve_outer_confidence,
+            preserve_outer_margin=geometry_route_preserve_outer_margin,
+            consensus_outer_confidence=geometry_route_consensus_outer_confidence,
+            consensus_outer_margin=geometry_route_consensus_outer_margin,
         )
     else:
         routing = _routing_from_affine_outputs(

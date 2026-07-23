@@ -1116,6 +1116,36 @@ def build_arg_parser():
         action="store_false",
     )
     parser.add_argument(
+        "--geometry_route_texel_consensus_weight",
+        type=float,
+        default=None,
+        help="Blend weight for center-weighted texel consensus; 0 keeps local probabilities and 1 uses only the cell aggregate.",
+    )
+    parser.add_argument(
+        "--geometry_route_preserve_outer_confidence",
+        type=float,
+        default=None,
+        help="Keep a raw outer route above this confidence even when cell consensus prefers inner.",
+    )
+    parser.add_argument(
+        "--geometry_route_preserve_outer_margin",
+        type=float,
+        default=None,
+        help="Minimum raw outer margin ratio required by high-confidence outer preservation.",
+    )
+    parser.add_argument(
+        "--geometry_route_consensus_outer_confidence",
+        type=float,
+        default=None,
+        help="Minimum fused confidence required to promote a route to outer.",
+    )
+    parser.add_argument(
+        "--geometry_route_consensus_outer_margin",
+        type=float,
+        default=None,
+        help="Minimum fused margin ratio required to promote a route to outer.",
+    )
+    parser.add_argument(
         "--color_aggregation",
         choices=SPLAT_COLOR_AGGREGATIONS,
         default="grid_mode",
@@ -1273,6 +1303,31 @@ def main():
         if args.geometry_route_texel_consensus is None
         else args.geometry_route_texel_consensus
     )
+    geometry_route_texel_consensus_weight = (
+        parser_args.get("geometry_route_texel_consensus_weight", 0.60)
+        if args.geometry_route_texel_consensus_weight is None
+        else args.geometry_route_texel_consensus_weight
+    )
+    geometry_route_preserve_outer_confidence = (
+        parser_args.get("geometry_route_preserve_outer_confidence", 0.80)
+        if args.geometry_route_preserve_outer_confidence is None
+        else args.geometry_route_preserve_outer_confidence
+    )
+    geometry_route_preserve_outer_margin = (
+        parser_args.get("geometry_route_preserve_outer_margin", 0.35)
+        if args.geometry_route_preserve_outer_margin is None
+        else args.geometry_route_preserve_outer_margin
+    )
+    geometry_route_consensus_outer_confidence = (
+        parser_args.get("geometry_route_consensus_outer_confidence", 0.70)
+        if args.geometry_route_consensus_outer_confidence is None
+        else args.geometry_route_consensus_outer_confidence
+    )
+    geometry_route_consensus_outer_margin = (
+        parser_args.get("geometry_route_consensus_outer_margin", 0.20)
+        if args.geometry_route_consensus_outer_margin is None
+        else args.geometry_route_consensus_outer_margin
+    )
     outer_uv_min_coverage = (
         parser_args.get("outer_uv_min_coverage", 0.0)
         if args.outer_uv_min_coverage is None
@@ -1372,6 +1427,21 @@ def main():
             outer_rescue_min_coverage=args.outer_rescue_min_coverage,
             color_aggregation=args.color_aggregation,
             geometry_route_texel_consensus=geometry_route_texel_consensus,
+            geometry_route_texel_consensus_weight=(
+                geometry_route_texel_consensus_weight
+            ),
+            geometry_route_preserve_outer_confidence=(
+                geometry_route_preserve_outer_confidence
+            ),
+            geometry_route_preserve_outer_margin=(
+                geometry_route_preserve_outer_margin
+            ),
+            geometry_route_consensus_outer_confidence=(
+                geometry_route_consensus_outer_confidence
+            ),
+            geometry_route_consensus_outer_margin=(
+                geometry_route_consensus_outer_margin
+            ),
             observed_foreground=observed_foreground,
             background_color_tolerance=args.background_color_tolerance,
             color_background_tolerance=args.color_background_tolerance,
@@ -1480,6 +1550,26 @@ def main():
                 & (torch.sigmoid(routing_details["outputs"]["foreground"])[:, 0] > args.fg_threshold)
             ).sum().item()
         )
+        consensus_changed_count = int(
+            routing.get(
+                "consensus_changed", torch.zeros_like(raw_outer)
+            ).sum().item()
+        )
+        consensus_inner_to_outer_count = int(
+            routing.get(
+                "consensus_inner_to_outer", torch.zeros_like(raw_outer)
+            ).sum().item()
+        )
+        consensus_outer_to_inner_count = int(
+            routing.get(
+                "consensus_outer_to_inner", torch.zeros_like(raw_outer)
+            ).sum().item()
+        )
+        consensus_preserved_outer_count = int(
+            routing.get(
+                "consensus_preserved_outer", torch.zeros_like(raw_outer)
+            ).sum().item()
+        )
         print(
             "routing_filter="
             + json.dumps(
@@ -1546,6 +1636,19 @@ def main():
                     "routed_secondary_pixels": routed_secondary_count,
                     "rejected_secondary_pixels": rejected_secondary_count,
                     "raw_secondary_backface_pixels": raw_secondary_count,
+                    "consensus_changed_pixels": consensus_changed_count,
+                    "consensus_inner_to_outer_pixels": (
+                        consensus_inner_to_outer_count
+                    ),
+                    "consensus_outer_to_inner_pixels": (
+                        consensus_outer_to_inner_count
+                    ),
+                    "consensus_preserved_outer_pixels": (
+                        consensus_preserved_outer_count
+                    ),
+                    "consensus_weight": round(
+                        float(geometry_route_texel_consensus_weight), 6
+                    ),
                 },
                 sort_keys=True,
             )

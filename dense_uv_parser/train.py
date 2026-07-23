@@ -500,6 +500,21 @@ def hard_uv_conditioning_metrics(
             geometry_route_texel_consensus=getattr(
                 args, "geometry_route_texel_consensus", False
             ),
+            geometry_route_texel_consensus_weight=getattr(
+                args, "geometry_route_texel_consensus_weight", 0.60
+            ),
+            geometry_route_preserve_outer_confidence=getattr(
+                args, "geometry_route_preserve_outer_confidence", 0.80
+            ),
+            geometry_route_preserve_outer_margin=getattr(
+                args, "geometry_route_preserve_outer_margin", 0.35
+            ),
+            geometry_route_consensus_outer_confidence=getattr(
+                args, "geometry_route_consensus_outer_confidence", 0.70
+            ),
+            geometry_route_consensus_outer_margin=getattr(
+                args, "geometry_route_consensus_outer_margin", 0.20
+            ),
             observed_foreground=None,
             background_color_tolerance=args.background_color_tolerance,
             color_background_tolerance=getattr(
@@ -841,6 +856,21 @@ def save_preview(
                 color_aggregation=args.splat_color_aggregation,
                 geometry_route_texel_consensus=getattr(
                     args, "geometry_route_texel_consensus", False
+                ),
+                geometry_route_texel_consensus_weight=getattr(
+                    args, "geometry_route_texel_consensus_weight", 0.60
+                ),
+                geometry_route_preserve_outer_confidence=getattr(
+                    args, "geometry_route_preserve_outer_confidence", 0.80
+                ),
+                geometry_route_preserve_outer_margin=getattr(
+                    args, "geometry_route_preserve_outer_margin", 0.35
+                ),
+                geometry_route_consensus_outer_confidence=getattr(
+                    args, "geometry_route_consensus_outer_confidence", 0.70
+                ),
+                geometry_route_consensus_outer_margin=getattr(
+                    args, "geometry_route_consensus_outer_margin", 0.20
                 ),
                 observed_foreground=None,
                 background_color_tolerance=getattr(
@@ -1220,6 +1250,21 @@ def build_arg_parser():
         action="store_false",
     )
     parser.add_argument(
+        "--geometry_route_texel_consensus_weight", type=float, default=0.60
+    )
+    parser.add_argument(
+        "--geometry_route_preserve_outer_confidence", type=float, default=0.80
+    )
+    parser.add_argument(
+        "--geometry_route_preserve_outer_margin", type=float, default=0.35
+    )
+    parser.add_argument(
+        "--geometry_route_consensus_outer_confidence", type=float, default=0.70
+    )
+    parser.add_argument(
+        "--geometry_route_consensus_outer_margin", type=float, default=0.20
+    )
+    parser.add_argument(
         "--splat_color_aggregation",
         choices=SPLAT_COLOR_AGGREGATIONS,
         default="grid_mode",
@@ -1352,6 +1397,15 @@ def main():
         raise ValueError("--color_foreground_inset must be non-negative.")
     if args.outer_uv_min_source_pixels < 1:
         raise ValueError("--outer_uv_min_source_pixels must be positive.")
+    for name in (
+        "geometry_route_texel_consensus_weight",
+        "geometry_route_preserve_outer_confidence",
+        "geometry_route_preserve_outer_margin",
+        "geometry_route_consensus_outer_confidence",
+        "geometry_route_consensus_outer_margin",
+    ):
+        if not 0.0 <= getattr(args, name) <= 1.0:
+            raise ValueError(f"--{name} must be in [0, 1].")
     if args.lr <= 0:
         raise ValueError("--lr must be positive.")
     if not 0.0 <= args.min_lr_ratio <= 1.0:

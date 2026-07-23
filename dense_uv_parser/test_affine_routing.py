@@ -462,6 +462,17 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         self.assertEqual(parser_args.outer_rescue_margin_threshold, 0.25)
         self.assertEqual(parser_args.outer_rescue_min_coverage, 0.10)
         self.assertTrue(parser_args.geometry_route_texel_consensus)
+        self.assertEqual(parser_args.geometry_route_texel_consensus_weight, 0.60)
+        self.assertEqual(
+            parser_args.geometry_route_preserve_outer_confidence, 0.80
+        )
+        self.assertEqual(parser_args.geometry_route_preserve_outer_margin, 0.35)
+        self.assertEqual(
+            parser_args.geometry_route_consensus_outer_confidence, 0.70
+        )
+        self.assertEqual(
+            parser_args.geometry_route_consensus_outer_margin, 0.20
+        )
         self.assertEqual(parser_args.outer_selection_precision_weight, 1.50)
         self.assertEqual(parser_args.outer_selection_recall_weight, 0.50)
 
@@ -1613,6 +1624,84 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         semantic_routing = semantic_details["routing"]
         self.assertEqual(int((semantic_routing["raw_route_role"] == 2).sum()), 1)
         self.assertEqual(int(semantic_routing["foreground"].sum()), 3)
+
+    def test_soft_texel_consensus_preserves_strong_raw_outer(self):
+        renderer = FakeRenderer(mask=torch.ones(1, 4))
+        renderer.front_outer_mask.copy_(renderer.front_inner_mask)
+        rendered = torch.rand(1, 4, 1, 4)
+        rendered[:, 3] = 1.0
+        role_logits = torch.tensor(
+            [[[[0.0, 4.0, 4.0, 4.0]], [[4.0, 0.0, 0.0, 0.0]], [[-8.0] * 4]]]
+        )
+        outputs = {
+            "foreground": torch.full((1, 1, 1, 4), 10.0),
+            "layer": role_logits,
+            "affine": torch.zeros(1, 3),
+        }
+
+        _, details = splat_parser_predictions_to_uv_conditioning(
+            rendered,
+            outputs,
+            renderer=renderer,
+            views=["front"],
+            group_size=1,
+            affine_refine=False,
+            route_confidence_threshold=0.0,
+            route_margin_threshold=0.0,
+            outer_route_confidence_threshold=0.0,
+            outer_route_margin_threshold=0.0,
+            outer_uv_min_coverage=0.0,
+            outer_uv_min_source_pixels=1,
+            outer_geometry_rescue=False,
+            outer_semantic_rescue=False,
+            geometry_route_texel_consensus=True,
+            return_details=True,
+        )
+
+        routing = details["routing"]
+        self.assertEqual(int(routing["raw_route_role"][0, 0, 0]), 1)
+        self.assertEqual(int(routing["route_role"][0, 0, 0]), 1)
+        self.assertTrue(routing["consensus_preserved_outer"][0, 0, 0])
+        self.assertFalse(routing["consensus_outer_to_inner"][0, 0, 0])
+
+    def test_soft_texel_consensus_removes_weaker_isolated_outer(self):
+        renderer = FakeRenderer(mask=torch.ones(1, 4))
+        renderer.front_outer_mask.copy_(renderer.front_inner_mask)
+        rendered = torch.rand(1, 4, 1, 4)
+        rendered[:, 3] = 1.0
+        role_logits = torch.tensor(
+            [[[[0.0, 4.0, 4.0, 4.0]], [[1.0, 0.0, 0.0, 0.0]], [[-8.0] * 4]]]
+        )
+        outputs = {
+            "foreground": torch.full((1, 1, 1, 4), 10.0),
+            "layer": role_logits,
+            "affine": torch.zeros(1, 3),
+        }
+
+        _, details = splat_parser_predictions_to_uv_conditioning(
+            rendered,
+            outputs,
+            renderer=renderer,
+            views=["front"],
+            group_size=1,
+            affine_refine=False,
+            route_confidence_threshold=0.0,
+            route_margin_threshold=0.0,
+            outer_route_confidence_threshold=0.0,
+            outer_route_margin_threshold=0.0,
+            outer_uv_min_coverage=0.0,
+            outer_uv_min_source_pixels=1,
+            outer_geometry_rescue=False,
+            outer_semantic_rescue=False,
+            geometry_route_texel_consensus=True,
+            return_details=True,
+        )
+
+        routing = details["routing"]
+        self.assertEqual(int(routing["raw_route_role"][0, 0, 0]), 1)
+        self.assertEqual(int(routing["route_role"][0, 0, 0]), 0)
+        self.assertTrue(routing["consensus_outer_to_inner"][0, 0, 0])
+        self.assertFalse(routing["consensus_preserved_outer"][0, 0, 0])
 
     def test_geometry_secondary_requires_absolute_texel_majority(self):
         renderer = FakeRenderer(mask=torch.ones(1, 4))
