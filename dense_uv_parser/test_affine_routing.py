@@ -302,6 +302,43 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         self.assertEqual(tuple(loaded.route_role_prior.shape), (2, 3, 4, 2))
         self.assertEqual(loaded.route_prior_logit_cap, 1.25)
 
+    def test_outer_uv_occupancy_checkpoint_round_trip(self):
+        model = DenseUVParserNet(
+            base_channels=8,
+            geometry_only=True,
+            view_classes=2,
+            predict_outer_uv_occupancy=True,
+        )
+        checkpoint = {
+            "model": model.state_dict(),
+            "model_config": {
+                "base_channels": 8,
+                "uv_size": 64,
+                "view_classes": 2,
+                "parser_mode": "geometry_fit",
+                "predict_affine": False,
+                "surface_classes": 0,
+                "layer_classes": 3,
+                "geometry_only": True,
+                "semantic_channels": 256,
+                "predict_outer_uv_occupancy": True,
+            },
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "occupancy.pt"
+            torch.save(checkpoint, path)
+            loaded, _ = load_parser(path, torch.device("cpu"))
+
+        self.assertTrue(loaded.predict_outer_uv_occupancy)
+        outputs = loaded(
+            torch.rand(2, 4, 32, 16),
+            view_ids=torch.tensor([0, 1]),
+        )
+        self.assertEqual(
+            tuple(outputs["outer_uv_occupancy_logits"].shape),
+            (1, 1, 64, 64),
+        )
+
     def test_route_prior_and_new_route_losses_backpropagate_together(self):
         model = DenseUVParserNet(
             base_channels=8,
@@ -441,6 +478,10 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         self.assertEqual(parser_args.route_outer_class_weight_cap, 1.0)
         self.assertEqual(parser_args.lambda_primary_route_swap, 1.0)
         self.assertEqual(parser_args.lambda_route_texel_consistency, 0.25)
+        self.assertEqual(parser_args.lambda_route_texel_supervision, 0.50)
+        self.assertEqual(parser_args.route_texel_center_power, 2.0)
+        self.assertTrue(parser_args.predict_outer_uv_occupancy)
+        self.assertEqual(parser_args.lambda_outer_uv_occupancy, 0.50)
         self.assertEqual(parser_args.semantic_channels, 256)
         self.assertEqual(parser_args.semantic_attention_heads, 8)
         self.assertEqual(parser_args.semantic_layers, 2)
@@ -472,6 +513,14 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         )
         self.assertEqual(
             parser_args.geometry_route_consensus_outer_margin, 0.20
+        )
+        self.assertEqual(parser_args.outer_uv_occupancy_blend_weight, 0.30)
+        self.assertEqual(parser_args.outer_uv_occupancy_gate_threshold, 0.10)
+        self.assertEqual(
+            parser_args.outer_uv_occupancy_rescue_threshold, 0.70
+        )
+        self.assertEqual(
+            parser_args.outer_uv_occupancy_rescue_route_threshold, 0.30
         )
         self.assertEqual(parser_args.outer_selection_precision_weight, 1.50)
         self.assertEqual(parser_args.outer_selection_recall_weight, 0.50)
@@ -1702,6 +1751,88 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         self.assertEqual(int(routing["route_role"][0, 0, 0]), 0)
         self.assertTrue(routing["consensus_outer_to_inner"][0, 0, 0])
         self.assertFalse(routing["consensus_preserved_outer"][0, 0, 0])
+
+    def test_outer_uv_occupancy_rescues_plausible_inner_to_outer_route(self):
+        renderer = FakeRenderer(mask=torch.ones(1, 4))
+        renderer.front_outer_mask.copy_(renderer.front_inner_mask)
+        rendered = torch.rand(1, 4, 1, 4)
+        rendered[:, 3] = 1.0
+        occupancy_logits = torch.full((1, 1, 64, 64), -10.0)
+        occupancy_logits[:, :, 0, 0] = 10.0
+        outputs = {
+            "foreground": torch.full((1, 1, 1, 4), 10.0),
+            "layer": torch.tensor(
+                [[[[0.4] * 4], [[0.0] * 4], [[-8.0] * 4]]]
+            ),
+            "outer_uv_occupancy_logits": occupancy_logits,
+            "affine": torch.zeros(1, 3),
+        }
+
+        _, details = splat_parser_predictions_to_uv_conditioning(
+            rendered,
+            outputs,
+            renderer=renderer,
+            views=["front"],
+            group_size=1,
+            affine_refine=False,
+            route_confidence_threshold=0.0,
+            route_margin_threshold=0.0,
+            outer_route_confidence_threshold=0.0,
+            outer_route_margin_threshold=0.55,
+            outer_uv_min_coverage=0.0,
+            outer_uv_min_source_pixels=1,
+            outer_geometry_rescue=False,
+            outer_semantic_rescue=False,
+            geometry_route_texel_consensus=True,
+            outer_uv_occupancy=True,
+            return_details=True,
+        )
+
+        routing = details["routing"]
+        self.assertEqual(int(routing["raw_route_role"][0, 0, 0]), 0)
+        self.assertEqual(int(routing["route_role"][0, 0, 0]), 1)
+        self.assertTrue(routing["occupancy_rescued_outer"][0, 0, 0])
+        self.assertTrue(routing["outer_occupancy_supported"][0, 0, 0])
+        self.assertTrue(routing["outer_occupancy_rescued"][0, 0, 0])
+        self.assertTrue(routing["foreground"][0, 0, 0])
+        self.assertTrue(routing["outer_uv_occupancy_available"].all())
+
+    def test_center_weighted_texel_route_supervision_backpropagates(self):
+        renderer = FakeRenderer(mask=torch.ones(1, 4))
+        renderer.front_outer_mask.copy_(renderer.front_inner_mask)
+        role_logits = torch.tensor(
+            [[[[2.0] * 4], [[0.0] * 4], [[-8.0] * 4]]],
+            requires_grad=True,
+        )
+        outputs = {
+            "foreground": torch.full((1, 1, 1, 4), 10.0),
+            "layer": role_logits,
+        }
+        targets = dense_targets(1, 1, 4)
+        targets["route_role"].fill_(1)
+        targets["layer"].fill_(1)
+        targets["surface"].fill_(1)
+
+        metrics = parser_train.center_weighted_texel_route_supervision(
+            outputs,
+            targets,
+            renderer,
+            ["front"],
+            canonicalize=False,
+        )
+        metrics["loss_route_texel_supervision"].backward()
+
+        self.assertTrue(
+            torch.isfinite(metrics["loss_route_texel_supervision"])
+        )
+        self.assertGreater(
+            float(
+                metrics["loss_route_texel_supervision"].detach()
+            ),
+            0.0,
+        )
+        self.assertIsNotNone(role_logits.grad)
+        self.assertGreater(float(role_logits.grad.abs().sum()), 0.0)
 
     def test_geometry_secondary_requires_absolute_texel_majority(self):
         renderer = FakeRenderer(mask=torch.ones(1, 4))

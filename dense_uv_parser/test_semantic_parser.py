@@ -11,7 +11,11 @@ from SkingToolkit.dense_uv_parser.infer import (
 )
 from SkingToolkit.dense_uv_parser.losses import DenseUVParserLoss
 from SkingToolkit.dense_uv_parser.model import DenseUVParserNet
+from SkingToolkit.dense_uv_parser.train import outer_uv_occupancy_losses
 from SkingToolkit.dense_uv_parser.utils import splat_to_uv_conditioning
+from SkingToolkit.semantic_uv_reconstruction.semantic_losses import (
+    build_part_layer_masks,
+)
 
 
 class SemanticDenseUVParserTest(unittest.TestCase):
@@ -29,6 +33,7 @@ class SemanticDenseUVParserTest(unittest.TestCase):
             semantic_layers=1,
             semantic_dropout=0.0,
             predict_confidence=True,
+            predict_outer_uv_occupancy=True,
         )
 
     def test_multiview_semantics_condition_dense_outputs(self):
@@ -42,12 +47,46 @@ class SemanticDenseUVParserTest(unittest.TestCase):
         self.assertEqual(tuple(outputs["route_confidence"].shape), (4, 1, 32, 32))
         self.assertEqual(tuple(outputs["outer_presence_logits"].shape), (2, 6))
         self.assertEqual(tuple(outputs["outer_coverage"].shape), (2, 6))
+        self.assertEqual(
+            tuple(outputs["outer_uv_occupancy_logits"].shape),
+            (2, 1, 64, 64),
+        )
 
-        loss = outputs["layer"].mean() + outputs["outer_coverage"].mean()
+        loss = (
+            outputs["layer"].mean()
+            + outputs["outer_coverage"].mean()
+            + outputs["outer_uv_occupancy_logits"].mean()
+        )
         loss.backward()
         gradient = model.semantic_fusion.input_projection[1].weight.grad
         self.assertIsNotNone(gradient)
         self.assertGreater(float(gradient.abs().sum()), 0.0)
+        occupancy_gradient = (
+            model.outer_uv_occupancy_head[-1].weight.grad
+        )
+        self.assertIsNotNone(occupancy_gradient)
+        self.assertGreater(float(occupancy_gradient.abs().sum()), 0.0)
+
+    def test_outer_uv_occupancy_loss_uses_only_outer_atlas(self):
+        logits = torch.zeros(1, 1, 64, 64, requires_grad=True)
+        target_uv = torch.zeros(1, 4, 64, 64)
+        _, outer_masks = build_part_layer_masks()
+        occupied = outer_masks[:, 0].bool().any(dim=0)
+        y, x = occupied.nonzero()[0]
+        target_uv[0, 3, y, x] = 1.0
+
+        losses = outer_uv_occupancy_losses(
+            logits, target_uv, outer_masks
+        )
+        total = (
+            losses["loss_outer_uv_occupancy_bce"]
+            + losses["loss_outer_uv_occupancy_dice"]
+        )
+        total.backward()
+
+        self.assertTrue(torch.isfinite(total))
+        self.assertIsNotNone(logits.grad)
+        self.assertGreater(float(logits.grad.abs().sum()), 0.0)
 
     def test_confidence_head_learns_current_route_correctness(self):
         model = self.build_model()

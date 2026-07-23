@@ -35,7 +35,9 @@ from SkingToolkit.dense_uv_parser.utils import (  # noqa: E402
     augment_dense_batch,
     build_dense_parser_batch,
     build_geometry_grid_debug,
+    build_static_surface_routing,
     canonicalize_dense_targets,
+    canonicalize_parser_outputs,
     colorize_foreground,
     colorize_labels,
     colorize_surface,
@@ -325,6 +327,219 @@ def focused_visible_layer_recall_loss(
     return combined, mean_loss, hard_loss
 
 
+def center_weighted_texel_route_supervision(
+    outputs,
+    targets,
+    renderer,
+    views,
+    canonicalize=True,
+    center_power=2.0,
+):
+    """Supervise the route distribution after pooling pixels into UV texels.
+
+    The older consistency loss only makes pixels in one texel agree. It does
+    not decide whether the agreed label should be inner or outer. This loss
+    pools primary-route probabilities across all fixed views using the same
+    texel-center preference as inference, then applies a macro-balanced
+    inner/outer cross entropy to the pooled prediction.
+    """
+    if center_power < 0.0:
+        raise ValueError("center_power must be non-negative.")
+    views = parse_views(views)
+    if not views:
+        raise ValueError("At least one view is required for texel supervision.")
+    if outputs["layer"].shape[1] != 3:
+        zero = outputs["layer"].new_zeros((), dtype=torch.float32)
+        return {
+            "loss_route_texel_supervision": zero,
+            "texel_route_accuracy": zero,
+            "texel_route_precision_outer": zero,
+            "texel_route_recall_outer": zero,
+            "texel_route_count": zero,
+        }
+    if not {"route_role", "surface", "uv"}.issubset(targets):
+        zero = outputs["layer"].sum() * 0.0
+        return {
+            "loss_route_texel_supervision": zero,
+            "texel_route_accuracy": zero,
+            "texel_route_precision_outer": zero,
+            "texel_route_recall_outer": zero,
+            "texel_route_count": zero,
+        }
+    if outputs["layer"].shape[0] % len(views) != 0:
+        raise ValueError("Route batch must be divisible by the fixed-view count.")
+
+    canonical_outputs = (
+        canonicalize_parser_outputs(outputs) if canonicalize else outputs
+    )
+    canonical_targets = (
+        canonicalize_dense_targets(targets) if canonicalize else targets
+    )
+    probabilities = torch.softmax(
+        canonical_outputs["layer"].float(), dim=1
+    )
+    group_count = probabilities.shape[0] // len(views)
+    uv_count = UV_SIZE * UV_SIZE
+    pooled_probability = probabilities.new_zeros(
+        group_count * uv_count, probabilities.shape[1]
+    )
+    pooled_target = probabilities.new_zeros(
+        group_count * uv_count, probabilities.shape[1]
+    )
+    pooled_weight = probabilities.new_zeros(group_count * uv_count, 1)
+
+    for view_index, view in enumerate(views):
+        selection = slice(view_index, probabilities.shape[0], len(views))
+        static = build_static_surface_routing(
+            renderer, view, probabilities.device
+        )
+        route_target = canonical_targets["route_role"][selection]
+        surface_target = canonical_targets["surface"][selection]
+        uv_target = canonical_targets["uv"][selection]
+        foreground_target = canonical_targets["foreground"][selection, 0]
+        surface_count = static["texel_center_score"].shape[0]
+        valid_surface = (
+            (surface_target >= 0) & (surface_target < surface_count)
+        )
+        primary = (
+            (route_target == 0) | (route_target == 1)
+        ) & valid_surface & (foreground_target > 0.5)
+        if not primary.any():
+            continue
+
+        safe_surface = surface_target.clamp(0, surface_count - 1)
+        center_score = static["texel_center_score"].unsqueeze(0).expand(
+            route_target.shape[0], -1, -1, -1
+        ).gather(1, safe_surface.unsqueeze(1)).squeeze(1)
+        pixel_weight = center_score.float().clamp(0.0, 1.0).pow(center_power)
+        pixel_weight = pixel_weight * foreground_target.float()
+        primary = primary & (pixel_weight > 0.0)
+        if not primary.any():
+            continue
+
+        x = (
+            uv_target[:, 0].clamp(0.0, 1.0) * (UV_SIZE - 1)
+        ).round().long()
+        y = (
+            uv_target[:, 1].clamp(0.0, 1.0) * (UV_SIZE - 1)
+        ).round().long()
+        flat_uv = y * UV_SIZE + x
+        groups = torch.arange(
+            route_target.shape[0], device=probabilities.device
+        ).view(-1, 1, 1)
+        pooled_index = groups * uv_count + flat_uv
+
+        selected_index = pooled_index[primary]
+        selected_weight = pixel_weight[primary].unsqueeze(1)
+        selected_probability = probabilities[selection].permute(
+            0, 2, 3, 1
+        )[primary]
+        selected_target = F.one_hot(
+            route_target[primary],
+            num_classes=probabilities.shape[1],
+        ).to(dtype=probabilities.dtype)
+        pooled_probability.index_add_(
+            0, selected_index, selected_probability * selected_weight
+        )
+        pooled_target.index_add_(
+            0, selected_index, selected_target * selected_weight
+        )
+        pooled_weight.index_add_(0, selected_index, selected_weight)
+
+    occupied = pooled_weight[:, 0] > 0.0
+    if not occupied.any():
+        zero = probabilities.sum() * 0.0
+        return {
+            "loss_route_texel_supervision": zero,
+            "texel_route_accuracy": zero,
+            "texel_route_precision_outer": zero,
+            "texel_route_recall_outer": zero,
+            "texel_route_count": zero,
+        }
+
+    mean_probability = (
+        pooled_probability[occupied] / pooled_weight[occupied]
+    ).clamp_min(1e-8)
+    mean_target = pooled_target[occupied] / pooled_weight[occupied]
+    target_role = mean_target.argmax(dim=1)
+    per_texel_loss = -(
+        mean_target * mean_probability.log()
+    ).sum(dim=1)
+    class_losses = [
+        per_texel_loss[target_role == role].mean()
+        for role in (0, 1)
+        if (target_role == role).any()
+    ]
+    loss = torch.stack(class_losses).mean()
+    predicted_role = mean_probability.argmax(dim=1)
+    outer_predicted = predicted_role == 1
+    outer_target = target_role == 1
+    true_outer = outer_predicted & outer_target
+    return {
+        "loss_route_texel_supervision": loss,
+        "texel_route_accuracy": (
+            predicted_role == target_role
+        ).float().mean(),
+        "texel_route_precision_outer": (
+            true_outer.float().sum()
+            / outer_predicted.float().sum().clamp_min(1.0)
+        ),
+        "texel_route_recall_outer": (
+            true_outer.float().sum()
+            / outer_target.float().sum().clamp_min(1.0)
+        ),
+        "texel_route_count": occupied.float().sum(),
+    }
+
+
+def outer_uv_occupancy_losses(
+    logits,
+    target_uv,
+    outer_part_masks,
+    alpha_threshold=0.5,
+):
+    """Train the grouped semantic head on exact outer-layer atlas occupancy."""
+    if logits.shape != (target_uv.shape[0], 1, UV_SIZE, UV_SIZE):
+        raise ValueError(
+            "Expected grouped outer occupancy logits shaped "
+            f"{(target_uv.shape[0], 1, UV_SIZE, UV_SIZE)}, got "
+            f"{tuple(logits.shape)}."
+        )
+    valid = outer_part_masks[:, 0].bool().any(dim=0)
+    valid = valid.view(1, 1, UV_SIZE, UV_SIZE).expand_as(logits)
+    target = (
+        (target_uv[:, 3:4].float() > float(alpha_threshold))
+        & valid
+    ).float()
+    selected_logits = logits.float()[valid]
+    selected_target = target[valid]
+    positive = selected_target.sum().clamp_min(1.0)
+    negative = (selected_target.numel() - selected_target.sum()).clamp_min(1.0)
+    pos_weight = (negative / positive).clamp(max=10.0)
+    loss_bce = F.binary_cross_entropy_with_logits(
+        selected_logits,
+        selected_target,
+        pos_weight=pos_weight,
+    )
+    probability = torch.sigmoid(logits.float()) * valid
+    dice = 1.0 - (
+        2.0 * (probability * target).sum() + 1.0
+    ) / (probability.sum() + target.sum() + 1.0)
+    predicted = (probability >= 0.5) & valid
+    expected = target > 0.5
+    true_positive = (predicted & expected).float().sum()
+    return {
+        "loss_outer_uv_occupancy_bce": loss_bce,
+        "loss_outer_uv_occupancy_dice": dice,
+        "outer_uv_occupancy_precision": (
+            true_positive / predicted.float().sum().clamp_min(1.0)
+        ),
+        "outer_uv_occupancy_recall": (
+            true_positive / expected.float().sum().clamp_min(1.0)
+        ),
+    }
+
+
 def differentiable_geometry_losses(
     rendered,
     gt_uv,
@@ -336,6 +551,7 @@ def differentiable_geometry_losses(
     canonicalize=True,
     recall_hard_fraction=0.10,
     recall_hard_weight=0.50,
+    route_texel_center_power=2.0,
 ):
     """Photometric UV and multi-view render losses for geometry-parser logits."""
     views = parse_views(views)
@@ -348,6 +564,14 @@ def differentiable_geometry_losses(
         temperature=temperature,
         canonicalize=canonicalize,
         return_details=True,
+    )
+    texel_route = center_weighted_texel_route_supervision(
+        outputs,
+        targets,
+        renderer,
+        views,
+        canonicalize=canonicalize,
+        center_power=route_texel_center_power,
     )
     gt_uv = gt_uv.float()
     support = (pred_uv[:, 3:4].detach() > 0.05).to(dtype=pred_uv.dtype)
@@ -431,6 +655,7 @@ def differentiable_geometry_losses(
 
     view_count = max(len(views), 1)
     return {
+        **texel_route,
         "loss_soft_uv_rgb": loss_soft_uv_rgb,
         "loss_soft_uv_alpha": loss_soft_uv_alpha,
         "loss_soft_uv_inner_recall": loss_soft_uv_inner_recall,
@@ -514,6 +739,23 @@ def hard_uv_conditioning_metrics(
             ),
             geometry_route_consensus_outer_margin=getattr(
                 args, "geometry_route_consensus_outer_margin", 0.20
+            ),
+            outer_uv_occupancy=getattr(
+                args, "predict_outer_uv_occupancy", False
+            ),
+            outer_uv_occupancy_blend_weight=getattr(
+                args, "outer_uv_occupancy_blend_weight", 0.30
+            ),
+            outer_uv_occupancy_gate_threshold=getattr(
+                args, "outer_uv_occupancy_gate_threshold", 0.10
+            ),
+            outer_uv_occupancy_rescue_threshold=getattr(
+                args, "outer_uv_occupancy_rescue_threshold", 0.70
+            ),
+            outer_uv_occupancy_rescue_route_threshold=getattr(
+                args,
+                "outer_uv_occupancy_rescue_route_threshold",
+                0.30,
             ),
             observed_foreground=None,
             background_color_tolerance=args.background_color_tolerance,
@@ -657,6 +899,46 @@ def run_epoch(
                     losses["loss_semantic_presence"] = zero
                     losses["loss_semantic_coverage"] = zero
                     losses["loss_semantic_attributes"] = zero
+                if (
+                    semantic_masks is not None
+                    and "outer_uv_occupancy_logits" in outputs
+                ):
+                    _, outer_part_masks = semantic_masks
+                    occupancy = outer_uv_occupancy_losses(
+                        outputs["outer_uv_occupancy_logits"],
+                        batch["uv"],
+                        outer_part_masks,
+                        alpha_threshold=args.target_alpha_threshold,
+                    )
+                    loss_outer_uv_occupancy = (
+                        occupancy["loss_outer_uv_occupancy_bce"]
+                        + args.outer_uv_occupancy_dice_weight
+                        * occupancy["loss_outer_uv_occupancy_dice"]
+                    )
+                    weighted_outer_uv_occupancy = (
+                        args.lambda_outer_uv_occupancy
+                        * loss_outer_uv_occupancy
+                    )
+                    losses.update(occupancy)
+                    losses["loss_outer_uv_occupancy"] = (
+                        loss_outer_uv_occupancy
+                    )
+                    losses["loss_outer_uv_occupancy_weighted"] = (
+                        weighted_outer_uv_occupancy
+                    )
+                    losses["loss_total"] = (
+                        losses["loss_total"] + weighted_outer_uv_occupancy
+                    )
+                    losses["loss_routing"] = (
+                        losses["loss_routing"] + weighted_outer_uv_occupancy
+                    )
+                else:
+                    losses["loss_outer_uv_occupancy_bce"] = zero
+                    losses["loss_outer_uv_occupancy_dice"] = zero
+                    losses["loss_outer_uv_occupancy"] = zero
+                    losses["loss_outer_uv_occupancy_weighted"] = zero
+                    losses["outer_uv_occupancy_precision"] = zero
+                    losses["outer_uv_occupancy_recall"] = zero
                 auxiliary_enabled = args.parser_mode == "geometry_fit" and any(
                     weight > 0
                     for weight in (
@@ -666,6 +948,7 @@ def run_epoch(
                         args.lambda_soft_uv_outer_recall,
                         args.lambda_render_rgb,
                         args.lambda_render_alpha,
+                        args.lambda_route_texel_supervision,
                     )
                 )
                 if auxiliary_enabled:
@@ -680,6 +963,9 @@ def run_epoch(
                         canonicalize=apply_augment,
                         recall_hard_fraction=args.soft_uv_recall_hard_fraction,
                         recall_hard_weight=args.soft_uv_recall_hard_weight,
+                        route_texel_center_power=(
+                            args.route_texel_center_power
+                        ),
                     )
                 else:
                     auxiliary = {
@@ -693,6 +979,11 @@ def run_epoch(
                         "loss_soft_uv_outer_recall_hard": zero,
                         "loss_render_rgb": zero,
                         "loss_render_alpha": zero,
+                        "loss_route_texel_supervision": zero,
+                        "texel_route_accuracy": zero,
+                        "texel_route_precision_outer": zero,
+                        "texel_route_recall_outer": zero,
+                        "texel_route_count": zero,
                         "soft_uv_known_percent": zero,
                         "visible_inner_uv_percent": zero,
                         "visible_outer_uv_percent": zero,
@@ -706,6 +997,8 @@ def run_epoch(
                     * auxiliary["loss_soft_uv_outer_recall"]
                     + args.lambda_render_rgb * auxiliary["loss_render_rgb"]
                     + args.lambda_render_alpha * auxiliary["loss_render_alpha"]
+                    + args.lambda_route_texel_supervision
+                    * auxiliary["loss_route_texel_supervision"]
                 )
                 losses.update(auxiliary)
                 losses["loss_differentiable"] = weighted_auxiliary
@@ -872,6 +1165,23 @@ def save_preview(
                 geometry_route_consensus_outer_margin=getattr(
                     args, "geometry_route_consensus_outer_margin", 0.20
                 ),
+                outer_uv_occupancy=getattr(
+                    args, "predict_outer_uv_occupancy", False
+                ),
+                outer_uv_occupancy_blend_weight=getattr(
+                    args, "outer_uv_occupancy_blend_weight", 0.30
+                ),
+                outer_uv_occupancy_gate_threshold=getattr(
+                    args, "outer_uv_occupancy_gate_threshold", 0.10
+                ),
+                outer_uv_occupancy_rescue_threshold=getattr(
+                    args, "outer_uv_occupancy_rescue_threshold", 0.70
+                ),
+                outer_uv_occupancy_rescue_route_threshold=getattr(
+                    args,
+                    "outer_uv_occupancy_rescue_route_threshold",
+                    0.30,
+                ),
                 observed_foreground=None,
                 background_color_tolerance=getattr(
                     args, "background_color_tolerance", 0.25
@@ -922,6 +1232,31 @@ def save_preview(
         dim=0,
     )
     save_image(preview.clamp(0.0, 1.0), output_path, nrow=count)
+    if "outer_uv_occupancy_logits" in outputs:
+        _, outer_part_masks = build_part_layer_masks()
+        outer_valid = outer_part_masks[:, 0].bool().any(dim=0)
+        outer_valid = outer_valid.to(
+            device=outputs["outer_uv_occupancy_logits"].device
+        ).view(1, 1, UV_SIZE, UV_SIZE)
+        predicted_occupancy = (
+            torch.sigmoid(outputs["outer_uv_occupancy_logits"][:count].float())
+            * outer_valid
+        )
+        target_occupancy = (
+            (batch["uv"][:count, 3:4] > args.target_alpha_threshold).float()
+            * outer_valid
+        )
+        occupancy_preview = torch.cat(
+            [predicted_occupancy, target_occupancy], dim=0
+        )
+        occupancy_path = output_path.with_name(
+            f"{output_path.stem}_outer_occupancy{output_path.suffix}"
+        )
+        save_image(
+            occupancy_preview.detach().cpu(),
+            occupancy_path,
+            nrow=count,
+        )
 
     debug_count = min(count * view_count, rendered.shape[0])
     if routing_details is not None:
@@ -1127,6 +1462,9 @@ def save_checkpoint(path, model, optimizer, scaler, epoch, args, metrics, best_m
             "route_prior_width": model.route_prior_width,
             "route_prior_logit_cap": model.route_prior_logit_cap,
             "route_prior_dropout": model.route_prior_dropout,
+            "predict_outer_uv_occupancy": (
+                model.predict_outer_uv_occupancy
+            ),
             "arm_model": "steve",
         },
     }
@@ -1186,6 +1524,21 @@ def build_arg_parser():
     parser.add_argument("--semantic_attention_heads", type=int, default=8)
     parser.add_argument("--semantic_layers", type=int, default=2)
     parser.add_argument("--semantic_dropout", type=float, default=0.05)
+    parser.add_argument(
+        "--predict_outer_uv_occupancy",
+        dest="predict_outer_uv_occupancy",
+        action="store_true",
+        default=True,
+        help=(
+            "Predict grouped 64x64 outer-layer occupancy as a semantic prior "
+            "for inner/outer routing."
+        ),
+    )
+    parser.add_argument(
+        "--no_predict_outer_uv_occupancy",
+        dest="predict_outer_uv_occupancy",
+        action="store_false",
+    )
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--num_workers", type=int, default=8)
     parser.add_argument("--prefetch_factor", type=int, default=4)
@@ -1265,6 +1618,20 @@ def build_arg_parser():
         "--geometry_route_consensus_outer_margin", type=float, default=0.20
     )
     parser.add_argument(
+        "--outer_uv_occupancy_blend_weight", type=float, default=0.30
+    )
+    parser.add_argument(
+        "--outer_uv_occupancy_gate_threshold", type=float, default=0.10
+    )
+    parser.add_argument(
+        "--outer_uv_occupancy_rescue_threshold", type=float, default=0.70
+    )
+    parser.add_argument(
+        "--outer_uv_occupancy_rescue_route_threshold",
+        type=float,
+        default=0.30,
+    )
+    parser.add_argument(
         "--splat_color_aggregation",
         choices=SPLAT_COLOR_AGGREGATIONS,
         default="grid_mode",
@@ -1298,10 +1665,26 @@ def build_arg_parser():
         "--lambda_route_texel_consistency", type=float, default=0.25
     )
     parser.add_argument(
+        "--lambda_route_texel_supervision",
+        type=float,
+        default=0.50,
+        help="Weight for center-weighted, cross-view UV-texel route supervision.",
+    )
+    parser.add_argument(
+        "--route_texel_center_power",
+        type=float,
+        default=2.0,
+        help="Power applied to renderer texel-center quality in route supervision.",
+    )
+    parser.add_argument(
         "--lambda_route_prior_regularization", type=float, default=0.001
     )
     parser.add_argument("--lambda_semantic_presence", type=float, default=0.25)
     parser.add_argument("--lambda_semantic_coverage", type=float, default=0.25)
+    parser.add_argument("--lambda_outer_uv_occupancy", type=float, default=0.50)
+    parser.add_argument(
+        "--outer_uv_occupancy_dice_weight", type=float, default=1.0
+    )
     parser.add_argument("--outer_false_positive_gamma", type=float, default=2.0)
     parser.add_argument("--outer_false_negative_gamma", type=float, default=2.0)
     parser.add_argument("--primary_route_swap_gamma", type=float, default=2.0)
@@ -1403,6 +1786,10 @@ def main():
         "geometry_route_preserve_outer_margin",
         "geometry_route_consensus_outer_confidence",
         "geometry_route_consensus_outer_margin",
+        "outer_uv_occupancy_blend_weight",
+        "outer_uv_occupancy_gate_threshold",
+        "outer_uv_occupancy_rescue_threshold",
+        "outer_uv_occupancy_rescue_route_threshold",
     ):
         if not 0.0 <= getattr(args, name) <= 1.0:
             raise ValueError(f"--{name} must be in [0, 1].")
@@ -1422,11 +1809,16 @@ def main():
         args.lambda_route_confidence,
         args.lambda_primary_route_swap,
         args.lambda_route_texel_consistency,
+        args.lambda_route_texel_supervision,
         args.lambda_route_prior_regularization,
         args.lambda_semantic_presence,
         args.lambda_semantic_coverage,
+        args.lambda_outer_uv_occupancy,
+        args.outer_uv_occupancy_dice_weight,
     ) < 0:
         raise ValueError("Route, semantic, and confidence loss weights must be non-negative.")
+    if args.route_texel_center_power < 0:
+        raise ValueError("--route_texel_center_power must be non-negative.")
     if args.semantic_channels < 1 or args.semantic_layers < 1:
         raise ValueError("Semantic channels and layers must be positive.")
     if args.semantic_attention_heads < 1:
@@ -1500,6 +1892,7 @@ def main():
                 local_files_only=args.siglip_local_files_only,
             )
             semantic_feature_dim = runtime_semantic_backbone.raw_feature_dim
+    if args.semantic_backbone == "siglip2" or args.predict_outer_uv_occupancy:
         semantic_masks = tuple(
             mask.to(device) for mask in build_part_layer_masks()
         )
@@ -1561,6 +1954,7 @@ def main():
         route_prior_width=args.route_prior_width,
         route_prior_logit_cap=args.route_prior_logit_cap,
         route_prior_dropout=args.route_prior_dropout,
+        predict_outer_uv_occupancy=args.predict_outer_uv_occupancy,
     ).to(device)
     if runtime_semantic_backbone is not None:
         attach_siglip_runtime(
@@ -1662,6 +2056,21 @@ def main():
                 "Start a new parser run instead of resuming it."
             )
         checkpoint_config = checkpoint.get("model_config", {})
+        checkpoint_outer_occupancy = checkpoint_config.get(
+            "predict_outer_uv_occupancy",
+            any(
+                key.startswith("outer_uv_occupancy_head.")
+                for key in checkpoint["model"]
+            ),
+        )
+        if (
+            checkpoint_outer_occupancy
+            != model.predict_outer_uv_occupancy
+        ):
+            raise ValueError(
+                "Cannot add or remove the outer UV occupancy head while "
+                "resuming. Start a new parser run."
+            )
         checkpoint_route_prior = checkpoint_config.get(
             "route_role_spatial_prior",
             "route_role_prior" in checkpoint["model"],
@@ -1743,6 +2152,7 @@ def main():
         "route_prior_width": model.route_prior_width,
         "route_prior_logit_cap": model.route_prior_logit_cap,
         "route_prior_dropout": model.route_prior_dropout,
+        "predict_outer_uv_occupancy": model.predict_outer_uv_occupancy,
         "device": str(device),
         "parser_mode": args.parser_mode,
         "uv_classification": model.uv_classification,
@@ -1782,11 +2192,19 @@ def main():
         "lambda_route_confidence": args.lambda_route_confidence,
         "lambda_primary_route_swap": args.lambda_primary_route_swap,
         "lambda_route_texel_consistency": args.lambda_route_texel_consistency,
+        "lambda_route_texel_supervision": (
+            args.lambda_route_texel_supervision
+        ),
+        "route_texel_center_power": args.route_texel_center_power,
         "lambda_route_prior_regularization": (
             args.lambda_route_prior_regularization
         ),
         "lambda_semantic_presence": args.lambda_semantic_presence,
         "lambda_semantic_coverage": args.lambda_semantic_coverage,
+        "lambda_outer_uv_occupancy": args.lambda_outer_uv_occupancy,
+        "outer_uv_occupancy_dice_weight": (
+            args.outer_uv_occupancy_dice_weight
+        ),
         "outer_false_positive_gamma": args.outer_false_positive_gamma,
         "outer_false_negative_gamma": args.outer_false_negative_gamma,
         "primary_route_swap_gamma": args.primary_route_swap_gamma,

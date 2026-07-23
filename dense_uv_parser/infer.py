@@ -94,6 +94,9 @@ def load_parser(checkpoint_path, device):
     has_uv_classification = any(key.startswith("uv_x.") or key.startswith("uv_y.") for key in state_dict)
     has_layer_face = any(key.startswith("layer_face.") for key in state_dict)
     has_route_prior = "route_role_prior" in state_dict
+    has_outer_uv_occupancy = any(
+        key.startswith("outer_uv_occupancy_head.") for key in state_dict
+    )
     uv_classification = model_config.get("uv_classification", has_uv_classification)
     parser_mode = model_config.get("parser_mode", checkpoint_args.get("parser_mode", "dense"))
     predict_affine = model_config.get("predict_affine", parser_mode in ("global_affine", "geometry_fit"))
@@ -146,6 +149,9 @@ def load_parser(checkpoint_path, device):
         ),
         route_prior_logit_cap=model_config.get("route_prior_logit_cap", 1.5),
         route_prior_dropout=model_config.get("route_prior_dropout", 0.0),
+        predict_outer_uv_occupancy=model_config.get(
+            "predict_outer_uv_occupancy", has_outer_uv_occupancy
+        ),
     ).to(device)
     model.load_state_dict(state_dict)
     if model.semantic_feature_dim > 0:
@@ -1146,6 +1152,32 @@ def build_arg_parser():
         help="Minimum fused margin ratio required to promote a route to outer.",
     )
     parser.add_argument(
+        "--outer_uv_occupancy",
+        dest="outer_uv_occupancy",
+        action="store_true",
+        default=None,
+        help="Use the checkpoint's grouped 64x64 outer-layer occupancy prior.",
+    )
+    parser.add_argument(
+        "--no_outer_uv_occupancy",
+        dest="outer_uv_occupancy",
+        action="store_false",
+    )
+    parser.add_argument(
+        "--outer_uv_occupancy_blend_weight", type=float, default=None
+    )
+    parser.add_argument(
+        "--outer_uv_occupancy_gate_threshold", type=float, default=None
+    )
+    parser.add_argument(
+        "--outer_uv_occupancy_rescue_threshold", type=float, default=None
+    )
+    parser.add_argument(
+        "--outer_uv_occupancy_rescue_route_threshold",
+        type=float,
+        default=None,
+    )
+    parser.add_argument(
         "--color_aggregation",
         choices=SPLAT_COLOR_AGGREGATIONS,
         default="grid_mode",
@@ -1328,6 +1360,36 @@ def main():
         if args.geometry_route_consensus_outer_margin is None
         else args.geometry_route_consensus_outer_margin
     )
+    outer_uv_occupancy = (
+        parser_args.get(
+            "predict_outer_uv_occupancy",
+            parser_model.predict_outer_uv_occupancy,
+        )
+        if args.outer_uv_occupancy is None
+        else args.outer_uv_occupancy
+    )
+    outer_uv_occupancy_blend_weight = (
+        parser_args.get("outer_uv_occupancy_blend_weight", 0.30)
+        if args.outer_uv_occupancy_blend_weight is None
+        else args.outer_uv_occupancy_blend_weight
+    )
+    outer_uv_occupancy_gate_threshold = (
+        parser_args.get("outer_uv_occupancy_gate_threshold", 0.10)
+        if args.outer_uv_occupancy_gate_threshold is None
+        else args.outer_uv_occupancy_gate_threshold
+    )
+    outer_uv_occupancy_rescue_threshold = (
+        parser_args.get("outer_uv_occupancy_rescue_threshold", 0.70)
+        if args.outer_uv_occupancy_rescue_threshold is None
+        else args.outer_uv_occupancy_rescue_threshold
+    )
+    outer_uv_occupancy_rescue_route_threshold = (
+        parser_args.get(
+            "outer_uv_occupancy_rescue_route_threshold", 0.30
+        )
+        if args.outer_uv_occupancy_rescue_route_threshold is None
+        else args.outer_uv_occupancy_rescue_route_threshold
+    )
     outer_uv_min_coverage = (
         parser_args.get("outer_uv_min_coverage", 0.0)
         if args.outer_uv_min_coverage is None
@@ -1441,6 +1503,19 @@ def main():
             ),
             geometry_route_consensus_outer_margin=(
                 geometry_route_consensus_outer_margin
+            ),
+            outer_uv_occupancy=outer_uv_occupancy,
+            outer_uv_occupancy_blend_weight=(
+                outer_uv_occupancy_blend_weight
+            ),
+            outer_uv_occupancy_gate_threshold=(
+                outer_uv_occupancy_gate_threshold
+            ),
+            outer_uv_occupancy_rescue_threshold=(
+                outer_uv_occupancy_rescue_threshold
+            ),
+            outer_uv_occupancy_rescue_route_threshold=(
+                outer_uv_occupancy_rescue_route_threshold
             ),
             observed_foreground=observed_foreground,
             background_color_tolerance=args.background_color_tolerance,
@@ -1570,6 +1645,28 @@ def main():
                 "consensus_preserved_outer", torch.zeros_like(raw_outer)
             ).sum().item()
         )
+        occupancy_promoted_outer_count = int(
+            routing.get(
+                "occupancy_rescued_outer", torch.zeros_like(raw_outer)
+            ).sum().item()
+        )
+        occupancy_rejected_outer_count = int(
+            routing.get(
+                "occupancy_rejected_outer", torch.zeros_like(raw_outer)
+            ).sum().item()
+        )
+        occupancy_supported_outer_count = int(
+            routing.get(
+                "outer_occupancy_supported",
+                torch.zeros_like(raw_outer),
+            ).sum().item()
+        )
+        occupancy_trusted_outer_count = int(
+            routing.get(
+                "outer_occupancy_rescued",
+                torch.zeros_like(raw_outer),
+            ).sum().item()
+        )
         print(
             "routing_filter="
             + json.dumps(
@@ -1648,6 +1745,27 @@ def main():
                     ),
                     "consensus_weight": round(
                         float(geometry_route_texel_consensus_weight), 6
+                    ),
+                    "outer_uv_occupancy_available": bool(
+                        routing.get(
+                            "outer_uv_occupancy_available",
+                            torch.zeros_like(raw_outer),
+                        ).any().item()
+                    ),
+                    "outer_uv_occupancy_promoted_pixels": (
+                        occupancy_promoted_outer_count
+                    ),
+                    "outer_uv_occupancy_rejected_pixels": (
+                        occupancy_rejected_outer_count
+                    ),
+                    "outer_uv_occupancy_supported_pixels": (
+                        occupancy_supported_outer_count
+                    ),
+                    "outer_uv_occupancy_trusted_rescue_pixels": (
+                        occupancy_trusted_outer_count
+                    ),
+                    "outer_uv_occupancy_blend_weight": round(
+                        float(outer_uv_occupancy_blend_weight), 6
                     ),
                 },
                 sort_keys=True,

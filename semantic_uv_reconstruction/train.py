@@ -114,6 +114,10 @@ def load_dense_parser(checkpoint_path, device):
     state_dict = checkpoint["model"]
     has_uv_classification = any(key.startswith("uv_x.") or key.startswith("uv_y.") for key in state_dict)
     has_layer_face = any(key.startswith("layer_face.") for key in state_dict)
+    has_route_prior = "route_role_prior" in state_dict
+    has_outer_uv_occupancy = any(
+        key.startswith("outer_uv_occupancy_head.") for key in state_dict
+    )
     uv_classification = model_config.get("uv_classification", has_uv_classification)
     parser_mode = model_config.get("parser_mode", checkpoint_args.get("parser_mode", "dense"))
     predict_affine = model_config.get("predict_affine", parser_mode in ("global_affine", "geometry_fit"))
@@ -152,6 +156,22 @@ def load_dense_parser(checkpoint_path, device):
         predict_confidence=model_config.get(
             "predict_confidence",
             any(key.startswith("route_confidence.") for key in state_dict),
+        ),
+        route_role_spatial_prior=model_config.get(
+            "route_role_spatial_prior", has_route_prior
+        ),
+        route_prior_height=model_config.get(
+            "route_prior_height",
+            state_dict["route_role_prior"].shape[-2] if has_route_prior else 32,
+        ),
+        route_prior_width=model_config.get(
+            "route_prior_width",
+            state_dict["route_role_prior"].shape[-1] if has_route_prior else 16,
+        ),
+        route_prior_logit_cap=model_config.get("route_prior_logit_cap", 1.5),
+        route_prior_dropout=model_config.get("route_prior_dropout", 0.0),
+        predict_outer_uv_occupancy=model_config.get(
+            "predict_outer_uv_occupancy", has_outer_uv_occupancy
         ),
     ).to(device)
     model.load_state_dict(state_dict)

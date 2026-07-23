@@ -185,12 +185,14 @@ class DenseUVParserNet(nn.Module):
         route_prior_width=16,
         route_prior_logit_cap=1.5,
         route_prior_dropout=0.10,
+        predict_outer_uv_occupancy=False,
     ):
         super().__init__()
         self.geometry_only = bool(geometry_only)
         if layer_classes is None:
             layer_classes = 3 if self.geometry_only else 2
         self.layer_classes = int(layer_classes)
+        self.uv_size = int(uv_size)
         self.uv_classification = bool(uv_classification) and not self.geometry_only
         self.view_classes = int(view_classes)
         self.predict_affine = bool(predict_affine)
@@ -208,6 +210,7 @@ class DenseUVParserNet(nn.Module):
         self.route_prior_width = int(route_prior_width)
         self.route_prior_logit_cap = float(route_prior_logit_cap)
         self.route_prior_dropout = float(route_prior_dropout)
+        self.predict_outer_uv_occupancy = bool(predict_outer_uv_occupancy)
         if self.route_prior_height < 1 or self.route_prior_width < 1:
             raise ValueError("Route-prior dimensions must be positive.")
         if self.route_prior_logit_cap <= 0.0:
@@ -270,6 +273,24 @@ class DenseUVParserNet(nn.Module):
         if self.semantic_fusion is not None:
             self.outer_presence_head = nn.Linear(self.semantic_channels, 6)
             self.outer_coverage_head = nn.Linear(self.semantic_channels, 6)
+        if self.predict_outer_uv_occupancy:
+            if self.view_classes < 1:
+                raise ValueError(
+                    "Outer UV occupancy prediction requires grouped fixed-view inputs."
+                )
+            occupancy_input_channels = c * 8 + (
+                self.semantic_channels if self.semantic_fusion is not None else 0
+            )
+            occupancy_hidden_channels = max(self.semantic_channels, c * 4, 128)
+            self.outer_uv_occupancy_head = nn.Sequential(
+                nn.LayerNorm(occupancy_input_channels),
+                nn.Linear(occupancy_input_channels, occupancy_hidden_channels),
+                nn.GELU(),
+                nn.Linear(occupancy_hidden_channels, uv_size * uv_size),
+            )
+            # Outer-layer alpha is sparse. Starting below 0.5 avoids an
+            # untrained head behaving as an all-outer prior.
+            nn.init.constant_(self.outer_uv_occupancy_head[-1].bias, -2.0)
         if not self.geometry_only:
             self.part = nn.Conv2d(c, part_classes, kernel_size=1)
             self.face = nn.Conv2d(c, face_classes, kernel_size=1)
@@ -336,6 +357,15 @@ class DenseUVParserNet(nn.Module):
         s2 = self.down2(s1)
         s3 = self.down3(s2)
         x = self.mid(s3)
+        visual_summary = x.mean(dim=(2, 3))
+        if self.predict_outer_uv_occupancy:
+            if visual_summary.shape[0] % self.view_classes != 0:
+                raise ValueError(
+                    "Outer UV occupancy prediction requires complete fixed-view groups."
+                )
+            visual_summary = visual_summary.reshape(
+                -1, self.view_classes, visual_summary.shape[-1]
+            ).mean(dim=1)
         semantic_summary = None
         if self.semantic_fusion is not None:
             if semantic_features is None:
@@ -409,6 +439,15 @@ class DenseUVParserNet(nn.Module):
             outputs["outer_coverage"] = torch.sigmoid(
                 self.outer_coverage_head(semantic_summary)
             )
+        if self.predict_outer_uv_occupancy:
+            occupancy_summary = (
+                torch.cat([visual_summary, semantic_summary], dim=1)
+                if semantic_summary is not None
+                else visual_summary
+            )
+            outputs["outer_uv_occupancy_logits"] = self.outer_uv_occupancy_head(
+                occupancy_summary.float()
+            ).reshape(-1, 1, self.uv_size, self.uv_size)
         if not self.geometry_only:
             outputs["part"] = self.part(x)
             outputs["face"] = self.face(x)

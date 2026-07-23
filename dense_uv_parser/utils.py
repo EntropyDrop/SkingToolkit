@@ -692,7 +692,11 @@ def canonicalize_parser_outputs(outputs):
     canonical = {}
     for name, value in outputs.items():
         if (
-            name in ("affine", "route_role_prior_raw")
+            name in (
+                "affine",
+                "route_role_prior_raw",
+                "outer_uv_occupancy_logits",
+            )
             or not torch.is_tensor(value)
             or value.dim() != 4
         ):
@@ -1053,6 +1057,31 @@ def _aggregate_role_probabilities_by_direct_texel(
     return torch.stack(aggregated, dim=1)
 
 
+def _project_outer_uv_occupancy_to_view(
+    occupancy_logits,
+    static,
+    view_batch,
+):
+    """Gather a grouped 64x64 outer-alpha prior into one projected view."""
+    if occupancy_logits is None:
+        return None
+    if occupancy_logits.shape != (view_batch, 1, UV_SIZE, UV_SIZE):
+        raise ValueError(
+            "outer_uv_occupancy_logits must be grouped as "
+            f"{(view_batch, 1, UV_SIZE, UV_SIZE)}, got "
+            f"{tuple(occupancy_logits.shape)}."
+        )
+    probability = torch.sigmoid(occupancy_logits.float()).flatten(2)
+    flat_uv = static["flat_uv"][ROUTE_OUTER_PRIMARY].reshape(
+        1, 1, -1
+    ).expand(view_batch, 1, -1)
+    projected = probability.gather(2, flat_uv).reshape(
+        view_batch, *static["flat_uv"].shape[-2:]
+    )
+    outer_valid = static["masks"][ROUTE_OUTER_PRIMARY].unsqueeze(0)
+    return torch.where(outer_valid, projected, torch.zeros_like(projected))
+
+
 def _soft_route_role_consensus(
     role_prob,
     static,
@@ -1062,6 +1091,11 @@ def _soft_route_role_consensus(
     preserve_outer_margin=0.35,
     outer_confidence=0.70,
     outer_margin=0.20,
+    outer_uv_occupancy=None,
+    occupancy_blend_weight=0.30,
+    occupancy_gate_threshold=0.10,
+    occupancy_rescue_threshold=0.70,
+    occupancy_rescue_route_threshold=0.30,
 ):
     """Denoise route roles without erasing strong local outer-layer evidence."""
     for name, value in (
@@ -1070,6 +1104,13 @@ def _soft_route_role_consensus(
         ("preserve_outer_margin", preserve_outer_margin),
         ("outer_confidence", outer_confidence),
         ("outer_margin", outer_margin),
+        ("occupancy_blend_weight", occupancy_blend_weight),
+        ("occupancy_gate_threshold", occupancy_gate_threshold),
+        ("occupancy_rescue_threshold", occupancy_rescue_threshold),
+        (
+            "occupancy_rescue_route_threshold",
+            occupancy_rescue_route_threshold,
+        ),
     ):
         if not 0.0 <= float(value) <= 1.0:
             raise ValueError(f"{name} must be in [0, 1].")
@@ -1123,6 +1164,27 @@ def _soft_route_role_consensus(
         + float(consensus_weight) * texel_outer,
         unavailable,
     )
+    occupancy_available = outer_uv_occupancy is not None
+    if occupancy_available:
+        if outer_uv_occupancy.shape != texel_outer.shape:
+            raise ValueError(
+                "Projected outer occupancy must match the route map, got "
+                f"{tuple(outer_uv_occupancy.shape)} and "
+                f"{tuple(texel_outer.shape)}."
+            )
+        occupancy_prior = outer_uv_occupancy.float().clamp(0.0, 1.0)
+        fused_outer = torch.where(
+            outer_valid,
+            (1.0 - float(occupancy_blend_weight)) * fused_outer
+            + float(occupancy_blend_weight) * occupancy_prior,
+            unavailable,
+        )
+        occupancy_allows_outer = (
+            occupancy_prior >= float(occupancy_gate_threshold)
+        )
+    else:
+        occupancy_prior = torch.ones_like(texel_outer)
+        occupancy_allows_outer = torch.ones_like(outer_valid)
     # Secondary/backface observations remain strict cell-level decisions. The
     # soft blend is needed for the ambiguous inner/outer pair; retaining an
     # isolated secondary pixel would reintroduce exactly the speckle that
@@ -1144,6 +1206,7 @@ def _soft_route_role_consensus(
     ).clamp(0.0, 1.0)
     preserve_outer = (
         outer_valid
+        & occupancy_allows_outer
         & (raw_role == ROUTE_OUTER_PRIMARY)
         & (raw_outer_score >= float(preserve_outer_confidence))
         & (raw_outer_margin_ratio >= float(preserve_outer_margin))
@@ -1159,19 +1222,41 @@ def _soft_route_role_consensus(
         & (fused_outer >= float(outer_confidence))
         & (fused_outer_margin_ratio >= float(outer_margin))
     )
+    occupancy_rescue = (
+        outer_valid
+        & occupancy_allows_outer
+        & (occupancy_prior >= float(occupancy_rescue_threshold))
+        & (
+            raw_outer_score
+            >= float(occupancy_rescue_route_threshold)
+        )
+    ) if occupancy_available else torch.zeros_like(outer_valid)
     allow_outer = (
         outer_valid
-        & (fused_outer >= fused_outer_competitor)
+        & occupancy_allows_outer
+        & (
+            (fused_outer >= fused_outer_competitor)
+            | occupancy_rescue
+        )
         & (
             (raw_role == ROUTE_OUTER_PRIMARY)
             | promote_outer
             | preserve_outer
+            | occupancy_rescue
         )
     )
 
+    outer_candidate_score = torch.where(
+        occupancy_rescue,
+        torch.maximum(
+            fused_outer,
+            occupancy_prior,
+        ),
+        fused_outer,
+    )
     eligible_outer = torch.where(
         allow_outer | preserve_outer,
-        fused_outer,
+        outer_candidate_score,
         unavailable,
     )
     eligible_secondary = torch.where(
@@ -1227,6 +1312,19 @@ def _soft_route_role_consensus(
         ),
         "has_direct_candidate": has_direct_candidate,
         "preserved_outer": preserve_outer,
+        "occupancy_rescued_outer": (
+            occupancy_rescue
+            & (raw_role != ROUTE_OUTER_PRIMARY)
+            & (selected_role == ROUTE_OUTER_PRIMARY)
+        ),
+        "occupancy_rejected_outer": (
+            outer_valid
+            & (raw_role == ROUTE_OUTER_PRIMARY)
+            & ~occupancy_allows_outer
+        ),
+        "outer_uv_occupancy": (
+            occupancy_prior if occupancy_available else None
+        ),
         "changed": has_direct_candidate & (selected_role != raw_role),
         "inner_to_outer": (
             has_direct_candidate
@@ -1253,6 +1351,11 @@ def _routing_from_geometry_outputs(
     preserve_outer_margin=0.35,
     consensus_outer_confidence=0.70,
     consensus_outer_margin=0.20,
+    outer_uv_occupancy=True,
+    outer_uv_occupancy_blend_weight=0.30,
+    outer_uv_occupancy_gate_threshold=0.10,
+    outer_uv_occupancy_rescue_threshold=0.70,
+    outer_uv_occupancy_rescue_route_threshold=0.30,
 ):
     """Route a fitted Steve render through fixed inner/outer cuboid UV maps."""
     views = parse_views(views)
@@ -1289,6 +1392,14 @@ def _routing_from_geometry_outputs(
     consensus_inner_to_outer = torch.zeros_like(fg)
     consensus_outer_to_inner = torch.zeros_like(fg)
     consensus_preserved_outer = torch.zeros_like(fg)
+    occupancy_rescued_outer = torch.zeros_like(fg)
+    occupancy_rejected_outer = torch.zeros_like(fg)
+    projected_outer_occupancy = torch.zeros_like(outer_prob)
+    occupancy_logits = (
+        outputs.get("outer_uv_occupancy_logits")
+        if outer_uv_occupancy
+        else None
+    )
     for view_index, view in enumerate(views):
         selection = slice(view_index, N, len(views))
         static = build_static_surface_routing(renderer, view, outer_prob.device)
@@ -1301,6 +1412,11 @@ def _routing_from_geometry_outputs(
         inner_valid = static["masks"][0].unsqueeze(0).expand(outer_prob[selection].shape[0], -1, -1)
         outer_valid = static["masks"][1].unsqueeze(0).expand_as(inner_valid)
         if texel_consensus:
+            view_occupancy = _project_outer_uv_occupancy_to_view(
+                occupancy_logits,
+                static,
+                outer_prob[selection].shape[0],
+            )
             consensus = _soft_route_role_consensus(
                 role_prob[selection],
                 static,
@@ -1310,6 +1426,19 @@ def _routing_from_geometry_outputs(
                 preserve_outer_margin=preserve_outer_margin,
                 outer_confidence=consensus_outer_confidence,
                 outer_margin=consensus_outer_margin,
+                outer_uv_occupancy=view_occupancy,
+                occupancy_blend_weight=(
+                    outer_uv_occupancy_blend_weight
+                ),
+                occupancy_gate_threshold=(
+                    outer_uv_occupancy_gate_threshold
+                ),
+                occupancy_rescue_threshold=(
+                    outer_uv_occupancy_rescue_threshold
+                ),
+                occupancy_rescue_route_threshold=(
+                    outer_uv_occupancy_rescue_route_threshold
+                ),
             )
             has_direct_candidate = consensus["has_direct_candidate"]
             route_role[selection] = consensus["role"]
@@ -1336,6 +1465,14 @@ def _routing_from_geometry_outputs(
             consensus_inner_to_outer[selection] = consensus["inner_to_outer"]
             consensus_outer_to_inner[selection] = consensus["outer_to_inner"]
             consensus_preserved_outer[selection] = consensus["preserved_outer"]
+            occupancy_rescued_outer[selection] = consensus[
+                "occupancy_rescued_outer"
+            ]
+            occupancy_rejected_outer[selection] = consensus[
+                "occupancy_rejected_outer"
+            ]
+            if view_occupancy is not None:
+                projected_outer_occupancy[selection] = view_occupancy
 
         visible_outer = (
             (route_role[selection] == ROUTE_OUTER_PRIMARY)
@@ -1411,6 +1548,12 @@ def _routing_from_geometry_outputs(
         "consensus_inner_to_outer": consensus_inner_to_outer,
         "consensus_outer_to_inner": consensus_outer_to_inner,
         "consensus_preserved_outer": consensus_preserved_outer,
+        "occupancy_rescued_outer": occupancy_rescued_outer,
+        "occupancy_rejected_outer": occupancy_rejected_outer,
+        "projected_outer_occupancy": projected_outer_occupancy,
+        "outer_uv_occupancy_available": torch.full_like(
+            fg, occupancy_logits is not None
+        ),
     }
 
 
@@ -1460,6 +1603,11 @@ def _routing_from_geometry_surface_outputs(
     preserve_outer_margin=0.35,
     consensus_outer_confidence=0.70,
     consensus_outer_margin=0.20,
+    outer_uv_occupancy=True,
+    outer_uv_occupancy_blend_weight=0.30,
+    outer_uv_occupancy_gate_threshold=0.10,
+    outer_uv_occupancy_rescue_threshold=0.70,
+    outer_uv_occupancy_rescue_route_threshold=0.30,
 ):
     """Route primary layers first, then use the surface head for secondary UVs.
 
@@ -1500,6 +1648,14 @@ def _routing_from_geometry_surface_outputs(
     consensus_inner_to_outer = torch.zeros_like(fg)
     consensus_outer_to_inner = torch.zeros_like(fg)
     consensus_preserved_outer = torch.zeros_like(fg)
+    occupancy_rescued_outer = torch.zeros_like(fg)
+    occupancy_rejected_outer = torch.zeros_like(fg)
+    projected_outer_occupancy = torch.zeros_like(foreground_prob)
+    occupancy_logits = (
+        outputs.get("outer_uv_occupancy_logits")
+        if outer_uv_occupancy
+        else None
+    )
 
     for view_index, view in enumerate(views):
         selection = slice(view_index, N, len(views))
@@ -1528,6 +1684,11 @@ def _routing_from_geometry_surface_outputs(
         role_margin = role_top[:, 0] - role_top[:, 1]
 
         if texel_consensus:
+            view_occupancy = _project_outer_uv_occupancy_to_view(
+                occupancy_logits,
+                static,
+                view_batch,
+            )
             consensus = _soft_route_role_consensus(
                 view_role_prob,
                 static,
@@ -1537,6 +1698,19 @@ def _routing_from_geometry_surface_outputs(
                 preserve_outer_margin=preserve_outer_margin,
                 outer_confidence=consensus_outer_confidence,
                 outer_margin=consensus_outer_margin,
+                outer_uv_occupancy=view_occupancy,
+                occupancy_blend_weight=(
+                    outer_uv_occupancy_blend_weight
+                ),
+                occupancy_gate_threshold=(
+                    outer_uv_occupancy_gate_threshold
+                ),
+                occupancy_rescue_threshold=(
+                    outer_uv_occupancy_rescue_threshold
+                ),
+                occupancy_rescue_route_threshold=(
+                    outer_uv_occupancy_rescue_route_threshold
+                ),
             )
             selected_role = consensus["role"]
             selected_role_score = consensus["score"]
@@ -1545,6 +1719,14 @@ def _routing_from_geometry_surface_outputs(
             consensus_inner_to_outer[selection] = consensus["inner_to_outer"]
             consensus_outer_to_inner[selection] = consensus["outer_to_inner"]
             consensus_preserved_outer[selection] = consensus["preserved_outer"]
+            occupancy_rescued_outer[selection] = consensus[
+                "occupancy_rescued_outer"
+            ]
+            occupancy_rejected_outer[selection] = consensus[
+                "occupancy_rejected_outer"
+            ]
+            if view_occupancy is not None:
+                projected_outer_occupancy[selection] = view_occupancy
 
         candidate_score = surface_prob[selection, :surface_count]
         candidate_valid = static["masks"].unsqueeze(0).expand(
@@ -1686,6 +1868,12 @@ def _routing_from_geometry_surface_outputs(
         "consensus_inner_to_outer": consensus_inner_to_outer,
         "consensus_outer_to_inner": consensus_outer_to_inner,
         "consensus_preserved_outer": consensus_preserved_outer,
+        "occupancy_rescued_outer": occupancy_rescued_outer,
+        "occupancy_rejected_outer": occupancy_rejected_outer,
+        "projected_outer_occupancy": projected_outer_occupancy,
+        "outer_uv_occupancy_available": torch.full_like(
+            fg, occupancy_logits is not None
+        ),
         "learned_trust": (
             torch.sigmoid(outputs["route_confidence"][:, 0].float())
             if "route_confidence" in outputs
@@ -2126,6 +2314,11 @@ def splat_parser_predictions_to_uv_conditioning(
     geometry_route_preserve_outer_margin=0.35,
     geometry_route_consensus_outer_confidence=0.70,
     geometry_route_consensus_outer_margin=0.20,
+    outer_uv_occupancy=True,
+    outer_uv_occupancy_blend_weight=0.30,
+    outer_uv_occupancy_gate_threshold=0.10,
+    outer_uv_occupancy_rescue_threshold=0.70,
+    outer_uv_occupancy_rescue_route_threshold=0.30,
     observed_foreground=None,
     background_color_tolerance=SOLID_BACKGROUND_COLOR_TOLERANCE,
     color_background_tolerance=None,
@@ -2187,6 +2380,22 @@ def splat_parser_predictions_to_uv_conditioning(
         (
             "geometry_route_consensus_outer_margin",
             geometry_route_consensus_outer_margin,
+        ),
+        (
+            "outer_uv_occupancy_blend_weight",
+            outer_uv_occupancy_blend_weight,
+        ),
+        (
+            "outer_uv_occupancy_gate_threshold",
+            outer_uv_occupancy_gate_threshold,
+        ),
+        (
+            "outer_uv_occupancy_rescue_threshold",
+            outer_uv_occupancy_rescue_threshold,
+        ),
+        (
+            "outer_uv_occupancy_rescue_route_threshold",
+            outer_uv_occupancy_rescue_route_threshold,
         ),
     ):
         if not 0.0 <= float(value) <= 1.0:
@@ -2293,6 +2502,19 @@ def splat_parser_predictions_to_uv_conditioning(
             preserve_outer_margin=geometry_route_preserve_outer_margin,
             consensus_outer_confidence=geometry_route_consensus_outer_confidence,
             consensus_outer_margin=geometry_route_consensus_outer_margin,
+            outer_uv_occupancy=outer_uv_occupancy,
+            outer_uv_occupancy_blend_weight=(
+                outer_uv_occupancy_blend_weight
+            ),
+            outer_uv_occupancy_gate_threshold=(
+                outer_uv_occupancy_gate_threshold
+            ),
+            outer_uv_occupancy_rescue_threshold=(
+                outer_uv_occupancy_rescue_threshold
+            ),
+            outer_uv_occupancy_rescue_route_threshold=(
+                outer_uv_occupancy_rescue_route_threshold
+            ),
         )
     elif "surface" not in canonical_outputs and "part" not in canonical_outputs:
         routing = _routing_from_geometry_outputs(
@@ -2307,6 +2529,19 @@ def splat_parser_predictions_to_uv_conditioning(
             preserve_outer_margin=geometry_route_preserve_outer_margin,
             consensus_outer_confidence=geometry_route_consensus_outer_confidence,
             consensus_outer_margin=geometry_route_consensus_outer_margin,
+            outer_uv_occupancy=outer_uv_occupancy,
+            outer_uv_occupancy_blend_weight=(
+                outer_uv_occupancy_blend_weight
+            ),
+            outer_uv_occupancy_gate_threshold=(
+                outer_uv_occupancy_gate_threshold
+            ),
+            outer_uv_occupancy_rescue_threshold=(
+                outer_uv_occupancy_rescue_threshold
+            ),
+            outer_uv_occupancy_rescue_route_threshold=(
+                outer_uv_occupancy_rescue_route_threshold
+            ),
         )
     else:
         routing = _routing_from_affine_outputs(
@@ -2344,8 +2579,10 @@ def splat_parser_predictions_to_uv_conditioning(
         strict_trusted = strict_trusted & ~rejected_fallback
     geometry_supported_outer = torch.zeros_like(selected_outer)
     semantic_supported_outer = torch.zeros_like(selected_outer)
+    occupancy_supported_outer = torch.zeros_like(selected_outer)
     outer_geometry_rescued = torch.zeros_like(selected_outer)
     outer_semantic_rescued = torch.zeros_like(selected_outer)
+    outer_occupancy_rescued = torch.zeros_like(selected_outer)
     if outer_geometry_rescue:
         geometry_supported_outer = _geometry_supported_outer_texels(
             routing,
@@ -2390,6 +2627,38 @@ def splat_parser_predictions_to_uv_conditioning(
             semantic_rescue_trusted = semantic_rescue_trusted & ~rejected_fallback
         outer_semantic_rescued = semantic_rescue_trusted & ~trusted
         trusted = trusted | semantic_rescue_trusted
+    occupancy_available = routing.get(
+        "outer_uv_occupancy_available",
+        torch.zeros_like(selected_outer),
+    )
+    occupancy_supported_outer = (
+        selected_outer
+        & occupancy_available
+        & (
+            routing.get(
+                "projected_outer_occupancy",
+                torch.zeros_like(routing["confidence"]),
+            )
+            >= float(outer_uv_occupancy_rescue_threshold)
+        )
+    )
+    if outer_uv_occupancy and occupancy_supported_outer.any():
+        occupancy_rescue_trusted = (
+            raw_foreground
+            & canonical_observed_foreground
+            & occupancy_supported_outer
+            & (routing["confidence"] >= outer_rescue_confidence_threshold)
+            & (
+                routing["confidence_margin_ratio"]
+                >= outer_rescue_margin_threshold
+            )
+        )
+        if reject_semantic_fallback:
+            occupancy_rescue_trusted = (
+                occupancy_rescue_trusted & ~rejected_fallback
+            )
+        outer_occupancy_rescued = occupancy_rescue_trusted & ~trusted
+        trusted = trusted | occupancy_rescue_trusted
     outer_uv_coverage = torch.ones_like(routing["confidence"])
     outer_required_coverage = torch.zeros_like(routing["confidence"])
     if outer_uv_min_coverage > 0.0:
@@ -2428,9 +2697,15 @@ def splat_parser_predictions_to_uv_conditioning(
             pixel_coverage = coverage[item_groups.view(-1, 1, 1), routing["flat_uv"]]
         outer_uv_coverage = torch.where(selected_outer, pixel_coverage, outer_uv_coverage)
         required_coverage = torch.full_like(pixel_coverage, outer_uv_min_coverage)
-        if outer_geometry_rescue or outer_semantic_rescue:
+        if (
+            outer_geometry_rescue
+            or outer_semantic_rescue
+            or outer_uv_occupancy
+        ):
             required_coverage = torch.where(
-                geometry_supported_outer | semantic_supported_outer,
+                geometry_supported_outer
+                | semantic_supported_outer
+                | occupancy_supported_outer,
                 required_coverage.new_tensor(
                     min(outer_uv_min_coverage, outer_rescue_min_coverage)
                 ),
@@ -2479,6 +2754,8 @@ def splat_parser_predictions_to_uv_conditioning(
     routing["outer_geometry_rescued"] = outer_geometry_rescued & trusted
     routing["outer_semantic_supported"] = semantic_supported_outer
     routing["outer_semantic_rescued"] = outer_semantic_rescued & trusted
+    routing["outer_occupancy_supported"] = occupancy_supported_outer
+    routing["outer_occupancy_rescued"] = outer_occupancy_rescued & trusted
     routing["outer_required_coverage"] = outer_required_coverage
     routing["outer_source_support"] = outer_source_support
     routing["outer_source_rejected"] = outer_source_rejected
