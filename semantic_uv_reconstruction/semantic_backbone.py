@@ -5,6 +5,8 @@ unit tests, and the geometry-only fallback therefore remain usable on machines
 without a Hugging Face training environment.
 """
 
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -212,3 +214,165 @@ class SigLIP2VisionBackbone(nn.Module):
             "global": self.project_global(raw_global),
             "raw_global": raw_global,
         }
+
+
+class TIPSv2VisionBackbone(nn.Module):
+    """Frozen TIPSv2 vision backbone exposing its native spatial feature map.
+
+    Dense UV routing needs to distinguish nearby surfaces such as an eye from
+    hair or a hat brim.  A pooled image embedding discards exactly that spatial
+    evidence, so this adapter deliberately asks ``AutoBackbone`` for TIPSv2
+    feature maps instead of loading only the global image encoder.
+    """
+
+    def __init__(
+        self,
+        model_name="google/tipsv2-b14",
+        local_files_only=False,
+        inference_batch_size=32,
+    ):
+        super().__init__()
+        try:
+            from transformers import AutoBackbone, AutoImageProcessor
+        except (ImportError, AttributeError) as error:
+            raise ImportError(
+                "TIPSv2 training requires a recent Hugging Face Transformers "
+                "build with AutoBackbone TIPSv2 support. Install or upgrade "
+                "with: pip install -U transformers safetensors"
+            ) from error
+
+        processor = AutoImageProcessor.from_pretrained(
+            model_name,
+            local_files_only=bool(local_files_only),
+            use_fast=False,
+        )
+        self.vision_model = AutoBackbone.from_pretrained(
+            model_name,
+            local_files_only=bool(local_files_only),
+            out_indices=[-1],
+        )
+        config = self.vision_model.config
+        image_size = getattr(config, "image_size", None)
+        if isinstance(image_size, (tuple, list)):
+            if len(image_size) != 2 or image_size[0] != image_size[1]:
+                raise ValueError(
+                    f"{model_name} must use a square fixed-resolution input."
+                )
+            image_size = image_size[0]
+        if not isinstance(image_size, int):
+            processor_size = getattr(processor, "size", {})
+            if isinstance(processor_size, dict):
+                image_size = (
+                    processor_size.get("height")
+                    or processor_size.get("shortest_edge")
+                )
+        channels = getattr(self.vision_model, "channels", None)
+        hidden_size = channels[-1] if channels else getattr(config, "hidden_size", None)
+        if not isinstance(image_size, int):
+            raise ValueError(f"Cannot determine input image size for {model_name}.")
+        if not isinstance(hidden_size, int):
+            raise ValueError(f"Cannot determine spatial feature size for {model_name}.")
+
+        do_normalize = bool(getattr(processor, "do_normalize", False))
+        image_mean = (
+            getattr(processor, "image_mean", (0.0, 0.0, 0.0))
+            if do_normalize
+            else (0.0, 0.0, 0.0)
+        )
+        image_std = (
+            getattr(processor, "image_std", (1.0, 1.0, 1.0))
+            if do_normalize
+            else (1.0, 1.0, 1.0)
+        )
+        self.model_name = str(model_name)
+        self.image_size = int(image_size)
+        self.raw_feature_dim = int(hidden_size)
+        self.raw_spatial_feature_dim = int(hidden_size)
+        self.inference_batch_size = int(inference_batch_size)
+        if self.inference_batch_size < 1:
+            raise ValueError("TIPSv2 inference_batch_size must be positive.")
+        self.register_buffer(
+            "image_mean",
+            torch.tensor(image_mean, dtype=torch.float32).view(1, 3, 1, 1),
+            persistent=False,
+        )
+        self.register_buffer(
+            "image_std",
+            torch.tensor(image_std, dtype=torch.float32).view(1, 3, 1, 1),
+            persistent=False,
+        )
+        self.vision_model.requires_grad_(False)
+        self.vision_model.eval()
+
+    def train(self, mode=True):
+        super().train(mode)
+        self.vision_model.eval()
+        return self
+
+    def _letterbox(self, images):
+        if images.dim() != 4 or images.shape[1] != 3:
+            raise ValueError(f"Expected Nx3xHxW images, got {tuple(images.shape)}.")
+        height, width = images.shape[-2:]
+        scale = min(self.image_size / height, self.image_size / width)
+        resized_height = max(1, min(self.image_size, round(height * scale)))
+        resized_width = max(1, min(self.image_size, round(width * scale)))
+        resized = F.interpolate(
+            images.float(),
+            size=(resized_height, resized_width),
+            mode="bilinear",
+            align_corners=False,
+            antialias=True,
+        )
+        pad_height = self.image_size - resized_height
+        pad_width = self.image_size - resized_width
+        left = pad_width // 2
+        right = pad_width - left
+        top = pad_height // 2
+        bottom = pad_height - top
+        pixels = F.pad(resized, (left, right, top, bottom), value=0.5)
+        pixels = (pixels - self.image_mean) / self.image_std
+        return pixels, (top, left, resized_height, resized_width)
+
+    def _crop_letterbox_features(self, features, content_rect):
+        """Remove letterbox-only cells while retaining the source aspect ratio."""
+        top, left, resized_height, resized_width = content_rect
+        feature_height, feature_width = features.shape[-2:]
+        row_start = int(math.floor(top * feature_height / self.image_size))
+        row_stop = int(
+            math.ceil((top + resized_height) * feature_height / self.image_size)
+        )
+        column_start = int(math.floor(left * feature_width / self.image_size))
+        column_stop = int(
+            math.ceil((left + resized_width) * feature_width / self.image_size)
+        )
+        row_start = max(0, min(feature_height - 1, row_start))
+        row_stop = max(row_start + 1, min(feature_height, row_stop))
+        column_start = max(0, min(feature_width - 1, column_start))
+        column_stop = max(column_start + 1, min(feature_width, column_stop))
+        return features[:, :, row_start:row_stop, column_start:column_stop]
+
+    def encode_dense(self, images):
+        pixels, content_rect = self._letterbox(images)
+        spatial_chunks = []
+        for start in range(0, pixels.shape[0], self.inference_batch_size):
+            outputs = self.vision_model(
+                pixel_values=pixels[start : start + self.inference_batch_size]
+            )
+            feature_maps = getattr(outputs, "feature_maps", None)
+            if not feature_maps:
+                raise ValueError(
+                    f"{self.model_name} did not return spatial backbone feature maps."
+                )
+            spatial_chunks.append(feature_maps[-1])
+        feature_map = torch.cat(spatial_chunks, dim=0)
+        raw_spatial = self._crop_letterbox_features(
+            feature_map, content_rect
+        )
+        raw_global = raw_spatial.mean(dim=(2, 3))
+        return {
+            "raw_global": raw_global,
+            "raw_spatial": raw_spatial,
+        }
+
+    def forward(self, images):
+        return self.encode_dense(images)

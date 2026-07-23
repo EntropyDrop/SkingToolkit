@@ -154,6 +154,67 @@ class MultiViewSemanticFusion(nn.Module):
         return self.modulation(per_view), self.summary(pooled)
 
 
+class SpatialSemanticFusion(nn.Module):
+    """Project frozen 2D semantic features into the parser bottleneck.
+
+    The final projection starts at zero, preserving the stable geometry parser
+    at initialization while allowing spatial semantic corrections to emerge
+    during training.
+    """
+
+    def __init__(
+        self,
+        raw_feature_dim,
+        semantic_channels,
+        bottleneck_channels,
+    ):
+        super().__init__()
+        if raw_feature_dim < 1 or semantic_channels < 1:
+            raise ValueError("Spatial semantic feature dimensions must be positive.")
+        self.raw_feature_dim = int(raw_feature_dim)
+        self.semantic_channels = int(semantic_channels)
+        self.input_norm = nn.LayerNorm(raw_feature_dim)
+        self.input_projection = nn.Conv2d(
+            raw_feature_dim, semantic_channels, kernel_size=1
+        )
+        self.activation = nn.GELU()
+        self.output_projection = nn.Conv2d(
+            semantic_channels, bottleneck_channels, kernel_size=1
+        )
+        nn.init.zeros_(self.output_projection.weight)
+        nn.init.zeros_(self.output_projection.bias)
+
+    def forward(self, raw_features, sample_count, output_size):
+        if raw_features.dim() == 5:
+            raw_features = raw_features.reshape(
+                -1,
+                raw_features.shape[-3],
+                raw_features.shape[-2],
+                raw_features.shape[-1],
+            )
+        if (
+            raw_features.dim() != 4
+            or raw_features.shape[0] != sample_count
+            or raw_features.shape[1] != self.raw_feature_dim
+        ):
+            raise ValueError(
+                "Spatial semantic features must be shaped NxCxHxW or "
+                f"BxVxCxHxW; got {tuple(raw_features.shape)}."
+            )
+        normalized = self.input_norm(
+            raw_features.float().permute(0, 2, 3, 1)
+        ).permute(0, 3, 1, 2)
+        residual = self.output_projection(
+            self.activation(self.input_projection(normalized))
+        )
+        return F.interpolate(
+            residual,
+            size=output_size,
+            mode="bilinear",
+            align_corners=False,
+        )
+
+
 class DenseUVParserNet(nn.Module):
     """Predict dense Minecraft UV routing for each render pixel."""
 
@@ -179,6 +240,8 @@ class DenseUVParserNet(nn.Module):
         semantic_attention_heads=4,
         semantic_layers=1,
         semantic_dropout=0.05,
+        semantic_spatial_feature_dim=0,
+        semantic_spatial_channels=64,
         predict_confidence=False,
         route_role_spatial_prior=False,
         route_prior_height=32,
@@ -204,6 +267,8 @@ class DenseUVParserNet(nn.Module):
         self.semantic_attention_heads = int(semantic_attention_heads)
         self.semantic_layers = int(semantic_layers)
         self.semantic_dropout = float(semantic_dropout)
+        self.semantic_spatial_feature_dim = int(semantic_spatial_feature_dim)
+        self.semantic_spatial_channels = int(semantic_spatial_channels)
         self.predict_confidence = bool(predict_confidence)
         self.route_role_spatial_prior = bool(route_role_spatial_prior)
         self.route_prior_height = int(route_prior_height)
@@ -243,6 +308,15 @@ class DenseUVParserNet(nn.Module):
                 dropout=self.semantic_dropout,
             )
             if self.semantic_feature_dim > 0
+            else None
+        )
+        self.semantic_spatial_fusion = (
+            SpatialSemanticFusion(
+                self.semantic_spatial_feature_dim,
+                self.semantic_spatial_channels,
+                c * 8,
+            )
+            if self.semantic_spatial_feature_dim > 0
             else None
         )
         self.up2 = UpBlock(c * 8, c * 4, c * 4)
@@ -330,16 +404,48 @@ class DenseUVParserNet(nn.Module):
             upper_log_scale = math.log1p(self.affine_scale_range)
             self.affine_log_scale_limit = max(abs(lower_log_scale), abs(upper_log_scale))
 
-    def _runtime_semantic_features(self, images):
+    def _runtime_semantic_features(self, images, foreground=None):
         backbone = getattr(self, "_runtime_semantic_backbone", None)
         if backbone is None:
             raise ValueError(
-                "This parser requires semantic_features or an attached SigLIP2 runtime backbone."
+                "This parser requires semantic_features or an attached semantic "
+                "runtime backbone."
             )
+        rgb = images[:, :3]
+        if foreground is not None:
+            if foreground.dim() == 3:
+                foreground = foreground.unsqueeze(1)
+            if (
+                foreground.dim() != 4
+                or foreground.shape[0] != rgb.shape[0]
+                or foreground.shape[1] != 1
+            ):
+                raise ValueError(
+                    "semantic_foreground must be shaped Nx1xHxW or NxHxW; got "
+                    f"{tuple(foreground.shape)}."
+                )
+            if foreground.shape[-2:] != rgb.shape[-2:]:
+                foreground = F.interpolate(
+                    foreground.float(),
+                    size=rgb.shape[-2:],
+                    mode="nearest",
+                )
+            foreground = foreground.to(device=rgb.device, dtype=rgb.dtype).clamp(0, 1)
+            # A fixed neutral background prevents the frozen spatial tower from
+            # learning accidental correlations with randomized training colors.
+            rgb = rgb * foreground + 0.5 * (1.0 - foreground)
         with torch.no_grad():
-            return backbone.encode_global(images[:, :3])["raw_global"]
+            if hasattr(backbone, "encode_dense"):
+                return backbone.encode_dense(rgb)
+            return backbone.encode_global(rgb)
 
-    def forward(self, x, view_ids=None, semantic_features=None):
+    def forward(
+        self,
+        x,
+        view_ids=None,
+        semantic_features=None,
+        semantic_foreground=None,
+    ):
         source_images = x
         if self.view_classes > 0:
             if view_ids is None:
@@ -357,6 +463,33 @@ class DenseUVParserNet(nn.Module):
         s2 = self.down2(s1)
         s3 = self.down3(s2)
         x = self.mid(s3)
+        if (
+            self.semantic_fusion is not None
+            or self.semantic_spatial_fusion is not None
+        ) and semantic_features is None:
+            semantic_features = self._runtime_semantic_features(
+                source_images, foreground=semantic_foreground
+            )
+        if isinstance(semantic_features, dict):
+            semantic_global = semantic_features.get(
+                "raw_global", semantic_features.get("global")
+            )
+            semantic_spatial = semantic_features.get(
+                "raw_spatial", semantic_features.get("spatial")
+            )
+        else:
+            semantic_global = semantic_features
+            semantic_spatial = None
+        if self.semantic_spatial_fusion is not None:
+            if semantic_spatial is None:
+                raise ValueError(
+                    "This parser checkpoint requires spatial semantic features."
+                )
+            x = x + self.semantic_spatial_fusion(
+                semantic_spatial,
+                source_images.shape[0],
+                x.shape[-2:],
+            ).to(dtype=x.dtype)
         visual_summary = x.mean(dim=(2, 3))
         if self.predict_outer_uv_occupancy:
             if visual_summary.shape[0] % self.view_classes != 0:
@@ -368,10 +501,12 @@ class DenseUVParserNet(nn.Module):
             ).mean(dim=1)
         semantic_summary = None
         if self.semantic_fusion is not None:
-            if semantic_features is None:
-                semantic_features = self._runtime_semantic_features(source_images)
+            if semantic_global is None:
+                raise ValueError(
+                    "This parser checkpoint requires global semantic features."
+                )
             modulation, semantic_summary = self.semantic_fusion(
-                semantic_features,
+                semantic_global,
                 view_ids,
                 source_images.shape[0],
             )

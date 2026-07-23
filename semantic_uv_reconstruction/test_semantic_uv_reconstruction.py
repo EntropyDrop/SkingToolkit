@@ -19,7 +19,10 @@ from SkingToolkit.semantic_uv_reconstruction.semantic_losses import (
     build_part_layer_masks,
     build_semantic_attribute_targets,
 )
-from SkingToolkit.semantic_uv_reconstruction.semantic_backbone import SigLIP2VisionBackbone
+from SkingToolkit.semantic_uv_reconstruction.semantic_backbone import (
+    SigLIP2VisionBackbone,
+    TIPSv2VisionBackbone,
+)
 from SkingToolkit.semantic_uv_reconstruction.semantic_model import SemanticUVReconstructor
 from SkingToolkit.semantic_uv_reconstruction.train_semantic_uv_reconstruction import (
     build_arg_parser,
@@ -118,6 +121,60 @@ class SigLIP2AdapterTest(unittest.TestCase):
         outputs["raw_global"].sum().backward()
         self.assertIsNotNone(images.grad)
         self.assertGreater(float(images.grad.abs().sum()), 0.0)
+
+
+class TIPSv2AdapterTest(unittest.TestCase):
+    def test_adapter_returns_letterbox_cropped_spatial_features(self):
+        class FakeVisionBackbone(nn.Module):
+            channels = [12]
+
+            def __init__(self):
+                super().__init__()
+                self.config = SimpleNamespace(image_size=32, hidden_size=12)
+                self.projection = nn.Conv2d(3, 12, kernel_size=1)
+
+            @staticmethod
+            def from_pretrained(
+                model_name,
+                local_files_only=False,
+                out_indices=None,
+            ):
+                del model_name, local_files_only
+                if out_indices != [-1]:
+                    raise AssertionError("The adapter must request the final feature map.")
+                return FakeVisionBackbone()
+
+            def forward(self, pixel_values):
+                pooled = F.adaptive_avg_pool2d(pixel_values, (4, 4))
+                return SimpleNamespace(feature_maps=(self.projection(pooled),))
+
+        class FakeAutoImageProcessor:
+            @staticmethod
+            def from_pretrained(model_name, local_files_only=False, use_fast=True):
+                del model_name, local_files_only
+                if use_fast:
+                    raise AssertionError("The adapter must preserve processor metadata.")
+                return SimpleNamespace(
+                    image_mean=(0.5, 0.5, 0.5),
+                    image_std=(0.5, 0.5, 0.5),
+                    size={"height": 32, "width": 32},
+                )
+
+        fake_transformers = types.ModuleType("transformers")
+        fake_transformers.AutoImageProcessor = FakeAutoImageProcessor
+        fake_transformers.AutoBackbone = FakeVisionBackbone
+        with patch.dict(sys.modules, {"transformers": fake_transformers}):
+            backbone = TIPSv2VisionBackbone(
+                "fake-tipsv2",
+                inference_batch_size=1,
+            )
+        outputs = backbone.encode_dense(torch.rand(2, 3, 20, 40))
+
+        self.assertEqual(tuple(outputs["raw_spatial"].shape), (2, 12, 2, 4))
+        self.assertEqual(tuple(outputs["raw_global"].shape), (2, 12))
+        self.assertFalse(
+            any(parameter.requires_grad for parameter in backbone.vision_model.parameters())
+        )
 
 
 class SemanticUVModelTest(unittest.TestCase):

@@ -20,7 +20,7 @@ from SkingToolkit.dense_uv_parser.foreground import (  # noqa: E402
     build_parser_input,
     save_flood_outputs,
 )
-from SkingToolkit.dense_uv_parser.semantic import attach_siglip_runtime  # noqa: E402
+from SkingToolkit.dense_uv_parser.semantic import attach_semantic_runtime  # noqa: E402
 from SkingToolkit.dense_uv_parser.utils import (  # noqa: E402
     FACE_PALETTE,
     IGNORE_INDEX,
@@ -132,6 +132,12 @@ def load_parser(checkpoint_path, device):
         semantic_attention_heads=model_config.get("semantic_attention_heads", 4),
         semantic_layers=model_config.get("semantic_layers", 1),
         semantic_dropout=model_config.get("semantic_dropout", 0.05),
+        semantic_spatial_feature_dim=model_config.get(
+            "semantic_spatial_feature_dim", 0
+        ),
+        semantic_spatial_channels=model_config.get(
+            "semantic_spatial_channels", 64
+        ),
         predict_confidence=model_config.get(
             "predict_confidence",
             any(key.startswith("route_confidence.") for key in state_dict),
@@ -154,18 +160,42 @@ def load_parser(checkpoint_path, device):
         ),
     ).to(device)
     model.load_state_dict(state_dict)
-    if model.semantic_feature_dim > 0:
-        attach_siglip_runtime(
-            model,
+    if (
+        model.semantic_feature_dim > 0
+        or model.semantic_spatial_feature_dim > 0
+    ):
+        semantic_backbone = model_config.get("semantic_backbone", "siglip2")
+        semantic_model = model_config.get(
+            "semantic_model",
             model_config.get(
-                "siglip_model",
+                "tipsv2_model"
+                if semantic_backbone == "tipsv2"
+                else "siglip_model",
                 checkpoint_args.get(
-                    "siglip_model", "google/siglip2-base-patch16-224"
+                    "tipsv2_model"
+                    if semantic_backbone == "tipsv2"
+                    else "siglip_model",
+                    "google/tipsv2-b14"
+                    if semantic_backbone == "tipsv2"
+                    else "google/siglip2-base-patch16-224",
                 ),
             ),
+        )
+        attach_semantic_runtime(
+            model,
+            semantic_backbone,
+            semantic_model,
             device,
             local_files_only=bool(
-                checkpoint_args.get("siglip_local_files_only", False)
+                checkpoint_args.get(
+                    "tipsv2_local_files_only"
+                    if semantic_backbone == "tipsv2"
+                    else "siglip_local_files_only",
+                    False,
+                )
+            ),
+            runtime_batch_size=int(
+                checkpoint_args.get("semantic_runtime_batch_size", 32)
             ),
         )
     model.eval()
@@ -1461,7 +1491,11 @@ def main():
             )
         # Background removal affects parser features, while routing/splatting
         # below still reads exact foreground colors from the original input.
-        outputs = parser_model(parser_rendered, view_ids=view_ids)
+        outputs = parser_model(
+            parser_rendered,
+            view_ids=view_ids,
+            semantic_foreground=observed_foreground,
+        )
         conditioning, routing_details = splat_parser_predictions_to_uv_conditioning(
             rendered,
             outputs,

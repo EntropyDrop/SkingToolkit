@@ -19,8 +19,8 @@ if str(WORKSPACE_ROOT) not in sys.path:
 from SkingToolkit.dense_uv_parser.losses import DenseUVParserLoss  # noqa: E402
 from SkingToolkit.dense_uv_parser.model import DenseUVParserNet, count_parameters  # noqa: E402
 from SkingToolkit.dense_uv_parser.semantic import (  # noqa: E402
-    attach_siglip_runtime,
-    build_siglip_runtime,
+    attach_semantic_runtime,
+    build_semantic_runtime,
     cached_semantic_batch,
 )
 from SkingToolkit.dense_uv_parser.utils import (  # noqa: E402
@@ -881,14 +881,15 @@ def run_epoch(
 
         with torch.set_grad_enabled(train):
             with autocast_context(device, precision):
-                outputs = (
-                    model(
-                        rendered,
-                        view_ids=view_ids,
-                        semantic_features=semantic_features,
-                    )
-                    if semantic_features is not None
-                    else model(rendered, view_ids=view_ids)
+                semantic_kwargs = {}
+                if semantic_features is not None:
+                    semantic_kwargs["semantic_features"] = semantic_features
+                elif getattr(args, "semantic_backbone", "none") != "none":
+                    semantic_kwargs["semantic_foreground"] = targets["foreground"]
+                outputs = model(
+                    rendered,
+                    view_ids=view_ids,
+                    **semantic_kwargs,
                 )
                 losses = criterion(outputs, targets)
                 zero = losses["loss_total"].new_zeros(())
@@ -1125,14 +1126,15 @@ def save_preview(
         semantic_cache, batch["path"], device
     )
     with torch.no_grad():
-        outputs = (
-            model(
-                rendered,
-                view_ids=view_ids,
-                semantic_features=semantic_features,
-            )
-            if semantic_features is not None
-            else model(rendered, view_ids=view_ids)
+        semantic_kwargs = {}
+        if semantic_features is not None:
+            semantic_kwargs["semantic_features"] = semantic_features
+        elif getattr(args, "semantic_backbone", "none") != "none":
+            semantic_kwargs["semantic_foreground"] = targets["foreground"]
+        outputs = model(
+            rendered,
+            view_ids=view_ids,
+            **semantic_kwargs,
         )
         if "affine" in outputs:
             pred_conditioning, routing_details = splat_parser_predictions_to_uv_conditioning(
@@ -1469,12 +1471,22 @@ def save_checkpoint(path, model, optimizer, scaler, epoch, args, metrics, best_m
             "geometry_only": model.geometry_only,
             "feature_dropout": model.feature_dropout_probability,
             "semantic_backbone": args.semantic_backbone,
+            "semantic_model": (
+                args.tipsv2_model
+                if args.semantic_backbone == "tipsv2"
+                else args.siglip_model
+                if args.semantic_backbone == "siglip2"
+                else None
+            ),
             "siglip_model": args.siglip_model if args.semantic_backbone == "siglip2" else None,
+            "tipsv2_model": args.tipsv2_model if args.semantic_backbone == "tipsv2" else None,
             "semantic_feature_dim": model.semantic_feature_dim,
             "semantic_channels": model.semantic_channels,
             "semantic_attention_heads": model.semantic_attention_heads,
             "semantic_layers": model.semantic_layers,
             "semantic_dropout": model.semantic_dropout,
+            "semantic_spatial_feature_dim": model.semantic_spatial_feature_dim,
+            "semantic_spatial_channels": model.semantic_spatial_channels,
             "predict_confidence": model.predict_confidence,
             "route_role_spatial_prior": model.route_role_spatial_prior,
             "route_prior_height": model.route_prior_height,
@@ -1532,17 +1544,24 @@ def build_arg_parser():
     parser.add_argument("--route_prior_dropout", type=float, default=0.10)
     parser.add_argument(
         "--semantic_backbone",
-        choices=["none", "siglip2"],
+        choices=["none", "siglip2", "tipsv2"],
         default="none",
-        help="Frozen global semantic context used to condition route-role parsing.",
+        help=(
+            "Frozen semantic context used to condition route-role parsing. "
+            "TIPSv2 additionally contributes a spatial feature map."
+        ),
     )
     parser.add_argument("--siglip_model", default="google/siglip2-base-patch16-224")
     parser.add_argument("--siglip_cache_dir", default=None)
     parser.add_argument("--siglip_local_files_only", action="store_true")
+    parser.add_argument("--tipsv2_model", default="google/tipsv2-b14")
+    parser.add_argument("--tipsv2_local_files_only", action="store_true")
     parser.add_argument("--semantic_channels", type=int, default=128)
     parser.add_argument("--semantic_attention_heads", type=int, default=4)
     parser.add_argument("--semantic_layers", type=int, default=1)
     parser.add_argument("--semantic_dropout", type=float, default=0.05)
+    parser.add_argument("--semantic_spatial_channels", type=int, default=64)
+    parser.add_argument("--semantic_runtime_batch_size", type=int, default=32)
     parser.add_argument(
         "--predict_outer_uv_occupancy",
         dest="predict_outer_uv_occupancy",
@@ -1853,7 +1872,12 @@ def main():
         raise ValueError("Route, semantic, and confidence loss weights must be non-negative.")
     if args.route_texel_center_power < 0:
         raise ValueError("--route_texel_center_power must be non-negative.")
-    if args.semantic_channels < 1 or args.semantic_layers < 1:
+    if (
+        args.semantic_channels < 1
+        or args.semantic_layers < 1
+        or args.semantic_spatial_channels < 1
+        or args.semantic_runtime_batch_size < 1
+    ):
         raise ValueError("Semantic channels and layers must be positive.")
     if args.semantic_attention_heads < 1:
         raise ValueError("--semantic_attention_heads must be positive.")
@@ -1898,7 +1922,20 @@ def main():
     semantic_cache = None
     runtime_semantic_backbone = None
     semantic_feature_dim = 0
+    semantic_spatial_feature_dim = 0
     semantic_masks = None
+    semantic_model_name = (
+        args.tipsv2_model
+        if args.semantic_backbone == "tipsv2"
+        else args.siglip_model
+    )
+    semantic_local_files_only = (
+        args.tipsv2_local_files_only
+        if args.semantic_backbone == "tipsv2"
+        else args.siglip_local_files_only
+    )
+    if args.semantic_backbone != "siglip2" and args.siglip_cache_dir:
+        raise ValueError("--siglip_cache_dir can only be used with --semantic_backbone siglip2.")
     if args.semantic_backbone == "siglip2":
         if args.siglip_cache_dir:
             semantic_cache = SigLIPGlobalCache(
@@ -1919,14 +1956,29 @@ def main():
                 )
             semantic_feature_dim = int(semantic_cache.metadata["feature_dim"])
         else:
-            runtime_semantic_backbone = build_siglip_runtime(
-                args.siglip_model,
+            runtime_semantic_backbone = build_semantic_runtime(
+                args.semantic_backbone,
+                semantic_model_name,
                 device,
                 semantic_channels=args.semantic_channels,
-                local_files_only=args.siglip_local_files_only,
+                local_files_only=semantic_local_files_only,
+                runtime_batch_size=args.semantic_runtime_batch_size,
             )
             semantic_feature_dim = runtime_semantic_backbone.raw_feature_dim
-    if args.semantic_backbone == "siglip2" or args.predict_outer_uv_occupancy:
+    elif args.semantic_backbone == "tipsv2":
+        runtime_semantic_backbone = build_semantic_runtime(
+            args.semantic_backbone,
+            semantic_model_name,
+            device,
+            semantic_channels=args.semantic_channels,
+            local_files_only=semantic_local_files_only,
+            runtime_batch_size=args.semantic_runtime_batch_size,
+        )
+        semantic_feature_dim = runtime_semantic_backbone.raw_feature_dim
+        semantic_spatial_feature_dim = (
+            runtime_semantic_backbone.raw_spatial_feature_dim
+        )
+    if args.semantic_backbone != "none" or args.predict_outer_uv_occupancy:
         semantic_masks = tuple(
             mask.to(device) for mask in build_part_layer_masks()
         )
@@ -1980,6 +2032,8 @@ def main():
         semantic_attention_heads=args.semantic_attention_heads,
         semantic_layers=args.semantic_layers,
         semantic_dropout=args.semantic_dropout,
+        semantic_spatial_feature_dim=semantic_spatial_feature_dim,
+        semantic_spatial_channels=args.semantic_spatial_channels,
         predict_confidence=args.semantic_backbone != "none",
         route_role_spatial_prior=(
             geometry_only and args.route_role_spatial_prior
@@ -1991,12 +2045,14 @@ def main():
         predict_outer_uv_occupancy=args.predict_outer_uv_occupancy,
     ).to(device)
     if runtime_semantic_backbone is not None:
-        attach_siglip_runtime(
+        attach_semantic_runtime(
             model,
-            args.siglip_model,
+            args.semantic_backbone,
+            semantic_model_name,
             device,
-            local_files_only=args.siglip_local_files_only,
+            local_files_only=semantic_local_files_only,
             backbone=runtime_semantic_backbone,
+            runtime_batch_size=args.semantic_runtime_batch_size,
         )
     criterion = DenseUVParserLoss(
         lambda_foreground=args.lambda_foreground,
@@ -2052,25 +2108,57 @@ def main():
             )
         if args.semantic_backbone != "none":
             checkpoint_config = checkpoint.get("model_config", {})
-            checkpoint_siglip_model = checkpoint_config.get(
-                "siglip_model", checkpoint.get("args", {}).get("siglip_model")
+            checkpoint_semantic_model = checkpoint_config.get(
+                "semantic_model",
+                checkpoint_config.get(
+                    "tipsv2_model"
+                    if args.semantic_backbone == "tipsv2"
+                    else "siglip_model",
+                    checkpoint.get("args", {}).get(
+                        "tipsv2_model"
+                        if args.semantic_backbone == "tipsv2"
+                        else "siglip_model"
+                    ),
+                ),
             )
-            if checkpoint_siglip_model != args.siglip_model:
+            if checkpoint_semantic_model != semantic_model_name:
                 raise ValueError(
-                    "Cannot change SigLIP model while resuming: "
-                    f"checkpoint={checkpoint_siglip_model!r}, "
-                    f"requested={args.siglip_model!r}. Start a new run."
+                    "Cannot change semantic model while resuming: "
+                    f"checkpoint={checkpoint_semantic_model!r}, "
+                    f"requested={semantic_model_name!r}. Start a new run."
                 )
             semantic_resume_fields = {
                 "semantic_feature_dim": model.semantic_feature_dim,
                 "semantic_channels": model.semantic_channels,
                 "semantic_attention_heads": model.semantic_attention_heads,
                 "semantic_layers": model.semantic_layers,
+                "semantic_spatial_feature_dim": (
+                    model.semantic_spatial_feature_dim
+                ),
+                "semantic_spatial_channels": model.semantic_spatial_channels,
             }
             mismatches = {
-                name: (checkpoint_config.get(name), expected)
+                name: (
+                    checkpoint_config.get(
+                        name,
+                        0
+                        if name == "semantic_spatial_feature_dim"
+                        else expected
+                        if name == "semantic_spatial_channels"
+                        else None,
+                    ),
+                    expected,
+                )
                 for name, expected in semantic_resume_fields.items()
-                if checkpoint_config.get(name) != expected
+                if checkpoint_config.get(
+                    name,
+                    0
+                    if name == "semantic_spatial_feature_dim"
+                    else expected
+                    if name == "semantic_spatial_channels"
+                    else None,
+                )
+                != expected
             }
             if mismatches:
                 raise ValueError(
@@ -2177,9 +2265,15 @@ def main():
         "parameters": count_parameters(model),
         "feature_dropout": args.feature_dropout,
         "semantic_backbone": args.semantic_backbone,
+        "semantic_model": (
+            semantic_model_name if args.semantic_backbone != "none" else None
+        ),
         "semantic_feature_dim": semantic_feature_dim,
         "semantic_channels": args.semantic_channels,
         "semantic_layers": args.semantic_layers,
+        "semantic_spatial_feature_dim": semantic_spatial_feature_dim,
+        "semantic_spatial_channels": args.semantic_spatial_channels,
+        "semantic_runtime_batch_size": args.semantic_runtime_batch_size,
         "predict_confidence": model.predict_confidence,
         "route_role_spatial_prior": model.route_role_spatial_prior,
         "route_prior_height": model.route_prior_height,

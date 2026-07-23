@@ -94,16 +94,20 @@ ROUTE_PRIOR_HEIGHT="${ROUTE_PRIOR_HEIGHT:-32}"
 ROUTE_PRIOR_WIDTH="${ROUTE_PRIOR_WIDTH:-16}"
 ROUTE_PRIOR_LOGIT_CAP="${ROUTE_PRIOR_LOGIT_CAP:-1.5}"
 ROUTE_PRIOR_DROPOUT="${ROUTE_PRIOR_DROPOUT:-0.10}"
-SEMANTIC_BACKBONE="${SEMANTIC_BACKBONE:-siglip2}"
+SEMANTIC_BACKBONE="${SEMANTIC_BACKBONE:-tipsv2}"
 SIGLIP_MODEL="${SIGLIP_MODEL:-google/siglip2-base-patch16-224}"
 SIGLIP_LOCAL_FILES_ONLY="${SIGLIP_LOCAL_FILES_ONLY:-false}"
 CACHE_SIGLIP_GLOBALS="${CACHE_SIGLIP_GLOBALS:-true}"
 SIGLIP_CACHE_DIR="${SIGLIP_CACHE_DIR:-cache/semantic_dense_parser_siglip2_${MAPPINGS_SIZE}_${MAX_SAMPLES}}"
 SIGLIP_CACHE_BATCH_SIZE="${SIGLIP_CACHE_BATCH_SIZE:-32}"
+TIPSV2_MODEL="${TIPSV2_MODEL:-google/tipsv2-b14}"
+TIPSV2_LOCAL_FILES_ONLY="${TIPSV2_LOCAL_FILES_ONLY:-false}"
 SEMANTIC_CHANNELS="${SEMANTIC_CHANNELS:-128}"
 SEMANTIC_ATTENTION_HEADS="${SEMANTIC_ATTENTION_HEADS:-4}"
 SEMANTIC_LAYERS="${SEMANTIC_LAYERS:-1}"
 SEMANTIC_DROPOUT="${SEMANTIC_DROPOUT:-0.05}"
+SEMANTIC_SPATIAL_CHANNELS="${SEMANTIC_SPATIAL_CHANNELS:-64}"
+SEMANTIC_RUNTIME_BATCH_SIZE="${SEMANTIC_RUNTIME_BATCH_SIZE:-32}"
 PREDICT_OUTER_UV_OCCUPANCY="${PREDICT_OUTER_UV_OCCUPANCY:-false}"
 BATCH_SIZE="${BATCH_SIZE:-32}"
 NUM_WORKERS="${NUM_WORKERS:-16}"
@@ -312,12 +316,21 @@ if [[ "$SEMANTIC_BACKBONE" == "siglip2" ]]; then
       "${cache_args[@]}"
     semantic_args+=(--siglip_cache_dir "$SIGLIP_CACHE_DIR")
   fi
+  semantic_args+=(--siglip_model "$SIGLIP_MODEL")
+elif [[ "$SEMANTIC_BACKBONE" == "tipsv2" ]]; then
+  semantic_args+=(--tipsv2_model "$TIPSV2_MODEL")
+  if [[ "$TIPSV2_LOCAL_FILES_ONLY" == "true" ]]; then
+    semantic_args+=(--tipsv2_local_files_only)
+  fi
+fi
+if [[ "$SEMANTIC_BACKBONE" != "none" ]]; then
   semantic_args+=(
-    --siglip_model "$SIGLIP_MODEL"
     --semantic_channels "$SEMANTIC_CHANNELS"
     --semantic_attention_heads "$SEMANTIC_ATTENTION_HEADS"
     --semantic_layers "$SEMANTIC_LAYERS"
     --semantic_dropout "$SEMANTIC_DROPOUT"
+    --semantic_spatial_channels "$SEMANTIC_SPATIAL_CHANNELS"
+    --semantic_runtime_batch_size "$SEMANTIC_RUNTIME_BATCH_SIZE"
   )
 fi
 

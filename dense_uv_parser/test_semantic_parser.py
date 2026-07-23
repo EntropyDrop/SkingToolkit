@@ -11,6 +11,7 @@ from SkingToolkit.dense_uv_parser.infer import (
 )
 from SkingToolkit.dense_uv_parser.losses import DenseUVParserLoss
 from SkingToolkit.dense_uv_parser.model import DenseUVParserNet
+from SkingToolkit.dense_uv_parser.semantic import attach_semantic_runtime
 from SkingToolkit.dense_uv_parser.train import outer_uv_occupancy_losses
 from SkingToolkit.dense_uv_parser.utils import splat_to_uv_conditioning
 from SkingToolkit.semantic_uv_reconstruction.semantic_losses import (
@@ -66,6 +67,102 @@ class SemanticDenseUVParserTest(unittest.TestCase):
         )
         self.assertIsNotNone(occupancy_gradient)
         self.assertGreater(float(occupancy_gradient.abs().sum()), 0.0)
+
+    def test_spatial_semantics_start_as_zero_residual_then_learn(self):
+        model = DenseUVParserNet(
+            base_channels=8,
+            view_classes=2,
+            predict_affine=True,
+            surface_classes=4,
+            geometry_only=True,
+            semantic_feature_dim=16,
+            semantic_channels=16,
+            semantic_attention_heads=4,
+            semantic_layers=1,
+            semantic_dropout=0.0,
+            semantic_spatial_feature_dim=12,
+            semantic_spatial_channels=8,
+        )
+        images = torch.rand(2, 4, 32, 32)
+        view_ids = torch.tensor([0, 1])
+        global_features = torch.rand(2, 16)
+        first = model(
+            images,
+            view_ids=view_ids,
+            semantic_features={
+                "raw_global": global_features,
+                "raw_spatial": torch.zeros(2, 12, 7, 5),
+            },
+        )
+        second = model(
+            images,
+            view_ids=view_ids,
+            semantic_features={
+                "raw_global": global_features,
+                "raw_spatial": torch.rand(2, 12, 7, 5),
+            },
+        )
+        self.assertTrue(torch.equal(first["layer"], second["layer"]))
+
+        second["layer"].square().mean().backward()
+        gradient = model.semantic_spatial_fusion.output_projection.weight.grad
+        self.assertIsNotNone(gradient)
+        self.assertGreater(float(gradient.abs().sum()), 0.0)
+
+    def test_runtime_semantics_receive_neutralized_background(self):
+        class FakeBackbone:
+            raw_feature_dim = 16
+            raw_spatial_feature_dim = 12
+
+            def __init__(self):
+                self.seen = None
+
+            def encode_dense(self, images):
+                self.seen = images.detach().clone()
+                return {
+                    "raw_global": torch.zeros(images.shape[0], 16),
+                    "raw_spatial": torch.zeros(images.shape[0], 12, 4, 4),
+                }
+
+        model = DenseUVParserNet(
+            base_channels=8,
+            view_classes=2,
+            geometry_only=True,
+            semantic_feature_dim=16,
+            semantic_channels=16,
+            semantic_attention_heads=4,
+            semantic_spatial_feature_dim=12,
+            semantic_spatial_channels=8,
+        )
+        backbone = FakeBackbone()
+        attach_semantic_runtime(
+            model,
+            "tipsv2",
+            "fake",
+            torch.device("cpu"),
+            backbone=backbone,
+        )
+        images = torch.zeros(2, 4, 16, 16)
+        images[:, :3, :, 8:] = 1.0
+        foreground = torch.zeros(2, 16, 16, dtype=torch.bool)
+        foreground[:, :, 8:] = True
+        model(
+            images,
+            view_ids=torch.tensor([0, 1]),
+            semantic_foreground=foreground,
+        )
+        self.assertTrue(
+            torch.equal(
+                backbone.seen[:, :, :, :8],
+                torch.full_like(backbone.seen[:, :, :, :8], 0.5),
+            )
+        )
+        self.assertTrue(
+            torch.equal(
+                backbone.seen[:, :, :, 8:],
+                torch.ones_like(backbone.seen[:, :, :, 8:]),
+            )
+        )
 
     def test_outer_uv_occupancy_loss_uses_only_outer_atlas(self):
         logits = torch.zeros(1, 1, 64, 64, requires_grad=True)
