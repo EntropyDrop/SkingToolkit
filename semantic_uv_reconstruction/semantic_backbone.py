@@ -221,8 +221,9 @@ class TIPSv2VisionBackbone(nn.Module):
 
     Dense UV routing needs to distinguish nearby surfaces such as an eye from
     hair or a hat brim.  A pooled image embedding discards exactly that spatial
-    evidence, so this adapter deliberately asks ``AutoBackbone`` for TIPSv2
-    feature maps instead of loading only the global image encoder.
+    evidence, so this adapter uses either the native Transformers
+    ``AutoBackbone`` feature maps or the official model repository's
+    ``encode_image().patch_tokens`` compatibility interface.
     """
 
     def __init__(
@@ -233,57 +234,60 @@ class TIPSv2VisionBackbone(nn.Module):
     ):
         super().__init__()
         try:
-            from transformers import AutoBackbone, AutoImageProcessor
-        except (ImportError, AttributeError) as error:
+            from transformers import AutoModel
+        except ImportError as error:
             raise ImportError(
-                "TIPSv2 training requires a recent Hugging Face Transformers "
-                "build with AutoBackbone TIPSv2 support. Install or upgrade "
+                "TIPSv2 training requires Hugging Face Transformers. Install "
                 "with: pip install -U transformers safetensors"
             ) from error
 
-        processor = AutoImageProcessor.from_pretrained(
-            model_name,
-            local_files_only=bool(local_files_only),
-            use_fast=False,
-        )
-        self.vision_model = AutoBackbone.from_pretrained(
-            model_name,
-            local_files_only=bool(local_files_only),
-            out_indices=[-1],
-        )
+        native_error = None
+        try:
+            from transformers import AutoBackbone
+
+            self.vision_model = AutoBackbone.from_pretrained(
+                model_name,
+                local_files_only=bool(local_files_only),
+                out_indices=[-1],
+            )
+            self.runtime_kind = "native_backbone"
+        except (ImportError, AttributeError, KeyError, OSError, TypeError, ValueError) as error:
+            native_error = error
+            try:
+                # Released TIPSv2 repositories expose a lightweight compatibility
+                # API before every Transformers build recognizes model_type=tipsv2.
+                self.vision_model = AutoModel.from_pretrained(
+                    model_name,
+                    local_files_only=bool(local_files_only),
+                    trust_remote_code=True,
+                )
+                self.runtime_kind = "remote_encode_image"
+            except Exception as remote_error:
+                raise RuntimeError(
+                    "Unable to load TIPSv2 through either native AutoBackbone "
+                    "or the official trust_remote_code compatibility path. "
+                    f"Native error: {native_error}. Remote error: {remote_error}."
+                ) from remote_error
+
         config = self.vision_model.config
-        image_size = getattr(config, "image_size", None)
+        image_size = getattr(config, "image_size", getattr(config, "img_size", None))
         if isinstance(image_size, (tuple, list)):
             if len(image_size) != 2 or image_size[0] != image_size[1]:
                 raise ValueError(
                     f"{model_name} must use a square fixed-resolution input."
                 )
             image_size = image_size[0]
-        if not isinstance(image_size, int):
-            processor_size = getattr(processor, "size", {})
-            if isinstance(processor_size, dict):
-                image_size = (
-                    processor_size.get("height")
-                    or processor_size.get("shortest_edge")
-                )
         channels = getattr(self.vision_model, "channels", None)
-        hidden_size = channels[-1] if channels else getattr(config, "hidden_size", None)
+        hidden_size = (
+            channels[-1]
+            if channels
+            else getattr(config, "hidden_size", getattr(config, "embed_dim", None))
+        )
         if not isinstance(image_size, int):
             raise ValueError(f"Cannot determine input image size for {model_name}.")
         if not isinstance(hidden_size, int):
             raise ValueError(f"Cannot determine spatial feature size for {model_name}.")
 
-        do_normalize = bool(getattr(processor, "do_normalize", False))
-        image_mean = (
-            getattr(processor, "image_mean", (0.0, 0.0, 0.0))
-            if do_normalize
-            else (0.0, 0.0, 0.0)
-        )
-        image_std = (
-            getattr(processor, "image_std", (1.0, 1.0, 1.0))
-            if do_normalize
-            else (1.0, 1.0, 1.0)
-        )
         self.model_name = str(model_name)
         self.image_size = int(image_size)
         self.raw_feature_dim = int(hidden_size)
@@ -291,16 +295,6 @@ class TIPSv2VisionBackbone(nn.Module):
         self.inference_batch_size = int(inference_batch_size)
         if self.inference_batch_size < 1:
             raise ValueError("TIPSv2 inference_batch_size must be positive.")
-        self.register_buffer(
-            "image_mean",
-            torch.tensor(image_mean, dtype=torch.float32).view(1, 3, 1, 1),
-            persistent=False,
-        )
-        self.register_buffer(
-            "image_std",
-            torch.tensor(image_std, dtype=torch.float32).view(1, 3, 1, 1),
-            persistent=False,
-        )
         self.vision_model.requires_grad_(False)
         self.vision_model.eval()
 
@@ -330,7 +324,6 @@ class TIPSv2VisionBackbone(nn.Module):
         top = pad_height // 2
         bottom = pad_height - top
         pixels = F.pad(resized, (left, right, top, bottom), value=0.5)
-        pixels = (pixels - self.image_mean) / self.image_std
         return pixels, (top, left, resized_height, resized_width)
 
     def _crop_letterbox_features(self, features, content_rect):
@@ -354,21 +347,47 @@ class TIPSv2VisionBackbone(nn.Module):
     def encode_dense(self, images):
         pixels, content_rect = self._letterbox(images)
         spatial_chunks = []
+        global_chunks = []
         for start in range(0, pixels.shape[0], self.inference_batch_size):
-            outputs = self.vision_model(
-                pixel_values=pixels[start : start + self.inference_batch_size]
-            )
-            feature_maps = getattr(outputs, "feature_maps", None)
-            if not feature_maps:
-                raise ValueError(
-                    f"{self.model_name} did not return spatial backbone feature maps."
+            pixel_chunk = pixels[start : start + self.inference_batch_size]
+            if self.runtime_kind == "native_backbone":
+                outputs = self.vision_model(pixel_values=pixel_chunk)
+                feature_maps = getattr(outputs, "feature_maps", None)
+                if not feature_maps:
+                    raise ValueError(
+                        f"{self.model_name} did not return spatial backbone feature maps."
+                    )
+                spatial_chunk = feature_maps[-1]
+                global_chunk = spatial_chunk.mean(dim=(2, 3))
+            else:
+                outputs = self.vision_model.encode_image(pixel_chunk)
+                patch_tokens = getattr(outputs, "patch_tokens", None)
+                cls_token = getattr(outputs, "cls_token", None)
+                if patch_tokens is None or cls_token is None:
+                    raise ValueError(
+                        f"{self.model_name} encode_image output must contain "
+                        "patch_tokens and cls_token."
+                    )
+                patch_grid = math.isqrt(patch_tokens.shape[1])
+                if patch_grid * patch_grid != patch_tokens.shape[1]:
+                    raise ValueError(
+                        "TIPSv2 patch token count must form a square grid; "
+                        f"got {patch_tokens.shape[1]}."
+                    )
+                spatial_chunk = patch_tokens.transpose(1, 2).reshape(
+                    patch_tokens.shape[0],
+                    patch_tokens.shape[2],
+                    patch_grid,
+                    patch_grid,
                 )
-            spatial_chunks.append(feature_maps[-1])
+                global_chunk = cls_token[:, 0]
+            spatial_chunks.append(spatial_chunk)
+            global_chunks.append(global_chunk)
         feature_map = torch.cat(spatial_chunks, dim=0)
+        raw_global = torch.cat(global_chunks, dim=0)
         raw_spatial = self._crop_letterbox_features(
             feature_map, content_rect
         )
-        raw_global = raw_spatial.mean(dim=(2, 3))
         return {
             "raw_global": raw_global,
             "raw_spatial": raw_spatial,

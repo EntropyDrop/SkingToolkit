@@ -148,21 +148,15 @@ class TIPSv2AdapterTest(unittest.TestCase):
                 pooled = F.adaptive_avg_pool2d(pixel_values, (4, 4))
                 return SimpleNamespace(feature_maps=(self.projection(pooled),))
 
-        class FakeAutoImageProcessor:
+        class UnexpectedAutoModel:
             @staticmethod
-            def from_pretrained(model_name, local_files_only=False, use_fast=True):
-                del model_name, local_files_only
-                if use_fast:
-                    raise AssertionError("The adapter must preserve processor metadata.")
-                return SimpleNamespace(
-                    image_mean=(0.5, 0.5, 0.5),
-                    image_std=(0.5, 0.5, 0.5),
-                    size={"height": 32, "width": 32},
-                )
+            def from_pretrained(*args, **kwargs):
+                del args, kwargs
+                raise AssertionError("Native AutoBackbone should be preferred.")
 
         fake_transformers = types.ModuleType("transformers")
-        fake_transformers.AutoImageProcessor = FakeAutoImageProcessor
         fake_transformers.AutoBackbone = FakeVisionBackbone
+        fake_transformers.AutoModel = UnexpectedAutoModel
         with patch.dict(sys.modules, {"transformers": fake_transformers}):
             backbone = TIPSv2VisionBackbone(
                 "fake-tipsv2",
@@ -175,6 +169,54 @@ class TIPSv2AdapterTest(unittest.TestCase):
         self.assertFalse(
             any(parameter.requires_grad for parameter in backbone.vision_model.parameters())
         )
+
+    def test_adapter_falls_back_to_official_remote_encode_image(self):
+        class UnsupportedAutoBackbone:
+            @staticmethod
+            def from_pretrained(*args, **kwargs):
+                del args, kwargs
+                raise ValueError("Unrecognized model_type tipsv2")
+
+        class FakeRemoteModel(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.config = SimpleNamespace(img_size=32, embed_dim=12)
+                self.projection = nn.Linear(3, 12)
+
+            def encode_image(self, pixel_values):
+                patches = F.adaptive_avg_pool2d(pixel_values, (4, 4))
+                patches = patches.flatten(2).transpose(1, 2)
+                patch_tokens = self.projection(patches)
+                return SimpleNamespace(
+                    cls_token=patch_tokens.mean(dim=1, keepdim=True),
+                    patch_tokens=patch_tokens,
+                )
+
+        class FakeAutoModel:
+            @staticmethod
+            def from_pretrained(
+                model_name,
+                local_files_only=False,
+                trust_remote_code=False,
+            ):
+                del model_name, local_files_only
+                if not trust_remote_code:
+                    raise AssertionError("TIPSv2 fallback requires official remote code.")
+                return FakeRemoteModel()
+
+        fake_transformers = types.ModuleType("transformers")
+        fake_transformers.AutoBackbone = UnsupportedAutoBackbone
+        fake_transformers.AutoModel = FakeAutoModel
+        with patch.dict(sys.modules, {"transformers": fake_transformers}):
+            backbone = TIPSv2VisionBackbone(
+                "fake-tipsv2",
+                inference_batch_size=1,
+            )
+        outputs = backbone.encode_dense(torch.rand(2, 3, 20, 40))
+
+        self.assertEqual(backbone.runtime_kind, "remote_encode_image")
+        self.assertEqual(tuple(outputs["raw_spatial"].shape), (2, 12, 2, 4))
+        self.assertEqual(tuple(outputs["raw_global"].shape), (2, 12))
 
 
 class SemanticUVModelTest(unittest.TestCase):
