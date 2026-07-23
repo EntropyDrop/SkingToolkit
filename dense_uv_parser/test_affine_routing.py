@@ -320,7 +320,7 @@ class GlobalAffineRoutingTest(unittest.TestCase):
                 "surface_classes": 0,
                 "layer_classes": 3,
                 "geometry_only": True,
-                "semantic_channels": 256,
+                "semantic_channels": 128,
                 "predict_outer_uv_occupancy": True,
             },
         }
@@ -480,13 +480,13 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         self.assertEqual(parser_args.lambda_route_texel_consistency, 0.25)
         self.assertEqual(parser_args.lambda_route_texel_supervision, 0.0)
         self.assertEqual(parser_args.route_texel_center_power, 2.0)
-        self.assertTrue(parser_args.predict_outer_uv_occupancy)
+        self.assertFalse(parser_args.predict_outer_uv_occupancy)
         self.assertEqual(parser_args.lambda_outer_uv_occupancy, 0.50)
         self.assertEqual(parser_args.outer_uv_occupancy_dice_weight, 0.25)
         self.assertFalse(parser_args.outer_uv_occupancy_routing)
-        self.assertEqual(parser_args.semantic_channels, 256)
-        self.assertEqual(parser_args.semantic_attention_heads, 8)
-        self.assertEqual(parser_args.semantic_layers, 2)
+        self.assertEqual(parser_args.semantic_channels, 128)
+        self.assertEqual(parser_args.semantic_attention_heads, 4)
+        self.assertEqual(parser_args.semantic_layers, 1)
         self.assertTrue(parser_args.route_role_spatial_prior)
         self.assertEqual(parser_args.route_prior_height, 32)
         self.assertEqual(parser_args.route_prior_width, 16)

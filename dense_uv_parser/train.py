@@ -1506,7 +1506,7 @@ def build_arg_parser():
         default="geometry_fit",
         help="geometry_fit learns alignment, route role, and exact renderer surface-slot routing.",
     )
-    parser.add_argument("--max_samples", type=int, default=None)
+    parser.add_argument("--max_samples", type=int, default=180000)
     parser.add_argument("--val_split", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument("--base_channels", type=int, default=32)
@@ -1539,15 +1539,15 @@ def build_arg_parser():
     parser.add_argument("--siglip_model", default="google/siglip2-base-patch16-224")
     parser.add_argument("--siglip_cache_dir", default=None)
     parser.add_argument("--siglip_local_files_only", action="store_true")
-    parser.add_argument("--semantic_channels", type=int, default=256)
-    parser.add_argument("--semantic_attention_heads", type=int, default=8)
-    parser.add_argument("--semantic_layers", type=int, default=2)
+    parser.add_argument("--semantic_channels", type=int, default=128)
+    parser.add_argument("--semantic_attention_heads", type=int, default=4)
+    parser.add_argument("--semantic_layers", type=int, default=1)
     parser.add_argument("--semantic_dropout", type=float, default=0.05)
     parser.add_argument(
         "--predict_outer_uv_occupancy",
         dest="predict_outer_uv_occupancy",
         action="store_true",
-        default=True,
+        default=False,
         help=(
             "Predict grouped 64x64 outer-layer occupancy as a semantic prior "
             "for inner/outer routing."
@@ -1561,7 +1561,7 @@ def build_arg_parser():
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--num_workers", type=int, default=8)
     parser.add_argument("--prefetch_factor", type=int, default=4)
-    parser.add_argument("--epochs", type=int, default=100)
+    parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument(
         "--lr_schedule",
