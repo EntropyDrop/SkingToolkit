@@ -425,9 +425,8 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         self.assertEqual(parser_args.affine_refine_translation_px, 0.0)
         self.assertGreater(parser_args.lambda_soft_uv_rgb, 0.0)
         self.assertGreater(parser_args.lambda_render_rgb, 0.0)
-        self.assertEqual(parser_args.lambda_soft_uv_alpha, 0.60)
-        self.assertEqual(parser_args.lambda_render_rgb, 0.40)
-        self.assertEqual(parser_args.lambda_render_alpha, 0.50)
+        self.assertEqual(parser_args.lambda_soft_uv_alpha, 0.35)
+        self.assertEqual(parser_args.lambda_render_alpha, 0.25)
         self.assertGreater(parser_args.lambda_outer_false_positive, 0.0)
         self.assertGreater(parser_args.lambda_outer_false_negative, 0.0)
         self.assertEqual(parser_args.lambda_soft_uv_inner_recall, 0.50)
@@ -437,17 +436,14 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         self.assertEqual(parser_args.lr_schedule, "cosine")
         self.assertEqual(parser_args.min_lr_ratio, 0.05)
         self.assertEqual(parser_args.route_class_weight_floor, 0.75)
-        self.assertEqual(parser_args.lambda_outer_false_positive, 1.25)
+        self.assertEqual(parser_args.lambda_outer_false_positive, 0.75)
         self.assertEqual(parser_args.lambda_outer_false_negative, 0.75)
         self.assertEqual(parser_args.route_outer_class_weight_cap, 1.0)
         self.assertEqual(parser_args.lambda_primary_route_swap, 1.0)
         self.assertEqual(parser_args.lambda_route_texel_consistency, 0.25)
-        self.assertEqual(parser_args.soft_uv_alpha_hard_fraction, 0.10)
-        self.assertEqual(parser_args.soft_uv_alpha_hard_weight, 0.75)
-        self.assertEqual(parser_args.render_hard_fraction, 0.02)
-        self.assertEqual(parser_args.render_hard_weight, 0.50)
-        self.assertEqual(parser_args.render_softmax_temperature, 0.5)
-        self.assertEqual(parser_args.outer_selection_precision_weight, 2.0)
+        self.assertEqual(parser_args.semantic_channels, 256)
+        self.assertEqual(parser_args.semantic_attention_heads, 8)
+        self.assertEqual(parser_args.semantic_layers, 2)
         self.assertTrue(parser_args.route_role_spatial_prior)
         self.assertEqual(parser_args.route_prior_height, 32)
         self.assertEqual(parser_args.route_prior_width, 16)
@@ -466,7 +462,7 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         self.assertEqual(parser_args.outer_rescue_margin_threshold, 0.25)
         self.assertEqual(parser_args.outer_rescue_min_coverage, 0.10)
         self.assertTrue(parser_args.geometry_route_texel_consensus)
-        self.assertEqual(parser_args.outer_selection_precision_weight, 2.00)
+        self.assertEqual(parser_args.outer_selection_precision_weight, 1.50)
         self.assertEqual(parser_args.outer_selection_recall_weight, 0.50)
 
         inpainting_args = inpainting_train.build_arg_parser().parse_args(
@@ -1355,24 +1351,6 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         self.assertAlmostEqual(float(hard_loss.detach()), 1.0)
         self.assertAlmostEqual(float(combined.detach()), 0.625)
         self.assertLess(float(predicted.grad[0, 0, 0, 3]), 0.0)
-
-    def test_focused_masked_error_keeps_small_artifact_gradient(self):
-        error = torch.tensor([[[[1.0, 0.1, 0.1, 0.1]]]], requires_grad=True)
-        mask = torch.ones_like(error)
-
-        combined, mean_loss, hard_loss = parser_train.focused_masked_error_loss(
-            error,
-            mask,
-            hard_fraction=0.25,
-            hard_weight=0.50,
-        )
-        combined.backward()
-
-        self.assertAlmostEqual(float(mean_loss.detach()), 0.325)
-        self.assertAlmostEqual(float(hard_loss.detach()), 1.0)
-        self.assertAlmostEqual(float(combined.detach()), 0.6625)
-        self.assertGreater(float(error.grad[0, 0, 0, 0]), 0.5)
-        self.assertLess(float(error.grad[0, 0, 0, 1]), 0.2)
 
     def test_outer_selection_metric_uses_global_precision_and_iou(self):
         metrics = parser_train.format_metrics(

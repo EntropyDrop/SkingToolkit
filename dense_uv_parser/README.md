@@ -33,6 +33,8 @@ The standard launcher uses `geometry_fit` plus a frozen SigLIP2 vision tower.
 SigLIP2 is not trained: its per-view global features are cached once, fused across
 front/back views, and injected into the parser bottleneck with a zero-initialized
 FiLM adapter. This lets semantics correct routing without replacing fixed geometry.
+The trainable semantic fusion defaults to 256 channels, 8 attention heads, and
+2 transformer layers; the frozen backbone remains `siglip2-base-patch16-224`.
 
 Renderer mappings derive the dense supervision, so no manual labels are needed.
 For each GT skin the parser learns:
@@ -83,13 +85,11 @@ Route-role training now gives inner and outer equal macro weight in a dedicated
 swap loss, regardless of their pixel-count imbalance. A projected-texel
 consistency loss also makes multiple source pixels that map to the same GT
 layer/UV texel agree. The complementary false-positive and false-negative focal
-terms remain. The false-positive weight is intentionally higher because an
-invented opaque outer texel produces a visible block, while an uncertain texel
-can still be left for completion. The ordinary three-class loss continues to
-handle secondary/backface observations.
+terms remain, but use symmetric defaults; the ordinary three-class loss still
+handles secondary/backface observations.
 
 ```bash
-LAMBDA_OUTER_FALSE_POSITIVE=1.25 \
+LAMBDA_OUTER_FALSE_POSITIVE=0.75 \
 LAMBDA_OUTER_FALSE_NEGATIVE=0.75 \
 LAMBDA_PRIMARY_ROUTE_SWAP=1.0 \
 LAMBDA_ROUTE_TEXEL_CONSISTENCY=0.25 \
@@ -128,28 +128,21 @@ the common-pattern bias.
 
 `geometry_fit` training also uses a differentiable photometric branch. Route-role and surface logits are converted to probabilities, softly splatted through the fixed renderer UV candidates, and merged into a provisional skin. That skin is rendered back through the direct inner/outer cuboids for every configured view. Soft-UV RGB/alpha errors and multi-view render RGB/alpha errors are added to the supervised classification losses, so wrong inner/outer or exact-surface choices receive color and silhouette gradients in addition to cross-entropy. Inference remains hard-routed and selects the real source pixel nearest each integer UV texel center.
 
-Alpha consistency is weighted more strongly than RGB consistency because a wrong opaque outer texel is more damaging than leaving an uncertain texel for inpainting. Soft UV alpha additionally places 75% of its loss on the worst 10% of false opaque texels. Render RGB/alpha blend their global mean with the worst 2% of rendered pixels, preventing a small but conspicuous outer-layer block from being diluted by the rest of a correctly reconstructed character. A lower softmax temperature also makes the differentiable forward pass closer to inference-time hard routing.
-
-The layer-recall losses count the GT projections that are actually visible in each inner/outer UV texel and compare them with the predicted per-layer splat weight. This avoids diluting recall with geometrically possible but occluded projections. Half of each recall loss focuses on the worst 10% of visible texels by default, so eyes, exposed face pixels, and other small regions cannot disappear while the whole-image average still improves:
+Alpha consistency is weighted more strongly than RGB consistency because a wrong opaque outer texel is more damaging than leaving an uncertain texel for inpainting. In addition, the layer-recall losses count the GT projections that are actually visible in each inner/outer UV texel and compare them with the predicted per-layer splat weight. This avoids diluting recall with geometrically possible but occluded projections. Half of each recall loss focuses on the worst 10% of visible texels by default, so eyes, exposed face pixels, and other small regions cannot disappear while the whole-image average still improves:
 
 ```bash
 LAMBDA_SOFT_UV_RGB=0.25 \
-LAMBDA_SOFT_UV_ALPHA=0.60 \
+LAMBDA_SOFT_UV_ALPHA=0.35 \
 LAMBDA_SOFT_UV_INNER_RECALL=0.50 \
 LAMBDA_SOFT_UV_OUTER_RECALL=0.50 \
 SOFT_UV_RECALL_HARD_FRACTION=0.10 \
 SOFT_UV_RECALL_HARD_WEIGHT=0.50 \
-SOFT_UV_ALPHA_HARD_FRACTION=0.10 \
-SOFT_UV_ALPHA_HARD_WEIGHT=0.75 \
-LAMBDA_RENDER_RGB=0.40 \
-LAMBDA_RENDER_ALPHA=0.50 \
-RENDER_HARD_FRACTION=0.02 \
-RENDER_HARD_WEIGHT=0.50 \
-RENDER_SOFTMAX_TEMPERATURE=0.5 \
+LAMBDA_RENDER_RGB=0.20 \
+LAMBDA_RENDER_ALPHA=0.25 \
 ./run_dense_uv_parser_training.sh
 ```
 
-Set the six `LAMBDA_*` values to `0` to recover classification-only training. `loss_differentiable`, mean and hard-tail UV alpha/render components, layer recall, visible UV percentages, and `soft_uv_known_percent` are recorded in epoch metrics. The differentiable branch shares one UV atlas across all configured views, providing multi-view consistency without changing the checkpoint architecture.
+Set the six `LAMBDA_*` values to `0` to recover classification-only training. `loss_differentiable`, mean and hard-tail layer recall, render losses, visible UV percentages, and `soft_uv_known_percent` are recorded in epoch metrics. The differentiable branch shares one UV atlas across all configured views, providing multi-view consistency without changing the checkpoint architecture.
 
 The training wrapper uses an absolute-epoch cosine learning-rate schedule by default. It starts from `LR=2e-4` and reaches `5%` of that value at the final epoch, reducing late-epoch drift after the geometry has already converged. Because the rate is calculated from the checkpoint epoch rather than stored scheduler state, existing checkpoints can resume safely:
 

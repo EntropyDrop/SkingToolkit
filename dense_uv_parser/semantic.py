@@ -12,7 +12,7 @@ from SkingToolkit.semantic_uv_reconstruction.semantic_backbone import (
 def build_siglip_runtime(
     model_name,
     device,
-    semantic_channels=128,
+    semantic_channels=256,
     local_files_only=False,
 ):
     backbone = SigLIP2VisionBackbone(

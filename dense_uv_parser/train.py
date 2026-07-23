@@ -325,48 +325,6 @@ def focused_visible_layer_recall_loss(
     return combined, mean_loss, hard_loss
 
 
-def focused_masked_error_loss(
-    error,
-    mask,
-    hard_fraction=0.02,
-    hard_weight=0.50,
-):
-    """Blend a masked mean with the worst errors so small artifacts stay visible.
-
-    ``error`` is expected to contain one scalar error per UV texel or rendered
-    pixel.  The hard component is computed independently per item, preventing
-    a large clean character region from diluting a small but conspicuous block.
-    """
-    if not 0.0 < hard_fraction <= 1.0:
-        raise ValueError("hard_fraction must be in (0, 1].")
-    if not 0.0 <= hard_weight <= 1.0:
-        raise ValueError("hard_weight must be in [0, 1].")
-    if error.shape != mask.shape:
-        raise ValueError(
-            "error and mask must have identical shapes, got "
-            f"{tuple(error.shape)} and {tuple(mask.shape)}."
-        )
-
-    active = mask > 0
-    mean_losses = []
-    hard_losses = []
-    for item in range(error.shape[0]):
-        item_error = error[item][active[item]]
-        if item_error.numel() == 0:
-            zero = error[item].sum() * 0.0
-            mean_losses.append(zero)
-            hard_losses.append(zero)
-            continue
-        mean_losses.append(item_error.mean())
-        hard_count = max(1, math.ceil(item_error.numel() * hard_fraction))
-        hard_losses.append(item_error.topk(hard_count, sorted=False).values.mean())
-
-    mean_loss = torch.stack(mean_losses).mean()
-    hard_loss = torch.stack(hard_losses).mean()
-    combined = (1.0 - hard_weight) * mean_loss + hard_weight * hard_loss
-    return combined, mean_loss, hard_loss
-
-
 def differentiable_geometry_losses(
     rendered,
     gt_uv,
@@ -378,10 +336,6 @@ def differentiable_geometry_losses(
     canonicalize=True,
     recall_hard_fraction=0.10,
     recall_hard_weight=0.50,
-    alpha_hard_fraction=0.10,
-    alpha_hard_weight=0.75,
-    render_hard_fraction=0.02,
-    render_hard_weight=0.50,
 ):
     """Photometric UV and multi-view render losses for geometry-parser logits."""
     views = parse_views(views)
@@ -407,15 +361,12 @@ def differentiable_geometry_losses(
         .mean()
     )
     transparent_support = support * (1.0 - gt_alpha)
-    (
-        loss_soft_uv_alpha,
-        loss_soft_uv_alpha_mean,
-        loss_soft_uv_alpha_hard,
-    ) = focused_masked_error_loss(
-        pred_uv[:, 3:4],
-        transparent_support,
-        hard_fraction=alpha_hard_fraction,
-        hard_weight=alpha_hard_weight,
+    alpha_denom = transparent_support.sum(dim=(1, 2, 3)).clamp_min(1.0)
+    loss_soft_uv_alpha = (
+        (pred_uv[:, 3:4] * transparent_support)
+        .sum(dim=(1, 2, 3))
+        .div(alpha_denom)
+        .mean()
     )
     visible_inner_counts = visible_target_layer_uv_counts(
         targets,
@@ -455,53 +406,33 @@ def differentiable_geometry_losses(
 
     render_rgb_total = pred_uv.new_zeros(())
     render_alpha_total = pred_uv.new_zeros(())
-    render_rgb_mean_total = pred_uv.new_zeros(())
-    render_rgb_hard_total = pred_uv.new_zeros(())
-    render_alpha_mean_total = pred_uv.new_zeros(())
-    render_alpha_hard_total = pred_uv.new_zeros(())
     for view in views:
         pred_render = render_direct_uv(pred_uv, renderer, view)
         with torch.no_grad():
             gt_render = render_direct_uv(gt_uv, renderer, view)
         foreground = gt_render[:, 3:4].detach()
-        render_rgb_error = (
-            pred_render[:, :3] - gt_render[:, :3]
-        ).abs().mean(dim=1, keepdim=True)
-        render_rgb, render_rgb_mean, render_rgb_hard = focused_masked_error_loss(
-            render_rgb_error,
-            foreground,
-            hard_fraction=render_hard_fraction,
-            hard_weight=render_hard_weight,
+        rgb_denom = (foreground.sum(dim=(1, 2, 3)) * 3.0).clamp_min(1.0)
+        render_rgb_total = render_rgb_total + (
+            ((pred_render[:, :3] - gt_render[:, :3]).abs() * foreground)
+            .sum(dim=(1, 2, 3))
+            .div(rgb_denom)
+            .mean()
         )
-        render_rgb_total = render_rgb_total + render_rgb
-        render_rgb_mean_total = render_rgb_mean_total + render_rgb_mean
-        render_rgb_hard_total = render_rgb_hard_total + render_rgb_hard
         alpha_support = torch.maximum(
             pred_render[:, 3:4], gt_render[:, 3:4]
         ).detach()
-        render_alpha_error = (
-            pred_render[:, 3:4] - gt_render[:, 3:4]
-        ).abs()
-        (
-            render_alpha,
-            render_alpha_mean,
-            render_alpha_hard,
-        ) = focused_masked_error_loss(
-            render_alpha_error,
-            alpha_support,
-            hard_fraction=render_hard_fraction,
-            hard_weight=render_hard_weight,
+        alpha_denom = alpha_support.sum(dim=(1, 2, 3)).clamp_min(1.0)
+        render_alpha_total = render_alpha_total + (
+            ((pred_render[:, 3:4] - gt_render[:, 3:4]).abs() * alpha_support)
+            .sum(dim=(1, 2, 3))
+            .div(alpha_denom)
+            .mean()
         )
-        render_alpha_total = render_alpha_total + render_alpha
-        render_alpha_mean_total = render_alpha_mean_total + render_alpha_mean
-        render_alpha_hard_total = render_alpha_hard_total + render_alpha_hard
 
     view_count = max(len(views), 1)
     return {
         "loss_soft_uv_rgb": loss_soft_uv_rgb,
         "loss_soft_uv_alpha": loss_soft_uv_alpha,
-        "loss_soft_uv_alpha_mean": loss_soft_uv_alpha_mean,
-        "loss_soft_uv_alpha_hard": loss_soft_uv_alpha_hard,
         "loss_soft_uv_inner_recall": loss_soft_uv_inner_recall,
         "loss_soft_uv_inner_recall_mean": loss_soft_uv_inner_recall_mean,
         "loss_soft_uv_inner_recall_hard": loss_soft_uv_inner_recall_hard,
@@ -509,11 +440,7 @@ def differentiable_geometry_losses(
         "loss_soft_uv_outer_recall_mean": loss_soft_uv_outer_recall_mean,
         "loss_soft_uv_outer_recall_hard": loss_soft_uv_outer_recall_hard,
         "loss_render_rgb": render_rgb_total / view_count,
-        "loss_render_rgb_mean": render_rgb_mean_total / view_count,
-        "loss_render_rgb_hard": render_rgb_hard_total / view_count,
         "loss_render_alpha": render_alpha_total / view_count,
-        "loss_render_alpha_mean": render_alpha_mean_total / view_count,
-        "loss_render_alpha_hard": render_alpha_hard_total / view_count,
         "visible_inner_uv_percent": visible_inner_uv.float().mean() * 100.0,
         "visible_outer_uv_percent": visible_outer_uv.float().mean() * 100.0,
         "soft_uv_known_percent": (
@@ -738,17 +665,11 @@ def run_epoch(
                         canonicalize=apply_augment,
                         recall_hard_fraction=args.soft_uv_recall_hard_fraction,
                         recall_hard_weight=args.soft_uv_recall_hard_weight,
-                        alpha_hard_fraction=args.soft_uv_alpha_hard_fraction,
-                        alpha_hard_weight=args.soft_uv_alpha_hard_weight,
-                        render_hard_fraction=args.render_hard_fraction,
-                        render_hard_weight=args.render_hard_weight,
                     )
                 else:
                     auxiliary = {
                         "loss_soft_uv_rgb": zero,
                         "loss_soft_uv_alpha": zero,
-                        "loss_soft_uv_alpha_mean": zero,
-                        "loss_soft_uv_alpha_hard": zero,
                         "loss_soft_uv_inner_recall": zero,
                         "loss_soft_uv_inner_recall_mean": zero,
                         "loss_soft_uv_inner_recall_hard": zero,
@@ -756,11 +677,7 @@ def run_epoch(
                         "loss_soft_uv_outer_recall_mean": zero,
                         "loss_soft_uv_outer_recall_hard": zero,
                         "loss_render_rgb": zero,
-                        "loss_render_rgb_mean": zero,
-                        "loss_render_rgb_hard": zero,
                         "loss_render_alpha": zero,
-                        "loss_render_alpha_mean": zero,
-                        "loss_render_alpha_hard": zero,
                         "soft_uv_known_percent": zero,
                         "visible_inner_uv_percent": zero,
                         "visible_outer_uv_percent": zero,
@@ -1235,9 +1152,9 @@ def build_arg_parser():
     parser.add_argument("--siglip_model", default="google/siglip2-base-patch16-224")
     parser.add_argument("--siglip_cache_dir", default=None)
     parser.add_argument("--siglip_local_files_only", action="store_true")
-    parser.add_argument("--semantic_channels", type=int, default=128)
-    parser.add_argument("--semantic_attention_heads", type=int, default=4)
-    parser.add_argument("--semantic_layers", type=int, default=1)
+    parser.add_argument("--semantic_channels", type=int, default=256)
+    parser.add_argument("--semantic_attention_heads", type=int, default=8)
+    parser.add_argument("--semantic_layers", type=int, default=2)
     parser.add_argument("--semantic_dropout", type=float, default=0.05)
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--num_workers", type=int, default=8)
@@ -1328,7 +1245,7 @@ def build_arg_parser():
     parser.add_argument("--lambda_uv_class", type=float, default=1.0)
     parser.add_argument("--lambda_affine", type=float, default=1.0)
     parser.add_argument("--lambda_surface", type=float, default=1.0)
-    parser.add_argument("--lambda_outer_false_positive", type=float, default=1.25)
+    parser.add_argument("--lambda_outer_false_positive", type=float, default=0.75)
     parser.add_argument("--lambda_outer_false_negative", type=float, default=0.75)
     parser.add_argument("--lambda_route_confidence", type=float, default=0.25)
     parser.add_argument("--lambda_primary_route_swap", type=float, default=1.0)
@@ -1347,18 +1264,14 @@ def build_arg_parser():
     parser.add_argument("--route_class_weight_floor", type=float, default=0.75)
     parser.add_argument("--route_outer_class_weight_cap", type=float, default=1.0)
     parser.add_argument("--lambda_soft_uv_rgb", type=float, default=0.25)
-    parser.add_argument("--lambda_soft_uv_alpha", type=float, default=0.60)
+    parser.add_argument("--lambda_soft_uv_alpha", type=float, default=0.35)
     parser.add_argument("--lambda_soft_uv_inner_recall", type=float, default=0.50)
     parser.add_argument("--lambda_soft_uv_outer_recall", type=float, default=0.50)
     parser.add_argument("--soft_uv_recall_hard_fraction", type=float, default=0.10)
     parser.add_argument("--soft_uv_recall_hard_weight", type=float, default=0.50)
-    parser.add_argument("--soft_uv_alpha_hard_fraction", type=float, default=0.10)
-    parser.add_argument("--soft_uv_alpha_hard_weight", type=float, default=0.75)
-    parser.add_argument("--lambda_render_rgb", type=float, default=0.40)
-    parser.add_argument("--lambda_render_alpha", type=float, default=0.50)
-    parser.add_argument("--render_hard_fraction", type=float, default=0.02)
-    parser.add_argument("--render_hard_weight", type=float, default=0.50)
-    parser.add_argument("--outer_selection_precision_weight", type=float, default=2.00)
+    parser.add_argument("--lambda_render_rgb", type=float, default=0.20)
+    parser.add_argument("--lambda_render_alpha", type=float, default=0.25)
+    parser.add_argument("--outer_selection_precision_weight", type=float, default=1.50)
     parser.add_argument("--outer_selection_recall_weight", type=float, default=0.50)
     parser.add_argument("--outer_selection_iou_weight", type=float, default=0.5)
     parser.add_argument("--inner_selection_recall_weight", type=float, default=0.5)
@@ -1366,7 +1279,7 @@ def build_arg_parser():
     parser.add_argument(
         "--render_softmax_temperature",
         type=float,
-        default=0.5,
+        default=1.0,
         help="Temperature for the differentiable route/surface probabilities.",
     )
     parser.add_argument("--uv_classification", dest="uv_classification", action="store_true", default=True)
@@ -1447,14 +1360,6 @@ def main():
         raise ValueError("--soft_uv_recall_hard_fraction must be in (0, 1].")
     if not 0.0 <= args.soft_uv_recall_hard_weight <= 1.0:
         raise ValueError("--soft_uv_recall_hard_weight must be in [0, 1].")
-    if not 0.0 < args.soft_uv_alpha_hard_fraction <= 1.0:
-        raise ValueError("--soft_uv_alpha_hard_fraction must be in (0, 1].")
-    if not 0.0 <= args.soft_uv_alpha_hard_weight <= 1.0:
-        raise ValueError("--soft_uv_alpha_hard_weight must be in [0, 1].")
-    if not 0.0 < args.render_hard_fraction <= 1.0:
-        raise ValueError("--render_hard_fraction must be in (0, 1].")
-    if not 0.0 <= args.render_hard_weight <= 1.0:
-        raise ValueError("--render_hard_weight must be in [0, 1].")
     if args.lambda_outer_false_positive < 0:
         raise ValueError("--lambda_outer_false_positive must be non-negative.")
     if args.lambda_outer_false_negative < 0:
