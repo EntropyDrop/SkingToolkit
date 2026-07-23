@@ -94,8 +94,10 @@ Route-role training now gives inner and outer equal macro weight in a dedicated
 swap loss, regardless of their pixel-count imbalance. A projected-texel
 consistency loss also makes multiple source pixels that map to the same GT
 layer/UV texel agree. The complementary false-positive and false-negative focal
-terms remain, but use symmetric defaults; the ordinary three-class loss still
-handles secondary/backface observations.
+terms use mildly precision-first defaults: the outer-negative term has more
+weight and a higher focal gamma, while the ordinary three-class loss caps the
+rare outer class weight below `1.0`. This focuses learning on confident,
+isolated inner-to-outer mistakes without removing the outer-positive loss.
 
 Optional center-weighted texel supervision pools route probabilities across
 the configured front/back views and directly labels each pooled UV texel as
@@ -106,15 +108,15 @@ outer-layer atlas regions, but does not participate in hard validation routing
 unless `OUTER_UV_OCCUPANCY_ROUTING=true` is explicitly selected.
 
 ```bash
-LAMBDA_OUTER_FALSE_POSITIVE=0.75 \
+LAMBDA_OUTER_FALSE_POSITIVE=1.0 \
 LAMBDA_OUTER_FALSE_NEGATIVE=0.75 \
 LAMBDA_PRIMARY_ROUTE_SWAP=1.0 \
 LAMBDA_ROUTE_TEXEL_CONSISTENCY=0.25 \
-OUTER_FALSE_POSITIVE_GAMMA=2.0 \
+OUTER_FALSE_POSITIVE_GAMMA=3.0 \
 OUTER_FALSE_NEGATIVE_GAMMA=2.0 \
 PRIMARY_ROUTE_SWAP_GAMMA=2.0 \
 ROUTE_CLASS_WEIGHT_FLOOR=0.75 \
-ROUTE_OUTER_CLASS_WEIGHT_CAP=1.0 \
+ROUTE_OUTER_CLASS_WEIGHT_CAP=0.90 \
 ./run_dense_uv_parser_training.sh
 ```
 

@@ -1691,7 +1691,7 @@ def build_arg_parser():
     parser.add_argument("--lambda_uv_class", type=float, default=1.0)
     parser.add_argument("--lambda_affine", type=float, default=1.0)
     parser.add_argument("--lambda_surface", type=float, default=1.0)
-    parser.add_argument("--lambda_outer_false_positive", type=float, default=0.75)
+    parser.add_argument("--lambda_outer_false_positive", type=float, default=1.0)
     parser.add_argument("--lambda_outer_false_negative", type=float, default=0.75)
     parser.add_argument("--lambda_route_confidence", type=float, default=0.25)
     parser.add_argument("--lambda_primary_route_swap", type=float, default=1.0)
@@ -1719,12 +1719,12 @@ def build_arg_parser():
     parser.add_argument(
         "--outer_uv_occupancy_dice_weight", type=float, default=0.25
     )
-    parser.add_argument("--outer_false_positive_gamma", type=float, default=2.0)
+    parser.add_argument("--outer_false_positive_gamma", type=float, default=3.0)
     parser.add_argument("--outer_false_negative_gamma", type=float, default=2.0)
     parser.add_argument("--primary_route_swap_gamma", type=float, default=2.0)
     parser.add_argument("--route_prior_tv_weight", type=float, default=1.0)
     parser.add_argument("--route_class_weight_floor", type=float, default=0.75)
-    parser.add_argument("--route_outer_class_weight_cap", type=float, default=1.0)
+    parser.add_argument("--route_outer_class_weight_cap", type=float, default=0.90)
     parser.add_argument("--lambda_soft_uv_rgb", type=float, default=0.25)
     parser.add_argument("--lambda_soft_uv_alpha", type=float, default=0.35)
     parser.add_argument("--lambda_soft_uv_inner_recall", type=float, default=0.50)
