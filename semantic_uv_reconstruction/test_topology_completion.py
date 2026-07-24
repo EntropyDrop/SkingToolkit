@@ -4,7 +4,6 @@ import torch
 
 from SkingToolkit.semantic_uv_reconstruction.topology import (
     INVALID_SURFACE,
-    LIMB_INNER_FACE,
     MIRRORED_PART,
     SURFACE_COUNT,
     build_uv_topology,
@@ -139,14 +138,14 @@ class UVTopologyTest(unittest.TestCase):
             )
         )
 
-    def test_ordinary_inner_faces_finish_each_outer_ring_before_moving_inward(self):
+    def test_front_back_top_bottom_finish_each_ring_before_moving_inward(self):
         topology = build_uv_topology()
         order = topology.inner_fill_order
         ordered_surfaces = topology.surface.reshape(-1)[order]
 
         for surface in range(SURFACE_COUNT // 2):
-            part, face = divmod(surface, 6)
-            if LIMB_INNER_FACE.get(part) == face:
+            _, face = divmod(surface, 6)
+            if face in (2, 3):
                 continue
             face_order = order[ordered_surfaces == surface]
             x = face_order % 64
@@ -157,48 +156,50 @@ class UVTopologyTest(unittest.TestCase):
             )
             self.assertTrue(torch.all(ring[1:] >= ring[:-1]))
 
-    def test_limb_inner_faces_move_from_both_side_edges_toward_row_centre(self):
+    def test_every_left_right_face_moves_from_both_edges_toward_row_centre(self):
         topology = build_uv_topology()
         order = topology.inner_fill_order
         ordered_surfaces = topology.surface.reshape(-1)[order]
 
-        for part, face in LIMB_INNER_FACE.items():
-            surface = part * 6 + face
-            face_order = order[ordered_surfaces == surface]
-            x = face_order % 64
-            y = torch.div(face_order, 64, rounding_mode="floor")
-            self.assertTrue(torch.all(y[1:] >= y[:-1]))
+        for part in range(6):
+            for face in (2, 3):
+                surface = part * 6 + face
+                face_order = order[ordered_surfaces == surface]
+                x = face_order % 64
+                y = torch.div(face_order, 64, rounding_mode="floor")
+                self.assertTrue(torch.all(y[1:] >= y[:-1]))
 
-            for row in torch.unique(y, sorted=True):
-                row_x = x[y == row]
-                left = int(row_x.min())
-                right = int(row_x.max())
-                expected = []
-                while left <= right:
-                    expected.append(left)
-                    if right != left:
-                        expected.append(right)
-                    left += 1
-                    right -= 1
-                self.assertTrue(
-                    torch.equal(row_x, torch.tensor(expected, dtype=row_x.dtype))
-                )
+                for row in torch.unique(y, sorted=True):
+                    row_x = x[y == row]
+                    left = int(row_x.min())
+                    right = int(row_x.max())
+                    expected = []
+                    while left <= right:
+                        expected.append(left)
+                        if right != left:
+                            expected.append(right)
+                        left += 1
+                        right -= 1
+                    self.assertTrue(
+                        torch.equal(
+                            row_x,
+                            torch.tensor(expected, dtype=row_x.dtype),
+                        )
+                    )
 
-    def test_limb_inner_face_is_completed_before_that_limb_other_faces(self):
+    def test_each_part_completes_front_back_then_sides_then_top_bottom(self):
         topology = build_uv_topology()
         order = topology.inner_fill_order
         ordered_parts = topology.part.reshape(-1)[order]
         ordered_faces = topology.face.reshape(-1)[order]
 
-        for part, inward_face in LIMB_INNER_FACE.items():
-            limb_faces = ordered_faces[ordered_parts == part]
-            inward_count = int((limb_faces == inward_face).sum())
-            self.assertGreater(inward_count, 0)
+        for part in range(6):
+            part_faces = ordered_faces[ordered_parts == part]
             self.assertTrue(
-                torch.all(limb_faces[:inward_count] == inward_face)
-            )
-            self.assertTrue(
-                torch.all(limb_faces[inward_count:] != inward_face)
+                torch.equal(
+                    torch.unique_consecutive(part_faces),
+                    torch.arange(6, dtype=part_faces.dtype),
+                )
             )
 
     def test_simple_inpaint_prefers_known_symmetry_before_nearest_3d(self):
@@ -294,6 +295,26 @@ class UVTopologyTest(unittest.TestCase):
             )
         )
         self.assertGreater(stats["unresolved_texels"], 0)
+
+    def test_simple_inpaint_excludes_undefined_rgb_from_color_sources(self):
+        topology = build_uv_topology()
+        uv = torch.zeros(4, 64, 64)
+        uv[:3, topology.valid] = torch.rand(
+            3,
+            int(topology.valid.sum()),
+        )
+
+        repaired, stats = simple_symmetry_nearest_inpaint(uv)
+
+        self.assertTrue(
+            torch.equal(
+                repaired[3, topology.valid],
+                torch.zeros_like(repaired[3, topology.valid]),
+            )
+        )
+        self.assertEqual(stats["symmetry_filled_texels"], 0)
+        self.assertEqual(stats["nearest_3d_filled_texels"], 0)
+        self.assertEqual(stats["color_sources"], "currently_defined_only")
 
 
 class TopologyAwareCompletionTest(unittest.TestCase):
