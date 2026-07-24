@@ -245,26 +245,43 @@ def build_uv_topology(is_slim=False):
             mirrored[targets] = candidates[nearest]
 
     # Deterministic repair order: process each cuboid face independently from
-    # top to bottom, and within each row start at the horizontal centre before
-    # expanding alternately toward the left and right edges. For an even-width
-    # row this yields, for example, 3, 4, 2, 5, 1, 6, 0, 7.
+    # its outer border toward its centre. Each rectangular ring is traversed
+    # clockwise (top, right, bottom, left) before the next inner ring starts.
+    # Newly repaired border texels can therefore provide colour evidence for
+    # later inner texels without crossing body-part boundaries.
     inner_fill_order = []
     for part in range(PART_COUNT):
         for face in range(FACE_COUNT):
-            members = (
-                valid
-                & (layer_map == 0)
-                & (part_map == part)
-                & (face_map == face)
-            ).nonzero(as_tuple=False).flatten().tolist()
-            members.sort(
-                key=lambda index: (
-                    float(local_uv[index, 1]),
-                    abs(float(local_uv[index, 0]) - 0.5),
-                    float(local_uv[index, 0]),
-                )
-            )
-            inner_fill_order.extend(members)
+            cells = [
+                cell
+                for cell in cells_by_group[(0, part)]
+                if cell["face"] == face
+            ]
+            width = max(cell["u"] for cell in cells) + 1
+            height = max(cell["v"] for cell in cells) + 1
+
+            def inward_ring_key(cell):
+                u = cell["u"]
+                v = cell["v"]
+                ring = min(u, v, width - 1 - u, height - 1 - v)
+                right = width - 1 - ring
+                bottom = height - 1 - ring
+                if v == ring:
+                    edge = 0
+                    offset = u - ring
+                elif u == right:
+                    edge = 1
+                    offset = v - ring
+                elif v == bottom:
+                    edge = 2
+                    offset = right - u
+                else:
+                    edge = 3
+                    offset = bottom - v
+                return ring, edge, offset
+
+            cells.sort(key=inward_ring_key)
+            inner_fill_order.extend(cell["flat"] for cell in cells)
 
     return UVTopology(
         valid=valid.reshape(UV_SIZE, UV_SIZE),
@@ -286,12 +303,13 @@ def build_uv_topology(is_slim=False):
 def simple_symmetry_nearest_inpaint(uv, alpha_threshold=0.5):
     """Fill unknown inner texels with symmetry, then 3D nearest colours.
 
-    Each face is traversed top-to-bottom and horizontal-centre-out. Horizontal
-    symmetry stays on the inner layer. The nearest-neighbour fallback searches
-    known texels only within the target body part, including that part's known
-    outer-layer texels. Newly repaired inner texels become sources for later
-    texels. The outer layer itself is never filled or cleared, and every
-    existing opaque RGBA value is untouched.
+    Each face is traversed from its outer border toward its centre, one
+    clockwise rectangular ring at a time. Horizontal symmetry stays on the
+    inner layer. The nearest-neighbour fallback searches known texels only
+    within the target body part, including that part's known outer-layer
+    texels. Newly repaired inner texels become sources for later texels. The
+    outer layer itself is never filled or cleared, and every existing opaque
+    RGBA value is untouched.
     """
     squeeze_batch = uv.dim() == 3
     if squeeze_batch:
@@ -363,7 +381,7 @@ def simple_symmetry_nearest_inpaint(uv, alpha_threshold=0.5):
                 "symmetry_filled_texels": symmetry_filled,
                 "nearest_3d_filled_texels": nearest_filled,
                 "preserved_outer_texels": int((valid & (layer == 1)).sum().item()),
-                "fill_order": "part_face_top_down_center_out",
+                "fill_order": "part_face_outer_to_inner_clockwise",
                 "unresolved_texels": int(
                     (valid & (layer == 0) & ~resolved_inner).sum().item()
                 ),

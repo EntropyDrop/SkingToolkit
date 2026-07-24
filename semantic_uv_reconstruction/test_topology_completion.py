@@ -65,24 +65,55 @@ class UVTopologyTest(unittest.TestCase):
             torch.equal(positions[mirrored[indices]], expected_positions)
         )
 
-    def test_inner_fill_order_is_face_top_down_and_center_out(self):
+    def test_inner_fill_order_is_face_outer_to_inner_clockwise(self):
         topology = build_uv_topology()
         # Head-front is the first part/face and occupies x=8..15, y=8..15.
-        expected_first_row = torch.tensor(
-            [8 * 64 + x for x in (11, 12, 10, 13, 9, 14, 8, 15)],
+        expected_outer_ring = torch.tensor(
+            [8 * 64 + x for x in range(8, 16)]
+            + [y * 64 + 15 for y in range(9, 16)]
+            + [15 * 64 + x for x in range(14, 7, -1)]
+            + [y * 64 + 8 for y in range(14, 8, -1)],
             dtype=torch.long,
         )
-        expected_second_row = torch.tensor(
-            [9 * 64 + x for x in (11, 12, 10, 13, 9, 14, 8, 15)],
+        expected_second_ring = torch.tensor(
+            [9 * 64 + x for x in range(9, 15)]
+            + [y * 64 + 14 for y in range(10, 15)]
+            + [14 * 64 + x for x in range(13, 8, -1)]
+            + [y * 64 + 9 for y in range(13, 9, -1)],
             dtype=torch.long,
         )
+        outer_count = len(expected_outer_ring)
+        second_count = len(expected_second_ring)
 
         self.assertTrue(
-            torch.equal(topology.inner_fill_order[:8], expected_first_row)
+            torch.equal(
+                topology.inner_fill_order[:outer_count],
+                expected_outer_ring,
+            )
         )
         self.assertTrue(
-            torch.equal(topology.inner_fill_order[8:16], expected_second_row)
+            torch.equal(
+                topology.inner_fill_order[
+                    outer_count : outer_count + second_count
+                ],
+                expected_second_ring,
+            )
         )
+
+    def test_every_inner_face_finishes_each_outer_ring_before_moving_inward(self):
+        topology = build_uv_topology()
+        order = topology.inner_fill_order
+        ordered_surfaces = topology.surface.reshape(-1)[order]
+
+        for surface in range(SURFACE_COUNT // 2):
+            face_order = order[ordered_surfaces == surface]
+            x = face_order % 64
+            y = torch.div(face_order, 64, rounding_mode="floor")
+            ring = torch.minimum(
+                torch.minimum(x - x.min(), x.max() - x),
+                torch.minimum(y - y.min(), y.max() - y),
+            )
+            self.assertTrue(torch.all(ring[1:] >= ring[:-1]))
 
     def test_simple_inpaint_prefers_known_symmetry_before_nearest_3d(self):
         topology = build_uv_topology()
