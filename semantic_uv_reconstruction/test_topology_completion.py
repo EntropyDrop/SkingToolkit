@@ -184,6 +184,23 @@ class UVTopologyTest(unittest.TestCase):
                     torch.equal(row_x, torch.tensor(expected, dtype=row_x.dtype))
                 )
 
+    def test_limb_inner_face_is_completed_before_that_limb_other_faces(self):
+        topology = build_uv_topology()
+        order = topology.inner_fill_order
+        ordered_parts = topology.part.reshape(-1)[order]
+        ordered_faces = topology.face.reshape(-1)[order]
+
+        for part, inward_face in LIMB_INNER_FACE.items():
+            limb_faces = ordered_faces[ordered_parts == part]
+            inward_count = int((limb_faces == inward_face).sum())
+            self.assertGreater(inward_count, 0)
+            self.assertTrue(
+                torch.all(limb_faces[:inward_count] == inward_face)
+            )
+            self.assertTrue(
+                torch.all(limb_faces[inward_count:] != inward_face)
+            )
+
     def test_simple_inpaint_prefers_known_symmetry_before_nearest_3d(self):
         topology = build_uv_topology()
         valid_inner = (

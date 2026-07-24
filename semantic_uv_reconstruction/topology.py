@@ -253,15 +253,21 @@ def build_uv_topology(is_slim=False):
             ).argmin(dim=1)
             mirrored[targets] = candidates[nearest]
 
-    # Deterministic repair order: most faces move from their outer border toward
-    # the centre, one clockwise rectangular ring at a time. The hidden inward
-    # side of each arm and leg instead moves top-to-bottom and, within every row,
-    # from the left/right seams toward the centre. Newly repaired border texels
-    # can therefore provide colour evidence for later inner texels without
-    # crossing body-part boundaries.
+    # Deterministic repair order: the hidden inward face of each arm and leg is
+    # completed before that limb's other five faces. It moves top-to-bottom and,
+    # within every row, from the left/right seams toward the centre. Most other
+    # faces move from their outer border toward the centre, one clockwise
+    # rectangular ring at a time. Newly repaired border texels can therefore
+    # provide colour evidence for later inner texels without crossing body-part
+    # boundaries.
     inner_fill_order = []
     for part in range(PART_COUNT):
-        for face in range(FACE_COUNT):
+        part_face_order = list(range(FACE_COUNT))
+        inward_face = LIMB_INNER_FACE.get(part)
+        if inward_face is not None:
+            part_face_order.remove(inward_face)
+            part_face_order.insert(0, inward_face)
+        for face in part_face_order:
             cells = [
                 cell
                 for cell in cells_by_group[(0, part)]
@@ -324,15 +330,15 @@ def build_uv_topology(is_slim=False):
 def simple_symmetry_nearest_inpaint(uv, alpha_threshold=0.5):
     """Fill unknown inner texels with symmetry, then 3D nearest colours.
 
-    Most faces are traversed from their outer border toward their centre, one
-    clockwise rectangular ring at a time. The inward-facing side of each arm
-    and leg is traversed top-to-bottom with every row moving from its left and
-    right edges toward the centre. Horizontal symmetry stays on the inner
-    layer. The nearest-neighbour fallback searches known texels only within the
-    target body part, including that part's known outer-layer texels. Newly
-    repaired inner texels become sources for later texels. The outer layer
-    itself is never filled or cleared, and every existing opaque RGBA value is
-    untouched.
+    The inward-facing side of each arm and leg is completed before that limb's
+    other faces. It is traversed top-to-bottom with every row moving from its
+    left and right edges toward the centre. Most other faces are traversed from
+    their outer border toward their centre, one clockwise rectangular ring at a
+    time. Horizontal symmetry stays on the inner layer. The nearest-neighbour
+    fallback searches known texels only within the target body part, including
+    that part's known outer-layer texels. Newly repaired inner texels become
+    sources for later texels. The outer layer itself is never filled or cleared,
+    and every existing opaque RGBA value is untouched.
     """
     squeeze_batch = uv.dim() == 3
     if squeeze_batch:
@@ -404,7 +410,7 @@ def simple_symmetry_nearest_inpaint(uv, alpha_threshold=0.5):
                 "symmetry_filled_texels": symmetry_filled,
                 "nearest_3d_filled_texels": nearest_filled,
                 "preserved_outer_texels": int((valid & (layer == 1)).sum().item()),
-                "fill_order": "face_rings_with_limb_inner_edges_in",
+                "fill_order": "limb_inner_first_then_face_rings",
                 "unresolved_texels": int(
                     (valid & (layer == 0) & ~resolved_inner).sum().item()
                 ),
