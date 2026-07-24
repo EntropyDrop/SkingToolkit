@@ -25,6 +25,17 @@ class DenseParserForegroundTest(unittest.TestCase):
         self.assertEqual(args.color_aggregation, "grid_mode")
         self.assertEqual(args.outer_uv_min_source_pixels, 15)
         self.assertIsNone(args.simple_inpaint_output)
+        self.assertFalse(hasattr(args, "inpaint_checkpoint"))
+
+        final_args = build_arg_parser().parse_args(
+            [
+                "--parser_checkpoint",
+                "unused.pt",
+                "--output",
+                "pred_uv.png",
+            ]
+        )
+        self.assertEqual(final_args.output, "pred_uv.png")
 
     def test_raw_face_debug_uses_observed_not_filtered_foreground(self):
         outputs = {"foreground": torch.full((1, 1, 2, 2), -10.0)}
@@ -48,6 +59,8 @@ class DenseParserForegroundTest(unittest.TestCase):
             'PARSER_CHECKPOINT="$(find_latest_checkpoint '
         )
         self.assertLess(definition, parser_lookup)
+        self.assertNotIn("semantic_uv_reconstruction", script)
+        self.assertNotIn("INPAINT_CHECKPOINT", script)
 
     def test_dense_infer_does_not_import_removed_foreground_package(self):
         import SkingToolkit.dense_uv_parser.infer  # noqa: F401

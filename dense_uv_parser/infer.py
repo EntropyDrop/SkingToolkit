@@ -1,5 +1,4 @@
 import argparse
-import inspect
 import json
 import sys
 from pathlib import Path
@@ -21,6 +20,15 @@ from SkingToolkit.dense_uv_parser.foreground import (  # noqa: E402
     save_flood_outputs,
 )
 from SkingToolkit.dense_uv_parser.semantic import attach_semantic_runtime  # noqa: E402
+from SkingToolkit.dense_uv_parser.runtime import get_device  # noqa: E402
+from SkingToolkit.dense_uv_parser.simple_inpainting import (  # noqa: E402
+    simple_symmetry_nearest_inpaint,
+)
+from SkingToolkit.dense_uv_parser.uv_layout import (  # noqa: E402
+    finalize_minecraft_alpha,
+    tensor_to_rgba_image,
+    view_native_size,
+)
 from SkingToolkit.dense_uv_parser.utils import (  # noqa: E402
     FACE_PALETTE,
     IGNORE_INDEX,
@@ -45,17 +53,6 @@ from SkingToolkit.dense_uv_parser.utils import (  # noqa: E402
     splat_parser_predictions_to_uv_conditioning,
     surface_class_count,
 )
-from SkingToolkit.semantic_uv_reconstruction.dataset import finalize_minecraft_alpha, tensor_to_rgba_image, view_native_size  # noqa: E402
-from SkingToolkit.semantic_uv_reconstruction.model import UVInpaintingNet  # noqa: E402
-from SkingToolkit.semantic_uv_reconstruction.topology_model import TopologyAwareUVCompletionNet  # noqa: E402
-from SkingToolkit.semantic_uv_reconstruction.topology import (  # noqa: E402
-    FACE_COUNT,
-    LAYER_COUNT,
-    PART_COUNT,
-    build_uv_topology,
-    simple_symmetry_nearest_inpaint,
-)
-from SkingToolkit.semantic_uv_reconstruction.train import get_device  # noqa: E402
 from SkingToolkit.renderer import DifferentiableRenderer  # noqa: E402
 
 
@@ -202,372 +199,6 @@ def load_parser(checkpoint_path, device):
     return model, checkpoint_args
 
 
-def load_inpaint(checkpoint_path, device):
-    checkpoint = torch.load(checkpoint_path, map_location=device)
-    checkpoint_args = checkpoint.get("args", {})
-    model_config = checkpoint.get("model_config", {})
-    model_type = model_config.get(
-        "model_type", checkpoint_args.get("completion_model", "unet")
-    )
-    input_channels = model_config.get(
-        "input_channels", checkpoint.get("input_channels", checkpoint_args.get("input_channels", 10))
-    )
-    if model_type == "topology_maskgit":
-        model = TopologyAwareUVCompletionNet(
-            input_channels=input_channels,
-            hidden_channels=model_config.get(
-                "hidden_channels", checkpoint_args.get("topology_channels", 128)
-            ),
-            layers=model_config.get("layers", checkpoint_args.get("topology_layers", 4)),
-            attention_heads=model_config.get(
-                "attention_heads", checkpoint_args.get("topology_attention_heads", 4)
-            ),
-            dropout=model_config.get("dropout", checkpoint_args.get("topology_dropout", 0.05)),
-            preserve_known=model_config.get(
-                "preserve_known", checkpoint_args.get("preserve_known", True)
-            ),
-            hard_lock_threshold=model_config.get(
-                "hard_lock_threshold",
-                checkpoint_args.get("topology_hard_lock_threshold", 0.85),
-            ),
-        ).to(device)
-    elif model_type == "unet":
-        model = UVInpaintingNet(
-            input_channels=input_channels,
-            base_channels=model_config.get(
-                "base_channels", checkpoint_args.get("base_channels", 64)
-            ),
-            preserve_known=model_config.get(
-                "preserve_known", checkpoint_args.get("preserve_known", True)
-            ),
-        ).to(device)
-    else:
-        raise ValueError(f"Unsupported inpaint model_type={model_type!r}.")
-    model.load_state_dict(checkpoint["model"])
-    model.eval()
-    checkpoint_args = dict(checkpoint_args)
-    checkpoint_args["completion_model"] = model_type
-    return model, checkpoint_args
-
-
-def checkpoint_run_id(path):
-    path = Path(path)
-    return f"{path.parent.name}/{path.name}"
-
-
-def generate_topology_completion(
-    model,
-    conditioning,
-    steps,
-    temperature,
-    seed,
-    palette_snap=True,
-    palette_min_confidence=0.5,
-    context_min_confidence=None,
-    rgb_decode="mean",
-):
-    """Call new and legacy topology generators without source-version crashes."""
-    parameters = inspect.signature(model.generate).parameters
-    kwargs = {
-        "steps": steps,
-        "temperature": temperature,
-        "seed": seed,
-    }
-    palette_supported = "palette_snap" in parameters
-    if palette_supported:
-        kwargs.update(
-            palette_snap=palette_snap,
-            palette_min_confidence=palette_min_confidence,
-        )
-        if "context_min_confidence" in parameters:
-            kwargs["context_min_confidence"] = context_min_confidence
-    elif palette_snap:
-        print(
-            "inpaint_warning="
-            + json.dumps(
-                {
-                    "message": (
-                        "palette snapping is unavailable because "
-                        "semantic_uv_reconstruction/topology_model.py is older "
-                        "than dense_uv_parser/infer.py; update both files"
-                    ),
-                    "palette_snap_applied": False,
-                },
-                sort_keys=True,
-            )
-        )
-    if "rgb_decode" in parameters:
-        kwargs["rgb_decode"] = rgb_decode
-    return model.generate(conditioning, **kwargs)
-
-
-def lock_completed_parser_evidence(completed, conditioning, confidence_threshold=0.0):
-    """Copy trusted parser RGBA back after completion, including legacy generators."""
-    if not 0.0 <= confidence_threshold <= 1.0:
-        raise ValueError("confidence_threshold must be in [0, 1].")
-    if completed.dim() != 4 or completed.shape[1:] != (4, 64, 64):
-        raise ValueError(f"Expected completed Bx4x64x64 UV, got {tuple(completed.shape)}.")
-    if conditioning.dim() != 4 or conditioning.shape[1] not in (10, 12):
-        raise ValueError(
-            "Expected 10- or 12-channel conditioning, "
-            f"got {tuple(conditioning.shape)}."
-        )
-    if completed.shape[0] != conditioning.shape[0]:
-        raise ValueError("Completed UV and conditioning batch sizes must match.")
-
-    inner_rgba = conditioning[:, 0:4]
-    inner_evidence = conditioning[:, 4:5] > 0.5
-    outer_offset = 6 if conditioning.shape[1] == 12 else 5
-    outer_rgba = conditioning[:, outer_offset : outer_offset + 4]
-    outer_evidence = conditioning[:, outer_offset + 4 : outer_offset + 5] > 0.5
-    if conditioning.shape[1] == 12:
-        inner_evidence = inner_evidence & (
-            conditioning[:, 5:6] >= float(confidence_threshold)
-        )
-        outer_evidence = outer_evidence & (
-            conditioning[:, 11:12] >= float(confidence_threshold)
-        )
-
-    locked_rgba = torch.where(outer_evidence.expand_as(outer_rgba), outer_rgba, inner_rgba)
-    locked_mask = inner_evidence | outer_evidence
-    difference = (completed - locked_rgba).abs().amax(dim=1, keepdim=True)
-    overwritten = locked_mask & (difference > (0.5 / 255.0))
-    locked = torch.where(locked_mask.expand_as(completed), locked_rgba, completed)
-    return locked, {
-        "locked_evidence_texels": int(locked_mask.sum().item()),
-        "model_overwrote_locked_texels": int(overwritten.sum().item()),
-        "max_locked_rgba_error": (
-            float(difference[locked_mask].max().item()) if locked_mask.any() else 0.0
-        ),
-    }
-
-
-def propagate_completed_unknown_colors(
-    completed,
-    conditioning,
-    min_confidence=0.75,
-    context_min_confidence=None,
-    context_alpha_rescue_mask=None,
-):
-    """Replace generated opaque RGB with stable nearby parser-observed colors."""
-    if not 0.0 <= min_confidence <= 1.0:
-        raise ValueError("min_confidence must be in [0, 1].")
-    if context_min_confidence is None:
-        context_min_confidence = min_confidence
-    if not 0.0 <= context_min_confidence <= 1.0:
-        raise ValueError("context_min_confidence must be in [0, 1].")
-    if completed.dim() != 4 or completed.shape[1:] != (4, 64, 64):
-        raise ValueError(f"Expected completed Bx4x64x64 UV, got {tuple(completed.shape)}.")
-    if conditioning.dim() != 4 or conditioning.shape[1] not in (10, 12):
-        raise ValueError("Expected 10- or 12-channel parser conditioning.")
-    if context_alpha_rescue_mask is not None:
-        if context_alpha_rescue_mask.shape != (
-            completed.shape[0],
-            1,
-            64,
-            64,
-        ):
-            raise ValueError(
-                "context_alpha_rescue_mask must have shape Bx1x64x64."
-            )
-
-    topology = build_uv_topology()
-    device = completed.device
-    valid = topology.valid.reshape(-1).to(device=device)
-    layer = topology.layer.reshape(-1).to(device=device)
-    part = topology.part.reshape(-1).to(device=device)
-    face = topology.face.reshape(-1).to(device=device)
-    coordinates = topology.local_uv.reshape(-1, 2).to(device=device).float()
-
-    flat = conditioning.flatten(2)
-    inner_rgba = flat[:, 0:4].transpose(1, 2)
-    inner_evidence = flat[:, 4] > 0.5
-    outer_offset = 6 if conditioning.shape[1] == 12 else 5
-    outer_rgba = flat[:, outer_offset : outer_offset + 4].transpose(1, 2)
-    outer_evidence = flat[:, outer_offset + 4] > 0.5
-    is_inner = (layer == 0).view(1, -1)
-    observed = torch.where(is_inner.unsqueeze(-1), inner_rgba, outer_rgba)
-    evidence = torch.where(is_inner, inner_evidence, outer_evidence) & valid.view(1, -1)
-    if conditioning.shape[1] == 12:
-        confidence = torch.where(
-            is_inner,
-            flat[:, 5],
-            flat[:, 11],
-        )
-    else:
-        confidence = evidence.to(dtype=completed.dtype)
-
-    # Rejected-but-plausible pixels need a lower threshold when copied back at
-    # their exact UV coordinate.  Keep them out of the shared propagation
-    # palette unless they also pass the stricter palette threshold, otherwise
-    # one uncertain pixel can recolor unrelated generated texels.
-    context_source = (~evidence) & (
-        confidence >= float(context_min_confidence)
-    )
-    palette_context_source = context_source & (
-        confidence >= float(min_confidence)
-    )
-    result = completed.flatten(2).transpose(1, 2).clone()
-    model_generated = (
-        (~evidence) & valid.view(1, -1) & (result[..., 3] > 0.5)
-    )
-    if context_alpha_rescue_mask is None:
-        alpha_rescue_mask = torch.zeros_like(context_source)
-    else:
-        alpha_rescue_mask = (
-            context_alpha_rescue_mask.flatten(2)[:, 0]
-            .to(device=result.device)
-            .bool()
-        )
-    alpha_rescue_eligible = (
-        context_source
-        & alpha_rescue_mask
-        & valid.view(1, -1)
-        & (observed[..., 3] > 0.5)
-    )
-    alpha_restored = alpha_rescue_eligible & ~model_generated
-    result[..., 3] = torch.where(
-        alpha_rescue_eligible,
-        observed[..., 3].to(dtype=result.dtype),
-        result[..., 3],
-    )
-    generated = (~evidence) & valid.view(1, -1) & (result[..., 3] > 0.5)
-    opaque_source = (evidence | palette_context_source) & (observed[..., 3] > 0.5)
-    strong_source = opaque_source & (confidence >= float(min_confidence))
-    direct_context = context_source & generated & (observed[..., 3] > 0.5)
-    result[..., :3] = torch.where(
-        direct_context.unsqueeze(-1),
-        observed[..., :3].to(dtype=result.dtype),
-        result[..., :3],
-    )
-    generated_for_propagation = generated & ~direct_context
-
-    def stable_indices(mask, colors):
-        indices = mask.nonzero(as_tuple=False).flatten()
-        if indices.numel() < 2:
-            return None, indices
-        rgb8 = colors[indices, :3].clamp(0.0, 1.0).mul(255.0).round().to(torch.uint8)
-        _, inverse, counts = torch.unique(
-            rgb8,
-            dim=0,
-            return_inverse=True,
-            return_counts=True,
-        )
-        stable = counts[inverse] >= 2
-        return (indices[stable] if stable.any() else None), indices
-
-    recolored = 0
-    for batch_index in range(result.shape[0]):
-        strong = strong_source[batch_index]
-        fallback = opaque_source[batch_index]
-        if not fallback.any():
-            continue
-        colors = observed[batch_index]
-        for part_index in range(PART_COUNT):
-            part_mask = part == part_index
-            for layer_index in range(LAYER_COUNT):
-                group_target = (
-                    generated_for_propagation[batch_index]
-                    & part_mask
-                    & (layer == layer_index)
-                )
-                if not group_target.any():
-                    continue
-                for face_index in range(FACE_COUNT):
-                    target = group_target & (face == face_index)
-                    if not target.any():
-                        continue
-                    candidates = (
-                        strong & part_mask & (layer == layer_index) & (face == face_index),
-                        fallback & part_mask & (layer == layer_index) & (face == face_index),
-                        strong & part_mask & (layer == layer_index),
-                        fallback & part_mask & (layer == layer_index),
-                        strong & part_mask,
-                        fallback & part_mask,
-                        strong,
-                        fallback,
-                    )
-                    selected_reference = None
-                    first_nonempty = None
-                    for candidate in candidates:
-                        stable, indices = stable_indices(candidate, colors)
-                        if first_nonempty is None and indices.numel() > 0:
-                            first_nonempty = indices
-                        if stable is not None and stable.numel() > 0:
-                            selected_reference = stable
-                            break
-                    if selected_reference is None:
-                        selected_reference = first_nonempty
-                    if selected_reference is None or selected_reference.numel() == 0:
-                        continue
-                    target_indices = target.nonzero(as_tuple=False).flatten()
-                    color_distance = torch.cdist(
-                        result[batch_index, target_indices, :3].float(),
-                        colors[selected_reference, :3].float(),
-                    )
-                    spatial_distance = torch.cdist(
-                        coordinates[target_indices],
-                        coordinates[selected_reference],
-                    )
-                    nearest = (
-                        color_distance + 0.05 * spatial_distance
-                    ).argmin(dim=1)
-                    source_indices = selected_reference[nearest]
-                    result[batch_index, target_indices, :3] = colors[source_indices, :3]
-                    recolored += int(target_indices.numel())
-
-    result = result.transpose(1, 2).reshape_as(completed)
-    return result, {
-        "model_generated_opaque_texels": int(model_generated.sum().item()),
-        "generated_opaque_texels": int(generated.sum().item()),
-        "available_context_texels": int(
-            (context_source & valid.view(1, -1) & (observed[..., 3] > 0.5))
-            .sum()
-            .item()
-        ),
-        "palette_context_texels": int(
-            (
-                palette_context_source
-                & valid.view(1, -1)
-                & (observed[..., 3] > 0.5)
-            )
-            .sum()
-            .item()
-        ),
-        "context_alpha_rescue_eligible_texels": int(
-            alpha_rescue_eligible.sum().item()
-        ),
-        "context_alpha_restored_texels": int(alpha_restored.sum().item()),
-        "direct_context_texels": int(direct_context.sum().item()),
-        "model_context_alpha_rejected_texels": int(
-            (
-                context_source
-                & valid.view(1, -1)
-                & (observed[..., 3] > 0.5)
-                & ~model_generated
-            )
-            .sum()
-            .item()
-        ),
-        "context_alpha_rejected_texels": int(
-            (
-                context_source
-                & valid.view(1, -1)
-                & (observed[..., 3] > 0.5)
-                & ~generated
-            )
-            .sum()
-            .item()
-        ),
-        "topology_color_propagated_texels": recolored,
-        "uncolored_generated_texels": (
-            int(generated.sum().item())
-            - int(direct_context.sum().item())
-            - recolored
-        ),
-    }
-
-
 def load_view_images(args, views, renderer, bg_color=(128, 128, 128)):
     images = []
     if args.combined:
@@ -647,7 +278,7 @@ def save_parser_uv(
     print(f"Saved parser_partial_uv={output_path}")
 
 
-def save_simple_inpaint_uv(conditioning, output_path, alpha_threshold=0.5):
+def simple_inpaint_uv(conditioning, alpha_threshold=0.5):
     """Repair inner UV holes while preserving the parser's outer layer."""
     parser_uv = conditioning_to_pred_uv(conditioning)
     if parser_uv.dim() != 4 or parser_uv.shape[0] != 1:
@@ -669,10 +300,19 @@ def save_simple_inpaint_uv(conditioning, output_path, alpha_threshold=0.5):
         repaired[:3],
         torch.zeros_like(repaired[:3]),
     )
+    return repaired, stats
+
+
+def save_simple_inpaint_uv(conditioning, output_path, alpha_threshold=0.5):
+    repaired, stats = simple_inpaint_uv(
+        conditioning,
+        alpha_threshold=alpha_threshold,
+    )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     tensor_to_rgba_image(repaired.detach().cpu()).save(output_path)
     print("simple_inpaint_stats=" + json.dumps(stats, sort_keys=True))
     print(f"Saved parser_simple_inpaint_uv={output_path}")
+    return repaired, stats
 
 
 def _raw_debug_foreground(outputs, routing, fg_threshold):
@@ -981,45 +621,15 @@ def build_arg_parser():
         default="outputs/foreground_parser_input.png",
         help="Exact adaptive-background RGB images passed to dense parser.",
     )
-    parser.add_argument("--inpaint_checkpoint", default=None, help="Optional semantic_uv_reconstruction checkpoint used to inpaint final skin.")
-    parser.add_argument("--inpaint_steps", type=int, default=4, help="Masked-generation steps for topology checkpoints.")
-    parser.add_argument("--inpaint_temperature", type=float, default=0.0, help="0 uses deterministic decoding; positive values sample unknown texels.")
-    parser.add_argument("--inpaint_seed", type=int, default=1234)
     parser.add_argument(
-        "--inpaint_rgb_decode",
-        choices=["mean", "argmax"],
-        default="mean",
-        help="Deterministic RGB decoder. mean matches the continuous training objective; argmax is legacy behavior.",
-    )
-    parser.add_argument(
-        "--inpaint_palette_snap",
-        dest="inpaint_palette_snap",
-        action="store_true",
-        default=True,
-        help="Snap generated RGB to observed per-part/layer character palettes.",
-    )
-    parser.add_argument(
-        "--no_inpaint_palette_snap",
-        dest="inpaint_palette_snap",
-        action="store_false",
-    )
-    parser.add_argument("--inpaint_palette_min_confidence", type=float, default=0.5)
-    parser.add_argument(
-        "--inpaint_context_min_confidence",
-        type=float,
-        default=0.35,
+        "--output",
+        default=None,
         help=(
-            "Minimum confidence for copying rejected context at the same UV texel. "
-            "This does not lower the shared palette threshold."
+            "Final deterministic RGBA UV PNG. Unknown inner-layer texels are "
+            "completed by the topology-aware simple inpainting algorithm; "
+            "the predicted outer layer is preserved unchanged."
         ),
     )
-    parser.add_argument(
-        "--inpaint_evidence_lock_threshold",
-        type=float,
-        default=0.0,
-        help="Lock parser evidence at or above this confidence; zero preserves every routed texel.",
-    )
-    parser.add_argument("--output", default=None, help="Final RGBA UV PNG path; requires --inpaint_checkpoint.")
     parser.add_argument("--conditioning_output", default=None, help="Optional preview image for parser-splatted conditioning.")
     parser.add_argument(
         "--parser_uv_output",
@@ -1030,10 +640,8 @@ def build_arg_parser():
         "--simple_inpaint_output",
         default=None,
         help=(
-            "Optional deterministic inner-layer repair: use known left/right "
-            "symmetry first, then the nearest known texel in 3D character "
-            "space from the same body part. Traverse each face top-down and "
-            "horizontal-centre-out; preserve the outer layer unchanged."
+            "Optional copy of the deterministic pre-final UV repair. This is "
+            "the same completion used by --output."
         ),
     )
     parser.add_argument("--debug_output", default=None, help="Optional path to write a debug preview grid of predictions.")
@@ -1218,56 +826,18 @@ def build_arg_parser():
         action="store_true",
         help="Keep pixels whose strict semantic routing had no valid candidate.",
     )
-    parser.add_argument(
-        "--rejected_context",
-        dest="include_rejected_context",
-        action="store_true",
-        default=True,
-        help="Pass moderately confident rejected pixels to topology completion as unlocked RGB context.",
-    )
-    parser.add_argument(
-        "--no_rejected_context",
-        dest="include_rejected_context",
-        action="store_false",
-    )
-    parser.add_argument("--rejected_context_confidence_threshold", type=float, default=0.35)
-    parser.add_argument("--rejected_context_margin_threshold", type=float, default=0.10)
-    parser.add_argument(
-        "--inpaint_context_alpha_rescue",
-        dest="inpaint_context_alpha_rescue",
-        action="store_true",
-        default=False,
-        help=(
-            "Restore opacity only for rejected outer context backed by "
-            "part semantics or outer geometry."
-        ),
-    )
-    parser.add_argument(
-        "--no_inpaint_context_alpha_rescue",
-        dest="inpaint_context_alpha_rescue",
-        action="store_false",
-    )
-    parser.add_argument(
-        "--inpaint_context_alpha_min_confidence", type=float, default=0.50
-    )
-    parser.add_argument(
-        "--inpaint_context_alpha_min_margin", type=float, default=0.10
-    )
     parser.add_argument("--no_semantic_gate", dest="semantic_gate", action="store_false", default=None)
     parser.add_argument("--affine_refine", dest="affine_refine", action="store_true", default=None)
     parser.add_argument("--no_affine_refine", dest="affine_refine", action="store_false")
     parser.add_argument("--affine_refine_translation_px", type=float, default=None)
     parser.add_argument("--affine_refine_scale", type=float, default=None)
     parser.add_argument("--alpha_threshold", type=float, default=0.5)
-    parser.add_argument("--no_enforce_base_alpha", action="store_true")
     parser.add_argument("--device", default="auto")
     return parser
 
 
 def main():
     args = build_arg_parser().parse_args()
-    if args.inpaint_steps < 1 or args.inpaint_temperature < 0.0:
-        raise ValueError("Inpaint generation requires positive steps and non-negative temperature.")
     if not 0.0 <= args.background_color_tolerance <= 1.0:
         raise ValueError("--background_color_tolerance must be in [0, 1].")
     if not 0.0 <= args.color_background_tolerance <= 1.0:
@@ -1278,20 +848,6 @@ def main():
         raise ValueError("--outer_uv_min_source_pixels must be positive.")
     if not 0.0 <= args.foreground_flood_tolerance <= 1.0:
         raise ValueError("--foreground_flood_tolerance must be in [0, 1].")
-    if not 0.0 <= args.inpaint_palette_min_confidence <= 1.0:
-        raise ValueError("--inpaint_palette_min_confidence must be in [0, 1].")
-    if not 0.0 <= args.inpaint_context_min_confidence <= 1.0:
-        raise ValueError("--inpaint_context_min_confidence must be in [0, 1].")
-    if not 0.0 <= args.inpaint_context_alpha_min_confidence <= 1.0:
-        raise ValueError(
-            "--inpaint_context_alpha_min_confidence must be in [0, 1]."
-        )
-    if not 0.0 <= args.inpaint_context_alpha_min_margin <= 1.0:
-        raise ValueError("--inpaint_context_alpha_min_margin must be in [0, 1].")
-    if not 0.0 <= args.inpaint_evidence_lock_threshold <= 1.0:
-        raise ValueError("--inpaint_evidence_lock_threshold must be in [0, 1].")
-    if args.output and not args.inpaint_checkpoint:
-        raise ValueError("--output requires --inpaint_checkpoint.")
     if not any(
         (
             args.output,
@@ -1323,10 +879,6 @@ def main():
 
     device = get_device(args.device)
     parser_model, parser_args = load_parser(args.parser_checkpoint, device)
-    inpaint_model = None
-    inpaint_args = None
-    if args.output:
-        inpaint_model, inpaint_args = load_inpaint(args.inpaint_checkpoint, device)
     views = parse_views(parser_args.get("views", "walk_front_both_layer_ortho,walk_back_both_layer_ortho"))
     if parser_model.view_classes not in (0, len(views)):
         raise ValueError(
@@ -1556,18 +1108,8 @@ def main():
             color_background_tolerance=args.color_background_tolerance,
             color_foreground_inset=args.color_foreground_inset,
             reject_semantic_fallback=not args.allow_semantic_fallback,
-            include_rejected_context=args.include_rejected_context,
-            rejected_context_confidence_threshold=args.rejected_context_confidence_threshold,
-            rejected_context_margin_threshold=args.rejected_context_margin_threshold,
-            rejected_context_alpha_confidence_threshold=(
-                args.inpaint_context_alpha_min_confidence
-            ),
-            rejected_context_alpha_margin_threshold=(
-                args.inpaint_context_alpha_min_margin
-            ),
-            include_confidence=(
-                getattr(inpaint_model, "input_channels", 10) == 12
-            ),
+            include_rejected_context=False,
+            include_confidence=False,
             return_details=True,
         )
 
@@ -1895,194 +1437,27 @@ def main():
             enforce_base_alpha=False,
         )
 
+    repair_outputs = []
     if args.simple_inpaint_output:
-        save_simple_inpaint_uv(
+        repair_outputs.append(
+            ("parser_simple_inpaint_uv", Path(args.simple_inpaint_output))
+        )
+    if args.output:
+        repair_outputs.append(("completed_uv", Path(args.output)))
+    if repair_outputs:
+        repaired, stats = simple_inpaint_uv(
             conditioning.detach().cpu(),
-            Path(args.simple_inpaint_output),
             alpha_threshold=args.alpha_threshold,
         )
-
-    if args.output:
-        print(
-            "inpaint_config="
-            + json.dumps(
-                {
-                    "checkpoint": checkpoint_run_id(args.inpaint_checkpoint),
-                    "completion_model": inpaint_args.get("completion_model", "unet"),
-                    "preserve_known": bool(inpaint_args.get("preserve_known", True)),
-                    "generation_steps": args.inpaint_steps,
-                    "generation_temperature": args.inpaint_temperature,
-                    "rgb_decode": args.inpaint_rgb_decode,
-                    "palette_snap": args.inpaint_palette_snap,
-                    "palette_min_confidence": args.inpaint_palette_min_confidence,
-                    "context_min_confidence": args.inpaint_context_min_confidence,
-                    "context_alpha_rescue": args.inpaint_context_alpha_rescue,
-                    "context_alpha_min_confidence": (
-                        args.inpaint_context_alpha_min_confidence
-                    ),
-                    "context_alpha_min_margin": (
-                        args.inpaint_context_alpha_min_margin
-                    ),
-                    "evidence_lock_threshold": args.inpaint_evidence_lock_threshold,
-                },
-                sort_keys=True,
-            )
-        )
-        inpaint_views = parse_views(inpaint_args.get("views", ""))
-        if inpaint_views and inpaint_views != views:
-            raise ValueError(f"Parser/inpaint view mismatch: parser={views}, inpaint={inpaint_views}")
-        expected_parser = inpaint_args.get("parser_checkpoint")
-        if expected_parser and checkpoint_run_id(expected_parser) != checkpoint_run_id(args.parser_checkpoint):
-            raise ValueError(
-                "The semantic_uv_reconstruction checkpoint was trained with a different parser: "
-                f"expected {checkpoint_run_id(expected_parser)}, got {checkpoint_run_id(args.parser_checkpoint)}."
-            )
-        expected_refine = inpaint_args.get("parser_affine_refine")
-        if expected_refine is not None and bool(expected_refine) != affine_refine:
-            raise ValueError(
-                "Parser affine-refinement setting does not match the semantic_uv_reconstruction checkpoint: "
-                f"checkpoint={expected_refine}, requested={affine_refine}."
-            )
-        expected_translation_px = inpaint_args.get("parser_affine_refine_translation_px")
-        if expected_translation_px is not None and abs(float(expected_translation_px) - affine_refine_translation_px) > 1e-9:
-            print(
-                "inpaint_warning="
-                + json.dumps(
-                    {
-                        "message": "parser affine-refinement translation range differs from checkpoint",
-                        "checkpoint_translation_px": float(expected_translation_px),
-                        "requested_translation_px": float(affine_refine_translation_px),
-                    },
-                    sort_keys=True,
-                )
-            )
-        expected_scale = inpaint_args.get("parser_affine_refine_scale")
-        if expected_scale is not None and abs(float(expected_scale) - affine_refine_scale) > 1e-9:
-            raise ValueError(
-                "Parser affine-refinement scale range does not match the semantic_uv_reconstruction checkpoint: "
-                f"checkpoint={expected_scale}, requested={affine_refine_scale}."
-            )
-        expected_outer_coverage = inpaint_args.get("parser_outer_uv_min_coverage")
-        if expected_outer_coverage is not None and abs(
-            float(expected_outer_coverage) - outer_uv_min_coverage
-        ) > 1e-9:
-            print(
-                "inpaint_warning="
-                + json.dumps(
-                    {
-                        "message": "using stricter inference outer-coverage filtering",
-                        "checkpoint_outer_uv_min_coverage": float(expected_outer_coverage),
-                        "requested_outer_uv_min_coverage": float(outer_uv_min_coverage),
-                    },
-                    sort_keys=True,
-                )
-            )
-        expected_outer_source_pixels = inpaint_args.get(
-            "parser_outer_uv_min_source_pixels"
-        )
-        if (
-            expected_outer_source_pixels is not None
-            and int(expected_outer_source_pixels)
-            != int(args.outer_uv_min_source_pixels)
-        ):
-            print(
-                "inpaint_warning="
-                + json.dumps(
-                    {
-                        "message": "parser outer source-pixel filter differs from checkpoint",
-                        "checkpoint_outer_uv_min_source_pixels": int(
-                            expected_outer_source_pixels
-                        ),
-                        "requested_outer_uv_min_source_pixels": int(
-                            args.outer_uv_min_source_pixels
-                        ),
-                    },
-                    sort_keys=True,
-                )
-            )
-        expected_consensus = inpaint_args.get("parser_geometry_route_texel_consensus")
-        if (
-            expected_consensus is not None
-            and bool(expected_consensus) != geometry_route_texel_consensus
-        ):
-            print(
-                "inpaint_warning="
-                + json.dumps(
-                    {
-                        "message": "using inference-time projected-texel consensus",
-                        "checkpoint_texel_consensus": bool(expected_consensus),
-                        "requested_texel_consensus": bool(geometry_route_texel_consensus),
-                    },
-                    sort_keys=True,
-                )
-            )
-        expected_color_aggregation = inpaint_args.get("parser_splat_color_aggregation")
-        if expected_color_aggregation is not None and expected_color_aggregation != args.color_aggregation:
-            print(
-                "inpaint_warning="
-                + json.dumps(
-                    {
-                        "message": "using inference-time parser color aggregation",
-                        "checkpoint_color_aggregation": expected_color_aggregation,
-                        "requested_color_aggregation": args.color_aggregation,
-                    },
-                    sort_keys=True,
-                )
-            )
-        with torch.no_grad():
-            if hasattr(inpaint_model, "hard_lock_threshold"):
-                inpaint_model.hard_lock_threshold = float(
-                    args.inpaint_evidence_lock_threshold
-                )
-            if hasattr(inpaint_model, "generate"):
-                completed = generate_topology_completion(
-                    inpaint_model,
-                    conditioning,
-                    steps=args.inpaint_steps,
-                    temperature=args.inpaint_temperature,
-                    seed=args.inpaint_seed,
-                    rgb_decode=args.inpaint_rgb_decode,
-                    # Final color propagation is applied below for both current
-                    # and legacy generator signatures.
-                    palette_snap=False,
-                    palette_min_confidence=args.inpaint_palette_min_confidence,
-                    context_min_confidence=args.inpaint_context_min_confidence,
-                )[0]
-            else:
-                completed = inpaint_model(conditioning)[0]
-            if args.inpaint_palette_snap:
-                completed_batch, color_stats = propagate_completed_unknown_colors(
-                    completed.unsqueeze(0),
-                    conditioning,
-                    min_confidence=args.inpaint_palette_min_confidence,
-                    context_min_confidence=args.inpaint_context_min_confidence,
-                    context_alpha_rescue_mask=(
-                        routing_details.get("context_alpha_rescue_uv")
-                        if args.inpaint_context_alpha_rescue
-                        else None
-                    ),
-                )
-                completed = completed_batch[0]
-                print(
-                    "inpaint_color_propagation="
-                    + json.dumps(color_stats, sort_keys=True)
-                )
-            completed_batch, lock_stats = lock_completed_parser_evidence(
-                completed.unsqueeze(0),
-                conditioning,
-                confidence_threshold=args.inpaint_evidence_lock_threshold,
-            )
-            completed = completed_batch[0]
-            print("inpaint_evidence_lock=" + json.dumps(lock_stats, sort_keys=True))
-            pred_uv = finalize_minecraft_alpha(
-                completed,
-                alpha_threshold=args.alpha_threshold,
-                enforce_base_alpha=not args.no_enforce_base_alpha,
-            )
-        output_path = Path(args.output)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        tensor_to_rgba_image(pred_uv.detach().cpu()).save(output_path)
-        print(f"Saved completed_uv={output_path}")
+        print("simple_inpaint_stats=" + json.dumps(stats, sort_keys=True))
+        written_paths = set()
+        for output_label, output_path in repair_outputs:
+            resolved_path = output_path.resolve()
+            if resolved_path not in written_paths:
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                tensor_to_rgba_image(repaired).save(output_path)
+                written_paths.add(resolved_path)
+            print(f"Saved {output_label}={output_path}")
 
 
 if __name__ == "__main__":

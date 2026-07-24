@@ -10,7 +10,7 @@ WORKSPACE_ROOT = TOOLKIT_ROOT.parent
 if str(WORKSPACE_ROOT) not in sys.path:
     sys.path.insert(0, str(WORKSPACE_ROOT))
 
-from SkingToolkit.semantic_uv_reconstruction.losses import minecraft_layer_rects  # noqa: E402
+from SkingToolkit.dense_uv_parser.uv_layout import minecraft_layer_rects  # noqa: E402
 
 IGNORE_INDEX = 255
 PART_CLASSES = 6
@@ -308,105 +308,6 @@ def build_dense_parser_batch(skins, renderer, view, alpha_threshold=0.5):
         "uv": uv,
     }
     return rendered, targets
-
-
-def _sample_index_target(target, grid):
-    sampled = F.grid_sample(
-        (target.float() + 1.0).unsqueeze(1),
-        grid,
-        mode="nearest",
-        padding_mode="zeros",
-        align_corners=False,
-    ).squeeze(1)
-    sampled = sampled.round().long() - 1
-    sampled[sampled < 0] = IGNORE_INDEX
-    return sampled
-
-
-def augment_dense_batch(
-    rendered,
-    targets,
-    translation_scale=0.0,
-    scale_range=0.0,
-    bg_color=(128, 128, 128),
-    generator=None,
-):
-    B, _, H, W = rendered.shape
-    device = rendered.device
-    dtype = rendered.dtype
-    if translation_scale <= 0 and scale_range <= 0:
-        identity_targets = dict(targets)
-        identity_targets["affine"] = rendered.new_zeros(B, 3)
-        return rendered, identity_targets
-
-    C = rendered.shape[1]
-
-    dx = (torch.rand(B, device=device, dtype=dtype, generator=generator) - 0.5) * 2 * translation_scale * W
-    dy = (torch.rand(B, device=device, dtype=dtype, generator=generator) - 0.5) * 2 * translation_scale * H
-    scale = 1.0 + (torch.rand(B, device=device, dtype=dtype, generator=generator) - 0.5) * 2 * scale_range
-    inv_scale = scale.reciprocal()
-
-    theta = torch.zeros(B, 2, 3, device=device, dtype=dtype)
-    theta[:, 0, 0] = inv_scale
-    theta[:, 1, 1] = inv_scale
-    theta[:, 0, 2] = -2.0 * dx / max(W, 1)
-    theta[:, 1, 2] = -2.0 * dy / max(H, 1)
-    grid = F.affine_grid(theta, rendered.shape, align_corners=False)
-
-    fill = rendered.new_tensor(
-        [bg_color[0] / 255.0, bg_color[1] / 255.0, bg_color[2] / 255.0, 0.0],
-    )[:C].view(1, C, 1, 1)
-    rendered_aug = F.grid_sample(
-        rendered - fill,
-        grid,
-        mode="bilinear",
-        padding_mode="zeros",
-        align_corners=False,
-    ) + fill
-
-    foreground = F.grid_sample(
-        targets["foreground"],
-        grid,
-        mode="nearest",
-        padding_mode="zeros",
-        align_corners=False,
-    )
-    layer = _sample_index_target(targets["layer"], grid)
-    route_role = _sample_index_target(targets["route_role"], grid)
-    part = _sample_index_target(targets["part"], grid)
-    face = _sample_index_target(targets["face"], grid)
-    surface = _sample_index_target(targets["surface"], grid)
-    uv = F.grid_sample(
-        targets["uv"],
-        grid,
-        mode="nearest",
-        padding_mode="zeros",
-        align_corners=False,
-    )
-    valid = (layer != IGNORE_INDEX).unsqueeze(1)
-    uv = torch.where(valid, uv, torch.zeros_like(uv))
-    foreground = foreground * valid.to(dtype=foreground.dtype)
-
-    affine = torch.stack(
-        [
-            2.0 * dx / max(W, 1),
-            2.0 * dy / max(H, 1),
-            scale.log(),
-        ],
-        dim=1,
-    )
-    return rendered_aug, {
-        "foreground": foreground,
-        "layer": layer,
-        "route_role": route_role,
-        "part": part,
-        "face": face,
-        "surface": surface,
-        "uv": uv,
-        # [tx, ty, log_scale] maps canonical output coordinates to the
-        # augmented input. It is the inverse of the grid used above.
-        "affine": affine,
-    }
 
 
 def randomize_render_background(rendered, probability=0.9, bg_color=(128, 128, 128)):
@@ -2939,7 +2840,7 @@ def splat_predictions_to_uv_conditioning(
     fg_threshold=0.5,
     bg_color=(128, 128, 128),
 ):
-    """Splat parser predictions back to the 10-channel semantic_uv_reconstruction conditioning layout."""
+    """Splat parser predictions into the parser's layered UV evidence layout."""
     foreground_prob = torch.sigmoid(outputs["foreground"])[:, 0]
     fg = foreground_prob > fg_threshold
     fg = fg & (rendered[:, 3] > 1e-4)

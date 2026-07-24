@@ -4,7 +4,7 @@ from pathlib import Path
 
 import torch
 
-from SkingToolkit.semantic_uv_reconstruction.semantic_backbone import (
+from SkingToolkit.dense_uv_parser.semantic_backbone import (
     SigLIP2VisionBackbone,
     TIPSv2VisionBackbone,
 )

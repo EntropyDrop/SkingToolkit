@@ -17,7 +17,7 @@ from SkingToolkit.dense_uv_parser.semantic import (
 )
 from SkingToolkit.dense_uv_parser.train import outer_uv_occupancy_losses
 from SkingToolkit.dense_uv_parser.utils import splat_to_uv_conditioning
-from SkingToolkit.semantic_uv_reconstruction.semantic_losses import (
+from SkingToolkit.dense_uv_parser.semantic_targets import (
     build_part_layer_masks,
 )
 
@@ -286,10 +286,13 @@ class SemanticDenseUVParserTest(unittest.TestCase):
             self.assertEqual(image.getpixel((20, 20)), (0, 0, 0, 0))
 
     def test_simple_parser_uv_inpaint_writes_separate_completed_artifact(self):
-        conditioning = torch.zeros(1, 12, 64, 64)
+        conditioning = torch.zeros(1, 10, 64, 64)
         conditioning[0, 0:4, 8, 8] = torch.tensor([1.0, 0.0, 0.0, 1.0])
         conditioning[0, 4, 8, 8] = 1.0
-        conditioning[0, 5, 8, 8] = 1.0
+        conditioning[0, 5:9, 8, 40] = torch.tensor(
+            [0.0, 128.0 / 255.0, 1.0, 1.0]
+        )
+        conditioning[0, 9, 8, 40] = 1.0
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "simple.png"
             save_simple_inpaint_uv(conditioning, output)
@@ -298,7 +301,7 @@ class SemanticDenseUVParserTest(unittest.TestCase):
             self.assertEqual(image.size, (64, 64))
             self.assertEqual(image.getpixel((8, 8)), (255, 0, 0, 255))
             self.assertEqual(image.getpixel((20, 20)), (0, 0, 0, 0))
-            self.assertEqual(image.getpixel((40, 8)), (0, 0, 0, 0))
+            self.assertEqual(image.getpixel((40, 8)), (0, 128, 255, 255))
             self.assertEqual(image.getpixel((63, 0)), (0, 0, 0, 0))
 
 

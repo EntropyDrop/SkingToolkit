@@ -9,7 +9,8 @@ front/back render pixels
   -> global translation/scale + confidence-calibrated inner/outer/backface routing
   -> fixed Steve cuboids provide body part + face + exact UV
   -> splat visible pixels and trust into 64x64 UV conditioning
-  -> topology-aware generator repairs uncertain and fills invisible texels
+  -> deterministic per-part topology repair fills missing inner texels
+     while preserving the observed outer layer
 ```
 
 It keeps the existing two-image `view_images` contract by default:
@@ -96,7 +97,7 @@ automatically fall back to the official repository's remote-code
 `encode_image` interface. Reduce `SEMANTIC_RUNTIME_BATCH_SIZE` if online TIPSv2
 extraction runs out of memory.
 
-Pixels seen through transparent outer holes can come from a deeper or back-facing cube face. They are supervised as `secondary_backface`, shown in purple in debug output, then routed through a separately predicted exact renderer surface slot. This preserves their real layer/face/UV mapping instead of dropping them or forcing them into the nearest direct surface. Pixels that remain hidden in both views are still completed by the downstream semantic_uv_reconstruction model.
+Pixels seen through transparent outer holes can come from a deeper or back-facing cube face. They are supervised as `secondary_backface`, shown in purple in debug output, then routed through a separately predicted exact renderer surface slot. This preserves their real layer/face/UV mapping instead of dropping them or forcing them into the nearest direct surface. Inner texels that remain hidden in both views are repaired deterministically from observed texels on the same body part; unobserved outer texels remain transparent.
 
 The parser is explicitly conditioned on the configured view index, so front and back renders cannot become ambiguous for plain or symmetric skins. Inference must preserve the checkpoint's view order.
 
@@ -104,13 +105,13 @@ Parser training uses solid-color background randomization by default. Parser inp
 
 The input still needs an unobstructed Minecraft render in the configured camera/pose; arbitrary background does not mean arbitrary photo composition or a character hidden behind other objects.
 
-Geometric augmentation is disabled by default. Training and validation use the canonical renderer coordinates without deformation, translation, scale, or perspective transforms. Solid-color background randomization remains enabled because it does not move character pixels.
+Geometric augmentation has been removed. Training and validation use the canonical renderer coordinates without deformation, translation, scale, or perspective transforms. Solid-color background randomization remains enabled because it does not move character pixels.
 
 ```bash
 ./run_dense_uv_parser_training.sh
 ```
 
-The validation set is also canonical, so `best.pt` is selected on the same fixed geometry used for inference. Geometric augmentation remains available only as an explicit override.
+The validation set is also canonical, so `best.pt` is selected on the same fixed geometry used for inference.
 
 Set `BACKGROUND_AUGMENT=false` to use a fixed gray RGB background; the input still remains RGB with alpha fixed to one internally.
 
@@ -179,7 +180,7 @@ the common-pattern bias.
 
 `geometry_fit` training also uses a differentiable photometric branch. Route-role and surface logits are converted to probabilities, softly splatted through the fixed renderer UV candidates, and merged into a provisional skin. That skin is rendered back through the direct inner/outer cuboids for every configured view. Soft-UV RGB/alpha errors and multi-view render RGB/alpha errors are added to the supervised classification losses, so wrong inner/outer or exact-surface choices receive color and silhouette gradients in addition to cross-entropy. Inference remains hard-routed and selects the real source pixel nearest each integer UV texel center.
 
-Alpha consistency is weighted more strongly than RGB consistency because a wrong opaque outer texel is more damaging than leaving an uncertain texel for inpainting. In addition, the layer-recall losses count the GT projections that are actually visible in each inner/outer UV texel and compare them with the predicted per-layer splat weight. This avoids diluting recall with geometrically possible but occluded projections. Half of each recall loss focuses on the worst 10% of visible texels by default, so eyes, exposed face pixels, and other small regions cannot disappear while the whole-image average still improves:
+Alpha consistency is weighted more strongly than RGB consistency because a wrong opaque outer texel is more damaging than leaving an uncertain outer texel transparent. In addition, the layer-recall losses count the GT projections that are actually visible in each inner/outer UV texel and compare them with the predicted per-layer splat weight. This avoids diluting recall with geometrically possible but occluded projections. Half of each recall loss focuses on the worst 10% of visible texels by default, so eyes, exposed face pixels, and other small regions cannot disappear while the whole-image average still improves:
 
 ```bash
 LAMBDA_SOFT_UV_RGB=0.25 \
@@ -225,8 +226,8 @@ foreground samples are preferred; only boundary samples that are within
 antialiased or isolated background pocket from winning a grid cell, while a
 real interior skin texel is still allowed to equal the background color.
 Outer texels also require multiple routed source pixels. Both production
-profiles default to 15, matching parser training validation and
-parser-conditioned completion training. This prevents a small residual
+profiles default to 15, matching parser training validation and inference.
+This prevents a small residual
 background fragment from becoming persistent outer-layer evidence without
 globally raising the outer confidence threshold.
 
@@ -234,126 +235,106 @@ The learned route-confidence head is fused with the ordinary route score by a
 geometric mean. The trust target already represents route correctness, so this
 avoids double-penalizing correct routes by multiplying two correlated
 probabilities. Secondary routes use the geometric mean of role, surface, and
-learned trust. New
-topology checkpoints receive a 12-channel tensor:
+learned trust.
+
+The parser produces a 10-channel internal conditioning tensor:
 
 ```text
-[inner RGBA + evidence + confidence, outer RGBA + evidence + confidence]
+[inner RGBA + evidence, outer RGBA + evidence]
 ```
 
-Production topology inference uses a zero hard-lock threshold, so every routed
-evidence texel is preserved exactly. Raising the threshold is an explicit
-repair-mode ablation for weak evidence.
+No generative inpainting checkpoint is loaded. The final repair starts from the
+parser atlas, fills only unknown inner-layer texels, and never creates,
+recolors, or removes an outer-layer texel.
 
-Affine refinement is disabled by default so fixed-view inputs are never shifted after parsing. When explicitly enabled, it uses the observed solid-background silhouette rather than the parser's noisy foreground logits. Canonicalized RGB is padded with the detected source background color instead of black.
+Affine refinement is disabled by default so fixed-view inputs are never shifted
+after parsing. When explicitly enabled, it uses the observed solid-background
+silhouette rather than the parser's noisy foreground logits. Canonicalized RGB
+is padded with the detected source background color instead of black.
 
-## Infer With Inpaint
+## Inference
 
-Use the latest parser checkpoint automatically:
+The launcher automatically selects the highest compatible
+`runs/dense_uv_parser*_vN/best.pt` checkpoint, with `latest.pt` as the final
+fallback:
 
 ```bash
 ./run_infer.sh
 ```
 
-Foreground removal defaults to a deterministic four-connected flood fill. Each
-view uses its own top-left pixel as the background RGB seed and removes only
-seed-colored pixels connected to that corner. Matching colors enclosed inside
-the character are preserved. The default RGB tolerance is `0.03`, independent
-of the later parser routing tolerance:
+Foreground removal defaults to deterministic four-connected flood fill. Every
+view uses its top-left pixel as the background RGB seed and removes only
+seed-colored pixels connected to that corner. Equal colors enclosed by the
+character are preserved. The default RGB tolerance is `0.03`:
 
 ```bash
 FOREGROUND_METHOD=flood \
 FOREGROUND_FLOOD_TOLERANCE=0.03 \
+COMBINED=/path/to/front_back.png \
 ./run_infer.sh
 ```
 
-It writes a binary `foreground_probability.png`, `foreground_mask_raw.png`,
+`FOREGROUND_METHOD=legacy` skips this pre-parser removal. The flood path writes
+`foreground_probability.png`, `foreground_mask_raw.png`,
 `foreground_mask.png`, transparent `foreground_cutout.png`, and the exact
-adaptive-background `foreground_parser_input.png` consumed by the dense parser.
-Original source RGB remains untouched for UV splatting.
+adaptive-background `foreground_parser_input.png` passed to the parser.
+Original source RGB remains untouched for UV color extraction.
 
-`FOREGROUND_METHOD=legacy` skips pre-parser removal and retains the older
-four-corner routing fallback.
+Default UV outputs are:
 
-By default it first selects the highest topology-completion version, then reads
-that run's `config.json` and reuses the exact parser checkpoint used during
-training. If the recorded path is unavailable, it falls back to the highest
-`dense_uv_parser*_vN/best.pt`, then the newest compatible `best.pt` or
-`latest.pt`. The launcher prints both selected paths before inference. It writes:
+- `outputs/parser_pred_uv.png`: observed parser texels only; unknown texels are
+  transparent.
+- `outputs/parser_pred_uv_simple_inpainting.png`: deterministic inner-layer
+  repair artifact.
+- `outputs/pred_uv.png`: the final UV, produced by the same deterministic
+  repair. No second model or checkpoint is involved.
 
-- `outputs/parser_conditioning.png`
-- `outputs/parser_pred_uv.png`: partial 64x64 RGBA atlas containing only known
-  parser texels; unknown base-layer texels intentionally remain transparent, so
-  this diagnostic file is not itself a valid finished Minecraft skin
-- `outputs/parser_pred_uv_simple_inpainting.png`: deterministic baseline repair.
-  Every body part completes its front and back faces first, moving one
-  rectangular ring at a time from the border toward the centre. It then
-  completes the left and right faces top-to-bottom, with every row moving from
-  both side edges toward the centre. Top and bottom are completed last with the
-  unchanged border-inward ring order. An unknown inner texel first copies an
-  available defined left/right mirrored inner texel; otherwise it copies the
-  closest currently defined texel. For left/right targets, nearest-neighbour
-  lookup first searches the same vertical row across that part's four vertical
-  faces, then falls back to unrestricted canonical 3D distance within the same
-  body part. Transparent texels with residual RGB never provide color. Defined
-  outer texels from that part may provide color, but no outer texel is added or
-  overwritten
-- `outputs/parser_debug_geometry_grid.png`: fitted inner/outer cuboid faces with projected UV texel boundaries
-- `outputs/parser_debug_geometry_overlay.png`: inner (cyan) and outer (magenta) fitted grids overlaid on the canonicalized source views
-- `outputs/parser_debug_geometry_routed_overlay.png`: the same grids over only pixels routed to their matching inner/outer layer
-- `outputs/parser_debug_geometry_fill.png`: only source RGB actually routed to inner/outer; unclassified pixels are gray
-- `outputs/parser_debug_color_source.png`: source pixels that are allowed to contribute RGB to the UV atlas after boundary/background safety filtering
-- `outputs/parser_debug_secondary.png`: secondary/deeper source pixels, including those recovered by exact surface routing
-- `outputs/pred_uv.png` when a `semantic_uv_reconstruction` compatibility checkpoint is found
+The repair processes every body part independently. It completes front and back
+faces first, one rectangular ring at a time from the outside toward the centre.
+Left and right faces follow, top-to-bottom, with every row moving from both
+edges toward the middle and preferring a defined source in the same row. Top
+and bottom faces retain border-inward ring traversal. A missing inner texel
+first uses its available left/right mirror; otherwise it copies the nearest
+currently defined texel in canonical 3D space from the same body part.
+Transparent residual RGB is never treated as evidence. Already defined inner
+texels and the complete outer layer are byte-preserved.
 
 Common overrides:
 
 ```bash
 FRONT=/path/to/front.png BACK=/path/to/back.png ./run_infer.sh
-COMBINED=/path/to/combined.png ./run_infer.sh
-# Writes the partial atlas to outputs/parser_only_uv.png and skips completion.
-PARSER_ONLY=true COMBINED=/path/to/combined.png ./run_infer.sh
+COMBINED=/path/to/front_back.png ./run_infer.sh
 PARSER_CHECKPOINT=runs/dense_uv_parser_v3/best.pt ./run_infer.sh
-INPAINT_CHECKPOINT=../semantic_uv_reconstruction/runs/semantic_uv_reconstruction_topology_maskgit_v3/best.pt ./run_infer.sh
-OUTPUT= CONDITIONING_OUTPUT=outputs/parser_conditioning.png ./run_infer.sh
-OUTPUT= PARSER_UV_OUTPUT=outputs/parser_pred_uv.png ./run_infer.sh
-SIMPLE_INPAINT_OUTPUT=outputs/simple.png ./run_infer.sh
-# Disable only the simple deterministic repair artifact.
+OUTPUT=/path/to/final.png ./run_infer.sh
+
+# Export parser observations and diagnostics without deterministic repair.
+PARSER_ONLY=true COMBINED=/path/to/front_back.png ./run_infer.sh
+
+# Disable only the extra copy; final pred_uv.png is still repaired.
 SIMPLE_INPAINT_OUTPUT= ./run_infer.sh
-GEOMETRY_ROUTE_TEXEL_CONSENSUS=false OUTER_UV_MIN_COVERAGE=0 ./run_infer.sh
-BACKGROUND_COLOR_TOLERANCE=0.1882352941 ./run_infer.sh
-COLOR_BACKGROUND_TOLERANCE=0.031372549 COLOR_FOREGROUND_INSET=1 ./run_infer.sh
-OUTER_UV_MIN_SOURCE_PIXELS=15 ./run_infer.sh
-ROUTING_PROFILE=conservative COMBINED=/path/to/combined.png ./run_infer.sh
 ```
 
-Use a trained parser checkpoint plus an existing `semantic_uv_reconstruction` inpaint checkpoint:
+The equivalent direct Python entry point is:
 
 ```bash
 python infer.py \
   --parser_checkpoint runs/dense_uv_parser_v1/best.pt \
-  --inpaint_checkpoint ../semantic_uv_reconstruction/runs/semantic_uv_reconstruction_topology_maskgit_v1/best.pt \
   --view_images front_both.png back_both.png \
+  --parser_uv_output parser_pred_uv.png \
   --output pred_uv.png
 ```
 
-To inspect just the parser splat before inpainting:
+The precision-first defaults leave the ordinary inner route ungated
+(`0.0/0.0`) while requiring outer confidence/margin `0.80/0.55`, outer
+footprint coverage `0.25`, and projected-texel consensus. Geometry-backed
+outer rescue allows a texel proven by an outer-only silhouette or exact
+secondary/backface slot to use the relaxed `0.60/0.25` gate and `0.10`
+coverage floor. Overlapping inner/outer regions still use the strict gate.
 
-```bash
-python infer.py \
-  --parser_checkpoint runs/dense_uv_parser_v1/best.pt \
-  --view_images front_both.png back_both.png \
-  --conditioning_output parser_conditioning.png
-```
-
-The conditioning preview shows the predicted inner-layer RGB row and outer-layer RGB row. The precision-first defaults leave the ordinary inner route ungated (`0.0/0.0`) while requiring outer confidence/margin `0.80/0.55`, outer footprint coverage `0.25`, and projected-texel consensus. This asymmetric policy targets inner-to-outer false positives without discarding otherwise correct inner evidence. Geometry-backed outer rescue is enabled: a texel proven by an outer-only silhouette or exact secondary/backface slot may use the relaxed `0.60/0.25` gate and `0.10` coverage floor. Overlapping inner/outer regions still use the strict gate.
-
-Projected-texel consensus is a center-weighted soft blend rather than a hard
-cell-majority replacement. By default it combines `40%` local route probability
-with `60%` cell evidence. A raw outer prediction at or above `0.80` confidence
-and `0.35` margin ratio is preserved, while an inner-to-outer promotion requires
-at least `0.70` fused confidence and `0.20` fused margin ratio. This removes weak
-isolated speckle without erasing strong thin sleeves, bangs, or hat brims:
+Projected-texel consensus is a centre-weighted soft blend. By default it
+combines `40%` local route probability with `60%` cell evidence. A strong raw
+outer prediction is preserved, while weak isolated speckle can be changed to
+inner. The `routing_filter` log reports these changes. Useful controls are:
 
 ```bash
 GEOMETRY_ROUTE_TEXEL_CONSENSUS=true \
@@ -365,79 +346,13 @@ GEOMETRY_ROUTE_CONSENSUS_OUTER_MARGIN=0.20 \
 ./run_infer.sh
 ```
 
-`routing_filter` reports how many pixels consensus changed from inner to outer,
-changed from outer to inner, or preserved as strong raw outer evidence.
+The conservative routing profile prefers transparent outer omissions over
+persistent wrong outer colors. Because deterministic repair intentionally
+does not hallucinate outer-layer occupancy, such rejected outer texels remain
+transparent. Use `ROUTING_PROFILE=balanced` when outer recall is more important,
+or tune the outer thresholds explicitly.
 
-New checkpoints can experimentally blend a predicted `64x64` outer-UV
-occupancy prior into this decision. This is disabled by default. When enabled,
-the `0.10` gate rejects a raw outer route only when the occupancy head is very
-certain the texel is transparent; occupancy at or above `0.70` may rescue an
-inner prediction when its raw outer probability is still at least `0.30`:
-
-```bash
-OUTER_UV_OCCUPANCY=true \
-OUTER_UV_OCCUPANCY_BLEND_WEIGHT=0.30 \
-OUTER_UV_OCCUPANCY_GATE_THRESHOLD=0.10 \
-OUTER_UV_OCCUPANCY_RESCUE_THRESHOLD=0.70 \
-OUTER_UV_OCCUPANCY_RESCUE_ROUTE_THRESHOLD=0.30 \
-./run_infer.sh
-```
-
-Legacy checkpoints have no occupancy head, so these settings become a no-op.
-Keep `OUTER_UV_OCCUPANCY=false` for the precision-first production path. The
-routing log reports both rescued and rejected pixel counts when the experiment
-is enabled.
-
-Inference uses a wider solid-background tolerance of `48/255` than the parser's
-training utility. This rejects green-screen and other solid-background colors
-blended into antialiased character boundaries. Override it with
-`BACKGROUND_COLOR_TOLERANCE` in normalized RGB units when necessary.
-
-For noisy parser evidence, `ROUTING_PROFILE=conservative` keeps strict outer
-confidence, margin, and footprint gates, enables projected-texel consensus and
-geometry-backed rescue, and uses a `64/255` background tolerance. Rejected texels
-become unknown rather than permanently wrong and are handled by topology
-completion. Set `OUTER_GEOMETRY_RESCUE=false` for an ablation, or tune
-`OUTER_RESCUE_CONFIDENCE_THRESHOLD`, `OUTER_RESCUE_MARGIN_THRESHOLD`, and
-`OUTER_RESCUE_MIN_COVERAGE`. The `balanced` profile disables this rescue.
-
-The conservative profile also enables part-semantic outer rescue. A pixel must
-still pass the relaxed `0.60/0.25` route gate, but it may bypass the global
-`0.80/0.55` gate when the image-level heads predict both outer presence and
-meaningful outer coverage for that body part. Tune
-`OUTER_SEMANTIC_PRESENCE_THRESHOLD` (default `0.80`) and
-`OUTER_SEMANTIC_COVERAGE_THRESHOLD` (default `0.20`), or disable it with
-`OUTER_SEMANTIC_RESCUE=false`.
-
-Moderately confident pixels rejected by the strict output filter are retained
-as unlocked topology context (`REJECTED_CONTEXT=true`). They do not appear in
-`parser_pred_uv.png` and are never restored by the parser evidence lock. Context
-at or above `INPAINT_CONTEXT_MIN_CONFIDENCE` (default `0.35`) anchors RGB at its
-exact UV texel when completion predicts that texel opaque. It does not enter the
-shared color palette unless it also passes the stricter
-`INPAINT_PALETTE_MIN_CONFIDENCE`, so uncertain local detail cannot recolor a
-different surface. Tune
-`REJECTED_CONTEXT_CONFIDENCE_THRESHOLD` and
-`REJECTED_CONTEXT_MARGIN_THRESHOLD`, or disable this path with
-`REJECTED_CONTEXT=false`.
-
-When the topology model predicts a referenced outer texel transparent,
-`INPAINT_CONTEXT_ALPHA_RESCUE=true` can restore its opacity only if the rejected
-pixel is backed by part-level outer semantics or outer-only geometry. The
-additional local gates default to confidence `0.50` and margin `0.10`; tune them
-with `INPAINT_CONTEXT_ALPHA_MIN_CONFIDENCE` and
-`INPAINT_CONTEXT_ALPHA_MIN_MARGIN`. This experimental path is disabled by
-default because part-level support is not sufficient to prove the layer of an
-individual ambiguous pixel.
-
-Topology inference enables `INPAINT_PALETTE_SNAP=true` and locks all routed
-parser evidence (`INPAINT_EVIDENCE_LOCK_THRESHOLD=0`) by default. Generated RGB
-uses distribution-mean decoding (`INPAINT_RGB_DECODE=mean`) and is projected onto
-complete observed RGB triplets on the same body part/layer/face. Color similarity
-drives selection and spatial distance breaks close ties, while parser RGBA is
-reapplied byte-exact after generation. This suppresses unrelated dataset-prior
-colors without retraining. Production applies this final pass in `infer.py` even
-for legacy topology checkpoints and propagates repeated stable colors before
-isolated evidence outliers. Set `INPAINT_PALETTE_SNAP=false` or
-`INPAINT_RGB_DECODE=argmax` only for ablation, or adjust
-`INPAINT_PALETTE_MIN_CONFIDENCE` (default `0.75`).
+Inference also writes the fitted geometry grids, routed overlays, semantic
+cutouts, and color-safe source preview under `outputs/`. These artifacts
+separate geometry alignment, inner/outer routing, and color extraction errors
+without changing the inference result.

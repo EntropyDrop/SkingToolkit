@@ -1,5 +1,11 @@
 # Semantic UV Reconstruction Training
 
+> This directory is retained for reconstruction and generative-completion
+> experiments. It is no longer part of the default production pipeline.
+> `dense_uv_parser` now owns the shared semantic backbone/cache, UV topology,
+> and deterministic inner-layer repair, and its inference requires no
+> completion checkpoint.
+
 This module contains two reconstruction paths. The new primary path learns:
 
 ```text
@@ -9,8 +15,7 @@ fixed front/back renders -> CNN + frozen SigLIP2 semantics -> complete 64x64 RGB
 Start it with `./run_semantic_uv_reconstruction_training.sh`. It does not need a
 parser checkpoint or a finite garment concept table.
 
-For inputs with occlusion or invisible UV texels, the recommended production
-path is geometry-first, topology-aware completion:
+The former parser-conditioned generative experiment is:
 
 ```text
 fixed-view renders -> dense parser geometry routing -> topology-aware masked generation -> complete 64x64 RGBA UV

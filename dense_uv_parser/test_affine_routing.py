@@ -18,10 +18,8 @@ from SkingToolkit.dense_uv_parser.losses import (
 from SkingToolkit.dense_uv_parser.model import DenseUVParserNet
 from SkingToolkit.dense_uv_parser.infer import load_parser
 from SkingToolkit.dense_uv_parser import train as parser_train
-from SkingToolkit.semantic_uv_reconstruction import train as inpainting_train
 from SkingToolkit.dense_uv_parser.utils import (
     IGNORE_INDEX,
-    augment_dense_batch,
     canonicalize_parser_render,
     canonicalize_tensor,
     build_color_sampling_support,
@@ -454,10 +452,10 @@ class GlobalAffineRoutingTest(unittest.TestCase):
     def test_training_defaults_keep_geometry_fixed(self):
         parser_args = parser_train.build_arg_parser().parse_args([])
         self.assertEqual(parser_args.feature_dropout, 0.10)
-        self.assertFalse(parser_args.augment)
-        self.assertFalse(parser_args.augment_validation)
-        self.assertEqual(parser_args.translation_scale, 0.0)
-        self.assertEqual(parser_args.scale_range, 0.0)
+        self.assertFalse(hasattr(parser_args, "augment"))
+        self.assertFalse(hasattr(parser_args, "augment_validation"))
+        self.assertFalse(hasattr(parser_args, "translation_scale"))
+        self.assertFalse(hasattr(parser_args, "scale_range"))
         self.assertFalse(parser_args.affine_refine)
         self.assertEqual(parser_args.affine_refine_translation_px, 0.0)
         self.assertGreater(parser_args.lambda_soft_uv_rgb, 0.0)
@@ -527,27 +525,6 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         )
         self.assertEqual(parser_args.outer_selection_precision_weight, 1.50)
         self.assertEqual(parser_args.outer_selection_recall_weight, 0.50)
-
-        inpainting_args = inpainting_train.build_arg_parser().parse_args(
-            ["--data_dir", "unused"]
-        )
-        self.assertFalse(inpainting_args.augment)
-        self.assertFalse(inpainting_args.augment_validation)
-        self.assertEqual(inpainting_args.translation_scale, 0.0)
-        self.assertEqual(inpainting_args.scale_range, 0.0)
-        self.assertEqual(inpainting_args.perspective_scale, 0.0)
-        self.assertEqual(inpainting_args.topology_hard_lock_threshold, 0.0)
-        self.assertEqual(inpainting_args.parser_route_confidence_threshold, 0.0)
-        self.assertEqual(inpainting_args.parser_route_margin_threshold, 0.0)
-        self.assertEqual(inpainting_args.parser_outer_route_confidence_threshold, 0.80)
-        self.assertEqual(inpainting_args.parser_outer_route_margin_threshold, 0.55)
-        self.assertIsNone(inpainting_args.parser_outer_uv_min_coverage)
-        self.assertEqual(inpainting_args.parser_outer_uv_min_source_pixels, 15)
-        self.assertTrue(inpainting_args.parser_outer_geometry_rescue)
-        self.assertEqual(inpainting_args.parser_outer_rescue_confidence_threshold, 0.60)
-        self.assertEqual(inpainting_args.parser_outer_rescue_margin_threshold, 0.25)
-        self.assertEqual(inpainting_args.parser_outer_rescue_min_coverage, 0.10)
-        self.assertIsNone(inpainting_args.parser_geometry_route_texel_consensus)
 
     def test_geometry_model_emits_exact_surface_head(self):
         model = DenseUVParserNet(
@@ -1471,12 +1448,8 @@ class GlobalAffineRoutingTest(unittest.TestCase):
     def test_global_model_emits_surface_and_affine_losses(self):
         rendered = torch.rand(1, 4, 32, 32)
         rendered[:, 3] = 1.0
-        _, targets = augment_dense_batch(
-            rendered,
-            dense_targets(1, 32, 32),
-            translation_scale=0.0,
-            scale_range=0.0,
-        )
+        targets = dense_targets(1, 32, 32)
+        targets["affine"] = rendered.new_zeros(1, 3)
         model = DenseUVParserNet(
             base_channels=8,
             uv_classification=False,
@@ -1495,12 +1468,8 @@ class GlobalAffineRoutingTest(unittest.TestCase):
     def test_geometry_model_only_emits_fit_and_visibility_heads(self):
         rendered = torch.rand(1, 4, 32, 32)
         rendered[:, 3] = 1.0
-        _, targets = augment_dense_batch(
-            rendered,
-            dense_targets(1, 32, 32),
-            translation_scale=0.0,
-            scale_range=0.0,
-        )
+        targets = dense_targets(1, 32, 32)
+        targets["affine"] = rendered.new_zeros(1, 3)
         model = DenseUVParserNet(
             base_channels=8,
             uv_classification=False,
@@ -1910,12 +1879,8 @@ class GlobalAffineRoutingTest(unittest.TestCase):
     def test_global_model_can_train_discrete_uv_routing_auxiliary(self):
         rendered = torch.rand(1, 4, 32, 32)
         rendered[:, 3] = 1.0
-        _, targets = augment_dense_batch(
-            rendered,
-            dense_targets(1, 32, 32),
-            translation_scale=0.0,
-            scale_range=0.0,
-        )
+        targets = dense_targets(1, 32, 32)
+        targets["affine"] = rendered.new_zeros(1, 3)
         model = DenseUVParserNet(
             base_channels=8,
             uv_classification=True,
@@ -1930,22 +1895,6 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         self.assertEqual(tuple(outputs["uv_x"].shape), (1, 64, 32, 32))
         self.assertEqual(tuple(outputs["uv_y"].shape), (1, 64, 32, 32))
         self.assertTrue(torch.isfinite(losses["loss_routing"]))
-
-    def test_affine_target_undoes_augmentation(self):
-        height = width = 64
-        rendered = torch.zeros(1, 4, height, width)
-        rendered[:, 3] = 1.0
-        rendered[:, 0, 20:44, 20:44] = 1.0
-
-        augmented, targets = augment_dense_batch(
-            rendered,
-            dense_targets(1, height, width),
-            translation_scale=0.03,
-            scale_range=0.03,
-            generator=torch.Generator().manual_seed(7),
-        )
-        recovered = canonicalize_tensor(augmented, targets["affine"])
-        self.assertLess((recovered[:, :3] - rendered[:, :3]).abs().mean().item(), 0.03)
 
     def test_canonicalize_tensor_matches_float_input_with_bfloat16_affine(self):
         tensor = torch.rand(1, 4, 8, 8, dtype=torch.float32)
@@ -1990,26 +1939,6 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         self.assertIn("count_hard_inner_tp", metrics)
         self.assertIn("count_hard_inner_rgb_abs", metrics)
         self.assertIn("count_hard_outer_rgb_values", metrics)
-
-    def test_color_canonicalization_uses_nearest_texels(self):
-        height = width = 64
-        rendered = torch.zeros(1, 4, height, width)
-        rendered[:, 3] = 1.0
-        rendered[:, :3, :, ::2] = 1.0
-        augmented, targets = augment_dense_batch(
-            rendered,
-            dense_targets(1, height, width),
-            translation_scale=0.03,
-            scale_range=0.03,
-            generator=torch.Generator().manual_seed(7),
-        )
-        sharp = canonicalize_parser_render(augmented, {"affine": targets["affine"]})[:, :3]
-        smooth = canonicalize_tensor(augmented, targets["affine"], mode="bilinear")[:, :3]
-        self.assertTrue(torch.allclose(sharp, canonicalize_tensor(augmented, targets["affine"], mode="nearest")[:, :3]))
-        interior = (slice(None), slice(None), slice(4, -4), slice(4, -4))
-        sharp_fractional = (sharp[interior] - sharp[interior].round()).abs().mean()
-        smooth_fractional = (smooth[interior] - smooth[interior].round()).abs().mean()
-        self.assertLess(sharp_fractional, smooth_fractional)
 
     def test_canonical_render_uses_background_fill_outside_input(self):
         rendered = torch.zeros(1, 4, 16, 16)
@@ -2128,12 +2057,8 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         self.assertEqual(int(details["routing"]["foreground"].sum()), 1)
         self.assertEqual(int(conditioning[:, 4:5].sum()), 1)
 
-        _, targets = augment_dense_batch(
-            rendered,
-            dense_targets(1, 8, 8),
-            translation_scale=0.0,
-            scale_range=0.0,
-        )
+        targets = dense_targets(1, 8, 8)
+        targets["affine"] = rendered.new_zeros(1, 3)
         target_conditioning = splat_deterministic_targets_to_uv_conditioning(
             rendered,
             targets,

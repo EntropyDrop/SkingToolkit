@@ -123,10 +123,6 @@ CUDNN_BENCHMARK="${CUDNN_BENCHMARK:-true}"
 LOG_EVERY="${LOG_EVERY:-50}"
 BEST_METRIC="${BEST_METRIC:-loss_hard_uv_color_selection}"
 
-AUGMENT="${AUGMENT:-false}"
-AUGMENT_VALIDATION="${AUGMENT_VALIDATION:-false}"
-TRANSLATION_SCALE="${TRANSLATION_SCALE:-0.0}"
-SCALE_RANGE="${SCALE_RANGE:-0.0}"
 BACKGROUND_AUGMENT="${BACKGROUND_AUGMENT:-true}"
 BACKGROUND_AUGMENT_PROB="${BACKGROUND_AUGMENT_PROB:-0.9}"
 SEMANTIC_GATE="${SEMANTIC_GATE:-true}"
@@ -207,21 +203,6 @@ HARD_RGB_SELECTION_WEIGHT="${HARD_RGB_SELECTION_WEIGHT:-1.0}"
 RENDER_SOFTMAX_TEMPERATURE="${RENDER_SOFTMAX_TEMPERATURE:-1.0}"
 UV_CLASSIFICATION="${UV_CLASSIFICATION:-true}"
 
-augment_args=()
-if [[ "$AUGMENT" == "true" ]]; then
-  augment_args=(
-    --augment
-    --translation_scale "$TRANSLATION_SCALE"
-    --scale_range "$SCALE_RANGE"
-  )
-else
-  augment_args=(--no_augment)
-fi
-if [[ "$AUGMENT_VALIDATION" == "true" ]]; then
-  augment_args+=(--augment_validation)
-else
-  augment_args+=(--no_augment_validation)
-fi
 route_prior_args=()
 if [[ "$ROUTE_ROLE_SPATIAL_PRIOR" == "true" ]]; then
   route_prior_args=(--route_role_spatial_prior)
@@ -305,7 +286,7 @@ if [[ "$SEMANTIC_BACKBONE" == "siglip2" ]]; then
     cache_args+=(--spatial)
   fi
   if [[ "$CACHE_SIGLIP_FEATURES" == "true" ]]; then
-    python ../semantic_uv_reconstruction/cache_siglip_globals.py \
+    python cache_semantic_features.py \
       --data_dir "$DATA_DIR" \
       --cache_dir "$SIGLIP_CACHE_DIR" \
       --mappings_dir "$MAPPINGS_DIR" \
@@ -431,7 +412,6 @@ python train.py \
   --outer_uv_occupancy_rescue_threshold "$OUTER_UV_OCCUPANCY_RESCUE_THRESHOLD" \
   --outer_uv_occupancy_rescue_route_threshold "$OUTER_UV_OCCUPANCY_RESCUE_ROUTE_THRESHOLD" \
   --splat_color_aggregation "$SPLAT_COLOR_AGGREGATION" \
-  "${augment_args[@]}" \
   "${route_prior_args[@]}" \
   "${background_args[@]}" \
   "${semantic_gate_args[@]}" \

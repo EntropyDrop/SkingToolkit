@@ -57,74 +57,14 @@ find_latest_family_checkpoint() {
   printf '%s\n' "$best_checkpoint"
 }
 
-parser_checkpoint_from_inpaint_config() {
-  local inpaint_checkpoint="$1"
-  local config_path
-  local recorded
-  local candidate
-
-  [[ -n "$inpaint_checkpoint" ]] || return 0
-  config_path="$(dirname "$inpaint_checkpoint")/config.json"
-  [[ -f "$config_path" ]] || return 0
-  recorded="$($PYTHON_BIN -c '
-import json
-import sys
-
-with open(sys.argv[1], encoding="utf-8") as handle:
-    config = json.load(handle)
-print(
-    config.get("metadata", {}).get("parser_checkpoint")
-    or config.get("args", {}).get("parser_checkpoint")
-    or ""
-)
-' "$config_path")"
-  [[ -n "$recorded" ]] || return 0
-
-  # Relative parser paths were recorded from semantic_uv_reconstruction/, while
-  # this launcher runs from dense_uv_parser/. Try both working directories.
-  for candidate in \
-    "$recorded" \
-    "../semantic_uv_reconstruction/$recorded" \
-    "../$recorded"; do
-    if [[ -f "$candidate" ]]; then
-      printf '%s\n' "$candidate"
-      return 0
-    fi
-  done
-}
-
 PYTHON_BIN="${PYTHON_BIN:-python}"
 PARSER_ONLY="${PARSER_ONLY:-false}"
-
-INPAINT_MODEL="${INPAINT_MODEL:-topology_maskgit}"
-INPAINT_RUNS_DIR="${INPAINT_RUNS_DIR:-../semantic_uv_reconstruction/runs}"
-INPAINT_RUN_PREFIX="${INPAINT_RUN_PREFIX:-semantic_uv_reconstruction_${INPAINT_MODEL}_v}"
-INPAINT_CHECKPOINT_NAME="${INPAINT_CHECKPOINT_NAME:-best.pt}"
-INPAINT_CHECKPOINT="${INPAINT_CHECKPOINT:-}"
-if [[ "$PARSER_ONLY" == "true" ]]; then
-  INPAINT_CHECKPOINT="none"
-fi
-if [[ "$INPAINT_CHECKPOINT" == "none" ]]; then
-  INPAINT_CHECKPOINT=""
-elif [[ -z "$INPAINT_CHECKPOINT" ]]; then
-  INPAINT_CHECKPOINT="$(find_latest_checkpoint "$INPAINT_RUNS_DIR" "$INPAINT_RUN_PREFIX" "$INPAINT_CHECKPOINT_NAME")"
-  if [[ -z "$INPAINT_CHECKPOINT" ]]; then
-    INPAINT_CHECKPOINT="$(find_latest_family_checkpoint "$INPAINT_RUNS_DIR" "semantic_uv_reconstruction_${INPAINT_MODEL}" "$INPAINT_CHECKPOINT_NAME")"
-  fi
-fi
-if [[ -n "$INPAINT_CHECKPOINT" && ! -f "$INPAINT_CHECKPOINT" ]]; then
-  echo "Inpaint checkpoint not found: $INPAINT_CHECKPOINT" >&2
-  exit 1
-fi
 
 PARSER_RUNS_DIR="${PARSER_RUNS_DIR:-runs}"
 PARSER_RUN_PREFIX="${PARSER_RUN_PREFIX:-dense_uv_parser_v}"
 PARSER_CHECKPOINT_NAME="${PARSER_CHECKPOINT_NAME:-best.pt}"
 PARSER_CHECKPOINT="${PARSER_CHECKPOINT:-${CHECKPOINT:-}}"
 
-if [[ -z "$PARSER_CHECKPOINT" ]]; then
-  PARSER_CHECKPOINT="$(parser_checkpoint_from_inpaint_config "$INPAINT_CHECKPOINT")"
-fi
 if [[ -z "$PARSER_CHECKPOINT" ]]; then
   PARSER_CHECKPOINT="$(find_latest_checkpoint "$PARSER_RUNS_DIR" "$PARSER_RUN_PREFIX" "$PARSER_CHECKPOINT_NAME")"
 fi
@@ -135,7 +75,7 @@ if [[ -z "$PARSER_CHECKPOINT" && "$PARSER_CHECKPOINT_NAME" != "latest.pt" ]]; th
   PARSER_CHECKPOINT="$(find_latest_family_checkpoint "$PARSER_RUNS_DIR" "dense_uv_parser" "latest.pt")"
 fi
 if [[ -z "$PARSER_CHECKPOINT" ]]; then
-  echo "No parser checkpoint found in $PARSER_RUNS_DIR or in the latest inpaint run config." >&2
+  echo "No parser checkpoint found in $PARSER_RUNS_DIR." >&2
   echo "Train one first with ./run_dense_uv_parser_training.sh or set PARSER_CHECKPOINT=/path/to/best.pt." >&2
   exit 1
 fi
@@ -161,16 +101,6 @@ if [[ "$FOREGROUND_METHOD" == "flood" ]]; then
 else
   echo "Using legacy background removal inside UV routing."
 fi
-if [[ -n "$INPAINT_CHECKPOINT" ]]; then
-  echo "Using inpaint checkpoint: $INPAINT_CHECKPOINT"
-else
-  echo "No inpaint checkpoint found; exporting parser conditioning only."
-fi
-
-OUTPUT_WAS_SET=false
-if [[ ${OUTPUT+x} ]]; then
-  OUTPUT_WAS_SET=true
-fi
 OUTPUT="${OUTPUT-outputs/pred_uv.png}"
 if [[ "$PARSER_ONLY" == "true" ]]; then
   OUTPUT=""
@@ -185,6 +115,9 @@ if [[ "$PARSER_ONLY" == "true" && "$PARSER_UV_OUTPUT_WAS_SET" == "false" ]]; the
   PARSER_UV_OUTPUT="outputs/parser_only_uv.png"
 fi
 SIMPLE_INPAINT_OUTPUT="${SIMPLE_INPAINT_OUTPUT-outputs/parser_pred_uv_simple_inpainting.png}"
+if [[ "$PARSER_ONLY" == "true" ]]; then
+  SIMPLE_INPAINT_OUTPUT=""
+fi
 DEBUG_OUTPUT="${DEBUG_OUTPUT-outputs/parser_debug.png}"
 OVERLAY_OUTPUT="${OVERLAY_OUTPUT-outputs/parser_debug_overlay.png}"
 INNER_CUTOUT_OUTPUT="${INNER_CUTOUT_OUTPUT-outputs/parser_debug_inner.png}"
@@ -225,9 +158,9 @@ case "$ROUTING_PROFILE" in
     DEFAULT_GEOMETRY_ROUTE_TEXEL_CONSENSUS="false"
     ;;
   conservative)
-    # Prefer holes that topology completion can regenerate over persistent
-    # wrong-color parser evidence. Intended for rendered/generated inputs with
-    # antialiased boundaries or small geometry mismatch.
+    # Prefer missing evidence over persistent wrong-color parser evidence.
+    # Deterministic repair fills inner-layer holes only; rejected outer texels
+    # intentionally remain transparent instead of being hallucinated.
     DEFAULT_BACKGROUND_COLOR_TOLERANCE="0.25"
     DEFAULT_ROUTE_CONFIDENCE_THRESHOLD="0.0"
     DEFAULT_ROUTE_MARGIN_THRESHOLD="0.0"
@@ -276,33 +209,18 @@ OUTER_UV_OCCUPANCY_RESCUE_THRESHOLD="${OUTER_UV_OCCUPANCY_RESCUE_THRESHOLD:-0.70
 OUTER_UV_OCCUPANCY_RESCUE_ROUTE_THRESHOLD="${OUTER_UV_OCCUPANCY_RESCUE_ROUTE_THRESHOLD:-0.30}"
 COLOR_AGGREGATION="${COLOR_AGGREGATION:-grid_mode}"
 ALLOW_SEMANTIC_FALLBACK="${ALLOW_SEMANTIC_FALLBACK:-false}"
-REJECTED_CONTEXT="${REJECTED_CONTEXT:-true}"
-REJECTED_CONTEXT_CONFIDENCE_THRESHOLD="${REJECTED_CONTEXT_CONFIDENCE_THRESHOLD:-0.35}"
-REJECTED_CONTEXT_MARGIN_THRESHOLD="${REJECTED_CONTEXT_MARGIN_THRESHOLD:-0.10}"
 SEMANTIC_GATE="${SEMANTIC_GATE:-true}"
 AFFINE_REFINE="${AFFINE_REFINE:-false}"
 AFFINE_REFINE_TRANSLATION_PX="${AFFINE_REFINE_TRANSLATION_PX:-0.0}"
 AFFINE_REFINE_SCALE="${AFFINE_REFINE_SCALE:-0.0}"
 ALPHA_THRESHOLD="${ALPHA_THRESHOLD:-0.5}"
 DEVICE="${DEVICE:-auto}"
-NO_ENFORCE_BASE_ALPHA="${NO_ENFORCE_BASE_ALPHA:-false}"
 OVERLAY_ALPHA="${OVERLAY_ALPHA:-0.45}"
-INPAINT_STEPS="${INPAINT_STEPS:-4}"
-INPAINT_TEMPERATURE="${INPAINT_TEMPERATURE:-0.0}"
-INPAINT_SEED="${INPAINT_SEED:-1234}"
-INPAINT_RGB_DECODE="${INPAINT_RGB_DECODE:-mean}"
-INPAINT_PALETTE_SNAP="${INPAINT_PALETTE_SNAP:-true}"
-INPAINT_PALETTE_MIN_CONFIDENCE="${INPAINT_PALETTE_MIN_CONFIDENCE:-0.75}"
-INPAINT_CONTEXT_MIN_CONFIDENCE="${INPAINT_CONTEXT_MIN_CONFIDENCE:-0.35}"
-INPAINT_CONTEXT_ALPHA_RESCUE="${INPAINT_CONTEXT_ALPHA_RESCUE:-false}"
-INPAINT_CONTEXT_ALPHA_MIN_CONFIDENCE="${INPAINT_CONTEXT_ALPHA_MIN_CONFIDENCE:-0.50}"
-INPAINT_CONTEXT_ALPHA_MIN_MARGIN="${INPAINT_CONTEXT_ALPHA_MIN_MARGIN:-0.10}"
-INPAINT_EVIDENCE_LOCK_THRESHOLD="${INPAINT_EVIDENCE_LOCK_THRESHOLD:-0.0}"
 
 echo "Using routing profile: $ROUTING_PROFILE"
 echo "Using grid color aggregation: $COLOR_AGGREGATION"
 if [[ "$PARSER_ONLY" == "true" ]]; then
-  echo "Parser-only mode: topology completion is disabled."
+  echo "Parser-only mode: deterministic UV repair is disabled."
 fi
 
 args=(
@@ -336,20 +254,9 @@ args=(
   --outer_uv_occupancy_rescue_threshold "$OUTER_UV_OCCUPANCY_RESCUE_THRESHOLD"
   --outer_uv_occupancy_rescue_route_threshold "$OUTER_UV_OCCUPANCY_RESCUE_ROUTE_THRESHOLD"
   --color_aggregation "$COLOR_AGGREGATION"
-  --rejected_context_confidence_threshold "$REJECTED_CONTEXT_CONFIDENCE_THRESHOLD"
-  --rejected_context_margin_threshold "$REJECTED_CONTEXT_MARGIN_THRESHOLD"
   --affine_refine_translation_px "$AFFINE_REFINE_TRANSLATION_PX"
   --affine_refine_scale "$AFFINE_REFINE_SCALE"
   --alpha_threshold "$ALPHA_THRESHOLD"
-  --inpaint_steps "$INPAINT_STEPS"
-  --inpaint_temperature "$INPAINT_TEMPERATURE"
-  --inpaint_seed "$INPAINT_SEED"
-  --inpaint_rgb_decode "$INPAINT_RGB_DECODE"
-  --inpaint_palette_min_confidence "$INPAINT_PALETTE_MIN_CONFIDENCE"
-  --inpaint_context_min_confidence "$INPAINT_CONTEXT_MIN_CONFIDENCE"
-  --inpaint_context_alpha_min_confidence "$INPAINT_CONTEXT_ALPHA_MIN_CONFIDENCE"
-  --inpaint_context_alpha_min_margin "$INPAINT_CONTEXT_ALPHA_MIN_MARGIN"
-  --inpaint_evidence_lock_threshold "$INPAINT_EVIDENCE_LOCK_THRESHOLD"
   --device "$DEVICE"
 )
 
@@ -367,18 +274,6 @@ if [[ -n "$FOREGROUND_CUTOUT_OUTPUT" ]]; then
 fi
 if [[ -n "$FOREGROUND_PARSER_INPUT_OUTPUT" ]]; then
   args+=(--foreground_parser_input_output "$FOREGROUND_PARSER_INPUT_OUTPUT")
-fi
-
-if [[ "$INPAINT_PALETTE_SNAP" == "true" ]]; then
-  args+=(--inpaint_palette_snap)
-else
-  args+=(--no_inpaint_palette_snap)
-fi
-
-if [[ "$INPAINT_CONTEXT_ALPHA_RESCUE" == "true" ]]; then
-  args+=(--inpaint_context_alpha_rescue)
-else
-  args+=(--no_inpaint_context_alpha_rescue)
 fi
 
 if [[ "$GEOMETRY_ROUTE_TEXEL_CONSENSUS" == "true" ]]; then
@@ -403,12 +298,6 @@ if [[ "$OUTER_SEMANTIC_RESCUE" == "true" ]]; then
   args+=(--outer_semantic_rescue)
 else
   args+=(--no_outer_semantic_rescue)
-fi
-
-if [[ "$REJECTED_CONTEXT" == "true" ]]; then
-  args+=(--rejected_context)
-else
-  args+=(--no_rejected_context)
 fi
 
 if [[ "$ALLOW_SEMANTIC_FALLBACK" == "true" ]]; then
@@ -504,24 +393,12 @@ if [[ -n "$GEOMETRY_FILL_OUTPUT" ]]; then
 fi
 
 if [[ -n "$OUTPUT" ]]; then
-  if [[ -n "$INPAINT_CHECKPOINT" ]]; then
-    args+=(--inpaint_checkpoint "$INPAINT_CHECKPOINT" --output "$OUTPUT")
-  elif [[ "$OUTPUT_WAS_SET" == "true" ]]; then
-    echo "OUTPUT was set, but no inpaint checkpoint was found." >&2
-    echo "Set INPAINT_CHECKPOINT=/path/to/best.pt, or set OUTPUT= to write only parser conditioning." >&2
-    exit 1
-  else
-    echo "No semantic_uv_reconstruction checkpoint found under ${INPAINT_RUNS_DIR}/${INPAINT_RUN_PREFIX}*/${INPAINT_CHECKPOINT_NAME}; writing conditioning only." >&2
-  fi
+  args+=(--output "$OUTPUT")
 fi
 
-if [[ -z "$CONDITIONING_OUTPUT" && -z "$PARSER_UV_OUTPUT" && -z "$SIMPLE_INPAINT_OUTPUT" && -z "$DEBUG_OUTPUT" && -z "$OVERLAY_OUTPUT" && -z "$INNER_CUTOUT_OUTPUT" && -z "$OUTER_CUTOUT_OUTPUT" && -z "$SECONDARY_CUTOUT_OUTPUT" && -z "$COLOR_SOURCE_OUTPUT" && -z "$FACE_OUTPUT" && -z "$LAYER_FACE_OUTPUT" && -z "$RAW_FACE_OUTPUT" && -z "$RAW_LAYER_FACE_OUTPUT" && -z "$GEOMETRY_GRID_OUTPUT" && -z "$GEOMETRY_OVERLAY_OUTPUT" && -z "$GEOMETRY_ROUTED_OVERLAY_OUTPUT" && -z "$GEOMETRY_FILL_OUTPUT" && ( -z "$OUTPUT" || -z "$INPAINT_CHECKPOINT" ) ]]; then
-  echo "Nothing to write. Set a debug/conditioning output or OUTPUT with a valid INPAINT_CHECKPOINT." >&2
+if [[ -z "$CONDITIONING_OUTPUT" && -z "$PARSER_UV_OUTPUT" && -z "$SIMPLE_INPAINT_OUTPUT" && -z "$DEBUG_OUTPUT" && -z "$OVERLAY_OUTPUT" && -z "$INNER_CUTOUT_OUTPUT" && -z "$OUTER_CUTOUT_OUTPUT" && -z "$SECONDARY_CUTOUT_OUTPUT" && -z "$COLOR_SOURCE_OUTPUT" && -z "$FACE_OUTPUT" && -z "$LAYER_FACE_OUTPUT" && -z "$RAW_FACE_OUTPUT" && -z "$RAW_LAYER_FACE_OUTPUT" && -z "$GEOMETRY_GRID_OUTPUT" && -z "$GEOMETRY_OVERLAY_OUTPUT" && -z "$GEOMETRY_ROUTED_OVERLAY_OUTPUT" && -z "$GEOMETRY_FILL_OUTPUT" && -z "$OUTPUT" ]]; then
+  echo "Nothing to write. Set at least one parser/debug/final output." >&2
   exit 1
-fi
-
-if [[ "$NO_ENFORCE_BASE_ALPHA" == "true" ]]; then
-  args+=(--no_enforce_base_alpha)
 fi
 
 echo "Parser checkpoint: $PARSER_CHECKPOINT"
@@ -543,9 +420,6 @@ if [[ "$FOREGROUND_METHOD" != "legacy" ]]; then
   if [[ -n "$FOREGROUND_PARSER_INPUT_OUTPUT" ]]; then
     echo "Foreground parser input: $FOREGROUND_PARSER_INPUT_OUTPUT"
   fi
-fi
-if [[ -n "$INPAINT_CHECKPOINT" ]]; then
-  echo "Inpaint checkpoint: $INPAINT_CHECKPOINT"
 fi
 if [[ -n "$CONDITIONING_OUTPUT" ]]; then
   echo "Conditioning output: $CONDITIONING_OUTPUT"
@@ -598,7 +472,7 @@ fi
 if [[ -n "$GEOMETRY_FILL_OUTPUT" ]]; then
   echo "Geometry fill output: $GEOMETRY_FILL_OUTPUT"
 fi
-if [[ -n "$OUTPUT" && -n "$INPAINT_CHECKPOINT" ]]; then
+if [[ -n "$OUTPUT" ]]; then
   echo "Final output: $OUTPUT"
 fi
 

@@ -1,5 +1,9 @@
 # Semantic UV Reconstruction Development Guide
 
+> Experimental/legacy module. Production Dense UV Parser training and
+> inference no longer import this package. The default final UV is repaired by
+> `dense_uv_parser/simple_inpainting.py` and requires only a parser checkpoint.
+
 ## Overview
 
 `semantic_uv_reconstruction` contains the primary open-semantic fixed-view
@@ -48,7 +52,8 @@ cd SkingToolkit/semantic_uv_reconstruction
 ./run_parser_conditioned_training.sh
 ```
 
-The full production inference path starts in the parser module:
+The production inference path starts in the parser module and does not load a
+semantic reconstruction checkpoint:
 
 ```bash
 cd SkingToolkit/dense_uv_parser
@@ -119,7 +124,8 @@ The launcher creates run directories named `runs/semantic_uv_reconstruction_<mod
 - `losses.py`: UV, alpha, edge, render, and GAN losses.
 - `train.py`: parser-conditioned training and checkpointing.
 - `train_semantic_uv_reconstruction.py`: open-semantic direct reconstruction.
-- `cache_siglip_globals.py`: one-time fixed-view frozen SigLIP global cache builder.
+- `cache_siglip_globals.py`: compatibility entry point for
+  `dense_uv_parser/cache_semantic_features.py`.
 - `run_parser_conditioned_training.sh`: standard training configuration.
 - `run_semantic_uv_reconstruction_training.sh`: primary direct training entry.
 

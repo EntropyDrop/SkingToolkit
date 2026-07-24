@@ -32,7 +32,6 @@ from SkingToolkit.dense_uv_parser.utils import (  # noqa: E402
     ROUTE_ROLE_PALETTE,
     SPLAT_COLOR_AGGREGATIONS,
     UV_SIZE,
-    augment_dense_batch,
     build_dense_parser_batch,
     build_geometry_grid_debug,
     build_static_surface_routing,
@@ -57,15 +56,15 @@ from SkingToolkit.dense_uv_parser.utils import (  # noqa: E402
     splat_targets_to_uv_conditioning,
     surface_class_count,
 )
-from SkingToolkit.semantic_uv_reconstruction.dataset import UVInpaintingDataset  # noqa: E402
-from SkingToolkit.semantic_uv_reconstruction.semantic_dataset import (  # noqa: E402
+from SkingToolkit.dense_uv_parser.semantic_cache import (  # noqa: E402
     SigLIPGlobalCache,
 )
-from SkingToolkit.semantic_uv_reconstruction.semantic_losses import (  # noqa: E402
+from SkingToolkit.dense_uv_parser.semantic_targets import (  # noqa: E402
     build_part_layer_masks,
     build_semantic_attribute_targets,
 )
-from SkingToolkit.semantic_uv_reconstruction.train import get_device  # noqa: E402
+from SkingToolkit.dense_uv_parser.runtime import get_device  # noqa: E402
+from SkingToolkit.dense_uv_parser.skin_dataset import SkinUVDataset  # noqa: E402
 from SkingToolkit.renderer import DifferentiableRenderer  # noqa: E402
 
 try:
@@ -226,7 +225,7 @@ def stack_view_targets(targets_by_view):
     return result
 
 
-def build_parser_inputs(batch_uv, renderer, views, train, args, apply_augment=None, augment_generator=None):
+def build_parser_inputs(batch_uv, renderer, views, train, args):
     rendered_by_view = []
     targets_by_view = []
     with torch.no_grad():
@@ -237,15 +236,11 @@ def build_parser_inputs(batch_uv, renderer, views, train, args, apply_augment=No
                 view,
                 alpha_threshold=args.target_alpha_threshold,
             )
-            should_augment = train and args.augment if apply_augment is None else apply_augment
-            rendered, targets = augment_dense_batch(
-                rendered,
-                targets,
-                translation_scale=args.translation_scale if should_augment else 0.0,
-                scale_range=args.scale_range if should_augment else 0.0,
-                bg_color=args.bg_color,
-                generator=augment_generator,
-            )
+            targets = dict(targets)
+            # Fixed-view parser training uses the canonical renderer coordinates.
+            # Keep an explicit identity transform for the geometry-routing API and
+            # for compatibility with existing affine-aware checkpoints.
+            targets["affine"] = rendered.new_zeros(rendered.shape[0], 3)
             background_probability = args.background_augment_prob if train and args.background_augment else 0.0
             rendered = randomize_render_background(
                 rendered,
@@ -856,12 +851,6 @@ def run_epoch(
     metric_sums = {}
     sample_count = 0
     iterator = tqdm(loader, leave=False, file=sys.__stderr__ or sys.stderr) if tqdm is not None else loader
-    val_generator = None
-    apply_augment = train and args.augment
-    if not train and args.augment_validation:
-        val_generator = torch.Generator(device=device)
-        val_generator.manual_seed(args.seed + 1009)
-        apply_augment = True
 
     for batch in iterator:
         batch = move_batch(batch, device)
@@ -871,8 +860,6 @@ def run_epoch(
             views,
             train=train,
             args=args,
-            apply_augment=apply_augment,
-            augment_generator=val_generator,
         )
         parser_samples = rendered.shape[0]
         semantic_features = cached_semantic_batch(
@@ -980,7 +967,7 @@ def run_epoch(
                         renderer,
                         views,
                         temperature=args.render_softmax_temperature,
-                        canonicalize=apply_augment,
+                        canonicalize=False,
                         recall_hard_fraction=args.soft_uv_recall_hard_fraction,
                         recall_hard_weight=args.soft_uv_recall_hard_weight,
                         route_texel_center_power=(
@@ -1120,7 +1107,7 @@ def save_preview(
     views = parse_views(args.views)
     batch = move_batch(next(iter(loader)), device)
     rendered, targets, view_count, view_ids = build_parser_inputs(
-        batch["uv"], renderer, views, train=False, args=args, apply_augment=False
+        batch["uv"], renderer, views, train=False, args=args
     )
     semantic_features = cached_semantic_batch(
         semantic_cache, batch["path"], device
@@ -1691,12 +1678,6 @@ def build_arg_parser():
         default="grid_mode",
     )
     parser.add_argument("--allow_semantic_fallback", action="store_true")
-    parser.add_argument("--augment", dest="augment", action="store_true", default=False)
-    parser.add_argument("--no_augment", dest="augment", action="store_false")
-    parser.add_argument("--augment_validation", dest="augment_validation", action="store_true", default=False)
-    parser.add_argument("--no_augment_validation", dest="augment_validation", action="store_false")
-    parser.add_argument("--translation_scale", type=float, default=0.0)
-    parser.add_argument("--scale_range", type=float, default=0.0)
     parser.add_argument("--background_augment", dest="background_augment", action="store_true", default=True)
     parser.add_argument("--no_background_augment", dest="background_augment", action="store_false")
     parser.add_argument("--background_augment_prob", type=float, default=0.9)
@@ -1791,8 +1772,6 @@ def build_arg_parser():
 def main():
     args = build_arg_parser().parse_args()
     args.bg_color = (128, 128, 128)
-    if args.scale_range < 0 or args.scale_range >= 1:
-        raise ValueError("--scale_range must be in [0, 1).")
     if not 0.0 <= args.feature_dropout < 1.0:
         raise ValueError("--feature_dropout must be in [0, 1).")
     if args.route_prior_height < 1 or args.route_prior_width < 1:
@@ -1804,15 +1783,6 @@ def main():
     if args.route_role_spatial_prior and args.parser_mode != "geometry_fit":
         raise ValueError(
             "--route_role_spatial_prior is supported only by geometry_fit."
-        )
-    if (
-        args.route_role_spatial_prior
-        and args.augment
-        and (args.translation_scale > 0.0 or args.scale_range > 0.0)
-    ):
-        raise ValueError(
-            "The canonical route prior requires fixed geometry; disable geometric "
-            "augmentation or disable the spatial prior."
         )
     differentiable_weights = (
         args.lambda_soft_uv_rgb,
@@ -1914,7 +1884,7 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "previews").mkdir(exist_ok=True)
 
-    dataset = UVInpaintingDataset(
+    dataset = SkinUVDataset(
         data_dir=args.data_dir,
         mappings_dir=args.mappings_dir,
         views=args.views,
@@ -2035,8 +2005,8 @@ def main():
         uv_classification=args.uv_classification and not geometry_only,
         view_classes=len(parse_views(args.views)),
         predict_affine=affine_mode,
-        affine_translation_scale=args.translation_scale,
-        affine_scale_range=args.scale_range,
+        affine_translation_scale=0.0,
+        affine_scale_range=0.0,
         surface_classes=surface_classes,
         geometry_only=geometry_only,
         feature_dropout=args.feature_dropout,
@@ -2308,8 +2278,6 @@ def main():
         "base_learning_rate": args.lr,
         "lr_schedule": args.lr_schedule,
         "min_lr_ratio": args.min_lr_ratio,
-        "augment": args.augment,
-        "augment_validation": args.augment_validation,
         "background_augment": args.background_augment,
         "background_augment_prob": args.background_augment_prob,
         "semantic_gate": args.semantic_gate,
