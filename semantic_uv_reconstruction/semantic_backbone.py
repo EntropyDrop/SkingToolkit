@@ -249,6 +249,10 @@ class TIPSv2VisionBackbone(nn.Module):
                 model_name,
                 local_files_only=bool(local_files_only),
                 out_indices=[-1],
+                # Do not let this capability probe ask an interactive question.
+                # Native releases ignore repository code and load normally;
+                # older releases fail here and use the explicit trusted fallback.
+                trust_remote_code=False,
             )
             self.runtime_kind = "native_backbone"
         except (ImportError, AttributeError, KeyError, OSError, TypeError, ValueError) as error:

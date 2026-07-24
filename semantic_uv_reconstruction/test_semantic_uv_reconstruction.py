@@ -138,10 +138,13 @@ class TIPSv2AdapterTest(unittest.TestCase):
                 model_name,
                 local_files_only=False,
                 out_indices=None,
+                trust_remote_code=None,
             ):
                 del model_name, local_files_only
                 if out_indices != [-1]:
                     raise AssertionError("The adapter must request the final feature map.")
+                if trust_remote_code is not False:
+                    raise AssertionError("Native probing must remain non-interactive.")
                 return FakeVisionBackbone()
 
             def forward(self, pixel_values):
@@ -173,8 +176,10 @@ class TIPSv2AdapterTest(unittest.TestCase):
     def test_adapter_falls_back_to_official_remote_encode_image(self):
         class UnsupportedAutoBackbone:
             @staticmethod
-            def from_pretrained(*args, **kwargs):
+            def from_pretrained(*args, trust_remote_code=None, **kwargs):
                 del args, kwargs
+                if trust_remote_code is not False:
+                    raise AssertionError("Fallback probing must remain non-interactive.")
                 raise ValueError("Unrecognized model_type tipsv2")
 
         class FakeRemoteModel(nn.Module):
