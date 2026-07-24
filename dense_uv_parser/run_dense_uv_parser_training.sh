@@ -94,11 +94,12 @@ ROUTE_PRIOR_HEIGHT="${ROUTE_PRIOR_HEIGHT:-32}"
 ROUTE_PRIOR_WIDTH="${ROUTE_PRIOR_WIDTH:-16}"
 ROUTE_PRIOR_LOGIT_CAP="${ROUTE_PRIOR_LOGIT_CAP:-1.5}"
 ROUTE_PRIOR_DROPOUT="${ROUTE_PRIOR_DROPOUT:-0.10}"
-SEMANTIC_BACKBONE="${SEMANTIC_BACKBONE:-tipsv2}"
+SEMANTIC_BACKBONE="${SEMANTIC_BACKBONE:-siglip2}"
 SIGLIP_MODEL="${SIGLIP_MODEL:-google/siglip2-base-patch16-224}"
 SIGLIP_LOCAL_FILES_ONLY="${SIGLIP_LOCAL_FILES_ONLY:-false}"
-CACHE_SIGLIP_GLOBALS="${CACHE_SIGLIP_GLOBALS:-true}"
-SIGLIP_CACHE_DIR="${SIGLIP_CACHE_DIR:-cache/semantic_dense_parser_siglip2_${MAPPINGS_SIZE}_${MAX_SAMPLES}}"
+CACHE_SIGLIP_FEATURES="${CACHE_SIGLIP_FEATURES:-${CACHE_SIGLIP_GLOBALS:-true}}"
+SIGLIP_CACHE_SPATIAL="${SIGLIP_CACHE_SPATIAL:-true}"
+SIGLIP_CACHE_DIR="${SIGLIP_CACHE_DIR:-cache/semantic_dense_parser_siglip2_spatial_${MAPPINGS_SIZE}_${MAX_SAMPLES}}"
 SIGLIP_CACHE_BATCH_SIZE="${SIGLIP_CACHE_BATCH_SIZE:-32}"
 TIPSV2_MODEL="${TIPSV2_MODEL:-google/tipsv2-b14}"
 TIPSV2_LOCAL_FILES_ONLY="${TIPSV2_LOCAL_FILES_ONLY:-false}"
@@ -300,7 +301,10 @@ if [[ "$SEMANTIC_BACKBONE" == "siglip2" ]]; then
     cache_args+=(--siglip_local_files_only)
     semantic_args+=(--siglip_local_files_only)
   fi
-  if [[ "$CACHE_SIGLIP_GLOBALS" == "true" ]]; then
+  if [[ "$SIGLIP_CACHE_SPATIAL" == "true" ]]; then
+    cache_args+=(--spatial)
+  fi
+  if [[ "$CACHE_SIGLIP_FEATURES" == "true" ]]; then
     python ../semantic_uv_reconstruction/cache_siglip_globals.py \
       --data_dir "$DATA_DIR" \
       --cache_dir "$SIGLIP_CACHE_DIR" \
@@ -315,6 +319,9 @@ if [[ "$SEMANTIC_BACKBONE" == "siglip2" ]]; then
       --device "${DEVICE:-auto}" \
       "${cache_args[@]}"
     semantic_args+=(--siglip_cache_dir "$SIGLIP_CACHE_DIR")
+    if [[ "$SIGLIP_CACHE_SPATIAL" == "true" ]]; then
+      semantic_args+=(--siglip_cache_require_spatial)
+    fi
   fi
   semantic_args+=(--siglip_model "$SIGLIP_MODEL")
 elif [[ "$SEMANTIC_BACKBONE" == "tipsv2" ]]; then

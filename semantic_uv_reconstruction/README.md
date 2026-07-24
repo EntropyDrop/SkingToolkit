@@ -31,9 +31,9 @@ To solve this, `dense_uv_parser` performs coordinate-guided routing first and `s
 
 ### 1. Dense Parser Conditioning
 * The frozen parser combines high-resolution geometry features with frozen
-  TIPSv2 spatial and multi-view context to classify pixels as inner, outer, or
-  secondary/deeper surfaces. Parser checkpoints trained with the former
-  SigLIP2 global adapter remain supported.
+  SigLIP2 spatial and multi-view context to classify pixels as inner, outer, or
+  secondary/deeper surfaces. Training caches the full 768-channel raw patch
+  features in FP16; TIPSv2 remains available as an online ablation.
 * Fixed mappings route them into 12 channels: inner RGBA, evidence, and learned
   confidence, followed by the same outer fields.
 * Routed evidence remains confidence-aware context, but the production default

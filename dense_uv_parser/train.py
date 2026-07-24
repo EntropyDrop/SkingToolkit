@@ -1547,12 +1547,13 @@ def build_arg_parser():
         choices=["none", "siglip2", "tipsv2"],
         default="none",
         help=(
-            "Frozen semantic context used to condition route-role parsing. "
-            "TIPSv2 additionally contributes a spatial feature map."
+            "Frozen semantic backbone. SigLIP2 can use cached global and spatial "
+            "features; TIPSv2 extracts both online."
         ),
     )
     parser.add_argument("--siglip_model", default="google/siglip2-base-patch16-224")
     parser.add_argument("--siglip_cache_dir", default=None)
+    parser.add_argument("--siglip_cache_require_spatial", action="store_true")
     parser.add_argument("--siglip_local_files_only", action="store_true")
     parser.add_argument("--tipsv2_model", default="google/tipsv2-b14")
     parser.add_argument("--tipsv2_local_files_only", action="store_true")
@@ -1943,6 +1944,7 @@ def main():
                 expected_views=parse_views(args.views),
                 expected_model=args.siglip_model,
                 expected_data_dir=args.data_dir,
+                require_spatial=args.siglip_cache_require_spatial,
             )
             missing_semantics = [
                 Path(path).name
@@ -1955,6 +1957,10 @@ def main():
                     f"first missing: {missing_semantics[0]}."
                 )
             semantic_feature_dim = int(semantic_cache.metadata["feature_dim"])
+            if semantic_cache.has_spatial:
+                semantic_spatial_feature_dim = int(
+                    semantic_cache.metadata["spatial_feature_dim"]
+                )
         else:
             runtime_semantic_backbone = build_semantic_runtime(
                 args.semantic_backbone,
@@ -1965,6 +1971,13 @@ def main():
                 runtime_batch_size=args.semantic_runtime_batch_size,
             )
             semantic_feature_dim = runtime_semantic_backbone.raw_feature_dim
+            semantic_spatial_feature_dim = int(
+                getattr(
+                    runtime_semantic_backbone,
+                    "raw_spatial_feature_dim",
+                    0,
+                )
+            )
     elif args.semantic_backbone == "tipsv2":
         runtime_semantic_backbone = build_semantic_runtime(
             args.semantic_backbone,

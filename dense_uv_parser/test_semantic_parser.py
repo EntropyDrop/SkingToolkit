@@ -11,7 +11,10 @@ from SkingToolkit.dense_uv_parser.infer import (
 )
 from SkingToolkit.dense_uv_parser.losses import DenseUVParserLoss
 from SkingToolkit.dense_uv_parser.model import DenseUVParserNet
-from SkingToolkit.dense_uv_parser.semantic import attach_semantic_runtime
+from SkingToolkit.dense_uv_parser.semantic import (
+    attach_semantic_runtime,
+    cached_semantic_batch,
+)
 from SkingToolkit.dense_uv_parser.train import outer_uv_occupancy_losses
 from SkingToolkit.dense_uv_parser.utils import splat_to_uv_conditioning
 from SkingToolkit.semantic_uv_reconstruction.semantic_losses import (
@@ -163,6 +166,30 @@ class SemanticDenseUVParserTest(unittest.TestCase):
                 torch.ones_like(backbone.seen[:, :, :, 8:]),
             )
         )
+
+    def test_cached_semantics_include_global_and_spatial_features(self):
+        class FakeCache:
+            has_spatial = True
+
+            @staticmethod
+            def get(filename):
+                value = 1.0 if filename == "one.png" else 2.0
+                return torch.full((2, 6), value)
+
+            @staticmethod
+            def get_spatial(filename):
+                value = 3.0 if filename == "one.png" else 4.0
+                return torch.full((2, 6, 3, 2), value, dtype=torch.float16)
+
+        features = cached_semantic_batch(
+            FakeCache(),
+            ["/tmp/one.png", "/tmp/two.png"],
+            torch.device("cpu"),
+        )
+
+        self.assertEqual(tuple(features["raw_global"].shape), (2, 2, 6))
+        self.assertEqual(tuple(features["raw_spatial"].shape), (2, 2, 6, 3, 2))
+        self.assertEqual(features["raw_spatial"].dtype, torch.float16)
 
     def test_outer_uv_occupancy_loss_uses_only_outer_atlas(self):
         logits = torch.zeros(1, 1, 64, 64, requires_grad=True)

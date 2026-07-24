@@ -46,9 +46,10 @@ SkingToolkit/
 
 The parser classifies render pixels as background, directly visible inner skin,
 directly visible outer skin, or a secondary/deeper renderer surface. A frozen
-TIPSv2 backbone supplies spatial and fused front/back semantic context while
-fixed Steve geometry supplies body-part, face, and UV mappings. Legacy SigLIP2
-parser checkpoints remain loadable. Its predictions are splatted
+SigLIP2 backbone supplies cached full-width spatial features and fused
+front/back semantic context while fixed Steve geometry supplies body-part,
+face, and UV mappings. TIPSv2 remains available as an online ablation. Its
+predictions are splatted
 into a 12-channel confidence-aware tensor:
 
 ```text

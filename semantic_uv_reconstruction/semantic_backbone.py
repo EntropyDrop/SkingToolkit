@@ -75,6 +75,7 @@ class SigLIP2VisionBackbone(nn.Module):
         self.image_size = int(image_size)
         self.patch_size = int(patch_size)
         self.raw_feature_dim = int(hidden_size)
+        self.raw_spatial_feature_dim = int(hidden_size)
         self.token_channels = int(token_channels)
         # Cache only immutable Python index tuples. A CUDA tensor kept here can
         # outlive a torch.compile CUDA Graph invocation and point at storage
@@ -184,6 +185,45 @@ class SigLIP2VisionBackbone(nn.Module):
         return {
             "global": self.project_global(raw_global),
             "raw_global": raw_global,
+        }
+
+    def encode_dense(self, images):
+        """Return pooled and full-width spatial features without trainable projection."""
+        pixels, content_rect = self._letterbox(images)
+        outputs = self.vision_model(pixel_values=pixels)
+        raw_tokens = outputs.last_hidden_state
+        patch_grid = self.image_size // self.patch_size
+        patch_token_count = patch_grid * patch_grid
+        if raw_tokens.shape[1] == patch_token_count + 1:
+            raw_tokens = raw_tokens[:, 1:]
+        elif raw_tokens.shape[1] != patch_token_count:
+            raise ValueError(
+                f"Expected {patch_token_count} SigLIP2 patch tokens, got "
+                f"{raw_tokens.shape[1]}."
+            )
+        raw_spatial = raw_tokens.transpose(1, 2).reshape(
+            raw_tokens.shape[0],
+            raw_tokens.shape[2],
+            patch_grid,
+            patch_grid,
+        )
+        top, left, resized_height, resized_width = content_rect
+        row_start = top // self.patch_size
+        row_stop = min(
+            patch_grid,
+            (top + resized_height + self.patch_size - 1) // self.patch_size,
+        )
+        column_start = left // self.patch_size
+        column_stop = min(
+            patch_grid,
+            (left + resized_width + self.patch_size - 1) // self.patch_size,
+        )
+        raw_spatial = raw_spatial[
+            :, :, row_start:row_stop, column_start:column_stop
+        ]
+        return {
+            "raw_global": outputs.pooler_output,
+            "raw_spatial": raw_spatial,
         }
 
     def forward(self, images):

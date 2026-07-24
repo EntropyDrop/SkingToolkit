@@ -11,11 +11,12 @@ from SkingToolkit.semantic_uv_reconstruction.dataset import IMAGE_EXTENSIONS, lo
 
 
 IGNORE_INDEX = 255
-SIGLIP_CACHE_VERSION = 1
+SIGLIP_CACHE_VERSION = 2
+SUPPORTED_SIGLIP_CACHE_VERSIONS = (1, 2)
 
 
 class SigLIPGlobalCache:
-    """Memory-mapped frozen SigLIP globals keyed by source skin filename."""
+    """Memory-mapped frozen SigLIP globals and optional spatial features."""
 
     def __init__(
         self,
@@ -23,6 +24,7 @@ class SigLIPGlobalCache:
         expected_views=None,
         expected_model=None,
         expected_data_dir=None,
+        require_spatial=False,
     ):
         self.cache_dir = Path(cache_dir)
         metadata_path = self.cache_dir / "metadata.json"
@@ -33,7 +35,7 @@ class SigLIPGlobalCache:
                 "and embeddings.npy."
             )
         self.metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-        if self.metadata.get("version") != SIGLIP_CACHE_VERSION:
+        if self.metadata.get("version") not in SUPPORTED_SIGLIP_CACHE_VERSIONS:
             raise ValueError(
                 f"Unsupported SigLIP cache version {self.metadata.get('version')!r}."
             )
@@ -72,6 +74,41 @@ class SigLIPGlobalCache:
             raise ValueError(
                 f"SigLIP cache shape={self.embeddings.shape}, expected {expected_shape}."
             )
+        spatial_metadata = (
+            self.metadata.get("spatial_feature_dim"),
+            self.metadata.get("spatial_height"),
+            self.metadata.get("spatial_width"),
+        )
+        self.has_spatial = all(value is not None for value in spatial_metadata)
+        self.spatial_embeddings = None
+        if self.has_spatial:
+            spatial_path = self.cache_dir / "spatial_embeddings.npy"
+            if not spatial_path.is_file():
+                raise FileNotFoundError(
+                    f"SigLIP cache metadata declares spatial features but "
+                    f"{spatial_path} is missing."
+                )
+            self.spatial_embeddings = np.load(spatial_path, mmap_mode="r")
+            expected_spatial_shape = (
+                len(filenames),
+                len(self.metadata["views"]),
+                int(self.metadata["spatial_feature_dim"]),
+                int(self.metadata["spatial_height"]),
+                int(self.metadata["spatial_width"]),
+            )
+            if self.spatial_embeddings.shape != expected_spatial_shape:
+                raise ValueError(
+                    "SigLIP spatial cache shape="
+                    f"{self.spatial_embeddings.shape}, expected "
+                    f"{expected_spatial_shape}."
+                )
+        elif any(value is not None for value in spatial_metadata):
+            raise ValueError("SigLIP spatial cache metadata is incomplete.")
+        if require_spatial and not self.has_spatial:
+            raise ValueError(
+                f"SigLIP cache {self.cache_dir} contains only global features; "
+                "rebuild it with spatial caching enabled."
+            )
 
     def get(self, filename):
         try:
@@ -80,6 +117,22 @@ class SigLIPGlobalCache:
             raise KeyError(f"{filename} is missing from the SigLIP cache.") from error
         # Copy the tiny row so DataLoader collation never holds a read-only mmap view.
         return torch.from_numpy(np.array(self.embeddings[index], dtype=np.float32, copy=True))
+
+    def get_spatial(self, filename):
+        if not self.has_spatial:
+            raise ValueError("This SigLIP cache has no spatial features.")
+        try:
+            index = self.filename_to_index[filename]
+        except KeyError as error:
+            raise KeyError(f"{filename} is missing from the SigLIP cache.") from error
+        # Keep the large row in FP16 through disk IO and host-to-device transfer.
+        return torch.from_numpy(
+            np.array(
+                self.spatial_embeddings[index],
+                dtype=np.float16,
+                copy=True,
+            )
+        )
 
 
 def load_semantic_uv_label(path):

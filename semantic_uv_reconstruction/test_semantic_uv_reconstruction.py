@@ -13,7 +13,10 @@ import torch.nn.functional as F
 from PIL import Image
 import numpy as np
 
-from SkingToolkit.semantic_uv_reconstruction.semantic_dataset import SemanticUVPairDataset
+from SkingToolkit.semantic_uv_reconstruction.semantic_dataset import (
+    SemanticUVPairDataset,
+    SigLIPGlobalCache,
+)
 from SkingToolkit.semantic_uv_reconstruction.semantic_losses import (
     SemanticUVReconstructionLoss,
     build_part_layer_masks,
@@ -121,6 +124,10 @@ class SigLIP2AdapterTest(unittest.TestCase):
         outputs["raw_global"].sum().backward()
         self.assertIsNotNone(images.grad)
         self.assertGreater(float(images.grad.abs().sum()), 0.0)
+
+        dense_outputs = backbone.encode_dense(images.detach())
+        self.assertEqual(tuple(dense_outputs["raw_global"].shape), (2, 12))
+        self.assertEqual(tuple(dense_outputs["raw_spatial"].shape), (2, 12, 2, 4))
 
 
 class TIPSv2AdapterTest(unittest.TestCase):
@@ -449,6 +456,42 @@ class SemanticAnnotationTest(unittest.TestCase):
             self.assertEqual(sample["siglip_raw_global"].shape, (2, 6))
             self.assertTrue(
                 torch.equal(sample["siglip_raw_global"], torch.from_numpy(values[0]).float())
+            )
+
+    def test_siglip_cache_reads_fp16_spatial_features(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cache = Path(directory)
+            globals_array = np.arange(12, dtype=np.float16).reshape(1, 2, 6)
+            spatial_array = np.arange(
+                1 * 2 * 6 * 3 * 2,
+                dtype=np.float16,
+            ).reshape(1, 2, 6, 3, 2)
+            np.save(cache / "embeddings.npy", globals_array)
+            np.save(cache / "spatial_embeddings.npy", spatial_array)
+            (cache / "metadata.json").write_text(
+                json.dumps(
+                    {
+                        "version": 2,
+                        "filenames": ["one.png"],
+                        "views": ["front", "back"],
+                        "siglip_model": "fake",
+                        "feature_dim": 6,
+                        "spatial_feature_dim": 6,
+                        "spatial_height": 3,
+                        "spatial_width": 2,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            cached = SigLIPGlobalCache(cache, require_spatial=True)
+
+            self.assertTrue(cached.has_spatial)
+            self.assertEqual(tuple(cached.get("one.png").shape), (2, 6))
+            spatial = cached.get_spatial("one.png")
+            self.assertEqual(tuple(spatial.shape), (2, 6, 3, 2))
+            self.assertEqual(spatial.dtype, torch.float16)
+            self.assertTrue(
+                torch.equal(spatial, torch.from_numpy(spatial_array[0]))
             )
 
 

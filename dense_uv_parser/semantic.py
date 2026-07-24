@@ -75,7 +75,7 @@ def attach_semantic_runtime(
     parser_spatial_dim = int(
         getattr(model, "semantic_spatial_feature_dim", 0)
     )
-    if backbone_spatial_dim != parser_spatial_dim:
+    if parser_spatial_dim > 0 and backbone_spatial_dim != parser_spatial_dim:
         raise ValueError(
             "Semantic spatial feature dimension does not match the parser "
             f"checkpoint: backbone={backbone_spatial_dim}, "
@@ -128,5 +128,18 @@ def attach_siglip_runtime(
 def cached_semantic_batch(cache, paths, device):
     if cache is None:
         return None
-    features = [cache.get(Path(path).name) for path in paths]
-    return torch.stack(features, dim=0).to(device=device, non_blocking=True)
+    filenames = [Path(path).name for path in paths]
+    global_features = torch.stack(
+        [cache.get(filename) for filename in filenames],
+        dim=0,
+    ).to(device=device, non_blocking=True)
+    if not getattr(cache, "has_spatial", False):
+        return global_features
+    spatial_features = torch.stack(
+        [cache.get_spatial(filename) for filename in filenames],
+        dim=0,
+    ).to(device=device, non_blocking=True)
+    return {
+        "raw_global": global_features,
+        "raw_spatial": spatial_features,
+    }
