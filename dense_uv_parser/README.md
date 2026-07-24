@@ -287,11 +287,13 @@ training. If the recorded path is unavailable, it falls back to the highest
   this diagnostic file is not itself a valid finished Minecraft skin
 - `outputs/parser_pred_uv_simple_inpainting.png`: deterministic baseline repair.
   Each face is repaired from its outer border toward its centre, traversing one
-  rectangular ring clockwise before entering the next ring. An unknown inner
-  texel first copies an available left/right mirrored inner texel; otherwise it
-  copies the closest known texel in canonical 3D character space from the same
-  body part. Known outer texels from that part may provide color, but no outer
-  texel is added or overwritten
+  rectangular ring clockwise before entering the next ring. The inward-facing
+  side of each arm and leg is the exception: it is processed top-to-bottom,
+  with every row moving from both side edges toward the centre. An unknown
+  inner texel first copies an available left/right mirrored inner texel;
+  otherwise it copies the closest known texel in canonical 3D character space
+  from the same body part. Known outer texels from that part may provide color,
+  but no outer texel is added or overwritten
 - `outputs/parser_debug_geometry_grid.png`: fitted inner/outer cuboid faces with projected UV texel boundaries
 - `outputs/parser_debug_geometry_overlay.png`: inner (cyan) and outer (magenta) fitted grids overlaid on the canonicalized source views
 - `outputs/parser_debug_geometry_routed_overlay.png`: the same grids over only pixels routed to their matching inner/outer layer

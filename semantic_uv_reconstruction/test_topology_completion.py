@@ -4,6 +4,7 @@ import torch
 
 from SkingToolkit.semantic_uv_reconstruction.topology import (
     INVALID_SURFACE,
+    LIMB_INNER_FACE,
     MIRRORED_PART,
     SURFACE_COUNT,
     build_uv_topology,
@@ -138,12 +139,15 @@ class UVTopologyTest(unittest.TestCase):
             )
         )
 
-    def test_every_inner_face_finishes_each_outer_ring_before_moving_inward(self):
+    def test_ordinary_inner_faces_finish_each_outer_ring_before_moving_inward(self):
         topology = build_uv_topology()
         order = topology.inner_fill_order
         ordered_surfaces = topology.surface.reshape(-1)[order]
 
         for surface in range(SURFACE_COUNT // 2):
+            part, face = divmod(surface, 6)
+            if LIMB_INNER_FACE.get(part) == face:
+                continue
             face_order = order[ordered_surfaces == surface]
             x = face_order % 64
             y = torch.div(face_order, 64, rounding_mode="floor")
@@ -152,6 +156,33 @@ class UVTopologyTest(unittest.TestCase):
                 torch.minimum(y - y.min(), y.max() - y),
             )
             self.assertTrue(torch.all(ring[1:] >= ring[:-1]))
+
+    def test_limb_inner_faces_move_from_both_side_edges_toward_row_centre(self):
+        topology = build_uv_topology()
+        order = topology.inner_fill_order
+        ordered_surfaces = topology.surface.reshape(-1)[order]
+
+        for part, face in LIMB_INNER_FACE.items():
+            surface = part * 6 + face
+            face_order = order[ordered_surfaces == surface]
+            x = face_order % 64
+            y = torch.div(face_order, 64, rounding_mode="floor")
+            self.assertTrue(torch.all(y[1:] >= y[:-1]))
+
+            for row in torch.unique(y, sorted=True):
+                row_x = x[y == row]
+                left = int(row_x.min())
+                right = int(row_x.max())
+                expected = []
+                while left <= right:
+                    expected.append(left)
+                    if right != left:
+                        expected.append(right)
+                    left += 1
+                    right -= 1
+                self.assertTrue(
+                    torch.equal(row_x, torch.tensor(expected, dtype=row_x.dtype))
+                )
 
     def test_simple_inpaint_prefers_known_symmetry_before_nearest_3d(self):
         topology = build_uv_topology()

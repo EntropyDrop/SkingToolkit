@@ -51,6 +51,15 @@ PART_CENTRES = (
     (-2.0, 6.0, 0.0),   # right leg
 )
 MIRRORED_PART = (0, 1, 3, 2, 5, 4)
+# Arms and legs use the side face pointing toward the character centre as their
+# hidden inner face. These faces benefit from propagating both front and back
+# seam colours horizontally instead of using the general rectangular-ring order.
+LIMB_INNER_FACE = {
+    2: 3,  # left arm: -X
+    3: 2,  # right arm: +X
+    4: 3,  # left leg: -X
+    5: 2,  # right leg: +X
+}
 
 
 def _axis_coordinate(index, size):
@@ -244,11 +253,12 @@ def build_uv_topology(is_slim=False):
             ).argmin(dim=1)
             mirrored[targets] = candidates[nearest]
 
-    # Deterministic repair order: process each cuboid face independently from
-    # its outer border toward its centre. Each rectangular ring is traversed
-    # clockwise (top, right, bottom, left) before the next inner ring starts.
-    # Newly repaired border texels can therefore provide colour evidence for
-    # later inner texels without crossing body-part boundaries.
+    # Deterministic repair order: most faces move from their outer border toward
+    # the centre, one clockwise rectangular ring at a time. The hidden inward
+    # side of each arm and leg instead moves top-to-bottom and, within every row,
+    # from the left/right seams toward the centre. Newly repaired border texels
+    # can therefore provide colour evidence for later inner texels without
+    # crossing body-part boundaries.
     inner_fill_order = []
     for part in range(PART_COUNT):
         for face in range(FACE_COUNT):
@@ -280,7 +290,18 @@ def build_uv_topology(is_slim=False):
                     offset = bottom - v
                 return ring, edge, offset
 
-            cells.sort(key=inward_ring_key)
+            if LIMB_INNER_FACE.get(part) == face:
+                cells.sort(
+                    key=lambda cell: (
+                        cell["v"],
+                        min(cell["u"], width - 1 - cell["u"]),
+                        0
+                        if cell["u"] < width - 1 - cell["u"]
+                        else 1,
+                    )
+                )
+            else:
+                cells.sort(key=inward_ring_key)
             inner_fill_order.extend(cell["flat"] for cell in cells)
 
     return UVTopology(
@@ -303,13 +324,15 @@ def build_uv_topology(is_slim=False):
 def simple_symmetry_nearest_inpaint(uv, alpha_threshold=0.5):
     """Fill unknown inner texels with symmetry, then 3D nearest colours.
 
-    Each face is traversed from its outer border toward its centre, one
-    clockwise rectangular ring at a time. Horizontal symmetry stays on the
-    inner layer. The nearest-neighbour fallback searches known texels only
-    within the target body part, including that part's known outer-layer
-    texels. Newly repaired inner texels become sources for later texels. The
-    outer layer itself is never filled or cleared, and every existing opaque
-    RGBA value is untouched.
+    Most faces are traversed from their outer border toward their centre, one
+    clockwise rectangular ring at a time. The inward-facing side of each arm
+    and leg is traversed top-to-bottom with every row moving from its left and
+    right edges toward the centre. Horizontal symmetry stays on the inner
+    layer. The nearest-neighbour fallback searches known texels only within the
+    target body part, including that part's known outer-layer texels. Newly
+    repaired inner texels become sources for later texels. The outer layer
+    itself is never filled or cleared, and every existing opaque RGBA value is
+    untouched.
     """
     squeeze_batch = uv.dim() == 3
     if squeeze_batch:
@@ -381,7 +404,7 @@ def simple_symmetry_nearest_inpaint(uv, alpha_threshold=0.5):
                 "symmetry_filled_texels": symmetry_filled,
                 "nearest_3d_filled_texels": nearest_filled,
                 "preserved_outer_texels": int((valid & (layer == 1)).sum().item()),
-                "fill_order": "part_face_outer_to_inner_clockwise",
+                "fill_order": "face_rings_with_limb_inner_edges_in",
                 "unresolved_texels": int(
                     (valid & (layer == 0) & ~resolved_inner).sum().item()
                 ),
