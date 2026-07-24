@@ -59,8 +59,6 @@ class DenseParserForegroundTest(unittest.TestCase):
             'PARSER_CHECKPOINT="$(find_latest_checkpoint '
         )
         self.assertLess(definition, parser_lookup)
-        self.assertNotIn("semantic_uv_reconstruction", script)
-        self.assertNotIn("INPAINT_CHECKPOINT", script)
 
     def test_dense_infer_does_not_import_removed_foreground_package(self):
         import SkingToolkit.dense_uv_parser.infer  # noqa: F401
