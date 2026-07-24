@@ -6,6 +6,7 @@ from SkingToolkit.semantic_uv_reconstruction.topology import (
     INVALID_SURFACE,
     MIRRORED_PART,
     SURFACE_COUNT,
+    _nearest_defined_source,
     build_uv_topology,
     simple_symmetry_nearest_inpaint,
 )
@@ -315,6 +316,120 @@ class UVTopologyTest(unittest.TestCase):
         self.assertEqual(stats["symmetry_filled_texels"], 0)
         self.assertEqual(stats["nearest_3d_filled_texels"], 0)
         self.assertEqual(stats["color_sources"], "currently_defined_only")
+
+    def test_side_nearest_prefers_same_vertical_row_before_closer_other_row(self):
+        topology = build_uv_topology()
+        valid = topology.valid.reshape(-1)
+        layer = topology.layer.reshape(-1)
+        part = topology.part.reshape(-1)
+        face = topology.face.reshape(-1)
+        local_uv = topology.local_uv.reshape(-1, 2)
+        positions = topology.world_position.reshape(-1, 3)
+        target_candidates = (
+            valid & (layer == 0) & (part == 1) & (face == 2)
+        ).nonzero(as_tuple=False).flatten()
+        target = int(target_candidates[len(target_candidates) // 2])
+        same_row_candidates = (
+            valid
+            & (layer == 0)
+            & (part == 1)
+            & (face == 3)
+            & torch.isclose(
+                local_uv[:, 1],
+                local_uv[target, 1],
+                rtol=0.0,
+                atol=1e-6,
+            )
+        ).nonzero(as_tuple=False).flatten()
+        same_row_source = int(same_row_candidates[0])
+        other_row_candidates = (
+            valid
+            & (layer == 0)
+            & (part == 1)
+            & (face == 2)
+            & ~torch.isclose(
+                local_uv[:, 1],
+                local_uv[target, 1],
+                rtol=0.0,
+                atol=1e-6,
+            )
+        ).nonzero(as_tuple=False).flatten()
+        other_row_distance = (
+            positions[other_row_candidates] - positions[target]
+        ).square().sum(dim=1)
+        closer_other_row_source = int(
+            other_row_candidates[other_row_distance.argmin()]
+        )
+        self.assertLess(
+            float(other_row_distance.min()),
+            float(
+                (
+                    positions[same_row_source] - positions[target]
+                ).square().sum()
+            ),
+        )
+        defined = torch.zeros_like(valid)
+        defined[same_row_source] = True
+        defined[closer_other_row_source] = True
+
+        source, used_same_row = _nearest_defined_source(
+            target,
+            defined,
+            valid,
+            part,
+            face,
+            local_uv[:, 1],
+            positions,
+            prefer_same_row=True,
+        )
+
+        self.assertTrue(used_same_row)
+        self.assertEqual(int(source), same_row_source)
+
+    def test_side_nearest_falls_back_to_same_part_3d_without_same_row(self):
+        topology = build_uv_topology()
+        valid = topology.valid.reshape(-1)
+        layer = topology.layer.reshape(-1)
+        part = topology.part.reshape(-1)
+        face = topology.face.reshape(-1)
+        local_uv = topology.local_uv.reshape(-1, 2)
+        positions = topology.world_position.reshape(-1, 3)
+        target = int(
+            (valid & (layer == 0) & (part == 1) & (face == 2))
+            .nonzero(as_tuple=False)
+            .flatten()[0]
+        )
+        candidates = (
+            valid
+            & (layer == 0)
+            & (part == 1)
+            & ~torch.isclose(
+                local_uv[:, 1],
+                local_uv[target, 1],
+                rtol=0.0,
+                atol=1e-6,
+            )
+        ).nonzero(as_tuple=False).flatten()
+        distance = (
+            positions[candidates] - positions[target]
+        ).square().sum(dim=1)
+        expected = candidates[distance.argmin()]
+        defined = torch.zeros_like(valid)
+        defined[candidates] = True
+
+        source, used_same_row = _nearest_defined_source(
+            target,
+            defined,
+            valid,
+            part,
+            face,
+            local_uv[:, 1],
+            positions,
+            prefer_same_row=True,
+        )
+
+        self.assertFalse(used_same_row)
+        self.assertEqual(int(source), int(expected))
 
 
 class TopologyAwareCompletionTest(unittest.TestCase):

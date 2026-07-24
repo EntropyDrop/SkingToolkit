@@ -313,6 +313,45 @@ def build_uv_topology(is_slim=False):
     )
 
 
+def _nearest_defined_source(
+    target_index,
+    defined,
+    valid,
+    part,
+    face,
+    local_v,
+    positions,
+    prefer_same_row=False,
+):
+    """Choose a defined same-part source, preferring a side-face vertical row."""
+    source_mask = defined & valid & (part == part[target_index])
+    used_same_row = False
+    if prefer_same_row:
+        same_row_mask = (
+            source_mask
+            & (face < 4)
+            & torch.isclose(
+                local_v,
+                local_v[target_index],
+                rtol=0.0,
+                atol=1e-6,
+            )
+        )
+        source_indices = same_row_mask.nonzero(as_tuple=False).flatten()
+        if source_indices.numel() > 0:
+            used_same_row = True
+        else:
+            source_indices = source_mask.nonzero(as_tuple=False).flatten()
+    else:
+        source_indices = source_mask.nonzero(as_tuple=False).flatten()
+    if source_indices.numel() == 0:
+        return None, False
+    squared_distance = (
+        positions[source_indices] - positions[target_index]
+    ).square().sum(dim=1)
+    return source_indices[squared_distance.argmin()], used_same_row
+
+
 def simple_symmetry_nearest_inpaint(uv, alpha_threshold=0.5):
     """Fill unknown inner texels with symmetry, then 3D nearest colours.
 
@@ -337,10 +376,16 @@ def simple_symmetry_nearest_inpaint(uv, alpha_threshold=0.5):
     if not 0.0 <= alpha_threshold <= 1.0:
         raise ValueError("alpha_threshold must be in [0, 1].")
     topology = build_uv_topology()
+    topology_face = topology.face.reshape(-1)
     device = uv.device
     valid = topology.valid.reshape(-1).to(device=device)
     layer = topology.layer.reshape(-1).to(device=device)
     part = topology.part.reshape(-1).to(device=device)
+    face = topology.face.reshape(-1).to(device=device)
+    local_v = topology.local_uv.reshape(-1, 2)[:, 1].to(
+        device=device,
+        dtype=torch.float32,
+    )
     mirrored = topology.mirrored_texel.reshape(-1).to(device=device)
     positions = topology.world_position.reshape(-1, 3).to(
         device=device, dtype=torch.float32
@@ -355,6 +400,7 @@ def simple_symmetry_nearest_inpaint(uv, alpha_threshold=0.5):
         defined = original_defined.clone()
         symmetry_filled = 0
         nearest_filled = 0
+        same_row_nearest_filled = 0
         for target_index in topology.inner_fill_order.tolist():
             if bool(defined[target_index]):
                 continue
@@ -367,21 +413,24 @@ def simple_symmetry_nearest_inpaint(uv, alpha_threshold=0.5):
                 symmetry_filled += 1
                 continue
 
-            target_part = part[target_index]
-            source_indices = (
-                defined & valid & (part == target_part)
-            ).nonzero(as_tuple=False).flatten()
-            if source_indices.numel() == 0:
+            source_index, used_same_row = _nearest_defined_source(
+                target_index,
+                defined,
+                valid,
+                part,
+                face,
+                local_v,
+                positions,
+                prefer_same_row=int(topology_face[target_index]) in (2, 3),
+            )
+            if source_index is None:
                 continue
-            squared_distance = (
-                positions[source_indices] - positions[target_index]
-            ).square().sum(dim=1)
-            source_index = source_indices[squared_distance.argmin()]
             result[batch_index, target_index] = result[
                 batch_index, source_index
             ]
             defined[target_index] = True
             nearest_filled += 1
+            same_row_nearest_filled += int(used_same_row)
 
         resolved_inner = defined & valid & (layer == 0)
         stats.append(
@@ -395,9 +444,11 @@ def simple_symmetry_nearest_inpaint(uv, alpha_threshold=0.5):
                 ),
                 "symmetry_filled_texels": symmetry_filled,
                 "nearest_3d_filled_texels": nearest_filled,
+                "same_row_nearest_filled_texels": same_row_nearest_filled,
                 "preserved_outer_texels": int((valid & (layer == 1)).sum().item()),
                 "fill_order": "front_back_rings_side_edges_top_bottom_rings",
                 "color_sources": "currently_defined_only",
+                "side_nearest_policy": "same_vertical_row_then_same_part_3d",
                 "unresolved_texels": int(
                     (valid & (layer == 0) & ~resolved_inner).sum().item()
                 ),

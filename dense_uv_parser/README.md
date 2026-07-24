@@ -292,7 +292,9 @@ training. If the recorded path is unavailable, it falls back to the highest
   both side edges toward the centre. Top and bottom are completed last with the
   unchanged border-inward ring order. An unknown inner texel first copies an
   available defined left/right mirrored inner texel; otherwise it copies the
-  closest currently defined texel in canonical 3D character space from the same
+  closest currently defined texel. For left/right targets, nearest-neighbour
+  lookup first searches the same vertical row across that part's four vertical
+  faces, then falls back to unrestricted canonical 3D distance within the same
   body part. Transparent texels with residual RGB never provide color. Defined
   outer texels from that part may provide color, but no outer texel is added or
   overwritten
