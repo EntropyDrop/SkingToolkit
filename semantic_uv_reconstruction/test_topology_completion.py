@@ -65,6 +65,44 @@ class UVTopologyTest(unittest.TestCase):
             torch.equal(positions[mirrored[indices]], expected_positions)
         )
 
+    def test_bottom_face_uv_depth_runs_from_back_edge_to_front_edge(self):
+        topology = build_uv_topology()
+        valid = topology.valid & (topology.layer == 0)
+
+        for part in range(6):
+            bottom = valid & (topology.part == part) & (topology.face == 5)
+            front = valid & (topology.part == part) & (topology.face == 0)
+            back = valid & (topology.part == part) & (topology.face == 1)
+            bottom_indices = bottom.reshape(-1).nonzero(as_tuple=False).flatten()
+            local_v = topology.local_uv.reshape(-1, 2)[bottom_indices, 1]
+            positions = topology.world_position.reshape(-1, 3)
+
+            back_edge = bottom_indices[local_v == local_v.min()]
+            front_edge = bottom_indices[local_v == local_v.max()]
+            front_positions = positions[front.reshape(-1)]
+            back_positions = positions[back.reshape(-1)]
+            back_edge_to_back = torch.cdist(
+                positions[back_edge], back_positions
+            ).min(dim=1).values
+            back_edge_to_front = torch.cdist(
+                positions[back_edge], front_positions
+            ).min(dim=1).values
+            front_edge_to_front = torch.cdist(
+                positions[front_edge], front_positions
+            ).min(dim=1).values
+            front_edge_to_back = torch.cdist(
+                positions[front_edge], back_positions
+            ).min(dim=1).values
+
+            self.assertLess(
+                float(back_edge_to_back.max()),
+                float(back_edge_to_front.min()),
+            )
+            self.assertLess(
+                float(front_edge_to_front.max()),
+                float(front_edge_to_back.min()),
+            )
+
     def test_inner_fill_order_is_face_outer_to_inner_clockwise(self):
         topology = build_uv_topology()
         # Head-front is the first part/face and occupies x=8..15, y=8..15.

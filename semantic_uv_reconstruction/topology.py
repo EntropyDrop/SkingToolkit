@@ -74,8 +74,8 @@ def _surface_coordinate(face, u, v, width, height, depth):
         return (-0.5 * width, y, z_from_back)
     if face == 4:  # top; bottom edge meets the front face
         return (x, -0.5 * height, -0.5 * depth + float(v) + 0.5)
-    if face == 5:  # bottom; top edge meets the front face
-        return (x, 0.5 * height, 0.5 * depth - float(v) - 0.5)
+    if face == 5:  # bottom; bottom edge meets the front face
+        return (x, 0.5 * height, -0.5 * depth + float(v) + 0.5)
     raise ValueError(f"Unknown face index {face}.")
 
 
