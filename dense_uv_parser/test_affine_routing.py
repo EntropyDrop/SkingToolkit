@@ -1866,12 +1866,13 @@ class GlobalAffineRoutingTest(unittest.TestCase):
             requires_grad=True,
         )
 
-        split = parser_train.cross_view_outer_visibility_loss(
-            {"layer": split_logits},
-            target_uv,
-            renderer,
-            ["front", "back"],
-        )
+        with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+            split = parser_train.cross_view_outer_visibility_loss(
+                {"layer": split_logits},
+                target_uv,
+                renderer,
+                ["front", "back"],
+            )
         consistent = parser_train.cross_view_outer_visibility_loss(
             {"layer": inner_logits},
             target_uv,

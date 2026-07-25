@@ -570,8 +570,8 @@ def cross_view_outer_visibility_loss(
         }
 
     expanded_target = target_outer.unsqueeze(1).expand_as(outer_probability)
-    per_view_loss = F.binary_cross_entropy(
-        outer_probability[selected],
+    per_view_loss = F.binary_cross_entropy_with_logits(
+        torch.logit(outer_probability[selected]),
         expanded_target[selected].to(dtype=outer_probability.dtype),
         reduction="none",
     )
@@ -588,8 +588,8 @@ def cross_view_outer_visibility_loss(
         (outer_probability * support_float).sum(dim=1)
         / support_float.sum(dim=1).clamp_min(1.0)
     ).clamp(1e-6, 1.0 - 1e-6)
-    pooled_loss = F.binary_cross_entropy(
-        consensus_probability[shared],
+    pooled_loss = F.binary_cross_entropy_with_logits(
+        torch.logit(consensus_probability[shared]),
         target_outer[shared].to(dtype=consensus_probability.dtype),
         reduction="none",
     )
