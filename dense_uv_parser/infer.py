@@ -895,7 +895,7 @@ def main():
             f"Parser checkpoint expects {parser_model.view_classes} views, but its metadata lists {len(views)}: {views}"
         )
     mappings_dir = args.mappings_dir or parser_args.get("mappings_dir")
-    renderer = DifferentiableRenderer(mappings_dir=mappings_dir)
+    renderer = DifferentiableRenderer(mappings_dir=mappings_dir).to(device)
     missing_views = [view for view in views if view not in renderer.views]
     if missing_views:
         raise ValueError(f"Unknown renderer views {missing_views}. Available views: {', '.join(renderer.views)}")
