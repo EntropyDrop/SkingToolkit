@@ -798,6 +798,52 @@ def build_arg_parser():
         help="Minimum fused margin ratio required to promote a route to outer.",
     )
     parser.add_argument(
+        "--geometry_cross_view_outer_consistency",
+        dest="geometry_cross_view_outer_consistency",
+        action="store_true",
+        default=None,
+        help=(
+            "Veto a strong outer route when another view gives strong "
+            "background/inner evidence for the same outer UV texel."
+        ),
+    )
+    parser.add_argument(
+        "--no_geometry_cross_view_outer_consistency",
+        dest="geometry_cross_view_outer_consistency",
+        action="store_false",
+    )
+    parser.add_argument(
+        "--geometry_cross_view_outer_weight", type=float, default=None
+    )
+    parser.add_argument(
+        "--geometry_cross_view_outer_positive_confidence",
+        type=float,
+        default=None,
+    )
+    parser.add_argument(
+        "--geometry_cross_view_outer_positive_margin",
+        type=float,
+        default=None,
+    )
+    parser.add_argument(
+        "--geometry_cross_view_outer_negative_confidence",
+        type=float,
+        default=None,
+    )
+    parser.add_argument(
+        "--geometry_cross_view_outer_negative_margin",
+        type=float,
+        default=None,
+    )
+    parser.add_argument(
+        "--geometry_cross_view_outer_background_max_coverage",
+        type=float,
+        default=None,
+    )
+    parser.add_argument(
+        "--geometry_cross_view_outer_min_views", type=int, default=None
+    )
+    parser.add_argument(
         "--outer_uv_occupancy",
         dest="outer_uv_occupancy",
         action="store_true",
@@ -952,6 +998,52 @@ def main():
         if args.geometry_route_consensus_outer_margin is None
         else args.geometry_route_consensus_outer_margin
     )
+    geometry_cross_view_outer_consistency = (
+        parser_args.get("geometry_cross_view_outer_consistency", True)
+        if args.geometry_cross_view_outer_consistency is None
+        else args.geometry_cross_view_outer_consistency
+    )
+    geometry_cross_view_outer_weight = (
+        parser_args.get("geometry_cross_view_outer_weight", 0.50)
+        if args.geometry_cross_view_outer_weight is None
+        else args.geometry_cross_view_outer_weight
+    )
+    geometry_cross_view_outer_positive_confidence = (
+        parser_args.get(
+            "geometry_cross_view_outer_positive_confidence", 0.70
+        )
+        if args.geometry_cross_view_outer_positive_confidence is None
+        else args.geometry_cross_view_outer_positive_confidence
+    )
+    geometry_cross_view_outer_positive_margin = (
+        parser_args.get("geometry_cross_view_outer_positive_margin", 0.20)
+        if args.geometry_cross_view_outer_positive_margin is None
+        else args.geometry_cross_view_outer_positive_margin
+    )
+    geometry_cross_view_outer_negative_confidence = (
+        parser_args.get(
+            "geometry_cross_view_outer_negative_confidence", 0.70
+        )
+        if args.geometry_cross_view_outer_negative_confidence is None
+        else args.geometry_cross_view_outer_negative_confidence
+    )
+    geometry_cross_view_outer_negative_margin = (
+        parser_args.get("geometry_cross_view_outer_negative_margin", 0.20)
+        if args.geometry_cross_view_outer_negative_margin is None
+        else args.geometry_cross_view_outer_negative_margin
+    )
+    geometry_cross_view_outer_background_max_coverage = (
+        parser_args.get(
+            "geometry_cross_view_outer_background_max_coverage", 0.25
+        )
+        if args.geometry_cross_view_outer_background_max_coverage is None
+        else args.geometry_cross_view_outer_background_max_coverage
+    )
+    geometry_cross_view_outer_min_views = (
+        parser_args.get("geometry_cross_view_outer_min_views", 2)
+        if args.geometry_cross_view_outer_min_views is None
+        else args.geometry_cross_view_outer_min_views
+    )
     outer_uv_occupancy = (
         parser_args.get(
             "outer_uv_occupancy_routing",
@@ -1100,6 +1192,30 @@ def main():
             geometry_route_consensus_outer_margin=(
                 geometry_route_consensus_outer_margin
             ),
+            geometry_cross_view_outer_consistency=(
+                geometry_cross_view_outer_consistency
+            ),
+            geometry_cross_view_outer_weight=(
+                geometry_cross_view_outer_weight
+            ),
+            geometry_cross_view_outer_positive_confidence=(
+                geometry_cross_view_outer_positive_confidence
+            ),
+            geometry_cross_view_outer_positive_margin=(
+                geometry_cross_view_outer_positive_margin
+            ),
+            geometry_cross_view_outer_negative_confidence=(
+                geometry_cross_view_outer_negative_confidence
+            ),
+            geometry_cross_view_outer_negative_margin=(
+                geometry_cross_view_outer_negative_margin
+            ),
+            geometry_cross_view_outer_background_max_coverage=(
+                geometry_cross_view_outer_background_max_coverage
+            ),
+            geometry_cross_view_outer_min_views=(
+                geometry_cross_view_outer_min_views
+            ),
             outer_uv_occupancy=outer_uv_occupancy,
             outer_uv_occupancy_blend_weight=(
                 outer_uv_occupancy_blend_weight
@@ -1231,6 +1347,21 @@ def main():
                 "consensus_preserved_outer", torch.zeros_like(raw_outer)
             ).sum().item()
         )
+        cross_view_outer_shared_count = int(
+            routing.get(
+                "cross_view_outer_shared", torch.zeros_like(raw_outer)
+            ).sum().item()
+        )
+        cross_view_outer_conflict_count = int(
+            routing.get(
+                "cross_view_outer_conflict", torch.zeros_like(raw_outer)
+            ).sum().item()
+        )
+        cross_view_outer_vetoed_count = int(
+            routing.get(
+                "cross_view_outer_vetoed", torch.zeros_like(raw_outer)
+            ).sum().item()
+        )
         occupancy_promoted_outer_count = int(
             routing.get(
                 "occupancy_rescued_outer", torch.zeros_like(raw_outer)
@@ -1328,6 +1459,21 @@ def main():
                     ),
                     "consensus_preserved_outer_pixels": (
                         consensus_preserved_outer_count
+                    ),
+                    "cross_view_outer_consistency": bool(
+                        geometry_cross_view_outer_consistency
+                    ),
+                    "cross_view_outer_shared_pixels": (
+                        cross_view_outer_shared_count
+                    ),
+                    "cross_view_outer_conflict_pixels": (
+                        cross_view_outer_conflict_count
+                    ),
+                    "cross_view_outer_vetoed_pixels": (
+                        cross_view_outer_vetoed_count
+                    ),
+                    "cross_view_outer_weight": round(
+                        float(geometry_cross_view_outer_weight), 6
                     ),
                     "consensus_weight": round(
                         float(geometry_route_texel_consensus_weight), 6

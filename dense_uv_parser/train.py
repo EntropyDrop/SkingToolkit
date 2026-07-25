@@ -30,8 +30,10 @@ from SkingToolkit.dense_uv_parser.utils import (  # noqa: E402
     LAYER_PALETTE,
     PART_PALETTE,
     ROUTE_ROLE_PALETTE,
+    ROUTE_OUTER_PRIMARY,
     SPLAT_COLOR_AGGREGATIONS,
     UV_SIZE,
+    aggregate_direct_outer_values_by_view,
     build_dense_parser_batch,
     build_geometry_grid_debug,
     build_static_surface_routing,
@@ -65,6 +67,7 @@ from SkingToolkit.dense_uv_parser.semantic_targets import (  # noqa: E402
 )
 from SkingToolkit.dense_uv_parser.runtime import get_device  # noqa: E402
 from SkingToolkit.dense_uv_parser.skin_dataset import SkinUVDataset  # noqa: E402
+from SkingToolkit.dense_uv_parser.uv_layout import build_uv_masks  # noqa: E402
 from SkingToolkit.renderer import DifferentiableRenderer  # noqa: E402
 
 try:
@@ -504,6 +507,130 @@ def center_weighted_texel_route_supervision(
     }
 
 
+def cross_view_outer_visibility_loss(
+    outputs,
+    target_uv,
+    renderer,
+    views,
+    center_power=2.0,
+    min_views=2,
+    consistency_weight=0.25,
+):
+    """Supervise shared-view outer evidence directly from atlas alpha.
+
+    Unlike the ordinary per-pixel route loss, this also supervises transparent
+    outer candidates that project over background or the inner layer. Those
+    locations are the negative evidence needed to prevent a single view from
+    inventing an outer protrusion.
+    """
+    views = parse_views(views)
+    if len(views) < min_views:
+        zero = outputs["layer"].sum() * 0.0
+        return {
+            "loss_cross_view_outer_visibility": zero,
+            "loss_cross_view_outer_consistency": zero,
+            "cross_view_outer_precision": zero,
+            "cross_view_outer_recall": zero,
+            "count_cross_view_outer_shared_texels": zero,
+        }
+    if min_views < 2:
+        raise ValueError("min_views must be at least 2.")
+    if not 0.0 <= consistency_weight <= 1.0:
+        raise ValueError("consistency_weight must be in [0, 1].")
+
+    probabilities = torch.softmax(outputs["layer"].float(), dim=1)
+    pooled, support = aggregate_direct_outer_values_by_view(
+        renderer,
+        views,
+        probabilities,
+        center_power=center_power,
+    )
+    outer_probability = pooled[:, :, ROUTE_OUTER_PRIMARY].clamp(
+        1e-6, 1.0 - 1e-6
+    )
+    _, outer_mask = build_uv_masks()
+    valid_outer = outer_mask[0].to(
+        device=probabilities.device, dtype=torch.bool
+    ).reshape(1, -1)
+    shared = (
+        support.sum(dim=1) >= int(min_views)
+    ) & valid_outer
+    target_outer = (
+        target_uv[:, 3].float().reshape(target_uv.shape[0], -1) > 0.5
+    )
+    selected = support & shared.unsqueeze(1)
+    if not selected.any():
+        zero = probabilities.sum() * 0.0
+        return {
+            "loss_cross_view_outer_visibility": zero,
+            "loss_cross_view_outer_consistency": zero,
+            "cross_view_outer_precision": zero,
+            "cross_view_outer_recall": zero,
+            "count_cross_view_outer_shared_texels": zero,
+        }
+
+    expanded_target = target_outer.unsqueeze(1).expand_as(outer_probability)
+    per_view_loss = F.binary_cross_entropy(
+        outer_probability[selected],
+        expanded_target[selected].to(dtype=outer_probability.dtype),
+        reduction="none",
+    )
+    selected_target = expanded_target[selected]
+    class_losses = [
+        per_view_loss[selected_target == expected].mean()
+        for expected in (False, True)
+        if (selected_target == expected).any()
+    ]
+    balanced_view_loss = torch.stack(class_losses).mean()
+
+    support_float = support.to(dtype=outer_probability.dtype)
+    consensus_probability = (
+        (outer_probability * support_float).sum(dim=1)
+        / support_float.sum(dim=1).clamp_min(1.0)
+    ).clamp(1e-6, 1.0 - 1e-6)
+    pooled_loss = F.binary_cross_entropy(
+        consensus_probability[shared],
+        target_outer[shared].to(dtype=consensus_probability.dtype),
+        reduction="none",
+    )
+    pooled_target = target_outer[shared]
+    pooled_class_losses = [
+        pooled_loss[pooled_target == expected].mean()
+        for expected in (False, True)
+        if (pooled_target == expected).any()
+    ]
+    balanced_pooled_loss = torch.stack(pooled_class_losses).mean()
+    disagreement = (
+        (
+            outer_probability
+            - consensus_probability.unsqueeze(1)
+        ).square()
+        * support_float
+        * shared.unsqueeze(1)
+    ).sum() / selected.float().sum().clamp_min(1.0)
+    visibility_loss = (
+        0.5 * (balanced_view_loss + balanced_pooled_loss)
+        + float(consistency_weight) * disagreement
+    )
+
+    predicted_outer = consensus_probability[shared] >= 0.5
+    expected_outer = target_outer[shared]
+    true_outer = predicted_outer & expected_outer
+    return {
+        "loss_cross_view_outer_visibility": visibility_loss,
+        "loss_cross_view_outer_consistency": disagreement,
+        "cross_view_outer_precision": (
+            true_outer.float().sum()
+            / predicted_outer.float().sum().clamp_min(1.0)
+        ),
+        "cross_view_outer_recall": (
+            true_outer.float().sum()
+            / expected_outer.float().sum().clamp_min(1.0)
+        ),
+        "count_cross_view_outer_shared_texels": shared.float().sum(),
+    }
+
+
 def outer_uv_occupancy_losses(
     logits,
     target_uv,
@@ -754,6 +881,36 @@ def hard_uv_conditioning_metrics(
             geometry_route_consensus_outer_margin=getattr(
                 args, "geometry_route_consensus_outer_margin", 0.20
             ),
+            geometry_cross_view_outer_consistency=getattr(
+                args, "geometry_cross_view_outer_consistency", True
+            ),
+            geometry_cross_view_outer_weight=getattr(
+                args, "geometry_cross_view_outer_weight", 0.50
+            ),
+            geometry_cross_view_outer_positive_confidence=getattr(
+                args,
+                "geometry_cross_view_outer_positive_confidence",
+                0.70,
+            ),
+            geometry_cross_view_outer_positive_margin=getattr(
+                args, "geometry_cross_view_outer_positive_margin", 0.20
+            ),
+            geometry_cross_view_outer_negative_confidence=getattr(
+                args,
+                "geometry_cross_view_outer_negative_confidence",
+                0.70,
+            ),
+            geometry_cross_view_outer_negative_margin=getattr(
+                args, "geometry_cross_view_outer_negative_margin", 0.20
+            ),
+            geometry_cross_view_outer_background_max_coverage=getattr(
+                args,
+                "geometry_cross_view_outer_background_max_coverage",
+                0.25,
+            ),
+            geometry_cross_view_outer_min_views=getattr(
+                args, "geometry_cross_view_outer_min_views", 2
+            ),
             outer_uv_occupancy=getattr(
                 args, "outer_uv_occupancy_routing", False
             ),
@@ -956,6 +1113,7 @@ def run_epoch(
                         args.lambda_render_rgb,
                         args.lambda_render_alpha,
                         args.lambda_route_texel_supervision,
+                        args.lambda_cross_view_outer_visibility,
                     )
                 )
                 if auxiliary_enabled:
@@ -974,6 +1132,18 @@ def run_epoch(
                             args.route_texel_center_power
                         ),
                     )
+                    cross_view_visibility = cross_view_outer_visibility_loss(
+                        outputs,
+                        batch["uv"],
+                        renderer,
+                        views,
+                        center_power=args.route_texel_center_power,
+                        min_views=args.geometry_cross_view_outer_min_views,
+                        consistency_weight=(
+                            args.cross_view_outer_consistency_loss_weight
+                        ),
+                    )
+                    auxiliary.update(cross_view_visibility)
                 else:
                     auxiliary = {
                         "loss_soft_uv_rgb": zero,
@@ -991,6 +1161,11 @@ def run_epoch(
                         "texel_route_precision_outer": zero,
                         "texel_route_recall_outer": zero,
                         "texel_route_count": zero,
+                        "loss_cross_view_outer_visibility": zero,
+                        "loss_cross_view_outer_consistency": zero,
+                        "cross_view_outer_precision": zero,
+                        "cross_view_outer_recall": zero,
+                        "count_cross_view_outer_shared_texels": zero,
                         "soft_uv_known_percent": zero,
                         "visible_inner_uv_percent": zero,
                         "visible_outer_uv_percent": zero,
@@ -1006,6 +1181,8 @@ def run_epoch(
                     + args.lambda_render_alpha * auxiliary["loss_render_alpha"]
                     + args.lambda_route_texel_supervision
                     * auxiliary["loss_route_texel_supervision"]
+                    + args.lambda_cross_view_outer_visibility
+                    * auxiliary["loss_cross_view_outer_visibility"]
                 )
                 losses.update(auxiliary)
                 losses["loss_differentiable"] = weighted_auxiliary
@@ -1172,6 +1349,36 @@ def save_preview(
                 ),
                 geometry_route_consensus_outer_margin=getattr(
                     args, "geometry_route_consensus_outer_margin", 0.20
+                ),
+                geometry_cross_view_outer_consistency=getattr(
+                    args, "geometry_cross_view_outer_consistency", True
+                ),
+                geometry_cross_view_outer_weight=getattr(
+                    args, "geometry_cross_view_outer_weight", 0.50
+                ),
+                geometry_cross_view_outer_positive_confidence=getattr(
+                    args,
+                    "geometry_cross_view_outer_positive_confidence",
+                    0.70,
+                ),
+                geometry_cross_view_outer_positive_margin=getattr(
+                    args, "geometry_cross_view_outer_positive_margin", 0.20
+                ),
+                geometry_cross_view_outer_negative_confidence=getattr(
+                    args,
+                    "geometry_cross_view_outer_negative_confidence",
+                    0.70,
+                ),
+                geometry_cross_view_outer_negative_margin=getattr(
+                    args, "geometry_cross_view_outer_negative_margin", 0.20
+                ),
+                geometry_cross_view_outer_background_max_coverage=getattr(
+                    args,
+                    "geometry_cross_view_outer_background_max_coverage",
+                    0.25,
+                ),
+                geometry_cross_view_outer_min_views=getattr(
+                    args, "geometry_cross_view_outer_min_views", 2
                 ),
                 outer_uv_occupancy=getattr(
                     args, "outer_uv_occupancy_routing", False
@@ -1644,6 +1851,52 @@ def build_arg_parser():
         "--geometry_route_consensus_outer_margin", type=float, default=0.20
     )
     parser.add_argument(
+        "--geometry_cross_view_outer_consistency",
+        dest="geometry_cross_view_outer_consistency",
+        action="store_true",
+        default=True,
+        help=(
+            "Reject an outer route when another view provides strong "
+            "background/inner evidence for the same outer UV texel."
+        ),
+    )
+    parser.add_argument(
+        "--no_geometry_cross_view_outer_consistency",
+        dest="geometry_cross_view_outer_consistency",
+        action="store_false",
+    )
+    parser.add_argument(
+        "--geometry_cross_view_outer_weight", type=float, default=0.50
+    )
+    parser.add_argument(
+        "--geometry_cross_view_outer_positive_confidence",
+        type=float,
+        default=0.70,
+    )
+    parser.add_argument(
+        "--geometry_cross_view_outer_positive_margin",
+        type=float,
+        default=0.20,
+    )
+    parser.add_argument(
+        "--geometry_cross_view_outer_negative_confidence",
+        type=float,
+        default=0.70,
+    )
+    parser.add_argument(
+        "--geometry_cross_view_outer_negative_margin",
+        type=float,
+        default=0.20,
+    )
+    parser.add_argument(
+        "--geometry_cross_view_outer_background_max_coverage",
+        type=float,
+        default=0.25,
+    )
+    parser.add_argument(
+        "--geometry_cross_view_outer_min_views", type=int, default=2
+    )
+    parser.add_argument(
         "--outer_uv_occupancy_blend_weight", type=float, default=0.30
     )
     parser.add_argument(
@@ -1704,6 +1957,21 @@ def build_arg_parser():
         type=float,
         default=0.0,
         help="Weight for center-weighted, cross-view UV-texel route supervision.",
+    )
+    parser.add_argument(
+        "--lambda_cross_view_outer_visibility",
+        type=float,
+        default=0.25,
+        help=(
+            "Weight for shared-view direct outer-alpha supervision on route "
+            "logits."
+        ),
+    )
+    parser.add_argument(
+        "--cross_view_outer_consistency_loss_weight",
+        type=float,
+        default=0.25,
+        help="Within-loss penalty for disagreement across shared views.",
     )
     parser.add_argument(
         "--route_texel_center_power",
@@ -1791,6 +2059,7 @@ def main():
         args.lambda_soft_uv_outer_recall,
         args.lambda_render_rgb,
         args.lambda_render_alpha,
+        args.lambda_cross_view_outer_visibility,
     )
     if any(weight < 0 for weight in differentiable_weights):
         raise ValueError("Differentiable parser loss weights must be non-negative.")
@@ -1810,6 +2079,12 @@ def main():
         "geometry_route_preserve_outer_margin",
         "geometry_route_consensus_outer_confidence",
         "geometry_route_consensus_outer_margin",
+        "geometry_cross_view_outer_weight",
+        "geometry_cross_view_outer_positive_confidence",
+        "geometry_cross_view_outer_positive_margin",
+        "geometry_cross_view_outer_negative_confidence",
+        "geometry_cross_view_outer_negative_margin",
+        "geometry_cross_view_outer_background_max_coverage",
         "outer_uv_occupancy_blend_weight",
         "outer_uv_occupancy_gate_threshold",
         "outer_uv_occupancy_rescue_threshold",
@@ -1834,6 +2109,8 @@ def main():
         args.lambda_primary_route_swap,
         args.lambda_route_texel_consistency,
         args.lambda_route_texel_supervision,
+        args.lambda_cross_view_outer_visibility,
+        args.cross_view_outer_consistency_loss_weight,
         args.lambda_route_prior_regularization,
         args.lambda_semantic_presence,
         args.lambda_semantic_coverage,
@@ -1843,6 +2120,14 @@ def main():
         raise ValueError("Route, semantic, and confidence loss weights must be non-negative.")
     if args.route_texel_center_power < 0:
         raise ValueError("--route_texel_center_power must be non-negative.")
+    if args.geometry_cross_view_outer_min_views < 2:
+        raise ValueError(
+            "--geometry_cross_view_outer_min_views must be at least 2."
+        )
+    if not 0.0 <= args.cross_view_outer_consistency_loss_weight <= 1.0:
+        raise ValueError(
+            "--cross_view_outer_consistency_loss_weight must be in [0, 1]."
+        )
     if (
         args.semantic_channels < 1
         or args.semantic_layers < 1
@@ -2282,6 +2567,15 @@ def main():
         "background_augment_prob": args.background_augment_prob,
         "semantic_gate": args.semantic_gate,
         "geometry_route_texel_consensus": args.geometry_route_texel_consensus,
+        "geometry_cross_view_outer_consistency": (
+            args.geometry_cross_view_outer_consistency
+        ),
+        "geometry_cross_view_outer_weight": (
+            args.geometry_cross_view_outer_weight
+        ),
+        "geometry_cross_view_outer_min_views": (
+            args.geometry_cross_view_outer_min_views
+        ),
         "outer_uv_min_source_pixels": args.outer_uv_min_source_pixels,
         "background_color_tolerance": args.background_color_tolerance,
         "color_background_tolerance": args.color_background_tolerance,
@@ -2304,6 +2598,12 @@ def main():
         "lambda_route_texel_consistency": args.lambda_route_texel_consistency,
         "lambda_route_texel_supervision": (
             args.lambda_route_texel_supervision
+        ),
+        "lambda_cross_view_outer_visibility": (
+            args.lambda_cross_view_outer_visibility
+        ),
+        "cross_view_outer_consistency_loss_weight": (
+            args.cross_view_outer_consistency_loss_weight
         ),
         "route_texel_center_power": args.route_texel_center_power,
         "lambda_route_prior_regularization": (

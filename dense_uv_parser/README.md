@@ -70,6 +70,7 @@ For each GT skin the parser learns:
 - exact renderer surface slot, including composite and geometry fallback surfaces
 - global translation and uniform scale
 - per-pixel probability that the selected route is correct
+- shared-view outer visibility for direct outer UV texels
 - per-body-part outer-layer presence and coverage from multi-view semantics
 - optionally, exact outer-layer alpha occupancy over the `64x64` UV atlas
 
@@ -121,7 +122,7 @@ Training previews are saved under `runs/<run>/previews`:
 - `epoch_XXXX_outer_occupancy.png`: predicted outer alpha prior followed by exact GT outer occupancy.
 - `epoch_XXXX_debug.png`: semantic diagnostics plus predicted/GT route roles, the prior-only route-role map, fitted inner/outer grids, and RGB-filled grid previews.
 
-For good parser splatting, watch `hard_iou_inner`, `hard_precision_outer`, `hard_recall_outer`, `hard_iou_outer`, `hard_rgb_mae_inner`, `hard_rgb_mae_outer`, `loss_primary_route_swap`, `loss_route_texel_consistency`, `loss_route_texel_supervision`, `texel_route_recall_outer`, `outer_uv_occupancy_precision`, `outer_uv_occupancy_recall`, `loss_soft_uv_inner_recall_hard`, `loss_soft_uv_outer_recall_hard`, `precision_secondary`, `recall_secondary`, `acc_route_role`, `confidence_mae`, `precision_trusted_route`, and `coverage_trusted_route`. Validation runs the same configured routing, confidence gates, background rejection, and UV splat used by inference. `best.pt` defaults to the lowest `loss_hard_uv_color_selection`: the former hard inner/outer occupancy score plus mean hard inner/outer RGB MAE. This prevents a sparse or incorrectly colored atlas from winning checkpoint selection merely because its occupancy precision is high. Hard counts and color errors are accumulated over the complete validation set. The occupancy-only `loss_hard_uv_selection` and older soft-classification `loss_outer_selection` remain logged as diagnostics.
+For good parser splatting, watch `hard_iou_inner`, `hard_precision_outer`, `hard_recall_outer`, `hard_iou_outer`, `hard_rgb_mae_inner`, `hard_rgb_mae_outer`, `loss_primary_route_swap`, `loss_route_texel_consistency`, `loss_cross_view_outer_visibility`, `cross_view_outer_precision`, `cross_view_outer_recall`, `loss_route_texel_supervision`, `texel_route_recall_outer`, `outer_uv_occupancy_precision`, `outer_uv_occupancy_recall`, `loss_soft_uv_inner_recall_hard`, `loss_soft_uv_outer_recall_hard`, `precision_secondary`, `recall_secondary`, `acc_route_role`, `confidence_mae`, `precision_trusted_route`, and `coverage_trusted_route`. Validation runs the same configured routing, confidence gates, background rejection, and UV splat used by inference. `best.pt` defaults to the lowest `loss_hard_uv_color_selection`: the former hard inner/outer occupancy score plus mean hard inner/outer RGB MAE. This prevents a sparse or incorrectly colored atlas from winning checkpoint selection merely because its occupancy precision is high. Hard counts and color errors are accumulated over the complete validation set. The occupancy-only `loss_hard_uv_selection` and older soft-classification `loss_outer_selection` remain logged as diagnostics.
 
 Route-role training now gives inner and outer equal macro weight in a dedicated
 swap loss, regardless of their pixel-count imbalance. A projected-texel
@@ -131,6 +132,25 @@ terms use mildly precision-first defaults: the outer-negative term has more
 weight and a higher focal gamma, while the ordinary three-class loss caps the
 rare outer class weight below `1.0`. This focuses learning on confident,
 isolated inner-to-outer mistakes without removing the outer-positive loss.
+
+The default training also projects every direct outer candidate into a shared
+outer-UV atlas while keeping front/back observations separate. Texels visible
+from at least two configured views are supervised against the exact GT outer
+alpha, including transparent candidates that land on background or expose the
+inner layer. A small disagreement term prevents one view from learning outer
+while another learns inner for the same texel:
+
+```bash
+LAMBDA_CROSS_VIEW_OUTER_VISIBILITY=0.25 \
+CROSS_VIEW_OUTER_CONSISTENCY_LOSS_WEIGHT=0.25 \
+GEOMETRY_CROSS_VIEW_OUTER_CONSISTENCY=true \
+./run_dense_uv_parser_training.sh
+```
+
+At inference this is a conflict-only veto rather than a hard intersection.
+It rejects outer only when one view strongly supports outer and another shared
+view sees clear background or strongly supports inner. Weak evidence,
+occlusion/unmapped regions, and single-view texels are left untouched.
 
 Optional center-weighted texel supervision pools route probabilities across
 the configured front/back views and directly labels each pooled UV texel as

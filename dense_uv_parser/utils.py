@@ -983,6 +983,215 @@ def _project_outer_uv_occupancy_to_view(
     return torch.where(outer_valid, projected, torch.zeros_like(projected))
 
 
+def aggregate_direct_outer_values_by_view(
+    renderer,
+    views,
+    values,
+    center_power=2.0,
+):
+    """Pool image-space values into direct outer UV texels, keeping views separate."""
+    views = parse_views(views)
+    if not views:
+        raise ValueError("At least one renderer view is required.")
+    if values.dim() != 4:
+        raise ValueError("values must be shaped NCHW.")
+    if values.shape[0] % len(views) != 0:
+        raise ValueError("The value batch must be divisible by the view count.")
+    if center_power < 0.0:
+        raise ValueError("center_power must be non-negative.")
+
+    group_count = values.shape[0] // len(views)
+    channel_count = values.shape[1]
+    uv_count = UV_SIZE * UV_SIZE
+    pooled_views = []
+    supported_views = []
+    for view_index, view in enumerate(views):
+        selection = slice(view_index, values.shape[0], len(views))
+        selected = values[selection].float()
+        static = build_static_surface_routing(renderer, view, values.device)
+        if static["masks"].shape[-2:] != values.shape[-2:]:
+            raise ValueError(
+                f"View {view!r} mapping shape "
+                f"{tuple(static['masks'].shape[-2:])} does not match "
+                f"value shape {tuple(values.shape[-2:])}."
+            )
+
+        valid = static["masks"][ROUTE_OUTER_PRIMARY].reshape(1, 1, -1)
+        flat_uv = static["flat_uv"][ROUTE_OUTER_PRIMARY].reshape(1, 1, -1)
+        center_weight = static["texel_center_score"][
+            ROUTE_OUTER_PRIMARY
+        ].float().clamp(0.0, 1.0).pow(float(center_power))
+        weight = center_weight.reshape(1, 1, -1) * valid
+        weight = weight.expand(group_count, 1, -1)
+        indices = flat_uv.expand(group_count, channel_count, -1)
+
+        sums = selected.new_zeros(group_count, channel_count, uv_count)
+        sums.scatter_add_(
+            2,
+            indices,
+            selected.flatten(2) * weight,
+        )
+        counts = selected.new_zeros(group_count, 1, uv_count)
+        counts.scatter_add_(
+            2,
+            flat_uv.expand(group_count, 1, -1),
+            weight,
+        )
+        pooled_views.append(sums / counts.clamp_min(1e-6))
+        supported_views.append(counts[:, 0] > 1e-6)
+
+    return (
+        torch.stack(pooled_views, dim=1),
+        torch.stack(supported_views, dim=1),
+    )
+
+
+def _project_grouped_outer_texels_to_views(
+    renderer,
+    views,
+    texel_values,
+):
+    """Project grouped outer-UV values back into every fixed input view."""
+    views = parse_views(views)
+    if texel_values.dim() != 2 or texel_values.shape[1] != UV_SIZE * UV_SIZE:
+        raise ValueError(
+            "texel_values must be shaped "
+            f"(B, {UV_SIZE * UV_SIZE})."
+        )
+    projected = []
+    for view in views:
+        static = build_static_surface_routing(
+            renderer, view, texel_values.device
+        )
+        flat_uv = static["flat_uv"][ROUTE_OUTER_PRIMARY].reshape(1, -1)
+        gathered = texel_values.gather(
+            1, flat_uv.expand(texel_values.shape[0], -1)
+        ).reshape(texel_values.shape[0], *static["masks"].shape[-2:])
+        valid = static["masks"][ROUTE_OUTER_PRIMARY].unsqueeze(0)
+        projected.append(torch.where(valid, gathered, torch.zeros_like(gathered)))
+    return torch.stack(projected, dim=1).reshape(
+        texel_values.shape[0] * len(views),
+        *projected[0].shape[-2:],
+    )
+
+
+def cross_view_outer_visibility_evidence(
+    renderer,
+    views,
+    role_prob,
+    observed_foreground,
+    center_power=2.0,
+    positive_confidence=0.70,
+    positive_margin=0.20,
+    negative_confidence=0.70,
+    negative_margin=0.20,
+    background_max_coverage=0.25,
+    min_views=2,
+):
+    """Find shared outer texels with high-confidence cross-view contradictions.
+
+    A contradiction requires at least one view that strongly supports outer and
+    another view that either sees background at the projected outer texel or
+    strongly supports inner. Weak predictions, missing mappings, and texels
+    visible from only one view never form a veto.
+    """
+    for name, value in (
+        ("positive_confidence", positive_confidence),
+        ("positive_margin", positive_margin),
+        ("negative_confidence", negative_confidence),
+        ("negative_margin", negative_margin),
+        ("background_max_coverage", background_max_coverage),
+    ):
+        if not 0.0 <= float(value) <= 1.0:
+            raise ValueError(f"{name} must be in [0, 1].")
+    if min_views < 2:
+        raise ValueError("min_views must be at least 2.")
+    if observed_foreground.shape != (
+        role_prob.shape[0],
+        *role_prob.shape[-2:],
+    ):
+        raise ValueError("observed_foreground must match the role probability map.")
+
+    values = torch.cat(
+        [
+            role_prob.float(),
+            observed_foreground.unsqueeze(1).float(),
+        ],
+        dim=1,
+    )
+    pooled, support = aggregate_direct_outer_values_by_view(
+        renderer,
+        views,
+        values,
+        center_power=center_power,
+    )
+    role_count = role_prob.shape[1]
+    pooled_role = pooled[:, :, :role_count]
+    foreground_coverage = pooled[:, :, role_count].clamp(0.0, 1.0)
+    outer_score = pooled_role[:, :, ROUTE_OUTER_PRIMARY]
+    outer_competitor = torch.maximum(
+        pooled_role[:, :, ROUTE_INNER_PRIMARY],
+        pooled_role[:, :, ROUTE_SECONDARY],
+    )
+    outer_margin_ratio = (
+        (outer_score - outer_competitor).clamp_min(0.0)
+        / outer_score.clamp_min(1e-8)
+    ).clamp(0.0, 1.0)
+    inner_score = pooled_role[:, :, ROUTE_INNER_PRIMARY]
+    inner_competitor = torch.maximum(
+        pooled_role[:, :, ROUTE_OUTER_PRIMARY],
+        pooled_role[:, :, ROUTE_SECONDARY],
+    )
+    inner_margin_ratio = (
+        (inner_score - inner_competitor).clamp_min(0.0)
+        / inner_score.clamp_min(1e-8)
+    ).clamp(0.0, 1.0)
+
+    positive = (
+        support
+        & (foreground_coverage > float(background_max_coverage))
+        & (outer_score >= float(positive_confidence))
+        & (outer_margin_ratio >= float(positive_margin))
+    )
+    background_negative = support & (
+        foreground_coverage <= float(background_max_coverage)
+    )
+    inner_negative = (
+        support
+        & ~background_negative
+        & (inner_score >= float(negative_confidence))
+        & (inner_margin_ratio >= float(negative_margin))
+    )
+    negative = background_negative | inner_negative
+    shared = support.sum(dim=1) >= int(min_views)
+    conflict = shared & positive.any(dim=1) & negative.any(dim=1)
+
+    evidence_weight = support.to(dtype=outer_score.dtype)
+    prior = (
+        (outer_score * foreground_coverage * evidence_weight).sum(dim=1)
+        / evidence_weight.sum(dim=1).clamp_min(1.0)
+    ).clamp(0.0, 1.0)
+    return {
+        "prior": _project_grouped_outer_texels_to_views(
+            renderer, views, prior
+        ),
+        "shared": _project_grouped_outer_texels_to_views(
+            renderer, views, shared.float()
+        ) > 0.5,
+        "conflict": _project_grouped_outer_texels_to_views(
+            renderer, views, conflict.float()
+        ) > 0.5,
+        "positive": _project_grouped_outer_texels_to_views(
+            renderer, views, positive.any(dim=1).float()
+        ) > 0.5,
+        "negative": _project_grouped_outer_texels_to_views(
+            renderer, views, negative.any(dim=1).float()
+        ) > 0.5,
+        "shared_texels": shared,
+        "conflict_texels": conflict,
+    }
+
+
 def _soft_route_role_consensus(
     role_prob,
     static,
@@ -997,6 +1206,10 @@ def _soft_route_role_consensus(
     occupancy_gate_threshold=0.10,
     occupancy_rescue_threshold=0.70,
     occupancy_rescue_route_threshold=0.30,
+    cross_view_outer_prior=None,
+    cross_view_outer_valid=None,
+    cross_view_outer_veto=None,
+    cross_view_outer_weight=0.50,
 ):
     """Denoise route roles without erasing strong local outer-layer evidence."""
     for name, value in (
@@ -1012,6 +1225,7 @@ def _soft_route_role_consensus(
             "occupancy_rescue_route_threshold",
             occupancy_rescue_route_threshold,
         ),
+        ("cross_view_outer_weight", cross_view_outer_weight),
     ):
         if not 0.0 <= float(value) <= 1.0:
             raise ValueError(f"{name} must be in [0, 1].")
@@ -1065,6 +1279,29 @@ def _soft_route_role_consensus(
         + float(consensus_weight) * texel_outer,
         unavailable,
     )
+    if cross_view_outer_prior is not None:
+        if (
+            cross_view_outer_valid is None
+            or cross_view_outer_prior.shape != texel_outer.shape
+            or cross_view_outer_valid.shape != texel_outer.shape
+        ):
+            raise ValueError(
+                "Cross-view outer prior and validity must match the route map."
+            )
+        cross_view_outer_prior = cross_view_outer_prior.float().clamp(0.0, 1.0)
+        cross_view_outer_valid = cross_view_outer_valid.bool()
+        fused_outer = torch.where(
+            outer_valid & cross_view_outer_valid,
+            (1.0 - float(cross_view_outer_weight)) * fused_outer
+            + float(cross_view_outer_weight) * cross_view_outer_prior,
+            fused_outer,
+        )
+    if cross_view_outer_veto is None:
+        cross_view_outer_veto = torch.zeros_like(outer_valid)
+    elif cross_view_outer_veto.shape != texel_outer.shape:
+        raise ValueError("Cross-view outer veto must match the route map.")
+    else:
+        cross_view_outer_veto = cross_view_outer_veto.bool()
     occupancy_available = outer_uv_occupancy is not None
     if occupancy_available:
         if outer_uv_occupancy.shape != texel_outer.shape:
@@ -1107,6 +1344,7 @@ def _soft_route_role_consensus(
     ).clamp(0.0, 1.0)
     preserve_outer = (
         outer_valid
+        & ~cross_view_outer_veto
         & occupancy_allows_outer
         & (raw_role == ROUTE_OUTER_PRIMARY)
         & (raw_outer_score >= float(preserve_outer_confidence))
@@ -1134,6 +1372,7 @@ def _soft_route_role_consensus(
     ) if occupancy_available else torch.zeros_like(outer_valid)
     allow_outer = (
         outer_valid
+        & ~cross_view_outer_veto
         & occupancy_allows_outer
         & (
             (fused_outer >= fused_outer_competitor)
@@ -1223,6 +1462,7 @@ def _soft_route_role_consensus(
             & (raw_role == ROUTE_OUTER_PRIMARY)
             & ~occupancy_allows_outer
         ),
+        "cross_view_outer_veto": cross_view_outer_veto,
         "outer_uv_occupancy": (
             occupancy_prior if occupancy_available else None
         ),
@@ -1257,6 +1497,15 @@ def _routing_from_geometry_outputs(
     outer_uv_occupancy_gate_threshold=0.10,
     outer_uv_occupancy_rescue_threshold=0.70,
     outer_uv_occupancy_rescue_route_threshold=0.30,
+    observed_foreground=None,
+    cross_view_outer_consistency=True,
+    cross_view_outer_weight=0.50,
+    cross_view_outer_positive_confidence=0.70,
+    cross_view_outer_positive_margin=0.20,
+    cross_view_outer_negative_confidence=0.70,
+    cross_view_outer_negative_margin=0.20,
+    cross_view_outer_background_max_coverage=0.25,
+    cross_view_outer_min_views=2,
 ):
     """Route a fitted Steve render through fixed inner/outer cuboid UV maps."""
     views = parse_views(views)
@@ -1301,6 +1550,24 @@ def _routing_from_geometry_outputs(
         if outer_uv_occupancy
         else None
     )
+    cross_view = None
+    if cross_view_outer_consistency and len(views) >= cross_view_outer_min_views:
+        if observed_foreground is None:
+            observed_foreground = foreground_prob > float(fg_threshold)
+        cross_view = cross_view_outer_visibility_evidence(
+            renderer,
+            views,
+            role_prob,
+            observed_foreground,
+            positive_confidence=cross_view_outer_positive_confidence,
+            positive_margin=cross_view_outer_positive_margin,
+            negative_confidence=cross_view_outer_negative_confidence,
+            negative_margin=cross_view_outer_negative_margin,
+            background_max_coverage=(
+                cross_view_outer_background_max_coverage
+            ),
+            min_views=cross_view_outer_min_views,
+        )
     for view_index, view in enumerate(views):
         selection = slice(view_index, N, len(views))
         static = build_static_surface_routing(renderer, view, outer_prob.device)
@@ -1312,7 +1579,7 @@ def _routing_from_geometry_outputs(
 
         inner_valid = static["masks"][0].unsqueeze(0).expand(outer_prob[selection].shape[0], -1, -1)
         outer_valid = static["masks"][1].unsqueeze(0).expand_as(inner_valid)
-        if texel_consensus:
+        if texel_consensus or cross_view is not None:
             view_occupancy = _project_outer_uv_occupancy_to_view(
                 occupancy_logits,
                 static,
@@ -1322,7 +1589,9 @@ def _routing_from_geometry_outputs(
                 role_prob[selection],
                 static,
                 foreground_prob[selection],
-                consensus_weight=texel_consensus_weight,
+                consensus_weight=(
+                    texel_consensus_weight if texel_consensus else 0.0
+                ),
                 preserve_outer_confidence=preserve_outer_confidence,
                 preserve_outer_margin=preserve_outer_margin,
                 outer_confidence=consensus_outer_confidence,
@@ -1340,6 +1609,22 @@ def _routing_from_geometry_outputs(
                 occupancy_rescue_route_threshold=(
                     outer_uv_occupancy_rescue_route_threshold
                 ),
+                cross_view_outer_prior=(
+                    cross_view["prior"][selection]
+                    if cross_view is not None
+                    else None
+                ),
+                cross_view_outer_valid=(
+                    cross_view["shared"][selection]
+                    if cross_view is not None
+                    else None
+                ),
+                cross_view_outer_veto=(
+                    cross_view["conflict"][selection]
+                    if cross_view is not None
+                    else None
+                ),
+                cross_view_outer_weight=cross_view_outer_weight,
             )
             has_direct_candidate = consensus["has_direct_candidate"]
             route_role[selection] = consensus["role"]
@@ -1455,6 +1740,25 @@ def _routing_from_geometry_outputs(
         "outer_uv_occupancy_available": torch.full_like(
             fg, occupancy_logits is not None
         ),
+        "cross_view_outer_shared": (
+            cross_view["shared"] if cross_view is not None else torch.zeros_like(fg)
+        ),
+        "cross_view_outer_conflict": (
+            cross_view["conflict"] if cross_view is not None else torch.zeros_like(fg)
+        ),
+        "cross_view_outer_vetoed": (
+            cross_view["conflict"]
+            & (raw_route_role == ROUTE_OUTER_PRIMARY)
+            & (route_role != ROUTE_OUTER_PRIMARY)
+            if cross_view is not None
+            else torch.zeros_like(fg)
+        ),
+        "cross_view_outer_positive": (
+            cross_view["positive"] if cross_view is not None else torch.zeros_like(fg)
+        ),
+        "cross_view_outer_negative": (
+            cross_view["negative"] if cross_view is not None else torch.zeros_like(fg)
+        ),
     }
 
 
@@ -1509,6 +1813,15 @@ def _routing_from_geometry_surface_outputs(
     outer_uv_occupancy_gate_threshold=0.10,
     outer_uv_occupancy_rescue_threshold=0.70,
     outer_uv_occupancy_rescue_route_threshold=0.30,
+    observed_foreground=None,
+    cross_view_outer_consistency=True,
+    cross_view_outer_weight=0.50,
+    cross_view_outer_positive_confidence=0.70,
+    cross_view_outer_positive_margin=0.20,
+    cross_view_outer_negative_confidence=0.70,
+    cross_view_outer_negative_margin=0.20,
+    cross_view_outer_background_max_coverage=0.25,
+    cross_view_outer_min_views=2,
 ):
     """Route primary layers first, then use the surface head for secondary UVs.
 
@@ -1557,6 +1870,24 @@ def _routing_from_geometry_surface_outputs(
         if outer_uv_occupancy
         else None
     )
+    cross_view = None
+    if cross_view_outer_consistency and len(views) >= cross_view_outer_min_views:
+        if observed_foreground is None:
+            observed_foreground = foreground_prob > float(fg_threshold)
+        cross_view = cross_view_outer_visibility_evidence(
+            renderer,
+            views,
+            role_prob,
+            observed_foreground,
+            positive_confidence=cross_view_outer_positive_confidence,
+            positive_margin=cross_view_outer_positive_margin,
+            negative_confidence=cross_view_outer_negative_confidence,
+            negative_margin=cross_view_outer_negative_margin,
+            background_max_coverage=(
+                cross_view_outer_background_max_coverage
+            ),
+            min_views=cross_view_outer_min_views,
+        )
 
     for view_index, view in enumerate(views):
         selection = slice(view_index, N, len(views))
@@ -1584,7 +1915,7 @@ def _routing_from_geometry_surface_outputs(
         role_top = view_role_prob.topk(2, dim=1).values
         role_margin = role_top[:, 0] - role_top[:, 1]
 
-        if texel_consensus:
+        if texel_consensus or cross_view is not None:
             view_occupancy = _project_outer_uv_occupancy_to_view(
                 occupancy_logits,
                 static,
@@ -1594,7 +1925,9 @@ def _routing_from_geometry_surface_outputs(
                 view_role_prob,
                 static,
                 foreground_prob[selection],
-                consensus_weight=texel_consensus_weight,
+                consensus_weight=(
+                    texel_consensus_weight if texel_consensus else 0.0
+                ),
                 preserve_outer_confidence=preserve_outer_confidence,
                 preserve_outer_margin=preserve_outer_margin,
                 outer_confidence=consensus_outer_confidence,
@@ -1612,6 +1945,22 @@ def _routing_from_geometry_surface_outputs(
                 occupancy_rescue_route_threshold=(
                     outer_uv_occupancy_rescue_route_threshold
                 ),
+                cross_view_outer_prior=(
+                    cross_view["prior"][selection]
+                    if cross_view is not None
+                    else None
+                ),
+                cross_view_outer_valid=(
+                    cross_view["shared"][selection]
+                    if cross_view is not None
+                    else None
+                ),
+                cross_view_outer_veto=(
+                    cross_view["conflict"][selection]
+                    if cross_view is not None
+                    else None
+                ),
+                cross_view_outer_weight=cross_view_outer_weight,
             )
             selected_role = consensus["role"]
             selected_role_score = consensus["score"]
@@ -1774,6 +2123,25 @@ def _routing_from_geometry_surface_outputs(
         "projected_outer_occupancy": projected_outer_occupancy,
         "outer_uv_occupancy_available": torch.full_like(
             fg, occupancy_logits is not None
+        ),
+        "cross_view_outer_shared": (
+            cross_view["shared"] if cross_view is not None else torch.zeros_like(fg)
+        ),
+        "cross_view_outer_conflict": (
+            cross_view["conflict"] if cross_view is not None else torch.zeros_like(fg)
+        ),
+        "cross_view_outer_vetoed": (
+            cross_view["conflict"]
+            & (raw_route_role == ROUTE_OUTER_PRIMARY)
+            & (route_role != ROUTE_OUTER_PRIMARY)
+            if cross_view is not None
+            else torch.zeros_like(fg)
+        ),
+        "cross_view_outer_positive": (
+            cross_view["positive"] if cross_view is not None else torch.zeros_like(fg)
+        ),
+        "cross_view_outer_negative": (
+            cross_view["negative"] if cross_view is not None else torch.zeros_like(fg)
         ),
         "learned_trust": (
             torch.sigmoid(outputs["route_confidence"][:, 0].float())
@@ -2215,6 +2583,14 @@ def splat_parser_predictions_to_uv_conditioning(
     geometry_route_preserve_outer_margin=0.35,
     geometry_route_consensus_outer_confidence=0.70,
     geometry_route_consensus_outer_margin=0.20,
+    geometry_cross_view_outer_consistency=True,
+    geometry_cross_view_outer_weight=0.50,
+    geometry_cross_view_outer_positive_confidence=0.70,
+    geometry_cross_view_outer_positive_margin=0.20,
+    geometry_cross_view_outer_negative_confidence=0.70,
+    geometry_cross_view_outer_negative_margin=0.20,
+    geometry_cross_view_outer_background_max_coverage=0.25,
+    geometry_cross_view_outer_min_views=2,
     outer_uv_occupancy=False,
     outer_uv_occupancy_blend_weight=0.30,
     outer_uv_occupancy_gate_threshold=0.10,
@@ -2283,6 +2659,30 @@ def splat_parser_predictions_to_uv_conditioning(
             geometry_route_consensus_outer_margin,
         ),
         (
+            "geometry_cross_view_outer_weight",
+            geometry_cross_view_outer_weight,
+        ),
+        (
+            "geometry_cross_view_outer_positive_confidence",
+            geometry_cross_view_outer_positive_confidence,
+        ),
+        (
+            "geometry_cross_view_outer_positive_margin",
+            geometry_cross_view_outer_positive_margin,
+        ),
+        (
+            "geometry_cross_view_outer_negative_confidence",
+            geometry_cross_view_outer_negative_confidence,
+        ),
+        (
+            "geometry_cross_view_outer_negative_margin",
+            geometry_cross_view_outer_negative_margin,
+        ),
+        (
+            "geometry_cross_view_outer_background_max_coverage",
+            geometry_cross_view_outer_background_max_coverage,
+        ),
+        (
             "outer_uv_occupancy_blend_weight",
             outer_uv_occupancy_blend_weight,
         ),
@@ -2322,6 +2722,8 @@ def splat_parser_predictions_to_uv_conditioning(
         raise ValueError("color_background_tolerance must be in [0, 1].")
     if color_foreground_inset < 0:
         raise ValueError("color_foreground_inset must be non-negative.")
+    if geometry_cross_view_outer_min_views < 2:
+        raise ValueError("geometry_cross_view_outer_min_views must be at least 2.")
     if "affine" not in outputs:
         conditioning = splat_predictions_to_uv_conditioning(
             rendered,
@@ -2416,6 +2818,27 @@ def splat_parser_predictions_to_uv_conditioning(
             outer_uv_occupancy_rescue_route_threshold=(
                 outer_uv_occupancy_rescue_route_threshold
             ),
+            observed_foreground=canonical_observed_foreground,
+            cross_view_outer_consistency=(
+                geometry_cross_view_outer_consistency
+            ),
+            cross_view_outer_weight=geometry_cross_view_outer_weight,
+            cross_view_outer_positive_confidence=(
+                geometry_cross_view_outer_positive_confidence
+            ),
+            cross_view_outer_positive_margin=(
+                geometry_cross_view_outer_positive_margin
+            ),
+            cross_view_outer_negative_confidence=(
+                geometry_cross_view_outer_negative_confidence
+            ),
+            cross_view_outer_negative_margin=(
+                geometry_cross_view_outer_negative_margin
+            ),
+            cross_view_outer_background_max_coverage=(
+                geometry_cross_view_outer_background_max_coverage
+            ),
+            cross_view_outer_min_views=geometry_cross_view_outer_min_views,
         )
     elif "surface" not in canonical_outputs and "part" not in canonical_outputs:
         routing = _routing_from_geometry_outputs(
@@ -2443,6 +2866,27 @@ def splat_parser_predictions_to_uv_conditioning(
             outer_uv_occupancy_rescue_route_threshold=(
                 outer_uv_occupancy_rescue_route_threshold
             ),
+            observed_foreground=canonical_observed_foreground,
+            cross_view_outer_consistency=(
+                geometry_cross_view_outer_consistency
+            ),
+            cross_view_outer_weight=geometry_cross_view_outer_weight,
+            cross_view_outer_positive_confidence=(
+                geometry_cross_view_outer_positive_confidence
+            ),
+            cross_view_outer_positive_margin=(
+                geometry_cross_view_outer_positive_margin
+            ),
+            cross_view_outer_negative_confidence=(
+                geometry_cross_view_outer_negative_confidence
+            ),
+            cross_view_outer_negative_margin=(
+                geometry_cross_view_outer_negative_margin
+            ),
+            cross_view_outer_background_max_coverage=(
+                geometry_cross_view_outer_background_max_coverage
+            ),
+            cross_view_outer_min_views=geometry_cross_view_outer_min_views,
         )
     else:
         routing = _routing_from_affine_outputs(

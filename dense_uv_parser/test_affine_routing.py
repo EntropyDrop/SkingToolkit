@@ -88,6 +88,33 @@ def dense_targets(batch, height, width):
 
 
 class GlobalAffineRoutingTest(unittest.TestCase):
+    @staticmethod
+    def two_view_shared_outer_renderer():
+        renderer = FakeRenderer(mask=torch.ones(1, 1))
+        outer_x, outer_y = 40, 8
+        outer_grid = torch.tensor(
+            [
+                [
+                    [
+                        2.0 * outer_x / 63.0 - 1.0,
+                        2.0 * outer_y / 63.0 - 1.0,
+                    ]
+                ]
+            ]
+        )
+        renderer.front_inner_grid.copy_(outer_grid)
+        renderer.front_outer_grid.copy_(outer_grid)
+        renderer.front_outer_mask.copy_(renderer.front_inner_mask)
+        renderer.register_buffer("back_inner_grid", outer_grid.clone())
+        renderer.register_buffer("back_outer_grid", outer_grid.clone())
+        renderer.register_buffer(
+            "back_inner_mask", renderer.front_inner_mask.clone()
+        )
+        renderer.register_buffer(
+            "back_outer_mask", renderer.front_outer_mask.clone()
+        )
+        return renderer
+
     def test_inverse_color_sampling_does_not_pick_background_boundary(self):
         mask = torch.ones(5, 5)
         renderer = FakeRenderer(mask=mask)
@@ -478,6 +505,12 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         self.assertEqual(parser_args.lambda_primary_route_swap, 1.0)
         self.assertEqual(parser_args.lambda_route_texel_consistency, 0.25)
         self.assertEqual(parser_args.lambda_route_texel_supervision, 0.0)
+        self.assertEqual(
+            parser_args.lambda_cross_view_outer_visibility, 0.25
+        )
+        self.assertEqual(
+            parser_args.cross_view_outer_consistency_loss_weight, 0.25
+        )
         self.assertEqual(parser_args.route_texel_center_power, 2.0)
         self.assertFalse(parser_args.predict_outer_uv_occupancy)
         self.assertEqual(parser_args.lambda_outer_uv_occupancy, 0.50)
@@ -514,6 +547,13 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         )
         self.assertEqual(
             parser_args.geometry_route_consensus_outer_margin, 0.20
+        )
+        self.assertTrue(parser_args.geometry_cross_view_outer_consistency)
+        self.assertEqual(
+            parser_args.geometry_cross_view_outer_weight, 0.50
+        )
+        self.assertEqual(
+            parser_args.geometry_cross_view_outer_min_views, 2
         )
         self.assertEqual(parser_args.outer_uv_occupancy_blend_weight, 0.30)
         self.assertEqual(parser_args.outer_uv_occupancy_gate_threshold, 0.10)
@@ -1723,6 +1763,131 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         self.assertEqual(int(routing["route_role"][0, 0, 0]), 0)
         self.assertTrue(routing["consensus_outer_to_inner"][0, 0, 0])
         self.assertFalse(routing["consensus_preserved_outer"][0, 0, 0])
+
+    def test_cross_view_background_evidence_vetoes_outer(self):
+        renderer = self.two_view_shared_outer_renderer()
+        rendered = torch.rand(2, 4, 1, 1)
+        rendered[:, 3] = 1.0
+        outputs = {
+            "foreground": torch.full((2, 1, 1, 1), 10.0),
+            "layer": torch.tensor(
+                [
+                    [[[0.0]], [[5.0]], [[-8.0]]],
+                    [[[5.0]], [[0.0]], [[-8.0]]],
+                ]
+            ),
+            "affine": torch.zeros(2, 3),
+        }
+        observed = torch.tensor([[[True]], [[False]]])
+
+        conditioning, details = splat_parser_predictions_to_uv_conditioning(
+            rendered,
+            outputs,
+            renderer=renderer,
+            views=["front", "back"],
+            group_size=2,
+            affine_refine=False,
+            observed_foreground=observed,
+            route_confidence_threshold=0.0,
+            route_margin_threshold=0.0,
+            outer_route_confidence_threshold=0.0,
+            outer_route_margin_threshold=0.0,
+            outer_uv_min_coverage=0.0,
+            outer_uv_min_source_pixels=1,
+            outer_geometry_rescue=False,
+            outer_semantic_rescue=False,
+            geometry_route_texel_consensus=True,
+            geometry_cross_view_outer_consistency=True,
+            return_details=True,
+        )
+
+        routing = details["routing"]
+        self.assertTrue(routing["cross_view_outer_conflict"].all())
+        self.assertEqual(int(routing["cross_view_outer_vetoed"].sum()), 1)
+        self.assertEqual(int((routing["route_role"] == 1).sum()), 0)
+        self.assertEqual(int(conditioning[:, 9:10].sum()), 0)
+
+    def test_cross_view_consistent_outer_is_preserved(self):
+        renderer = self.two_view_shared_outer_renderer()
+        rendered = torch.rand(2, 4, 1, 1)
+        rendered[:, 3] = 1.0
+        outputs = {
+            "foreground": torch.full((2, 1, 1, 1), 10.0),
+            "layer": torch.tensor(
+                [
+                    [[[0.0]], [[5.0]], [[-8.0]]],
+                    [[[0.0]], [[5.0]], [[-8.0]]],
+                ]
+            ),
+            "affine": torch.zeros(2, 3),
+        }
+
+        conditioning, details = splat_parser_predictions_to_uv_conditioning(
+            rendered,
+            outputs,
+            renderer=renderer,
+            views=["front", "back"],
+            group_size=2,
+            affine_refine=False,
+            observed_foreground=torch.ones(2, 1, 1, dtype=torch.bool),
+            route_confidence_threshold=0.0,
+            route_margin_threshold=0.0,
+            outer_route_confidence_threshold=0.0,
+            outer_route_margin_threshold=0.0,
+            outer_uv_min_coverage=0.0,
+            outer_uv_min_source_pixels=1,
+            outer_geometry_rescue=False,
+            outer_semantic_rescue=False,
+            geometry_route_texel_consensus=True,
+            geometry_cross_view_outer_consistency=True,
+            return_details=True,
+        )
+
+        routing = details["routing"]
+        self.assertFalse(routing["cross_view_outer_conflict"].any())
+        self.assertEqual(int((routing["route_role"] == 1).sum()), 2)
+        self.assertEqual(int(conditioning[:, 9:10].sum()), 1)
+
+    def test_cross_view_outer_visibility_loss_penalizes_split_views(self):
+        renderer = self.two_view_shared_outer_renderer()
+        target_uv = torch.zeros(1, 4, 64, 64)
+        split_logits = torch.tensor(
+            [
+                [[[0.0]], [[5.0]], [[-8.0]]],
+                [[[5.0]], [[0.0]], [[-8.0]]],
+            ],
+            requires_grad=True,
+        )
+        inner_logits = torch.tensor(
+            [
+                [[[5.0]], [[0.0]], [[-8.0]]],
+                [[[5.0]], [[0.0]], [[-8.0]]],
+            ],
+            requires_grad=True,
+        )
+
+        split = parser_train.cross_view_outer_visibility_loss(
+            {"layer": split_logits},
+            target_uv,
+            renderer,
+            ["front", "back"],
+        )
+        consistent = parser_train.cross_view_outer_visibility_loss(
+            {"layer": inner_logits},
+            target_uv,
+            renderer,
+            ["front", "back"],
+        )
+
+        self.assertGreater(
+            float(split["loss_cross_view_outer_visibility"].detach()),
+            float(consistent["loss_cross_view_outer_visibility"].detach()),
+        )
+        self.assertEqual(
+            int(split["count_cross_view_outer_shared_texels"]), 1
+        )
+        split["loss_cross_view_outer_visibility"].backward()
+        self.assertGreater(float(split_logits.grad.abs().sum()), 0.0)
 
     def test_outer_uv_occupancy_rescues_plausible_inner_to_outer_route(self):
         renderer = FakeRenderer(mask=torch.ones(1, 4))
