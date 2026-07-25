@@ -644,6 +644,14 @@ def build_arg_parser():
             "the same completion used by --output."
         ),
     )
+    parser.add_argument(
+        "--simple_inpaint_render_output",
+        default="outputs/simple_inpaint_render.png",
+        help=(
+            "Combined front+back render of the simple-inpainted skin. "
+            "Left half = front_left view, right half = back_left view."
+        ),
+    )
     parser.add_argument("--debug_output", default=None, help="Optional path to write a debug preview grid of predictions.")
     parser.add_argument("--overlay_output", default=None, help="Optional path for segmentation overlays on canonicalized input views.")
     parser.add_argument("--overlay_alpha", type=float, default=0.45)
@@ -868,10 +876,12 @@ def main():
             args.geometry_overlay_output,
             args.geometry_routed_overlay_output,
             args.geometry_fill_output,
+            args.simple_inpaint_render_output,
         )
     ):
         raise ValueError(
             "Provide --output, --conditioning_output, --parser_uv_output, --simple_inpaint_output, "
+            "--simple_inpaint_render_output, "
             "--debug_output, --overlay_output, "
             "--inner_cutout_output, --outer_cutout_output, --secondary_cutout_output, "
             "and/or --color_source_output."
@@ -1437,6 +1447,11 @@ def main():
             enforce_base_alpha=False,
         )
 
+    needs_repair = bool(
+        args.simple_inpaint_output
+        or args.output
+        or args.simple_inpaint_render_output
+    )
     repair_outputs = []
     if args.simple_inpaint_output:
         repair_outputs.append(
@@ -1444,7 +1459,7 @@ def main():
         )
     if args.output:
         repair_outputs.append(("completed_uv", Path(args.output)))
-    if repair_outputs:
+    if needs_repair:
         repaired, stats = simple_inpaint_uv(
             conditioning.detach().cpu(),
             alpha_threshold=args.alpha_threshold,
@@ -1458,6 +1473,42 @@ def main():
                 tensor_to_rgba_image(repaired).save(output_path)
                 written_paths.add(resolved_path)
             print(f"Saved {output_label}={output_path}")
+
+        if args.simple_inpaint_render_output:
+            repaired_skin = repaired.unsqueeze(0).to(device)
+            rendered_views = renderer.forward(repaired_skin)
+            expected_views = ("front_left", "back_left")
+            missing = [v for v in expected_views if v not in rendered_views]
+            if missing:
+                print(
+                    "WARNING: simple_inpaint_render_output requires views "
+                    f"{expected_views}, but renderer only has "
+                    f"{list(rendered_views.keys())}. "
+                    f"Missing views: {missing}. "
+                    "Skipping combined render."
+                )
+            else:
+                bg = (
+                    torch.tensor(bg_color, device=device, dtype=repaired_skin.dtype)
+                    .view(1, 3, 1, 1)
+                    / 255.0
+                )
+                front_rgba = rendered_views["front_left"]
+                back_rgba = rendered_views["back_left"]
+                front_rgb = front_rgba[:, :3] * front_rgba[:, 3:4] + bg * (
+                    1.0 - front_rgba[:, 3:4]
+                )
+                back_rgb = back_rgba[:, :3] * back_rgba[:, 3:4] + bg * (
+                    1.0 - back_rgba[:, 3:4]
+                )
+                combined = torch.cat([front_rgb, back_rgb], dim=3)
+                render_path = Path(args.simple_inpaint_render_output)
+                render_path.parent.mkdir(parents=True, exist_ok=True)
+                save_image(
+                    combined[0].clamp(0.0, 1.0).cpu(),
+                    render_path,
+                )
+                print(f"Saved simple_inpaint_render={render_path}")
 
 
 if __name__ == "__main__":
