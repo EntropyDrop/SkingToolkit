@@ -623,7 +623,7 @@ def build_arg_parser():
     )
     parser.add_argument(
         "--output",
-        default=None,
+        default="outputs/pred_uv.png",
         help=(
             "Final deterministic RGBA UV PNG. Unknown inner-layer texels are "
             "completed by the topology-aware simple inpainting algorithm; "
@@ -633,12 +633,12 @@ def build_arg_parser():
     parser.add_argument("--conditioning_output", default=None, help="Optional preview image for parser-splatted conditioning.")
     parser.add_argument(
         "--parser_uv_output",
-        default=None,
+        default="outputs/parser_pred_uv.png",
         help="Optional preliminary RGBA skin merged directly from parser conditioning.",
     )
     parser.add_argument(
         "--simple_inpaint_output",
-        default=None,
+        default="outputs/parser_pred_uv_simple_inpainting.png",
         help=(
             "Optional copy of the deterministic pre-final UV repair. This is "
             "the same completion used by --output."
