@@ -777,13 +777,19 @@ def build_arg_parser():
         "--geometry_route_preserve_outer_confidence",
         type=float,
         default=None,
-        help="Keep a raw outer route above this confidence even when cell consensus prefers inner.",
+        help=(
+            "Minimum local outer confidence required in addition to the fused "
+            "texel gate when the raw route predicts outer."
+        ),
     )
     parser.add_argument(
         "--geometry_route_preserve_outer_margin",
         type=float,
         default=None,
-        help="Minimum raw outer margin ratio required by high-confidence outer preservation.",
+        help=(
+            "Minimum local outer margin required in addition to the fused "
+            "texel gate when the raw route predicts outer."
+        ),
     )
     parser.add_argument(
         "--geometry_route_consensus_outer_confidence",
@@ -989,12 +995,12 @@ def main():
         else args.geometry_route_preserve_outer_margin
     )
     geometry_route_consensus_outer_confidence = (
-        parser_args.get("geometry_route_consensus_outer_confidence", 0.70)
+        parser_args.get("geometry_route_consensus_outer_confidence", 0.80)
         if args.geometry_route_consensus_outer_confidence is None
         else args.geometry_route_consensus_outer_confidence
     )
     geometry_route_consensus_outer_margin = (
-        parser_args.get("geometry_route_consensus_outer_margin", 0.20)
+        parser_args.get("geometry_route_consensus_outer_margin", 0.35)
         if args.geometry_route_consensus_outer_margin is None
         else args.geometry_route_consensus_outer_margin
     )
@@ -1347,6 +1353,21 @@ def main():
                 "consensus_preserved_outer", torch.zeros_like(raw_outer)
             ).sum().item()
         )
+        consensus_outer_gate_rejected_count = int(
+            routing.get(
+                "consensus_outer_gate_rejected",
+                torch.zeros_like(raw_outer),
+            ).sum().item()
+        )
+        consensus_outer_gate_deferred_count = int(
+            (
+                routing.get(
+                    "consensus_outer_gate_rejected",
+                    torch.zeros_like(raw_outer),
+                )
+                & (routing.get("route_role") == 1)
+            ).sum().item()
+        )
         cross_view_outer_shared_count = int(
             routing.get(
                 "cross_view_outer_shared", torch.zeros_like(raw_outer)
@@ -1459,6 +1480,12 @@ def main():
                     ),
                     "consensus_preserved_outer_pixels": (
                         consensus_preserved_outer_count
+                    ),
+                    "consensus_outer_gate_rejected_pixels": (
+                        consensus_outer_gate_rejected_count
+                    ),
+                    "consensus_outer_gate_deferred_pixels": (
+                        consensus_outer_gate_deferred_count
                     ),
                     "cross_view_outer_consistency": bool(
                         geometry_cross_view_outer_consistency

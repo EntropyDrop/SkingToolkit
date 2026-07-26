@@ -134,15 +134,18 @@ rare outer class weight below `1.0`. This focuses learning on confident,
 isolated inner-to-outer mistakes without removing the outer-positive loss.
 
 The default training also projects every direct outer candidate into a shared
-outer-UV atlas while keeping front/back observations separate. Texels visible
-from at least two configured views are supervised against the exact GT outer
-alpha, including transparent candidates that land on background or expose the
-inner layer. A small disagreement term prevents one view from learning outer
-while another learns inner for the same texel:
+outer-UV atlas while keeping front/back observations separate. Every candidate
+visible from at least one configured view is supervised against the exact GT
+outer alpha, including transparent candidates that expose the inner layer.
+Only the probability-disagreement term is restricted to texels shared by at
+least two views. High-confidence transparent candidates receive additional
+hard-negative weight:
 
 ```bash
-LAMBDA_CROSS_VIEW_OUTER_VISIBILITY=0.25 \
+LAMBDA_CROSS_VIEW_OUTER_VISIBILITY=0.50 \
 CROSS_VIEW_OUTER_CONSISTENCY_LOSS_WEIGHT=0.25 \
+OUTER_VISIBILITY_HARD_NEGATIVE_FRACTION=0.20 \
+OUTER_VISIBILITY_HARD_NEGATIVE_WEIGHT=0.75 \
 GEOMETRY_CROSS_VIEW_OUTER_CONSISTENCY=true \
 ./run_dense_uv_parser_training.sh
 ```
@@ -352,17 +355,20 @@ secondary/backface slot to use the relaxed `0.60/0.25` gate and `0.10`
 coverage floor. Overlapping inner/outer regions still use the strict gate.
 
 Projected-texel consensus is a centre-weighted soft blend. By default it
-combines `40%` local route probability with `60%` cell evidence. A strong raw
-outer prediction is preserved, while weak isolated speckle can be changed to
-inner. The `routing_filter` log reports these changes. Useful controls are:
+combines `40%` local route probability with `60%` cell evidence. Every ordinary
+outer decision must pass both its local evidence threshold and the fused texel
+confidence/margin gate; a saturated raw outer prediction can no longer bypass
+the fused result. Atlas-level occupancy evidence remains an explicit rescue
+path. The `routing_filter` log reports outer predictions rejected by this gate.
+Useful controls are:
 
 ```bash
 GEOMETRY_ROUTE_TEXEL_CONSENSUS=true \
 GEOMETRY_ROUTE_TEXEL_CONSENSUS_WEIGHT=0.60 \
 GEOMETRY_ROUTE_PRESERVE_OUTER_CONFIDENCE=0.80 \
 GEOMETRY_ROUTE_PRESERVE_OUTER_MARGIN=0.35 \
-GEOMETRY_ROUTE_CONSENSUS_OUTER_CONFIDENCE=0.70 \
-GEOMETRY_ROUTE_CONSENSUS_OUTER_MARGIN=0.20 \
+GEOMETRY_ROUTE_CONSENSUS_OUTER_CONFIDENCE=0.80 \
+GEOMETRY_ROUTE_CONSENSUS_OUTER_MARGIN=0.35 \
 ./run_infer.sh
 ```
 

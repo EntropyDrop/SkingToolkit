@@ -614,8 +614,8 @@ def cross_view_outer_visibility_loss(
     center_power=2.0,
     min_views=2,
     consistency_weight=0.25,
-    hard_negative_fraction=0.10,
-    hard_negative_weight=0.50,
+    hard_negative_fraction=0.20,
+    hard_negative_weight=0.75,
 ):
     """Supervise every visible outer candidate directly from atlas alpha.
 
@@ -1019,10 +1019,10 @@ def hard_uv_conditioning_metrics(
                 args, "geometry_route_preserve_outer_margin", 0.35
             ),
             geometry_route_consensus_outer_confidence=getattr(
-                args, "geometry_route_consensus_outer_confidence", 0.70
+                args, "geometry_route_consensus_outer_confidence", 0.80
             ),
             geometry_route_consensus_outer_margin=getattr(
-                args, "geometry_route_consensus_outer_margin", 0.20
+                args, "geometry_route_consensus_outer_margin", 0.35
             ),
             geometry_cross_view_outer_consistency=getattr(
                 args, "geometry_cross_view_outer_consistency", True
@@ -1501,10 +1501,10 @@ def save_preview(
                     args, "geometry_route_preserve_outer_margin", 0.35
                 ),
                 geometry_route_consensus_outer_confidence=getattr(
-                    args, "geometry_route_consensus_outer_confidence", 0.70
+                    args, "geometry_route_consensus_outer_confidence", 0.80
                 ),
                 geometry_route_consensus_outer_margin=getattr(
-                    args, "geometry_route_consensus_outer_margin", 0.20
+                    args, "geometry_route_consensus_outer_margin", 0.35
                 ),
                 geometry_cross_view_outer_consistency=getattr(
                     args, "geometry_cross_view_outer_consistency", True
@@ -2045,10 +2045,10 @@ def build_arg_parser():
         "--geometry_route_preserve_outer_margin", type=float, default=0.35
     )
     parser.add_argument(
-        "--geometry_route_consensus_outer_confidence", type=float, default=0.70
+        "--geometry_route_consensus_outer_confidence", type=float, default=0.80
     )
     parser.add_argument(
-        "--geometry_route_consensus_outer_margin", type=float, default=0.20
+        "--geometry_route_consensus_outer_margin", type=float, default=0.35
     )
     parser.add_argument(
         "--geometry_cross_view_outer_consistency",
@@ -2161,7 +2161,7 @@ def build_arg_parser():
     parser.add_argument(
         "--lambda_cross_view_outer_visibility",
         type=float,
-        default=0.25,
+        default=0.50,
         help=(
             "Weight for direct outer-alpha supervision over the union of "
             "visible candidates and consistency over shared-view candidates."
@@ -2176,7 +2176,7 @@ def build_arg_parser():
     parser.add_argument(
         "--outer_visibility_hard_negative_fraction",
         type=float,
-        default=0.10,
+        default=0.20,
         help=(
             "Fraction of visible transparent outer candidates retained as "
             "high-confidence hard negatives."
@@ -2185,7 +2185,7 @@ def build_arg_parser():
     parser.add_argument(
         "--outer_visibility_hard_negative_weight",
         type=float,
-        default=0.50,
+        default=0.75,
         help="Within-loss weight for mined outer false-positive candidates.",
     )
     parser.add_argument(

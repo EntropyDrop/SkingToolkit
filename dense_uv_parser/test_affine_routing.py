@@ -514,16 +514,16 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         self.assertEqual(parser_args.lambda_route_texel_consistency, 0.25)
         self.assertEqual(parser_args.lambda_route_texel_supervision, 0.0)
         self.assertEqual(
-            parser_args.lambda_cross_view_outer_visibility, 0.25
+            parser_args.lambda_cross_view_outer_visibility, 0.50
         )
         self.assertEqual(
             parser_args.cross_view_outer_consistency_loss_weight, 0.25
         )
         self.assertEqual(
-            parser_args.outer_visibility_hard_negative_fraction, 0.10
+            parser_args.outer_visibility_hard_negative_fraction, 0.20
         )
         self.assertEqual(
-            parser_args.outer_visibility_hard_negative_weight, 0.50
+            parser_args.outer_visibility_hard_negative_weight, 0.75
         )
         self.assertEqual(parser_args.route_texel_center_power, 2.0)
         self.assertFalse(parser_args.predict_outer_uv_occupancy)
@@ -557,10 +557,10 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         )
         self.assertEqual(parser_args.geometry_route_preserve_outer_margin, 0.35)
         self.assertEqual(
-            parser_args.geometry_route_consensus_outer_confidence, 0.70
+            parser_args.geometry_route_consensus_outer_confidence, 0.80
         )
         self.assertEqual(
-            parser_args.geometry_route_consensus_outer_margin, 0.20
+            parser_args.geometry_route_consensus_outer_margin, 0.35
         )
         self.assertTrue(parser_args.geometry_cross_view_outer_consistency)
         self.assertEqual(
@@ -754,7 +754,7 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         self.assertEqual(int(rescued["routing"]["foreground"].sum()), 1)
         self.assertEqual(float(conditioning[:, 9:10].sum()), 1.0)
 
-    def test_semantic_outer_presence_rescues_only_supported_part(self):
+    def test_semantic_outer_presence_does_not_bypass_consensus_gate(self):
         renderer = FakeRenderer(valid_pixels=1)
         renderer.front_outer_mask.copy_(renderer.front_inner_mask)
         renderer.front_inner_grid[0, 0] = torch.tensor(
@@ -808,8 +808,8 @@ class GlobalAffineRoutingTest(unittest.TestCase):
 
         self.assertEqual(int(strict["routing"]["foreground"].sum()), 0)
         self.assertTrue(rescued["routing"]["outer_semantic_supported"][0, 0, 0])
-        self.assertTrue(rescued["routing"]["outer_semantic_rescued"][0, 0, 0])
-        self.assertEqual(int(conditioning[:, 9:10].sum()), 1)
+        self.assertFalse(rescued["routing"]["outer_semantic_rescued"][0, 0, 0])
+        self.assertEqual(int(conditioning[:, 9:10].sum()), 0)
 
     def test_learned_route_trust_uses_geometric_mean_not_product(self):
         renderer = FakeRenderer(valid_pixels=1)
@@ -1770,7 +1770,7 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         self.assertEqual(int((semantic_routing["raw_route_role"] == 2).sum()), 1)
         self.assertEqual(int(semantic_routing["foreground"].sum()), 3)
 
-    def test_soft_texel_consensus_preserves_strong_raw_outer(self):
+    def test_soft_texel_consensus_requires_fused_gate_for_strong_raw_outer(self):
         renderer = FakeRenderer(mask=torch.ones(1, 4))
         renderer.front_outer_mask.copy_(renderer.front_inner_mask)
         rendered = torch.rand(1, 4, 1, 4)
@@ -1806,8 +1806,12 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         routing = details["routing"]
         self.assertEqual(int(routing["raw_route_role"][0, 0, 0]), 1)
         self.assertEqual(int(routing["route_role"][0, 0, 0]), 1)
-        self.assertTrue(routing["consensus_preserved_outer"][0, 0, 0])
+        self.assertFalse(routing["consensus_preserved_outer"][0, 0, 0])
+        self.assertTrue(
+            routing["consensus_outer_gate_rejected"][0, 0, 0]
+        )
         self.assertFalse(routing["consensus_outer_to_inner"][0, 0, 0])
+        self.assertFalse(routing["foreground"][0, 0, 0])
 
     def test_soft_texel_consensus_removes_weaker_isolated_outer(self):
         renderer = FakeRenderer(mask=torch.ones(1, 4))
@@ -1847,6 +1851,10 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         self.assertEqual(int(routing["route_role"][0, 0, 0]), 0)
         self.assertTrue(routing["consensus_outer_to_inner"][0, 0, 0])
         self.assertFalse(routing["consensus_preserved_outer"][0, 0, 0])
+        self.assertTrue(
+            routing["consensus_outer_gate_rejected"][0, 0, 0]
+        )
+        self.assertTrue(routing["foreground"][0, 0, 0])
 
     def test_cross_view_background_evidence_vetoes_outer(self):
         renderer = self.two_view_shared_outer_renderer()

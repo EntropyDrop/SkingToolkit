@@ -1199,8 +1199,8 @@ def _soft_route_role_consensus(
     consensus_weight=0.60,
     preserve_outer_confidence=0.80,
     preserve_outer_margin=0.35,
-    outer_confidence=0.70,
-    outer_margin=0.20,
+    outer_confidence=0.80,
+    outer_margin=0.35,
     outer_uv_occupancy=None,
     occupancy_blend_weight=0.30,
     occupancy_gate_threshold=0.10,
@@ -1342,7 +1342,7 @@ def _soft_route_role_consensus(
     raw_outer_margin_ratio = (
         raw_outer_margin / raw_outer_score.clamp_min(1e-8)
     ).clamp(0.0, 1.0)
-    preserve_outer = (
+    raw_preserve_outer = (
         outer_valid
         & ~cross_view_outer_veto
         & occupancy_allows_outer
@@ -1356,10 +1356,27 @@ def _soft_route_role_consensus(
     fused_outer_margin_ratio = (
         fused_outer_margin / fused_outer.clamp_min(1e-8)
     ).clamp(0.0, 1.0)
-    promote_outer = (
+    fused_outer_admitted = (
         outer_valid
         & (fused_outer >= float(outer_confidence))
         & (fused_outer_margin_ratio >= float(outer_margin))
+    )
+    # Raw outer confidence is deliberately not an admission shortcut. A
+    # coherent inner texture (eyes, mouth, shirt graphics) can make the local
+    # route head extremely confident while still being semantically wrong.
+    # Every ordinary outer decision must therefore pass the fused texel gate.
+    # Occupancy evidence remains the only explicit bypass because it predicts
+    # atlas-level outer existence rather than repeating the local route score.
+    outer_admitted = fused_outer_admitted & (
+        (raw_role != ROUTE_OUTER_PRIMARY) | raw_preserve_outer
+    )
+    preserve_outer = raw_preserve_outer & fused_outer_admitted
+    outer_gate_rejected = (
+        outer_valid
+        & ~cross_view_outer_veto
+        & occupancy_allows_outer
+        & (raw_role == ROUTE_OUTER_PRIMARY)
+        & ~outer_admitted
     )
     occupancy_rescue = (
         outer_valid
@@ -1374,16 +1391,7 @@ def _soft_route_role_consensus(
         outer_valid
         & ~cross_view_outer_veto
         & occupancy_allows_outer
-        & (
-            (fused_outer >= fused_outer_competitor)
-            | occupancy_rescue
-        )
-        & (
-            (raw_role == ROUTE_OUTER_PRIMARY)
-            | promote_outer
-            | preserve_outer
-            | occupancy_rescue
-        )
+        & (outer_admitted | occupancy_rescue)
     )
 
     outer_candidate_score = torch.where(
@@ -1394,11 +1402,7 @@ def _soft_route_role_consensus(
         ),
         fused_outer,
     )
-    eligible_outer = torch.where(
-        allow_outer | preserve_outer,
-        outer_candidate_score,
-        unavailable,
-    )
+    eligible_outer = torch.where(allow_outer, outer_candidate_score, unavailable)
     eligible_secondary = torch.where(
         (fused_secondary >= SECONDARY_TEXEL_MIN_PROBABILITY)
         & has_direct_candidate,
@@ -1422,25 +1426,32 @@ def _soft_route_role_consensus(
         selected_margin / selected_score.clamp_min(1e-8)
     ).clamp(0.0, 1.0)
 
-    # A strong raw outer prediction survives a disagreeing cell mean. The
-    # downstream minimum-source-pixel and coverage filters still remove truly
-    # isolated evidence before it reaches the UV atlas.
+    # If fused outer still wins but does not clear the asymmetric admission
+    # gate, keep its outer UV identity while marking it untrusted. Downstream
+    # filtering can then leave the observation unknown (and preserve it as
+    # rejected context) instead of writing an uncertain outer color into the
+    # inner atlas. When fused inner actually wins, the ordinary argmax above
+    # performs the intended outer-to-inner correction.
+    deferred_outer = outer_gate_rejected & (
+        fused_outer >= fused_outer_competitor
+    )
     selected_role = torch.where(
-        preserve_outer,
+        deferred_outer,
         torch.full_like(selected_role, ROUTE_OUTER_PRIMARY),
         selected_role,
     )
-    selected_score = torch.where(preserve_outer, raw_outer_score, selected_score)
+    selected_score = torch.where(deferred_outer, fused_outer, selected_score)
     selected_margin = torch.where(
-        preserve_outer,
-        raw_outer_margin,
+        deferred_outer,
+        fused_outer_margin,
         selected_margin,
     )
     selected_margin_ratio = torch.where(
-        preserve_outer,
-        raw_outer_margin_ratio,
+        deferred_outer,
+        fused_outer_margin_ratio,
         selected_margin_ratio,
     )
+
     return {
         "role": selected_role,
         "score": selected_score,
@@ -1452,6 +1463,7 @@ def _soft_route_role_consensus(
         ),
         "has_direct_candidate": has_direct_candidate,
         "preserved_outer": preserve_outer,
+        "outer_gate_rejected": outer_gate_rejected,
         "occupancy_rescued_outer": (
             occupancy_rescue
             & (raw_role != ROUTE_OUTER_PRIMARY)
@@ -1490,8 +1502,8 @@ def _routing_from_geometry_outputs(
     texel_consensus_weight=0.60,
     preserve_outer_confidence=0.80,
     preserve_outer_margin=0.35,
-    consensus_outer_confidence=0.70,
-    consensus_outer_margin=0.20,
+    consensus_outer_confidence=0.80,
+    consensus_outer_margin=0.35,
     outer_uv_occupancy=False,
     outer_uv_occupancy_blend_weight=0.30,
     outer_uv_occupancy_gate_threshold=0.10,
@@ -1542,6 +1554,7 @@ def _routing_from_geometry_outputs(
     consensus_inner_to_outer = torch.zeros_like(fg)
     consensus_outer_to_inner = torch.zeros_like(fg)
     consensus_preserved_outer = torch.zeros_like(fg)
+    consensus_outer_gate_rejected = torch.zeros_like(fg)
     occupancy_rescued_outer = torch.zeros_like(fg)
     occupancy_rejected_outer = torch.zeros_like(fg)
     projected_outer_occupancy = torch.zeros_like(outer_prob)
@@ -1651,6 +1664,9 @@ def _routing_from_geometry_outputs(
             consensus_inner_to_outer[selection] = consensus["inner_to_outer"]
             consensus_outer_to_inner[selection] = consensus["outer_to_inner"]
             consensus_preserved_outer[selection] = consensus["preserved_outer"]
+            consensus_outer_gate_rejected[selection] = consensus[
+                "outer_gate_rejected"
+            ]
             occupancy_rescued_outer[selection] = consensus[
                 "occupancy_rescued_outer"
             ]
@@ -1734,6 +1750,7 @@ def _routing_from_geometry_outputs(
         "consensus_inner_to_outer": consensus_inner_to_outer,
         "consensus_outer_to_inner": consensus_outer_to_inner,
         "consensus_preserved_outer": consensus_preserved_outer,
+        "consensus_outer_gate_rejected": consensus_outer_gate_rejected,
         "occupancy_rescued_outer": occupancy_rescued_outer,
         "occupancy_rejected_outer": occupancy_rejected_outer,
         "projected_outer_occupancy": projected_outer_occupancy,
@@ -1806,8 +1823,8 @@ def _routing_from_geometry_surface_outputs(
     texel_consensus_weight=0.60,
     preserve_outer_confidence=0.80,
     preserve_outer_margin=0.35,
-    consensus_outer_confidence=0.70,
-    consensus_outer_margin=0.20,
+    consensus_outer_confidence=0.80,
+    consensus_outer_margin=0.35,
     outer_uv_occupancy=False,
     outer_uv_occupancy_blend_weight=0.30,
     outer_uv_occupancy_gate_threshold=0.10,
@@ -1862,6 +1879,7 @@ def _routing_from_geometry_surface_outputs(
     consensus_inner_to_outer = torch.zeros_like(fg)
     consensus_outer_to_inner = torch.zeros_like(fg)
     consensus_preserved_outer = torch.zeros_like(fg)
+    consensus_outer_gate_rejected = torch.zeros_like(fg)
     occupancy_rescued_outer = torch.zeros_like(fg)
     occupancy_rejected_outer = torch.zeros_like(fg)
     projected_outer_occupancy = torch.zeros_like(foreground_prob)
@@ -1969,6 +1987,9 @@ def _routing_from_geometry_surface_outputs(
             consensus_inner_to_outer[selection] = consensus["inner_to_outer"]
             consensus_outer_to_inner[selection] = consensus["outer_to_inner"]
             consensus_preserved_outer[selection] = consensus["preserved_outer"]
+            consensus_outer_gate_rejected[selection] = consensus[
+                "outer_gate_rejected"
+            ]
             occupancy_rescued_outer[selection] = consensus[
                 "occupancy_rescued_outer"
             ]
@@ -2118,6 +2139,7 @@ def _routing_from_geometry_surface_outputs(
         "consensus_inner_to_outer": consensus_inner_to_outer,
         "consensus_outer_to_inner": consensus_outer_to_inner,
         "consensus_preserved_outer": consensus_preserved_outer,
+        "consensus_outer_gate_rejected": consensus_outer_gate_rejected,
         "occupancy_rescued_outer": occupancy_rescued_outer,
         "occupancy_rejected_outer": occupancy_rejected_outer,
         "projected_outer_occupancy": projected_outer_occupancy,
@@ -2581,8 +2603,8 @@ def splat_parser_predictions_to_uv_conditioning(
     geometry_route_texel_consensus_weight=0.60,
     geometry_route_preserve_outer_confidence=0.80,
     geometry_route_preserve_outer_margin=0.35,
-    geometry_route_consensus_outer_confidence=0.70,
-    geometry_route_consensus_outer_margin=0.20,
+    geometry_route_consensus_outer_confidence=0.80,
+    geometry_route_consensus_outer_margin=0.35,
     geometry_cross_view_outer_consistency=True,
     geometry_cross_view_outer_weight=0.50,
     geometry_cross_view_outer_positive_confidence=0.70,
@@ -2917,6 +2939,17 @@ def splat_parser_predictions_to_uv_conditioning(
         & (routing["confidence"] >= confidence_threshold)
         & (routing["confidence_margin_ratio"] >= margin_threshold)
     )
+    outer_consensus_gate_rejected = routing.get(
+        "consensus_outer_gate_rejected",
+        torch.zeros_like(selected_outer),
+    )
+    # A deferred outer route is intentionally unknown. It may be restored by
+    # exact geometry or atlas occupancy evidence below, but broad semantic part
+    # presence must not turn the rejected local observation back into outer.
+    deferred_outer_gate_rejected = (
+        selected_outer & outer_consensus_gate_rejected
+    )
+    strict_trusted = strict_trusted & ~deferred_outer_gate_rejected
     if reject_semantic_fallback:
         rejected_fallback = routing["semantic_fallback"] & (
             selected_outer | reject_inner_semantic_fallback
@@ -2962,6 +2995,7 @@ def splat_parser_predictions_to_uv_conditioning(
             raw_foreground
             & canonical_observed_foreground
             & semantic_supported_outer
+            & ~deferred_outer_gate_rejected
             & (routing["confidence"] >= outer_rescue_confidence_threshold)
             & (
                 routing["confidence_margin_ratio"]
