@@ -8,10 +8,12 @@ from unittest.mock import patch
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from SkingToolkit.dense_uv_parser.losses import (
     DenseUVParserLoss,
     _balanced_cross_entropy,
+    _deterministic_cross_entropy,
     outer_false_negative_loss,
     outer_false_positive_loss,
     primary_route_swap_loss,
@@ -516,6 +518,12 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         )
         self.assertEqual(
             parser_args.cross_view_outer_consistency_loss_weight, 0.25
+        )
+        self.assertEqual(
+            parser_args.outer_visibility_hard_negative_fraction, 0.10
+        )
+        self.assertEqual(
+            parser_args.outer_visibility_hard_negative_weight, 0.50
         )
         self.assertEqual(parser_args.route_texel_center_power, 2.0)
         self.assertFalse(parser_args.predict_outer_uv_occupancy)
@@ -1334,11 +1342,37 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         self.assertTrue(torch.isfinite(loss))
         self.assertEqual(loss.dtype, torch.float32)
 
+    def test_deterministic_cross_entropy_matches_pytorch_value_and_gradient(self):
+        logits = torch.randn(2, 3, 4, 5, requires_grad=True)
+        reference_logits = logits.detach().clone().requires_grad_(True)
+        target = torch.randint(0, 3, (2, 4, 5))
+        target[0, 0, 0] = IGNORE_INDEX
+        weight = torch.tensor([0.75, 1.25, 2.0])
+
+        loss = _deterministic_cross_entropy(
+            logits,
+            target,
+            weight=weight,
+        )
+        reference = F.cross_entropy(
+            reference_logits,
+            target,
+            weight=weight,
+            ignore_index=IGNORE_INDEX,
+        )
+        loss.backward()
+        reference.backward()
+
+        self.assertTrue(torch.allclose(loss, reference, atol=1e-6))
+        self.assertTrue(
+            torch.allclose(logits.grad, reference_logits.grad, atol=1e-6)
+        )
+
     def test_route_class_balancing_caps_outer_and_protects_inner_weight(self):
         logits = torch.zeros(1, 3, 1, 10)
         target = torch.tensor([[[0, 0, 0, 0, 0, 0, 0, 0, 0, 1]]])
         with patch(
-            "SkingToolkit.dense_uv_parser.losses.F.cross_entropy",
+            "SkingToolkit.dense_uv_parser.losses._deterministic_cross_entropy",
             return_value=torch.tensor(0.0),
         ) as cross_entropy:
             _balanced_cross_entropy(
@@ -1937,8 +1971,72 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         self.assertEqual(
             int(split["count_cross_view_outer_shared_texels"]), 1
         )
+        self.assertEqual(
+            int(split["count_outer_visible_candidate_texels"]), 1
+        )
+        self.assertEqual(
+            int(split["count_outer_visible_candidate_observations"]), 2
+        )
+        self.assertEqual(
+            int(split["count_outer_hard_negative_candidates"]), 1
+        )
         split["loss_cross_view_outer_visibility"].backward()
         self.assertGreater(float(split_logits.grad.abs().sum()), 0.0)
+
+    def test_outer_visibility_loss_supervises_single_view_candidates(self):
+        renderer = self.two_view_shared_outer_renderer()
+        back_x, back_y = 41, 8
+        back_grid = torch.tensor(
+            [
+                [
+                    [
+                        2.0 * back_x / 63.0 - 1.0,
+                        2.0 * back_y / 63.0 - 1.0,
+                    ]
+                ]
+            ]
+        )
+        renderer.back_outer_grid.copy_(back_grid)
+        target_uv = torch.zeros(1, 4, 64, 64)
+        wrong_logits = torch.tensor(
+            [
+                [[[0.0]], [[5.0]], [[-8.0]]],
+                [[[5.0]], [[0.0]], [[-8.0]]],
+            ],
+            requires_grad=True,
+        )
+        correct_logits = torch.tensor(
+            [
+                [[[5.0]], [[0.0]], [[-8.0]]],
+                [[[5.0]], [[0.0]], [[-8.0]]],
+            ]
+        )
+
+        wrong = parser_train.cross_view_outer_visibility_loss(
+            {"layer": wrong_logits},
+            target_uv,
+            renderer,
+            ["front", "back"],
+        )
+        correct = parser_train.cross_view_outer_visibility_loss(
+            {"layer": correct_logits},
+            target_uv,
+            renderer,
+            ["front", "back"],
+        )
+
+        self.assertEqual(
+            int(wrong["count_cross_view_outer_shared_texels"]), 0
+        )
+        self.assertEqual(
+            int(wrong["count_outer_visible_candidate_texels"]), 2
+        )
+        self.assertGreater(
+            float(wrong["loss_cross_view_outer_visibility"].detach()),
+            float(correct["loss_cross_view_outer_visibility"].detach()),
+        )
+        wrong["loss_cross_view_outer_visibility"].backward()
+        self.assertGreater(float(wrong_logits.grad[0].abs().sum()), 0.0)
 
     def test_outer_uv_occupancy_rescues_plausible_inner_to_outer_route(self):
         renderer = FakeRenderer(mask=torch.ones(1, 4))

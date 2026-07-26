@@ -5,6 +5,55 @@ import torch.nn.functional as F
 from SkingToolkit.dense_uv_parser.utils import IGNORE_INDEX, combine_layer_face
 
 
+def _deterministic_cross_entropy(
+    logits,
+    target,
+    weight=None,
+    ignore_index=IGNORE_INDEX,
+):
+    """Cross entropy without CUDA's non-deterministic NLLLoss2d kernel."""
+    if logits.dim() < 2:
+        raise ValueError("Cross-entropy logits must include a class dimension.")
+    expected_target_shape = logits.shape[:1] + logits.shape[2:]
+    if target.shape != expected_target_shape:
+        raise ValueError(
+            f"Expected target shape {expected_target_shape}, got "
+            f"{tuple(target.shape)}."
+        )
+
+    logits = logits.float()
+    target = target.long()
+    valid = target != int(ignore_index)
+    if not valid.any():
+        return logits.sum() * 0.0
+
+    class_count = logits.shape[1]
+    safe_target = target.clamp(0, class_count - 1)
+    log_probability = F.log_softmax(logits, dim=1)
+    per_element = -log_probability.gather(
+        1,
+        safe_target.unsqueeze(1),
+    ).squeeze(1)
+    if weight is None:
+        denominator = valid.sum().to(dtype=per_element.dtype)
+    else:
+        weight = torch.as_tensor(
+            weight,
+            device=logits.device,
+            dtype=per_element.dtype,
+        )
+        if weight.numel() != class_count:
+            raise ValueError(
+                f"Expected {class_count} class weights, got {weight.numel()}."
+            )
+        element_weight = weight.gather(0, safe_target.reshape(-1)).reshape_as(
+            safe_target
+        )
+        per_element = per_element * element_weight
+        denominator = element_weight[valid].sum()
+    return per_element[valid].sum() / denominator.clamp_min(1e-12)
+
+
 def _balanced_cross_entropy(
     logits,
     target,
@@ -36,7 +85,12 @@ def _balanced_cross_entropy(
         if (caps < 0).any():
             raise ValueError("Class-weight caps must be non-negative.")
         weights = torch.minimum(weights, caps)
-    return F.cross_entropy(logits.float(), target, weight=weights, ignore_index=IGNORE_INDEX)
+    return _deterministic_cross_entropy(
+        logits,
+        target,
+        weight=weights,
+        ignore_index=IGNORE_INDEX,
+    )
 
 
 def outer_false_positive_loss(logits, target, outer_index=1, gamma=2.0):
@@ -266,7 +320,11 @@ class DenseUVParserLoss(nn.Module):
                 ),
             )
             if geometry_route_roles
-            else F.cross_entropy(outputs["layer"], layer_target, ignore_index=IGNORE_INDEX)
+            else _deterministic_cross_entropy(
+                outputs["layer"],
+                layer_target,
+                ignore_index=IGNORE_INDEX,
+            )
         )
         loss_primary_route_swap = (
             primary_route_swap_loss(
@@ -315,12 +373,20 @@ class DenseUVParserLoss(nn.Module):
             self.lambda_outer_false_negative * loss_outer_false_negative
         )
         loss_part = (
-            F.cross_entropy(outputs["part"], targets["part"], ignore_index=IGNORE_INDEX)
+            _deterministic_cross_entropy(
+                outputs["part"],
+                targets["part"],
+                ignore_index=IGNORE_INDEX,
+            )
             if "part" in outputs
             else zero
         )
         loss_face = (
-            F.cross_entropy(outputs["face"], targets["face"], ignore_index=IGNORE_INDEX)
+            _deterministic_cross_entropy(
+                outputs["face"],
+                targets["face"],
+                ignore_index=IGNORE_INDEX,
+            )
             if "face" in outputs
             else zero
         )
@@ -343,8 +409,16 @@ class DenseUVParserLoss(nn.Module):
 
         if use_uv and "uv_x" in outputs and "uv_y" in outputs and fg_mask.any():
             target_x, target_y = uv_class_targets(targets["uv"], targets["layer"], self.uv_size)
-            loss_uv_x = F.cross_entropy(outputs["uv_x"], target_x, ignore_index=IGNORE_INDEX)
-            loss_uv_y = F.cross_entropy(outputs["uv_y"], target_y, ignore_index=IGNORE_INDEX)
+            loss_uv_x = _deterministic_cross_entropy(
+                outputs["uv_x"],
+                target_x,
+                ignore_index=IGNORE_INDEX,
+            )
+            loss_uv_y = _deterministic_cross_entropy(
+                outputs["uv_y"],
+                target_y,
+                ignore_index=IGNORE_INDEX,
+            )
             loss_uv_class = 0.5 * (loss_uv_x + loss_uv_y)
         else:
             loss_uv_x = zero

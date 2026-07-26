@@ -177,6 +177,18 @@ def configure_torch(args, device):
         warn_only=args.reproducible and not args.strict_determinism,
     )
     if device.type == "cuda":
+        if args.reproducible:
+            # Flash, memory-efficient, and cuDNN SDPA can select
+            # non-deterministic backward kernels. The math implementation is
+            # slower but follows the configured RNG and deterministic policy.
+            if hasattr(torch.backends.cuda, "enable_flash_sdp"):
+                torch.backends.cuda.enable_flash_sdp(False)
+            if hasattr(torch.backends.cuda, "enable_mem_efficient_sdp"):
+                torch.backends.cuda.enable_mem_efficient_sdp(False)
+            if hasattr(torch.backends.cuda, "enable_cudnn_sdp"):
+                torch.backends.cuda.enable_cudnn_sdp(False)
+            if hasattr(torch.backends.cuda, "enable_math_sdp"):
+                torch.backends.cuda.enable_math_sdp(True)
         torch.backends.cudnn.deterministic = args.reproducible
         torch.backends.cudnn.benchmark = (
             args.cudnn_benchmark and not args.reproducible
@@ -602,28 +614,41 @@ def cross_view_outer_visibility_loss(
     center_power=2.0,
     min_views=2,
     consistency_weight=0.25,
+    hard_negative_fraction=0.10,
+    hard_negative_weight=0.50,
 ):
-    """Supervise shared-view outer evidence directly from atlas alpha.
+    """Supervise every visible outer candidate directly from atlas alpha.
 
-    Unlike the ordinary per-pixel route loss, this also supervises transparent
-    outer candidates that project over background or the inner layer. Those
-    locations are the negative evidence needed to prevent a single view from
-    inventing an outer protrusion.
+    Alpha supervision covers the union of directly visible outer texels across
+    all views. Only the probability-disagreement term requires a texel to be
+    shared by multiple views. Hard-negative mining focuses extra gradient on
+    transparent candidates that are most confidently misrouted as outer.
     """
     views = parse_views(views)
-    if len(views) < min_views:
+    if not views:
         zero = outputs["layer"].sum() * 0.0
         return {
             "loss_cross_view_outer_visibility": zero,
             "loss_cross_view_outer_consistency": zero,
+            "loss_outer_visibility_hard_negative": zero,
             "cross_view_outer_precision": zero,
             "cross_view_outer_recall": zero,
+            "outer_visible_candidate_percent": zero,
+            "outer_shared_candidate_percent": zero,
+            "count_outer_visible_candidate_texels": zero,
+            "count_outer_visible_candidate_observations": zero,
+            "count_outer_visible_negative_candidates": zero,
+            "count_outer_hard_negative_candidates": zero,
             "count_cross_view_outer_shared_texels": zero,
         }
     if min_views < 2:
         raise ValueError("min_views must be at least 2.")
     if not 0.0 <= consistency_weight <= 1.0:
         raise ValueError("consistency_weight must be in [0, 1].")
+    if not 0.0 <= hard_negative_fraction <= 1.0:
+        raise ValueError("hard_negative_fraction must be in [0, 1].")
+    if hard_negative_weight < 0.0:
+        raise ValueError("hard_negative_weight must be non-negative.")
 
     probabilities = torch.softmax(outputs["layer"].float(), dim=1)
     pooled, support = aggregate_direct_outer_values_by_view(
@@ -639,20 +664,29 @@ def cross_view_outer_visibility_loss(
     valid_outer = outer_mask[0].to(
         device=probabilities.device, dtype=torch.bool
     ).reshape(1, -1)
+    visible = support & valid_outer.unsqueeze(1)
+    visible_texels = support.any(dim=1) & valid_outer
     shared = (
         support.sum(dim=1) >= int(min_views)
     ) & valid_outer
     target_outer = (
         target_uv[:, 3].float().reshape(target_uv.shape[0], -1) > 0.5
     )
-    selected = support & shared.unsqueeze(1)
+    selected = visible
     if not selected.any():
         zero = probabilities.sum() * 0.0
         return {
             "loss_cross_view_outer_visibility": zero,
             "loss_cross_view_outer_consistency": zero,
+            "loss_outer_visibility_hard_negative": zero,
             "cross_view_outer_precision": zero,
             "cross_view_outer_recall": zero,
+            "outer_visible_candidate_percent": zero,
+            "outer_shared_candidate_percent": zero,
+            "count_outer_visible_candidate_texels": zero,
+            "count_outer_visible_candidate_observations": zero,
+            "count_outer_visible_negative_candidates": zero,
+            "count_outer_hard_negative_candidates": zero,
             "count_cross_view_outer_shared_texels": zero,
         }
 
@@ -669,24 +703,26 @@ def cross_view_outer_visibility_loss(
         if (selected_target == expected).any()
     ]
     balanced_view_loss = torch.stack(class_losses).mean()
+    negative_loss = per_view_loss[~selected_target]
+    hard_negative_count = 0
+    if negative_loss.numel() > 0 and hard_negative_fraction > 0.0:
+        hard_negative_count = max(
+            1,
+            math.ceil(negative_loss.numel() * hard_negative_fraction),
+        )
+        hard_negative_loss = negative_loss.topk(
+            hard_negative_count,
+            sorted=False,
+        ).values.mean()
+    else:
+        hard_negative_loss = probabilities.sum() * 0.0
 
     support_float = support.to(dtype=outer_probability.dtype)
     consensus_probability = (
         (outer_probability * support_float).sum(dim=1)
         / support_float.sum(dim=1).clamp_min(1.0)
     ).clamp(1e-6, 1.0 - 1e-6)
-    pooled_loss = F.binary_cross_entropy_with_logits(
-        torch.logit(consensus_probability[shared]),
-        target_outer[shared].to(dtype=consensus_probability.dtype),
-        reduction="none",
-    )
-    pooled_target = target_outer[shared]
-    pooled_class_losses = [
-        pooled_loss[pooled_target == expected].mean()
-        for expected in (False, True)
-        if (pooled_target == expected).any()
-    ]
-    balanced_pooled_loss = torch.stack(pooled_class_losses).mean()
+    shared_observations = support & shared.unsqueeze(1)
     disagreement = (
         (
             outer_probability
@@ -694,18 +730,22 @@ def cross_view_outer_visibility_loss(
         ).square()
         * support_float
         * shared.unsqueeze(1)
-    ).sum() / selected.float().sum().clamp_min(1.0)
+    ).sum() / shared_observations.float().sum().clamp_min(1.0)
     visibility_loss = (
-        0.5 * (balanced_view_loss + balanced_pooled_loss)
+        balanced_view_loss
+        + float(hard_negative_weight) * hard_negative_loss
         + float(consistency_weight) * disagreement
     )
 
-    predicted_outer = consensus_probability[shared] >= 0.5
-    expected_outer = target_outer[shared]
+    predicted_outer = consensus_probability[visible_texels] >= 0.5
+    expected_outer = target_outer[visible_texels]
     true_outer = predicted_outer & expected_outer
+    valid_outer_count = valid_outer.expand_as(visible_texels).float().sum()
+    visible_count = visible_texels.float().sum()
     return {
         "loss_cross_view_outer_visibility": visibility_loss,
         "loss_cross_view_outer_consistency": disagreement,
+        "loss_outer_visibility_hard_negative": hard_negative_loss,
         "cross_view_outer_precision": (
             true_outer.float().sum()
             / predicted_outer.float().sum().clamp_min(1.0)
@@ -713,6 +753,22 @@ def cross_view_outer_visibility_loss(
         "cross_view_outer_recall": (
             true_outer.float().sum()
             / expected_outer.float().sum().clamp_min(1.0)
+        ),
+        "outer_visible_candidate_percent": (
+            100.0 * visible_count / valid_outer_count.clamp_min(1.0)
+        ),
+        "outer_shared_candidate_percent": (
+            100.0
+            * shared.float().sum()
+            / visible_count.clamp_min(1.0)
+        ),
+        "count_outer_visible_candidate_texels": visible_count,
+        "count_outer_visible_candidate_observations": selected.float().sum(),
+        "count_outer_visible_negative_candidates": (
+            (~selected_target).float().sum()
+        ),
+        "count_outer_hard_negative_candidates": probabilities.new_tensor(
+            float(hard_negative_count)
         ),
         "count_cross_view_outer_shared_texels": shared.float().sum(),
     }
@@ -1229,6 +1285,12 @@ def run_epoch(
                         consistency_weight=(
                             args.cross_view_outer_consistency_loss_weight
                         ),
+                        hard_negative_fraction=(
+                            args.outer_visibility_hard_negative_fraction
+                        ),
+                        hard_negative_weight=(
+                            args.outer_visibility_hard_negative_weight
+                        ),
                     )
                     auxiliary.update(cross_view_visibility)
                 else:
@@ -1250,8 +1312,15 @@ def run_epoch(
                         "texel_route_count": zero,
                         "loss_cross_view_outer_visibility": zero,
                         "loss_cross_view_outer_consistency": zero,
+                        "loss_outer_visibility_hard_negative": zero,
                         "cross_view_outer_precision": zero,
                         "cross_view_outer_recall": zero,
+                        "outer_visible_candidate_percent": zero,
+                        "outer_shared_candidate_percent": zero,
+                        "count_outer_visible_candidate_texels": zero,
+                        "count_outer_visible_candidate_observations": zero,
+                        "count_outer_visible_negative_candidates": zero,
+                        "count_outer_hard_negative_candidates": zero,
                         "count_cross_view_outer_shared_texels": zero,
                         "soft_uv_known_percent": zero,
                         "visible_inner_uv_percent": zero,
@@ -2094,8 +2163,8 @@ def build_arg_parser():
         type=float,
         default=0.25,
         help=(
-            "Weight for shared-view direct outer-alpha supervision on route "
-            "logits."
+            "Weight for direct outer-alpha supervision over the union of "
+            "visible candidates and consistency over shared-view candidates."
         ),
     )
     parser.add_argument(
@@ -2103,6 +2172,21 @@ def build_arg_parser():
         type=float,
         default=0.25,
         help="Within-loss penalty for disagreement across shared views.",
+    )
+    parser.add_argument(
+        "--outer_visibility_hard_negative_fraction",
+        type=float,
+        default=0.10,
+        help=(
+            "Fraction of visible transparent outer candidates retained as "
+            "high-confidence hard negatives."
+        ),
+    )
+    parser.add_argument(
+        "--outer_visibility_hard_negative_weight",
+        type=float,
+        default=0.50,
+        help="Within-loss weight for mined outer false-positive candidates.",
     )
     parser.add_argument(
         "--route_texel_center_power",
@@ -2261,6 +2345,14 @@ def main():
     if not 0.0 <= args.cross_view_outer_consistency_loss_weight <= 1.0:
         raise ValueError(
             "--cross_view_outer_consistency_loss_weight must be in [0, 1]."
+        )
+    if not 0.0 <= args.outer_visibility_hard_negative_fraction <= 1.0:
+        raise ValueError(
+            "--outer_visibility_hard_negative_fraction must be in [0, 1]."
+        )
+    if args.outer_visibility_hard_negative_weight < 0.0:
+        raise ValueError(
+            "--outer_visibility_hard_negative_weight must be non-negative."
         )
     if (
         args.semantic_channels < 1
@@ -2795,6 +2887,12 @@ def main():
         ),
         "cross_view_outer_consistency_loss_weight": (
             args.cross_view_outer_consistency_loss_weight
+        ),
+        "outer_visibility_hard_negative_fraction": (
+            args.outer_visibility_hard_negative_fraction
+        ),
+        "outer_visibility_hard_negative_weight": (
+            args.outer_visibility_hard_negative_weight
         ),
         "route_texel_center_power": args.route_texel_center_power,
         "lambda_route_prior_regularization": (
