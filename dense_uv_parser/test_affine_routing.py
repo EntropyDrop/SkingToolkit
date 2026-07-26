@@ -1,9 +1,11 @@
+import random
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import numpy as np
 import torch
 import torch.nn as nn
 
@@ -478,6 +480,10 @@ class GlobalAffineRoutingTest(unittest.TestCase):
 
     def test_training_defaults_keep_geometry_fixed(self):
         parser_args = parser_train.build_arg_parser().parse_args([])
+        self.assertEqual(parser_args.seed, 1234)
+        self.assertTrue(parser_args.reproducible)
+        self.assertFalse(parser_args.strict_determinism)
+        self.assertFalse(parser_args.cudnn_benchmark)
         self.assertEqual(parser_args.feature_dropout, 0.10)
         self.assertFalse(hasattr(parser_args, "augment"))
         self.assertFalse(hasattr(parser_args, "augment_validation"))
@@ -565,6 +571,50 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         )
         self.assertEqual(parser_args.outer_selection_precision_weight, 1.50)
         self.assertEqual(parser_args.outer_selection_recall_weight, 0.50)
+
+    def test_reproducibility_state_restores_all_random_streams(self):
+        train_generator = torch.Generator().manual_seed(101)
+        val_generator = torch.Generator().manual_seed(102)
+        parser_train.seed_everything(100)
+        state = parser_train.capture_reproducibility_state(
+            train_generator,
+            val_generator,
+        )
+
+        expected_python = random.random()
+        expected_numpy = float(np.random.rand())
+        expected_torch = torch.rand(4)
+        expected_train = torch.rand(4, generator=train_generator)
+        expected_val = torch.rand(4, generator=val_generator)
+
+        random.random()
+        np.random.rand()
+        torch.rand(4)
+        torch.rand(4, generator=train_generator)
+        torch.rand(4, generator=val_generator)
+
+        restored = parser_train.restore_reproducibility_state(
+            state,
+            train_generator,
+            val_generator,
+        )
+
+        self.assertTrue(restored)
+        self.assertEqual(random.random(), expected_python)
+        self.assertEqual(float(np.random.rand()), expected_numpy)
+        self.assertTrue(torch.equal(torch.rand(4), expected_torch))
+        self.assertTrue(
+            torch.equal(
+                torch.rand(4, generator=train_generator),
+                expected_train,
+            )
+        )
+        self.assertTrue(
+            torch.equal(
+                torch.rand(4, generator=val_generator),
+                expected_val,
+            )
+        )
 
     def test_geometry_model_emits_exact_surface_head(self):
         model = DenseUVParserNet(

@@ -2,10 +2,12 @@ import argparse
 import json
 import math
 import os
+import random
 import sys
 from contextlib import nullcontext
 from pathlib import Path
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, random_split
@@ -89,11 +91,96 @@ def build_grad_scaler(device, precision):
     return torch.amp.GradScaler("cuda")
 
 
+def seed_everything(seed, reproducible=True):
+    """Seed every RNG used by model initialization and the training loop."""
+    if seed < 0:
+        raise ValueError("--seed must be non-negative.")
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    if reproducible:
+        os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+    random.seed(seed)
+    np.random.seed(seed % (2**32))
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
+def seed_data_worker(_worker_id):
+    """Derive Python and NumPy worker RNGs from DataLoader's torch seed."""
+    worker_seed = torch.initial_seed() % (2**32)
+    random.seed(worker_seed)
+    np.random.seed(worker_seed)
+    torch.manual_seed(worker_seed)
+
+
+def capture_reproducibility_state(train_generator=None, val_generator=None):
+    numpy_state = np.random.get_state()
+    state = {
+        "python": random.getstate(),
+        "numpy": {
+            "bit_generator": numpy_state[0],
+            "state": numpy_state[1].tolist(),
+            "position": numpy_state[2],
+            "has_gauss": numpy_state[3],
+            "cached_gaussian": numpy_state[4],
+        },
+        "torch": torch.get_rng_state(),
+        "cuda": (
+            torch.cuda.get_rng_state_all()
+            if torch.cuda.is_available()
+            else None
+        ),
+    }
+    if train_generator is not None:
+        state["train_loader_generator"] = train_generator.get_state()
+    if val_generator is not None:
+        state["val_loader_generator"] = val_generator.get_state()
+    return state
+
+
+def restore_reproducibility_state(
+    state,
+    train_generator=None,
+    val_generator=None,
+):
+    if not state:
+        return False
+    random.setstate(state["python"])
+    numpy_state = state["numpy"]
+    np.random.set_state(
+        (
+            numpy_state["bit_generator"],
+            np.asarray(numpy_state["state"], dtype=np.uint32),
+            int(numpy_state["position"]),
+            int(numpy_state["has_gauss"]),
+            float(numpy_state["cached_gaussian"]),
+        )
+    )
+    torch.set_rng_state(state["torch"].cpu())
+    cuda_states = state.get("cuda")
+    if cuda_states is not None and torch.cuda.is_available():
+        torch.cuda.set_rng_state_all(
+            [cuda_state.cpu() for cuda_state in cuda_states]
+        )
+    if train_generator is not None and "train_loader_generator" in state:
+        train_generator.set_state(state["train_loader_generator"].cpu())
+    if val_generator is not None and "val_loader_generator" in state:
+        val_generator.set_state(state["val_loader_generator"].cpu())
+    return True
+
+
 def configure_torch(args, device):
     if hasattr(torch, "set_float32_matmul_precision"):
         torch.set_float32_matmul_precision(args.matmul_precision)
+    torch.use_deterministic_algorithms(
+        args.reproducible,
+        warn_only=args.reproducible and not args.strict_determinism,
+    )
     if device.type == "cuda":
-        torch.backends.cudnn.benchmark = args.cudnn_benchmark
+        torch.backends.cudnn.deterministic = args.reproducible
+        torch.backends.cudnn.benchmark = (
+            args.cudnn_benchmark and not args.reproducible
+        )
 
 
 def learning_rate_for_epoch(base_lr, epoch, epochs, schedule="cosine", min_lr_ratio=0.05):
@@ -1639,12 +1726,27 @@ def save_preview(
     save_image(debug_preview.clamp(0.0, 1.0).detach().cpu(), debug_path, nrow=view_count)
 
 
-def save_checkpoint(path, model, optimizer, scaler, epoch, args, metrics, best_metric=None):
+def save_checkpoint(
+    path,
+    model,
+    optimizer,
+    scaler,
+    epoch,
+    args,
+    metrics,
+    best_metric=None,
+    train_generator=None,
+    val_generator=None,
+):
     checkpoint = {
         "epoch": epoch,
         "model": model.state_dict(),
         "optimizer": optimizer.state_dict(),
         "scaler": scaler.state_dict() if scaler is not None else None,
+        "reproducibility_state": capture_reproducibility_state(
+            train_generator,
+            val_generator,
+        ),
         "args": vars(args),
         "metrics": metrics,
         "best_metric": best_metric,
@@ -1788,7 +1890,36 @@ def build_arg_parser():
     parser.add_argument("--device", default="auto")
     parser.add_argument("--mixed_precision", choices=["no", "fp16", "bf16"], default="bf16")
     parser.add_argument("--matmul_precision", choices=["highest", "high", "medium"], default="high")
-    parser.add_argument("--cudnn_benchmark", dest="cudnn_benchmark", action="store_true", default=True)
+    parser.add_argument(
+        "--reproducible",
+        dest="reproducible",
+        action="store_true",
+        default=True,
+        help=(
+            "Seed all RNG streams, use seeded DataLoaders, and request "
+            "deterministic kernels where PyTorch supports them."
+        ),
+    )
+    parser.add_argument(
+        "--no_reproducible",
+        dest="reproducible",
+        action="store_false",
+    )
+    parser.add_argument(
+        "--strict_determinism",
+        action="store_true",
+        default=False,
+        help=(
+            "Fail instead of warning when CUDA has no deterministic "
+            "implementation for an operation."
+        ),
+    )
+    parser.add_argument(
+        "--cudnn_benchmark",
+        dest="cudnn_benchmark",
+        action="store_true",
+        default=False,
+    )
     parser.add_argument("--no_cudnn_benchmark", dest="cudnn_benchmark", action="store_false")
     parser.add_argument("--target_alpha_threshold", type=float, default=0.5)
     parser.add_argument("--splat_fg_threshold", type=float, default=0.5)
@@ -2040,6 +2171,9 @@ def build_arg_parser():
 def main():
     args = build_arg_parser().parse_args()
     args.bg_color = (128, 128, 128)
+    if args.strict_determinism and not args.reproducible:
+        raise ValueError("--strict_determinism requires --reproducible.")
+    seed_everything(args.seed, reproducible=args.reproducible)
     if not 0.0 <= args.feature_dropout < 1.0:
         raise ValueError("--feature_dropout must be in [0, 1).")
     if args.route_prior_height < 1 or args.route_prior_width < 1:
@@ -2252,9 +2386,15 @@ def main():
         )
     val_count = int(len(dataset) * args.val_split)
     train_count = len(dataset) - val_count
-    generator = torch.Generator().manual_seed(args.seed)
+    split_generator = torch.Generator().manual_seed(args.seed)
+    train_loader_generator = torch.Generator().manual_seed(args.seed + 1)
+    val_loader_generator = torch.Generator().manual_seed(args.seed + 2)
     if val_count > 0:
-        train_dataset, val_dataset = random_split(dataset, [train_count, val_count], generator=generator)
+        train_dataset, val_dataset = random_split(
+            dataset,
+            [train_count, val_count],
+            generator=split_generator,
+        )
     else:
         train_dataset, val_dataset = dataset, None
 
@@ -2262,12 +2402,27 @@ def main():
         "batch_size": args.batch_size,
         "num_workers": args.num_workers,
         "pin_memory": device.type == "cuda",
+        "worker_init_fn": seed_data_worker,
     }
     if args.num_workers > 0:
-        loader_kwargs["persistent_workers"] = True
+        loader_kwargs["persistent_workers"] = not args.reproducible
         loader_kwargs["prefetch_factor"] = args.prefetch_factor
-    train_loader = DataLoader(train_dataset, shuffle=True, **loader_kwargs)
-    val_loader = DataLoader(val_dataset, shuffle=False, **loader_kwargs) if val_dataset is not None else None
+    train_loader = DataLoader(
+        train_dataset,
+        shuffle=True,
+        generator=train_loader_generator,
+        **loader_kwargs,
+    )
+    val_loader = (
+        DataLoader(
+            val_dataset,
+            shuffle=False,
+            generator=val_loader_generator,
+            **loader_kwargs,
+        )
+        if val_dataset is not None
+        else None
+    )
 
     renderer = DifferentiableRenderer(
         mappings_dir=args.mappings_dir,
@@ -2358,6 +2513,16 @@ def main():
     best_metric = float("inf")
     if args.resume:
         checkpoint = torch.load(args.resume, map_location=device)
+        checkpoint_seed = checkpoint.get("args", {}).get("seed")
+        if (
+            args.reproducible
+            and checkpoint_seed is not None
+            and int(checkpoint_seed) != args.seed
+        ):
+            raise ValueError(
+                "Cannot change --seed while reproducibly resuming: "
+                f"checkpoint={checkpoint_seed}, requested={args.seed}."
+            )
         checkpoint_mode = checkpoint.get("model_config", {}).get(
             "parser_mode", checkpoint.get("args", {}).get("parser_mode", "dense")
         )
@@ -2493,6 +2658,18 @@ def main():
             param_group["weight_decay"] = args.weight_decay
         if scaler is not None and checkpoint.get("scaler") is not None:
             scaler.load_state_dict(checkpoint["scaler"])
+        if args.reproducible:
+            restored_rng = restore_reproducibility_state(
+                checkpoint.get("reproducibility_state"),
+                train_loader_generator,
+                val_loader_generator,
+            )
+            if not restored_rng:
+                print(
+                    "warning: checkpoint has no reproducibility state; "
+                    "resume will use the requested seed but cannot exactly "
+                    "continue the old random sequence."
+                )
 
         checkpoint_epoch = int(checkpoint.get("epoch", 0))
         start_epoch = checkpoint_epoch + 1
@@ -2529,6 +2706,20 @@ def main():
         "num_samples": len(dataset),
         "train_samples": len(train_dataset),
         "val_samples": len(val_dataset) if val_dataset is not None else 0,
+        "seed": args.seed,
+        "reproducible": args.reproducible,
+        "strict_determinism": args.strict_determinism,
+        "deterministic_algorithms": (
+            torch.are_deterministic_algorithms_enabled()
+        ),
+        "cudnn_benchmark": (
+            torch.backends.cudnn.benchmark
+            if device.type == "cuda"
+            else False
+        ),
+        "cublas_workspace_config": os.environ.get(
+            "CUBLAS_WORKSPACE_CONFIG"
+        ),
         "views": parse_views(args.views),
         "parameters": count_parameters(model),
         "feature_dropout": args.feature_dropout,
@@ -2692,14 +2883,6 @@ def main():
         is_best = metric < best_metric
         if is_best:
             best_metric = metric
-        if epoch % args.save_every == 0:
-            save_checkpoint(
-                output_dir / "latest.pt", model, optimizer, scaler, epoch, args, metrics, best_metric=best_metric
-            )
-        if is_best:
-            save_checkpoint(
-                output_dir / "best.pt", model, optimizer, scaler, epoch, args, metrics, best_metric=best_metric
-            )
         if epoch % args.preview_every == 0:
             save_preview(
                 model,
@@ -2709,6 +2892,32 @@ def main():
                 args,
                 output_dir / "previews" / f"epoch_{epoch:04d}.png",
                 semantic_cache=semantic_cache,
+            )
+        if epoch % args.save_every == 0:
+            save_checkpoint(
+                output_dir / "latest.pt",
+                model,
+                optimizer,
+                scaler,
+                epoch,
+                args,
+                metrics,
+                best_metric=best_metric,
+                train_generator=train_loader_generator,
+                val_generator=val_loader_generator,
+            )
+        if is_best:
+            save_checkpoint(
+                output_dir / "best.pt",
+                model,
+                optimizer,
+                scaler,
+                epoch,
+                args,
+                metrics,
+                best_metric=best_metric,
+                train_generator=train_loader_generator,
+                val_generator=val_loader_generator,
             )
 
 

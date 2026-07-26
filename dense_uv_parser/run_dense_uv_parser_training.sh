@@ -114,14 +114,22 @@ BATCH_SIZE="${BATCH_SIZE:-32}"
 NUM_WORKERS="${NUM_WORKERS:-16}"
 PREFETCH_FACTOR="${PREFETCH_FACTOR:-4}"
 EPOCHS="${EPOCHS:-1}"
+SEED="${SEED:-1234}"
+REPRODUCIBLE="${REPRODUCIBLE:-true}"
+STRICT_DETERMINISM="${STRICT_DETERMINISM:-false}"
 LR="${LR:-2e-4}"
 LR_SCHEDULE="${LR_SCHEDULE:-cosine}"
 MIN_LR_RATIO="${MIN_LR_RATIO:-0.05}"
 MIXED_PRECISION="${MIXED_PRECISION:-bf16}"
 MATMUL_PRECISION="${MATMUL_PRECISION:-high}"
-CUDNN_BENCHMARK="${CUDNN_BENCHMARK:-true}"
+CUDNN_BENCHMARK="${CUDNN_BENCHMARK:-false}"
 LOG_EVERY="${LOG_EVERY:-50}"
 BEST_METRIC="${BEST_METRIC:-loss_hard_uv_color_selection}"
+
+if [[ "$REPRODUCIBLE" == "true" ]]; then
+  export PYTHONHASHSEED="$SEED"
+  export CUBLAS_WORKSPACE_CONFIG="${CUBLAS_WORKSPACE_CONFIG:-:4096:8}"
+fi
 
 BACKGROUND_AUGMENT="${BACKGROUND_AUGMENT:-true}"
 BACKGROUND_AUGMENT_PROB="${BACKGROUND_AUGMENT_PROB:-0.9}"
@@ -286,6 +294,15 @@ if [[ "$CUDNN_BENCHMARK" == "true" ]]; then
 else
   cudnn_args=(--no_cudnn_benchmark)
 fi
+reproducibility_args=()
+if [[ "$REPRODUCIBLE" == "true" ]]; then
+  reproducibility_args=(--reproducible)
+else
+  reproducibility_args=(--no_reproducible)
+fi
+if [[ "$STRICT_DETERMINISM" == "true" ]]; then
+  reproducibility_args+=(--strict_determinism)
+fi
 resume_args=()
 if [[ -n "$RESUME" ]]; then
   resume_args=(--resume "$RESUME")
@@ -356,6 +373,7 @@ python train.py \
   --num_workers "$NUM_WORKERS" \
   --prefetch_factor "$PREFETCH_FACTOR" \
   --epochs "$EPOCHS" \
+  --seed "$SEED" \
   --lr "$LR" \
   --lr_schedule "$LR_SCHEDULE" \
   --min_lr_ratio "$MIN_LR_RATIO" \
@@ -449,4 +467,5 @@ python train.py \
   "${outer_rescue_args[@]}" \
   "${uv_class_args[@]}" \
   "${cudnn_args[@]}" \
+  "${reproducibility_args[@]}" \
   "${resume_args[@]}"
