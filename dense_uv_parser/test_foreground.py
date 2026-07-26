@@ -53,6 +53,28 @@ class DenseParserForegroundTest(unittest.TestCase):
 
         self.assertTrue(torch.equal(debug_foreground, observed))
 
+    def test_raw_face_debug_prefers_pre_affine_observed_foreground(self):
+        outputs = {"foreground": torch.full((1, 1, 2, 2), -10.0)}
+        canonical_observed = torch.tensor(
+            [[[False, False], [False, True]]]
+        )
+        source_observed = torch.tensor(
+            [[[True, True], [True, False]]]
+        )
+        routing = {
+            "foreground": torch.zeros(1, 2, 2, dtype=torch.bool),
+            "observed_foreground": canonical_observed,
+        }
+
+        debug_foreground = _raw_debug_foreground(
+            outputs,
+            routing,
+            0.5,
+            observed_foreground=source_observed,
+        )
+
+        self.assertTrue(torch.equal(debug_foreground, source_observed))
+
     def test_run_infer_defines_versioned_checkpoint_lookup_before_use(self):
         script = (Path(__file__).parent / "run_infer.sh").read_text(
             encoding="utf-8"

@@ -303,6 +303,15 @@ COMBINED=/path/to/front_back.png \
 adaptive-background `foreground_parser_input.png` passed to the parser.
 Original source RGB remains untouched for UV color extraction.
 
+The flood mask is transformed into fitted canonical coordinates with
+coverage-preserving bilinear sampling. Any positive subpixel coverage is kept,
+so a small affine scale cannot erase thin hat brims, hair tips, or outer-layer
+silhouette protrusions. `parser_debug_observed_canonical.png` shows this
+post-affine mask before route filtering. `parser_debug_face_raw.png` and
+`parser_debug_layer_face_raw.png` instead remain in original input coordinates
+and use the unwarped flood mask, so they represent the actual raw semantic-head
+predictions rather than later affine or routing rejection.
+
 Default UV outputs are:
 
 - `outputs/parser_pred_uv.png`: observed parser texels only; unknown texels are

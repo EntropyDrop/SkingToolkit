@@ -315,7 +315,12 @@ def save_simple_inpaint_uv(conditioning, output_path, alpha_threshold=0.5):
     return repaired, stats
 
 
-def _raw_debug_foreground(outputs, routing, fg_threshold):
+def _raw_debug_foreground(
+    outputs,
+    routing,
+    fg_threshold,
+    observed_foreground=None,
+):
     """Mask raw semantic heads with observed input foreground when available.
 
     The routed foreground is deliberately stricter: it excludes pixels rejected
@@ -326,6 +331,17 @@ def _raw_debug_foreground(outputs, routing, fg_threshold):
     model_foreground = (
         torch.sigmoid(outputs["foreground"])[:, 0] > fg_threshold
     )
+    if observed_foreground is not None:
+        if observed_foreground.shape != model_foreground.shape:
+            raise ValueError(
+                "observed_foreground must have shape "
+                f"{tuple(model_foreground.shape)}, got "
+                f"{tuple(observed_foreground.shape)}."
+            )
+        return observed_foreground.to(
+            device=model_foreground.device,
+            dtype=torch.bool,
+        )
     if routing is None:
         return model_foreground
     return routing.get(
@@ -358,6 +374,8 @@ def save_debug_preview(
     geometry_fill_output=None,
     renderer=None,
     views=None,
+    raw_outputs=None,
+    raw_observed_foreground=None,
 ):
     if not 0.0 <= overlay_alpha <= 1.0:
         raise ValueError(f"overlay_alpha must be in [0, 1], got {overlay_alpha}.")
@@ -368,15 +386,25 @@ def save_debug_preview(
         else routing["part"]
     )
     pred_part = torch.where(pred_fg, pred_part_values, torch.full_like(pred_part_values, IGNORE_INDEX))
-    raw_layer_values = outputs["layer"].argmax(dim=1)
-    raw_fg = _raw_debug_foreground(outputs, routing, fg_threshold)
+    raw_head_outputs = outputs if raw_outputs is None else raw_outputs
+    raw_layer_values = raw_head_outputs["layer"].argmax(dim=1)
+    raw_fg = _raw_debug_foreground(
+        raw_head_outputs,
+        None if raw_outputs is not None else routing,
+        fg_threshold,
+        observed_foreground=raw_observed_foreground,
+    )
     pred_layer_values = routing["layer"] if routing is not None else raw_layer_values
     pred_layer = torch.where(
         pred_fg,
         pred_layer_values,
         torch.full_like(outputs["layer"].argmax(dim=1), IGNORE_INDEX),
     )
-    raw_face_values = outputs["face"].argmax(dim=1) if "face" in outputs else routing["face"]
+    raw_face_values = (
+        raw_head_outputs["face"].argmax(dim=1)
+        if "face" in raw_head_outputs
+        else routing["face"]
+    )
     raw_face = torch.where(
         raw_fg,
         raw_face_values,
@@ -388,19 +416,23 @@ def save_debug_preview(
         pred_face_values,
         torch.full_like(pred_face_values, IGNORE_INDEX),
     )
-    if "layer_face" in outputs:
-        raw_layer_face_values = outputs["layer_face"].argmax(dim=1)
+    if "layer_face" in raw_head_outputs:
+        raw_layer_face_values = raw_head_outputs["layer_face"].argmax(dim=1)
         raw_layer_face = torch.where(
             raw_fg,
             raw_layer_face_values,
             torch.full_like(raw_layer_face_values, IGNORE_INDEX),
         )
     else:
-        raw_layer_values_for_debug = (
-            routing["layer"]
-            if routing is not None and outputs["layer"].shape[1] == 3
-            else raw_layer_values
-        )
+        raw_layer_values_for_debug = raw_layer_values
+        if raw_head_outputs["layer"].shape[1] == 3:
+            # Geometry-fit class 2 is a secondary/backface role, not a skin
+            # layer. It has no raw inner/outer value until geometry routing,
+            # so leave it unlabelled in the pre-affine joint preview.
+            raw_layer_values_for_debug = raw_layer_values.masked_fill(
+                raw_layer_values == 2,
+                IGNORE_INDEX,
+            )
         raw_layer = torch.where(
             raw_fg,
             raw_layer_values_for_debug,
@@ -671,6 +703,14 @@ def build_arg_parser():
     parser.add_argument("--layer_face_output", default=None, help="Twelve-class inner/outer-by-face visualization.")
     parser.add_argument("--raw_face_output", default=None, help="Six-class raw face-head visualization.")
     parser.add_argument("--raw_layer_face_output", default=None, help="Twelve-class raw joint-head visualization.")
+    parser.add_argument(
+        "--canonical_foreground_output",
+        default=None,
+        help=(
+            "Foreground mask after coverage-preserving affine "
+            "canonicalization, before route filtering."
+        ),
+    )
     parser.add_argument("--geometry_grid_output", default=None, help="Fitted inner/outer cuboid UV grid preview.")
     parser.add_argument(
         "--geometry_overlay_output",
@@ -1247,10 +1287,32 @@ def main():
 
     routing = routing_details.get("routing")
     if routing is not None:
+        if args.canonical_foreground_output:
+            canonical_foreground_path = Path(
+                args.canonical_foreground_output
+            )
+            canonical_foreground_path.parent.mkdir(
+                parents=True, exist_ok=True
+            )
+            save_image(
+                routing["observed_foreground"]
+                .unsqueeze(1)
+                .to(dtype=rendered.dtype)
+                .detach()
+                .cpu(),
+                canonical_foreground_path,
+                nrow=len(views),
+            )
         observed_routing_foreground = routing.get(
             "observed_foreground", routing["raw_foreground"]
         )
         observed_count = int(observed_routing_foreground.sum().item())
+        canonical_foreground_coverage_rescued_count = int(
+            routing.get(
+                "canonical_foreground_coverage_rescued",
+                torch.zeros_like(observed_routing_foreground),
+            ).sum().item()
+        )
         unrouted_observed_count = int(
             (
                 observed_routing_foreground
@@ -1410,6 +1472,9 @@ def main():
             + json.dumps(
                 {
                     "observed_foreground_pixels": observed_count,
+                    "canonical_foreground_coverage_rescued_pixels": (
+                        canonical_foreground_coverage_rescued_count
+                    ),
                     "unrouted_observed_pixels": unrouted_observed_count,
                     "raw_pixels": raw_count,
                     "kept_pixels": raw_count - rejected_count,
@@ -1607,6 +1672,8 @@ def main():
             geometry_fill_output=Path(args.geometry_fill_output) if args.geometry_fill_output else None,
             renderer=renderer,
             views=views,
+            raw_outputs=outputs,
+            raw_observed_foreground=observed_foreground,
         )
 
     if args.conditioning_output:

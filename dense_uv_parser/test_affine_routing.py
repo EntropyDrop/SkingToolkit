@@ -24,6 +24,7 @@ from SkingToolkit.dense_uv_parser.infer import load_parser
 from SkingToolkit.dense_uv_parser import train as parser_train
 from SkingToolkit.dense_uv_parser.utils import (
     IGNORE_INDEX,
+    canonicalize_foreground_mask,
     canonicalize_parser_render,
     canonicalize_tensor,
     build_color_sampling_support,
@@ -2226,6 +2227,22 @@ class GlobalAffineRoutingTest(unittest.TestCase):
 
         self.assertEqual(canonical.dtype, torch.float32)
         self.assertTrue(torch.allclose(canonical, tensor, atol=1e-6))
+
+    def test_canonicalize_foreground_mask_preserves_partial_coverage(self):
+        mask = torch.zeros(1, 32, 32, dtype=torch.bool)
+        mask[:, 4:28, 8:24] = True
+        mask[:, 3, 15:17] = True
+        affine = torch.tensor([[0.03, 0.0, 0.05]])
+
+        nearest = canonicalize_tensor(
+            mask.unsqueeze(1).float(),
+            affine,
+            mode="nearest",
+        )[:, 0] > 0.5
+        conservative = canonicalize_foreground_mask(mask, affine)
+
+        self.assertGreater(int(conservative.sum()), int(nearest.sum()))
+        self.assertTrue((conservative & ~nearest).any())
 
     def test_hard_uv_metrics_cast_bfloat16_outputs_to_render_dtype(self):
         renderer = FakeRenderer(valid_pixels=1)

@@ -540,6 +540,32 @@ def canonicalize_tensor(tensor, affine, mode="bilinear"):
     )
 
 
+def canonicalize_foreground_mask(mask, affine, min_coverage=1e-3):
+    """Warp a foreground mask without dropping thin silhouette coverage.
+
+    Nearest-neighbour sampling can erase a one-pixel hat brim or outer-layer
+    protrusion after even a small predicted affine scale. Bilinear coverage
+    with a low positive threshold keeps every output pixel touched by the
+    transformed source mask. Later color/background and minimum-source filters
+    remain responsible for rejecting unsupported edge colors.
+    """
+    if mask.dim() == 3:
+        mask = mask.unsqueeze(1)
+    if mask.dim() != 4 or mask.shape[1] != 1:
+        raise ValueError(
+            "Foreground mask must have shape NHW or N1HW, got "
+            f"{tuple(mask.shape)}."
+        )
+    if not 0.0 < float(min_coverage) <= 1.0:
+        raise ValueError("min_coverage must be in (0, 1].")
+    coverage = canonicalize_tensor(
+        mask.to(device=affine.device, dtype=torch.float32),
+        affine,
+        mode="bilinear",
+    )
+    return coverage[:, 0] >= float(min_coverage)
+
+
 def canonicalize_index_tensor(index, affine):
     """Undo a global transform while preserving IGNORE_INDEX outside valid labels."""
     valid = (index != IGNORE_INDEX).unsqueeze(1).float()
@@ -2802,11 +2828,19 @@ def splat_parser_predictions_to_uv_conditioning(
         mode="nearest",
         fill_color=source_fill,
     )
-    canonical_observed_foreground = canonicalize_tensor(
+    canonical_observed_foreground = canonicalize_foreground_mask(
+        observed_foreground,
+        routing_outputs["affine"],
+    )
+    canonical_observed_foreground_nearest = canonicalize_tensor(
         observed_foreground.unsqueeze(1).to(dtype=rendered.dtype),
         routing_outputs["affine"],
         mode="nearest",
     )[:, 0] > 0.5
+    canonical_foreground_coverage_rescued = (
+        canonical_observed_foreground
+        & ~canonical_observed_foreground_nearest
+    )
     color_support = build_color_sampling_support(
         canonical_rendered,
         canonical_observed_foreground,
@@ -3127,6 +3161,9 @@ def splat_parser_predictions_to_uv_conditioning(
         trusted = trusted & ~outer_source_rejected
     routing["raw_foreground"] = raw_foreground
     routing["observed_foreground"] = canonical_observed_foreground
+    routing["canonical_foreground_coverage_rescued"] = (
+        canonical_foreground_coverage_rescued
+    )
     routing["background_rejected"] = raw_foreground & ~canonical_observed_foreground
     routing["rejected"] = raw_foreground & ~trusted
     routing["outer_geometry_supported"] = geometry_supported_outer

@@ -128,6 +128,7 @@ FACE_OUTPUT="${FACE_OUTPUT-outputs/parser_debug_face.png}"
 LAYER_FACE_OUTPUT="${LAYER_FACE_OUTPUT-outputs/parser_debug_layer_face.png}"
 RAW_FACE_OUTPUT="${RAW_FACE_OUTPUT-outputs/parser_debug_face_raw.png}"
 RAW_LAYER_FACE_OUTPUT="${RAW_LAYER_FACE_OUTPUT-outputs/parser_debug_layer_face_raw.png}"
+CANONICAL_FOREGROUND_OUTPUT="${CANONICAL_FOREGROUND_OUTPUT-outputs/parser_debug_observed_canonical.png}"
 GEOMETRY_GRID_OUTPUT="${GEOMETRY_GRID_OUTPUT-outputs/parser_debug_geometry_grid.png}"
 GEOMETRY_OVERLAY_OUTPUT="${GEOMETRY_OVERLAY_OUTPUT-outputs/parser_debug_geometry_overlay.png}"
 GEOMETRY_ROUTED_OVERLAY_OUTPUT="${GEOMETRY_ROUTED_OVERLAY_OUTPUT-outputs/parser_debug_geometry_routed_overlay.png}"
@@ -396,6 +397,9 @@ fi
 if [[ -n "$RAW_LAYER_FACE_OUTPUT" ]]; then
   args+=(--raw_layer_face_output "$RAW_LAYER_FACE_OUTPUT")
 fi
+if [[ -n "$CANONICAL_FOREGROUND_OUTPUT" ]]; then
+  args+=(--canonical_foreground_output "$CANONICAL_FOREGROUND_OUTPUT")
+fi
 
 if [[ -n "$GEOMETRY_GRID_OUTPUT" ]]; then
   args+=(--geometry_grid_output "$GEOMETRY_GRID_OUTPUT")
@@ -417,7 +421,7 @@ if [[ -n "$OUTPUT" ]]; then
   args+=(--output "$OUTPUT")
 fi
 
-if [[ -z "$CONDITIONING_OUTPUT" && -z "$PARSER_UV_OUTPUT" && -z "$SIMPLE_INPAINT_OUTPUT" && -z "$DEBUG_OUTPUT" && -z "$OVERLAY_OUTPUT" && -z "$INNER_CUTOUT_OUTPUT" && -z "$OUTER_CUTOUT_OUTPUT" && -z "$SECONDARY_CUTOUT_OUTPUT" && -z "$COLOR_SOURCE_OUTPUT" && -z "$FACE_OUTPUT" && -z "$LAYER_FACE_OUTPUT" && -z "$RAW_FACE_OUTPUT" && -z "$RAW_LAYER_FACE_OUTPUT" && -z "$GEOMETRY_GRID_OUTPUT" && -z "$GEOMETRY_OVERLAY_OUTPUT" && -z "$GEOMETRY_ROUTED_OVERLAY_OUTPUT" && -z "$GEOMETRY_FILL_OUTPUT" && -z "$OUTPUT" ]]; then
+if [[ -z "$CONDITIONING_OUTPUT" && -z "$PARSER_UV_OUTPUT" && -z "$SIMPLE_INPAINT_OUTPUT" && -z "$DEBUG_OUTPUT" && -z "$OVERLAY_OUTPUT" && -z "$INNER_CUTOUT_OUTPUT" && -z "$OUTER_CUTOUT_OUTPUT" && -z "$SECONDARY_CUTOUT_OUTPUT" && -z "$COLOR_SOURCE_OUTPUT" && -z "$FACE_OUTPUT" && -z "$LAYER_FACE_OUTPUT" && -z "$RAW_FACE_OUTPUT" && -z "$RAW_LAYER_FACE_OUTPUT" && -z "$CANONICAL_FOREGROUND_OUTPUT" && -z "$GEOMETRY_GRID_OUTPUT" && -z "$GEOMETRY_OVERLAY_OUTPUT" && -z "$GEOMETRY_ROUTED_OVERLAY_OUTPUT" && -z "$GEOMETRY_FILL_OUTPUT" && -z "$OUTPUT" ]]; then
   echo "Nothing to write. Set at least one parser/debug/final output." >&2
   exit 1
 fi
@@ -480,6 +484,9 @@ if [[ -n "$RAW_FACE_OUTPUT" ]]; then
 fi
 if [[ -n "$RAW_LAYER_FACE_OUTPUT" ]]; then
   echo "Raw layer-face output: $RAW_LAYER_FACE_OUTPUT"
+fi
+if [[ -n "$CANONICAL_FOREGROUND_OUTPUT" ]]; then
+  echo "Canonical foreground output: $CANONICAL_FOREGROUND_OUTPUT"
 fi
 if [[ -n "$GEOMETRY_GRID_OUTPUT" ]]; then
   echo "Geometry grid output: $GEOMETRY_GRID_OUTPUT"
