@@ -109,7 +109,11 @@ SEMANTIC_LAYERS="${SEMANTIC_LAYERS:-1}"
 SEMANTIC_DROPOUT="${SEMANTIC_DROPOUT:-0.05}"
 SEMANTIC_SPATIAL_CHANNELS="${SEMANTIC_SPATIAL_CHANNELS:-64}"
 SEMANTIC_RUNTIME_BATCH_SIZE="${SEMANTIC_RUNTIME_BATCH_SIZE:-32}"
-PREDICT_OUTER_UV_OCCUPANCY="${PREDICT_OUTER_UV_OCCUPANCY:-false}"
+PREDICT_OUTER_UV_OCCUPANCY="${PREDICT_OUTER_UV_OCCUPANCY:-true}"
+OUTER_UV_FEATURE_CHANNELS="${OUTER_UV_FEATURE_CHANNELS:-32}"
+OUTER_UV_TOPOLOGY_CHANNELS="${OUTER_UV_TOPOLOGY_CHANNELS:-64}"
+OUTER_UV_TOPOLOGY_LAYERS="${OUTER_UV_TOPOLOGY_LAYERS:-3}"
+OUTER_UV_TOPOLOGY_DROPOUT="${OUTER_UV_TOPOLOGY_DROPOUT:-0.05}"
 BATCH_SIZE="${BATCH_SIZE:-32}"
 NUM_WORKERS="${NUM_WORKERS:-16}"
 PREFETCH_FACTOR="${PREFETCH_FACTOR:-4}"
@@ -172,7 +176,11 @@ OUTER_UV_OCCUPANCY_BLEND_WEIGHT="${OUTER_UV_OCCUPANCY_BLEND_WEIGHT:-0.30}"
 OUTER_UV_OCCUPANCY_GATE_THRESHOLD="${OUTER_UV_OCCUPANCY_GATE_THRESHOLD:-0.10}"
 OUTER_UV_OCCUPANCY_RESCUE_THRESHOLD="${OUTER_UV_OCCUPANCY_RESCUE_THRESHOLD:-0.70}"
 OUTER_UV_OCCUPANCY_RESCUE_ROUTE_THRESHOLD="${OUTER_UV_OCCUPANCY_RESCUE_ROUTE_THRESHOLD:-0.30}"
-OUTER_UV_OCCUPANCY_ROUTING="${OUTER_UV_OCCUPANCY_ROUTING:-false}"
+OUTER_UV_OCCUPANCY_ROUTING="${OUTER_UV_OCCUPANCY_ROUTING:-true}"
+OUTER_UV_COMPONENT_ROUTING="${OUTER_UV_COMPONENT_ROUTING:-true}"
+OUTER_UV_COMPONENT_SEED_THRESHOLD="${OUTER_UV_COMPONENT_SEED_THRESHOLD:-0.80}"
+OUTER_UV_COMPONENT_GROW_THRESHOLD="${OUTER_UV_COMPONENT_GROW_THRESHOLD:-0.50}"
+OUTER_UV_COMPONENT_MIN_SIZE="${OUTER_UV_COMPONENT_MIN_SIZE:-2}"
 SPLAT_COLOR_AGGREGATION="${SPLAT_COLOR_AGGREGATION:-grid_mode}"
 ALLOW_SEMANTIC_FALLBACK="${ALLOW_SEMANTIC_FALLBACK:-false}"
 
@@ -201,6 +209,12 @@ LAMBDA_SEMANTIC_PRESENCE="${LAMBDA_SEMANTIC_PRESENCE:-0.25}"
 LAMBDA_SEMANTIC_COVERAGE="${LAMBDA_SEMANTIC_COVERAGE:-0.25}"
 LAMBDA_OUTER_UV_OCCUPANCY="${LAMBDA_OUTER_UV_OCCUPANCY:-0.50}"
 OUTER_UV_OCCUPANCY_DICE_WEIGHT="${OUTER_UV_OCCUPANCY_DICE_WEIGHT:-0.25}"
+OUTER_HARD_POSITIVE_FRACTION="${OUTER_HARD_POSITIVE_FRACTION:-0.25}"
+OUTER_HARD_POSITIVE_WEIGHT="${OUTER_HARD_POSITIVE_WEIGHT:-0.50}"
+LAMBDA_OUTER_COMPONENT_RECALL="${LAMBDA_OUTER_COMPONENT_RECALL:-0.25}"
+LAMBDA_OUTER_TOPOLOGY="${LAMBDA_OUTER_TOPOLOGY:-0.10}"
+LAMBDA_ROUTE_OCCUPANCY_AGREEMENT="${LAMBDA_ROUTE_OCCUPANCY_AGREEMENT:-0.25}"
+OUTER_OCCUPANCY_AGREEMENT_WARMUP_FRACTION="${OUTER_OCCUPANCY_AGREEMENT_WARMUP_FRACTION:-0.20}"
 OUTER_FALSE_POSITIVE_GAMMA="${OUTER_FALSE_POSITIVE_GAMMA:-3.0}"
 OUTER_FALSE_NEGATIVE_GAMMA="${OUTER_FALSE_NEGATIVE_GAMMA:-2.0}"
 PRIMARY_ROUTE_SWAP_GAMMA="${PRIMARY_ROUTE_SWAP_GAMMA:-2.0}"
@@ -283,6 +297,12 @@ if [[ "$OUTER_UV_OCCUPANCY_ROUTING" == "true" ]]; then
   outer_occupancy_routing_args=(--outer_uv_occupancy_routing)
 else
   outer_occupancy_routing_args=(--no_outer_uv_occupancy_routing)
+fi
+outer_component_routing_args=()
+if [[ "$OUTER_UV_COMPONENT_ROUTING" == "true" ]]; then
+  outer_component_routing_args=(--outer_uv_component_routing)
+else
+  outer_component_routing_args=(--no_outer_uv_component_routing)
 fi
 outer_rescue_args=()
 if [[ "$OUTER_GEOMETRY_RESCUE" == "true" ]]; then
@@ -370,6 +390,10 @@ python train.py \
   --route_prior_width "$ROUTE_PRIOR_WIDTH" \
   --route_prior_logit_cap "$ROUTE_PRIOR_LOGIT_CAP" \
   --route_prior_dropout "$ROUTE_PRIOR_DROPOUT" \
+  --outer_uv_feature_channels "$OUTER_UV_FEATURE_CHANNELS" \
+  --outer_uv_topology_channels "$OUTER_UV_TOPOLOGY_CHANNELS" \
+  --outer_uv_topology_layers "$OUTER_UV_TOPOLOGY_LAYERS" \
+  --outer_uv_topology_dropout "$OUTER_UV_TOPOLOGY_DROPOUT" \
   "${semantic_args[@]}" \
   --batch_size "$BATCH_SIZE" \
   --num_workers "$NUM_WORKERS" \
@@ -408,6 +432,12 @@ python train.py \
   --lambda_semantic_coverage "$LAMBDA_SEMANTIC_COVERAGE" \
   --lambda_outer_uv_occupancy "$LAMBDA_OUTER_UV_OCCUPANCY" \
   --outer_uv_occupancy_dice_weight "$OUTER_UV_OCCUPANCY_DICE_WEIGHT" \
+  --outer_hard_positive_fraction "$OUTER_HARD_POSITIVE_FRACTION" \
+  --outer_hard_positive_weight "$OUTER_HARD_POSITIVE_WEIGHT" \
+  --lambda_outer_component_recall "$LAMBDA_OUTER_COMPONENT_RECALL" \
+  --lambda_outer_topology "$LAMBDA_OUTER_TOPOLOGY" \
+  --lambda_route_occupancy_agreement "$LAMBDA_ROUTE_OCCUPANCY_AGREEMENT" \
+  --outer_occupancy_agreement_warmup_fraction "$OUTER_OCCUPANCY_AGREEMENT_WARMUP_FRACTION" \
   --outer_false_positive_gamma "$OUTER_FALSE_POSITIVE_GAMMA" \
   --outer_false_negative_gamma "$OUTER_FALSE_NEGATIVE_GAMMA" \
   --primary_route_swap_gamma "$PRIMARY_ROUTE_SWAP_GAMMA" \
@@ -458,6 +488,9 @@ python train.py \
   --outer_uv_occupancy_gate_threshold "$OUTER_UV_OCCUPANCY_GATE_THRESHOLD" \
   --outer_uv_occupancy_rescue_threshold "$OUTER_UV_OCCUPANCY_RESCUE_THRESHOLD" \
   --outer_uv_occupancy_rescue_route_threshold "$OUTER_UV_OCCUPANCY_RESCUE_ROUTE_THRESHOLD" \
+  --outer_uv_component_seed_threshold "$OUTER_UV_COMPONENT_SEED_THRESHOLD" \
+  --outer_uv_component_grow_threshold "$OUTER_UV_COMPONENT_GROW_THRESHOLD" \
+  --outer_uv_component_min_size "$OUTER_UV_COMPONENT_MIN_SIZE" \
   --splat_color_aggregation "$SPLAT_COLOR_AGGREGATION" \
   "${route_prior_args[@]}" \
   "${background_args[@]}" \
@@ -468,6 +501,7 @@ python train.py \
   "${cross_view_outer_args[@]}" \
   "${outer_occupancy_head_args[@]}" \
   "${outer_occupancy_routing_args[@]}" \
+  "${outer_component_routing_args[@]}" \
   "${outer_rescue_args[@]}" \
   "${uv_class_args[@]}" \
   "${cudnn_args[@]}" \

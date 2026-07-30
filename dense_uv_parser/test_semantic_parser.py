@@ -3,6 +3,7 @@ import unittest
 from pathlib import Path
 
 import torch
+import torch.nn.functional as F
 from PIL import Image
 
 from SkingToolkit.dense_uv_parser.infer import (
@@ -40,33 +41,57 @@ class SemanticDenseUVParserTest(unittest.TestCase):
             predict_outer_uv_occupancy=True,
         )
 
+    def projected_occupancy(self, model, outputs):
+        features = F.interpolate(
+            outputs["outer_uv_features"],
+            size=(64, 64),
+            mode="bilinear",
+            align_corners=False,
+        )
+        features = features.reshape(
+            -1,
+            model.view_classes,
+            features.shape[1],
+            64,
+            64,
+        ).mean(dim=1)
+        atlas_features = torch.cat(
+            [features, features.new_zeros(features.shape[0], 4, 64, 64)],
+            dim=1,
+        )
+        return model.predict_projected_outer_uv_occupancy(
+            atlas_features,
+            outputs["outer_uv_global_context"],
+        )
+
     def test_multiview_semantics_condition_dense_outputs(self):
         model = self.build_model()
         images = torch.rand(4, 4, 32, 32)
         view_ids = torch.tensor([0, 1, 0, 1])
         semantics = torch.rand(2, 2, 16)
         outputs = model(images, view_ids=view_ids, semantic_features=semantics)
+        occupancy_logits = self.projected_occupancy(model, outputs)
 
         self.assertEqual(tuple(outputs["layer"].shape), (4, 3, 32, 32))
         self.assertEqual(tuple(outputs["route_confidence"].shape), (4, 1, 32, 32))
         self.assertEqual(tuple(outputs["outer_presence_logits"].shape), (2, 6))
         self.assertEqual(tuple(outputs["outer_coverage"].shape), (2, 6))
         self.assertEqual(
-            tuple(outputs["outer_uv_occupancy_logits"].shape),
+            tuple(occupancy_logits.shape),
             (2, 1, 64, 64),
         )
 
         loss = (
             outputs["layer"].mean()
             + outputs["outer_coverage"].mean()
-            + outputs["outer_uv_occupancy_logits"].mean()
+            + occupancy_logits.mean()
         )
         loss.backward()
         gradient = model.semantic_fusion.input_projection[1].weight.grad
         self.assertIsNotNone(gradient)
         self.assertGreater(float(gradient.abs().sum()), 0.0)
         occupancy_gradient = (
-            model.outer_uv_occupancy_head[-1].weight.grad
+            model.outer_uv_occupancy_head.output[-1].weight.grad
         )
         self.assertIsNotNone(occupancy_gradient)
         self.assertGreater(float(occupancy_gradient.abs().sum()), 0.0)
@@ -219,11 +244,12 @@ class SemanticDenseUVParserTest(unittest.TestCase):
             view_ids=torch.tensor([0, 1]),
             semantic_features=torch.rand(1, 2, 16),
         )
+        occupancy_logits = self.projected_occupancy(model, outputs)
 
-        outputs["outer_uv_occupancy_logits"].mean().backward()
+        occupancy_logits.mean().backward()
 
         self.assertIsNotNone(
-            model.outer_uv_occupancy_head[-1].weight.grad
+            model.outer_uv_occupancy_head.output[-1].weight.grad
         )
         self.assertIsNone(model.stem.block[0].weight.grad)
         self.assertIsNone(

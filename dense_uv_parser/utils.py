@@ -11,6 +11,9 @@ if str(WORKSPACE_ROOT) not in sys.path:
     sys.path.insert(0, str(WORKSPACE_ROOT))
 
 from SkingToolkit.dense_uv_parser.uv_layout import minecraft_layer_rects  # noqa: E402
+from SkingToolkit.dense_uv_parser.uv_topology import (  # noqa: E402
+    build_outer_uv_graph,
+)
 
 IGNORE_INDEX = 255
 PART_CLASSES = 6
@@ -623,7 +626,9 @@ def canonicalize_parser_outputs(outputs):
                 "affine",
                 "route_role_prior_raw",
                 "outer_uv_occupancy_logits",
+                "outer_uv_occupancy_support",
             )
+            or name == "outer_uv_global_context"
             or not torch.is_tensor(value)
             or value.dim() != 4
         ):
@@ -985,20 +990,20 @@ def _aggregate_role_probabilities_by_direct_texel(
 
 
 def _project_outer_uv_occupancy_to_view(
-    occupancy_logits,
+    occupancy_probability,
     static,
     view_batch,
 ):
     """Gather a grouped 64x64 outer-alpha prior into one projected view."""
-    if occupancy_logits is None:
+    if occupancy_probability is None:
         return None
-    if occupancy_logits.shape != (view_batch, 1, UV_SIZE, UV_SIZE):
+    if occupancy_probability.shape != (view_batch, 1, UV_SIZE, UV_SIZE):
         raise ValueError(
-            "outer_uv_occupancy_logits must be grouped as "
+            "outer_uv_occupancy probability must be grouped as "
             f"{(view_batch, 1, UV_SIZE, UV_SIZE)}, got "
-            f"{tuple(occupancy_logits.shape)}."
+            f"{tuple(occupancy_probability.shape)}."
         )
-    probability = torch.sigmoid(occupancy_logits.float()).flatten(2)
+    probability = occupancy_probability.float().flatten(2)
     flat_uv = static["flat_uv"][ROUTE_OUTER_PRIMARY].reshape(
         1, 1, -1
     ).expand(view_batch, 1, -1)
@@ -1007,6 +1012,152 @@ def _project_outer_uv_occupancy_to_view(
     )
     outer_valid = static["masks"][ROUTE_OUTER_PRIMARY].unsqueeze(0)
     return torch.where(outer_valid, projected, torch.zeros_like(projected))
+
+
+def _outer_graph_component_labels(candidate, edge_index, max_steps=64):
+    """Label candidate outer nodes by bounded min-label propagation."""
+    batch, node_count = candidate.shape
+    labels = torch.arange(
+        node_count,
+        device=candidate.device,
+        dtype=torch.long,
+    ).view(1, -1).expand(batch, -1).clone()
+    labels[~candidate] = node_count
+    source, target = edge_index
+    expanded_target = target.view(1, -1).expand(batch, -1)
+    connected_edge = candidate[:, source] & candidate[:, target]
+    for _ in range(int(max_steps)):
+        neighbour = torch.where(
+            connected_edge,
+            labels[:, source],
+            torch.full_like(labels[:, source], node_count),
+        )
+        updated = labels.clone()
+        updated.scatter_reduce_(
+            1,
+            expanded_target,
+            neighbour,
+            reduce="amin",
+            include_self=True,
+        )
+        labels = updated
+    return labels
+
+
+def outer_uv_topology_hysteresis(
+    probability,
+    seed_threshold=0.80,
+    grow_threshold=0.50,
+    min_component_size=2,
+    max_steps=64,
+):
+    """Grow high-confidence outer seeds through topology-supported candidates."""
+    if probability.dim() == 3:
+        probability = probability.unsqueeze(1)
+    if probability.dim() != 4 or probability.shape[1:] != (
+        1,
+        UV_SIZE,
+        UV_SIZE,
+    ):
+        raise ValueError("Outer occupancy probability must be Bx1x64x64.")
+    if not 0.0 <= float(grow_threshold) <= float(seed_threshold) <= 1.0:
+        raise ValueError(
+            "Require 0 <= grow_threshold <= seed_threshold <= 1."
+        )
+    if min_component_size < 1:
+        raise ValueError("min_component_size must be positive.")
+    flat_indices, edge_index = build_outer_uv_graph()
+    flat_indices = flat_indices.to(probability.device)
+    edge_index = edge_index.to(probability.device)
+    nodes = probability.float().flatten(2)[:, 0].index_select(
+        1, flat_indices
+    )
+    candidate = nodes >= float(grow_threshold)
+    seeds = nodes >= float(seed_threshold)
+    source, target = edge_index
+    expanded_target = target.view(1, -1).expand(nodes.shape[0], -1)
+    active = seeds.clone()
+    component_score = torch.where(seeds, nodes, torch.zeros_like(nodes))
+    connected_edge = candidate[:, source] & candidate[:, target]
+    for _ in range(int(max_steps)):
+        neighbour_active = torch.where(
+            connected_edge,
+            active[:, source],
+            torch.zeros_like(active[:, source]),
+        )
+        propagated_active = torch.zeros_like(active, dtype=torch.uint8)
+        propagated_active.scatter_reduce_(
+            1,
+            expanded_target,
+            neighbour_active.to(torch.uint8),
+            reduce="amax",
+            include_self=False,
+        )
+        active = active | (candidate & propagated_active.bool())
+
+        neighbour_score = torch.where(
+            connected_edge,
+            component_score[:, source],
+            torch.zeros_like(component_score[:, source]),
+        )
+        propagated_score = torch.zeros_like(component_score)
+        propagated_score.scatter_reduce_(
+            1,
+            expanded_target,
+            neighbour_score,
+            reduce="amax",
+            include_self=False,
+        )
+        component_score = torch.maximum(
+            component_score,
+            torch.where(candidate, propagated_score, torch.zeros_like(propagated_score)),
+        )
+
+    labels = _outer_graph_component_labels(
+        candidate,
+        edge_index,
+        max_steps=max_steps,
+    )
+    node_count = nodes.shape[1]
+    batch_offsets = (
+        torch.arange(nodes.shape[0], device=nodes.device).view(-1, 1)
+        * (node_count + 1)
+    )
+    component_index = labels + batch_offsets
+    component_sizes = nodes.new_zeros(nodes.shape[0] * (node_count + 1))
+    component_sizes.scatter_add_(
+        0,
+        component_index[candidate],
+        torch.ones_like(nodes[candidate]),
+    )
+    node_component_size = component_sizes[component_index]
+    active = active & (node_component_size >= int(min_component_size))
+    grown = active & ~seeds
+    structured_nodes = torch.where(
+        active,
+        torch.maximum(nodes, component_score),
+        torch.zeros_like(nodes),
+    )
+
+    def scatter_nodes(node_values, dtype=None):
+        atlas = node_values.new_zeros(
+            node_values.shape[0],
+            UV_SIZE * UV_SIZE,
+            dtype=dtype,
+        )
+        atlas[:, flat_indices] = node_values.to(dtype=atlas.dtype)
+        return atlas.reshape(-1, 1, UV_SIZE, UV_SIZE)
+
+    return {
+        "probability": scatter_nodes(structured_nodes),
+        "accepted": scatter_nodes(active, dtype=torch.bool),
+        "seed": scatter_nodes(seeds & active, dtype=torch.bool),
+        "grown": scatter_nodes(grown, dtype=torch.bool),
+        "rejected_candidate": scatter_nodes(
+            candidate & ~active,
+            dtype=torch.bool,
+        ),
+    }
 
 
 def aggregate_direct_outer_values_by_view(
@@ -1070,6 +1221,111 @@ def aggregate_direct_outer_values_by_view(
         torch.stack(pooled_views, dim=1),
         torch.stack(supported_views, dim=1),
     )
+
+
+def attach_projected_outer_uv_occupancy(
+    model,
+    outputs,
+    renderer,
+    views,
+    observed_foreground=None,
+    center_power=2.0,
+):
+    """Project dense parser features into UV space and run the topology head."""
+    if not getattr(model, "predict_outer_uv_occupancy", False):
+        return outputs
+    if "outer_uv_features" not in outputs:
+        raise ValueError(
+            "Projected occupancy parser did not return outer_uv_features."
+        )
+    views = parse_views(views)
+    feature_map = outputs["outer_uv_features"]
+    layer_logits = outputs["layer"]
+    foreground = torch.sigmoid(outputs["foreground"].float())
+    if "affine" in outputs:
+        affine = outputs["affine"]
+        feature_map = canonicalize_tensor(feature_map, affine, mode="bilinear")
+        layer_logits = canonicalize_tensor(
+            layer_logits, affine, mode="bilinear"
+        )
+        foreground = canonicalize_tensor(
+            foreground, affine, mode="bilinear"
+        )
+        if observed_foreground is not None:
+            if observed_foreground.dim() == 3:
+                observed_foreground = observed_foreground.unsqueeze(1)
+            observed_foreground = canonicalize_tensor(
+                observed_foreground.float(),
+                affine,
+                mode="bilinear",
+            )
+    elif observed_foreground is not None and observed_foreground.dim() == 3:
+        observed_foreground = observed_foreground.unsqueeze(1)
+    if observed_foreground is not None:
+        foreground = observed_foreground.to(
+            device=foreground.device,
+            dtype=foreground.dtype,
+        ).clamp(0.0, 1.0)
+
+    outer_probability = torch.softmax(
+        layer_logits.float(), dim=1
+    )[:, ROUTE_OUTER_PRIMARY : ROUTE_OUTER_PRIMARY + 1].detach()
+    values = torch.cat(
+        [
+            feature_map.float(),
+            outer_probability,
+            foreground.float().detach(),
+        ],
+        dim=1,
+    )
+    pooled, support = aggregate_direct_outer_values_by_view(
+        renderer,
+        views,
+        values,
+        center_power=center_power,
+    )
+    support_weight = support.unsqueeze(2).to(dtype=pooled.dtype)
+    support_count = support_weight.sum(dim=1).clamp_min(1.0)
+    feature_channels = feature_map.shape[1]
+    pooled_mean = (
+        (pooled * support_weight).sum(dim=1) / support_count
+    )
+    mean_features = pooled_mean[:, :feature_channels]
+    mean_outer = pooled_mean[:, feature_channels : feature_channels + 1]
+    mean_foreground = pooled_mean[:, feature_channels + 1 : feature_channels + 2]
+    per_view_outer = pooled[:, :, feature_channels : feature_channels + 1]
+    max_outer = torch.where(
+        support_weight.bool(),
+        per_view_outer,
+        torch.zeros_like(per_view_outer),
+    ).amax(dim=1)
+    support_fraction = (
+        support_count / max(float(len(views)), 1.0)
+    )
+    atlas_features = torch.cat(
+        [
+            mean_features,
+            mean_outer,
+            max_outer,
+            mean_foreground,
+            support_fraction,
+        ],
+        dim=1,
+    ).reshape(
+        mean_features.shape[0],
+        feature_channels + 4,
+        UV_SIZE,
+        UV_SIZE,
+    )
+    logits = model.predict_projected_outer_uv_occupancy(
+        atlas_features,
+        outputs["outer_uv_global_context"],
+    )
+    outputs["outer_uv_occupancy_logits"] = logits
+    outputs["outer_uv_occupancy_support"] = (
+        support.any(dim=1).reshape(-1, 1, UV_SIZE, UV_SIZE)
+    )
+    return outputs
 
 
 def _project_grouped_outer_texels_to_views(
@@ -1535,6 +1791,10 @@ def _routing_from_geometry_outputs(
     outer_uv_occupancy_gate_threshold=0.10,
     outer_uv_occupancy_rescue_threshold=0.70,
     outer_uv_occupancy_rescue_route_threshold=0.30,
+    outer_uv_component_routing=True,
+    outer_uv_component_seed_threshold=0.80,
+    outer_uv_component_grow_threshold=0.50,
+    outer_uv_component_min_size=2,
     observed_foreground=None,
     cross_view_outer_consistency=True,
     cross_view_outer_weight=0.50,
@@ -1584,11 +1844,28 @@ def _routing_from_geometry_outputs(
     occupancy_rescued_outer = torch.zeros_like(fg)
     occupancy_rejected_outer = torch.zeros_like(fg)
     projected_outer_occupancy = torch.zeros_like(outer_prob)
+    projected_outer_component_seed = torch.zeros_like(fg)
+    projected_outer_component_grown = torch.zeros_like(fg)
+    projected_outer_component_rejected = torch.zeros_like(fg)
     occupancy_logits = (
         outputs.get("outer_uv_occupancy_logits")
         if outer_uv_occupancy
         else None
     )
+    occupancy_details = None
+    occupancy_probability = None
+    if occupancy_logits is not None:
+        raw_occupancy_probability = torch.sigmoid(occupancy_logits.float())
+        if outer_uv_component_routing:
+            occupancy_details = outer_uv_topology_hysteresis(
+                raw_occupancy_probability,
+                seed_threshold=outer_uv_component_seed_threshold,
+                grow_threshold=outer_uv_component_grow_threshold,
+                min_component_size=outer_uv_component_min_size,
+            )
+            occupancy_probability = occupancy_details["probability"]
+        else:
+            occupancy_probability = raw_occupancy_probability
     cross_view = None
     if cross_view_outer_consistency and len(views) >= cross_view_outer_min_views:
         if observed_foreground is None:
@@ -1618,12 +1895,41 @@ def _routing_from_geometry_outputs(
 
         inner_valid = static["masks"][0].unsqueeze(0).expand(outer_prob[selection].shape[0], -1, -1)
         outer_valid = static["masks"][1].unsqueeze(0).expand_as(inner_valid)
-        if texel_consensus or cross_view is not None:
+        if (
+            texel_consensus
+            or cross_view is not None
+            or occupancy_probability is not None
+        ):
             view_occupancy = _project_outer_uv_occupancy_to_view(
-                occupancy_logits,
+                occupancy_probability,
                 static,
                 outer_prob[selection].shape[0],
             )
+            if occupancy_details is not None:
+                projected_outer_component_seed[selection] = (
+                    _project_outer_uv_occupancy_to_view(
+                        occupancy_details["seed"].float(),
+                        static,
+                        outer_prob[selection].shape[0],
+                    )
+                    > 0.5
+                )
+                projected_outer_component_grown[selection] = (
+                    _project_outer_uv_occupancy_to_view(
+                        occupancy_details["grown"].float(),
+                        static,
+                        outer_prob[selection].shape[0],
+                    )
+                    > 0.5
+                )
+                projected_outer_component_rejected[selection] = (
+                    _project_outer_uv_occupancy_to_view(
+                        occupancy_details["rejected_candidate"].float(),
+                        static,
+                        outer_prob[selection].shape[0],
+                    )
+                    > 0.5
+                )
             consensus = _soft_route_role_consensus(
                 role_prob[selection],
                 static,
@@ -1780,6 +2086,11 @@ def _routing_from_geometry_outputs(
         "occupancy_rescued_outer": occupancy_rescued_outer,
         "occupancy_rejected_outer": occupancy_rejected_outer,
         "projected_outer_occupancy": projected_outer_occupancy,
+        "projected_outer_component_seed": projected_outer_component_seed,
+        "projected_outer_component_grown": projected_outer_component_grown,
+        "projected_outer_component_rejected": (
+            projected_outer_component_rejected
+        ),
         "outer_uv_occupancy_available": torch.full_like(
             fg, occupancy_logits is not None
         ),
@@ -1856,6 +2167,10 @@ def _routing_from_geometry_surface_outputs(
     outer_uv_occupancy_gate_threshold=0.10,
     outer_uv_occupancy_rescue_threshold=0.70,
     outer_uv_occupancy_rescue_route_threshold=0.30,
+    outer_uv_component_routing=True,
+    outer_uv_component_seed_threshold=0.80,
+    outer_uv_component_grow_threshold=0.50,
+    outer_uv_component_min_size=2,
     observed_foreground=None,
     cross_view_outer_consistency=True,
     cross_view_outer_weight=0.50,
@@ -1909,11 +2224,28 @@ def _routing_from_geometry_surface_outputs(
     occupancy_rescued_outer = torch.zeros_like(fg)
     occupancy_rejected_outer = torch.zeros_like(fg)
     projected_outer_occupancy = torch.zeros_like(foreground_prob)
+    projected_outer_component_seed = torch.zeros_like(fg)
+    projected_outer_component_grown = torch.zeros_like(fg)
+    projected_outer_component_rejected = torch.zeros_like(fg)
     occupancy_logits = (
         outputs.get("outer_uv_occupancy_logits")
         if outer_uv_occupancy
         else None
     )
+    occupancy_details = None
+    occupancy_probability = None
+    if occupancy_logits is not None:
+        raw_occupancy_probability = torch.sigmoid(occupancy_logits.float())
+        if outer_uv_component_routing:
+            occupancy_details = outer_uv_topology_hysteresis(
+                raw_occupancy_probability,
+                seed_threshold=outer_uv_component_seed_threshold,
+                grow_threshold=outer_uv_component_grow_threshold,
+                min_component_size=outer_uv_component_min_size,
+            )
+            occupancy_probability = occupancy_details["probability"]
+        else:
+            occupancy_probability = raw_occupancy_probability
     cross_view = None
     if cross_view_outer_consistency and len(views) >= cross_view_outer_min_views:
         if observed_foreground is None:
@@ -1959,12 +2291,41 @@ def _routing_from_geometry_surface_outputs(
         role_top = view_role_prob.topk(2, dim=1).values
         role_margin = role_top[:, 0] - role_top[:, 1]
 
-        if texel_consensus or cross_view is not None:
+        if (
+            texel_consensus
+            or cross_view is not None
+            or occupancy_probability is not None
+        ):
             view_occupancy = _project_outer_uv_occupancy_to_view(
-                occupancy_logits,
+                occupancy_probability,
                 static,
                 view_batch,
             )
+            if occupancy_details is not None:
+                projected_outer_component_seed[selection] = (
+                    _project_outer_uv_occupancy_to_view(
+                        occupancy_details["seed"].float(),
+                        static,
+                        view_batch,
+                    )
+                    > 0.5
+                )
+                projected_outer_component_grown[selection] = (
+                    _project_outer_uv_occupancy_to_view(
+                        occupancy_details["grown"].float(),
+                        static,
+                        view_batch,
+                    )
+                    > 0.5
+                )
+                projected_outer_component_rejected[selection] = (
+                    _project_outer_uv_occupancy_to_view(
+                        occupancy_details["rejected_candidate"].float(),
+                        static,
+                        view_batch,
+                    )
+                    > 0.5
+                )
             consensus = _soft_route_role_consensus(
                 view_role_prob,
                 static,
@@ -2169,6 +2530,11 @@ def _routing_from_geometry_surface_outputs(
         "occupancy_rescued_outer": occupancy_rescued_outer,
         "occupancy_rejected_outer": occupancy_rejected_outer,
         "projected_outer_occupancy": projected_outer_occupancy,
+        "projected_outer_component_seed": projected_outer_component_seed,
+        "projected_outer_component_grown": projected_outer_component_grown,
+        "projected_outer_component_rejected": (
+            projected_outer_component_rejected
+        ),
         "outer_uv_occupancy_available": torch.full_like(
             fg, occupancy_logits is not None
         ),
@@ -2644,6 +3010,10 @@ def splat_parser_predictions_to_uv_conditioning(
     outer_uv_occupancy_gate_threshold=0.10,
     outer_uv_occupancy_rescue_threshold=0.70,
     outer_uv_occupancy_rescue_route_threshold=0.30,
+    outer_uv_component_routing=True,
+    outer_uv_component_seed_threshold=0.80,
+    outer_uv_component_grow_threshold=0.50,
+    outer_uv_component_min_size=2,
     observed_foreground=None,
     background_color_tolerance=SOLID_BACKGROUND_COLOR_TOLERANCE,
     color_background_tolerance=None,
@@ -2675,6 +3045,17 @@ def splat_parser_predictions_to_uv_conditioning(
         raise ValueError("outer_uv_min_coverage must be in [0, 1].")
     if outer_uv_min_source_pixels < 1:
         raise ValueError("outer_uv_min_source_pixels must be positive.")
+    if not (
+        0.0
+        <= outer_uv_component_grow_threshold
+        <= outer_uv_component_seed_threshold
+        <= 1.0
+    ):
+        raise ValueError(
+            "Require outer component grow <= seed threshold in [0, 1]."
+        )
+    if outer_uv_component_min_size < 1:
+        raise ValueError("outer_uv_component_min_size must be positive.")
     if not 0.0 <= outer_rescue_confidence_threshold <= 1.0:
         raise ValueError("outer_rescue_confidence_threshold must be in [0, 1].")
     if not 0.0 <= outer_rescue_margin_threshold <= 1.0:
@@ -2874,6 +3255,14 @@ def splat_parser_predictions_to_uv_conditioning(
             outer_uv_occupancy_rescue_route_threshold=(
                 outer_uv_occupancy_rescue_route_threshold
             ),
+            outer_uv_component_routing=outer_uv_component_routing,
+            outer_uv_component_seed_threshold=(
+                outer_uv_component_seed_threshold
+            ),
+            outer_uv_component_grow_threshold=(
+                outer_uv_component_grow_threshold
+            ),
+            outer_uv_component_min_size=outer_uv_component_min_size,
             observed_foreground=canonical_observed_foreground,
             cross_view_outer_consistency=(
                 geometry_cross_view_outer_consistency
@@ -2922,6 +3311,14 @@ def splat_parser_predictions_to_uv_conditioning(
             outer_uv_occupancy_rescue_route_threshold=(
                 outer_uv_occupancy_rescue_route_threshold
             ),
+            outer_uv_component_routing=outer_uv_component_routing,
+            outer_uv_component_seed_threshold=(
+                outer_uv_component_seed_threshold
+            ),
+            outer_uv_component_grow_threshold=(
+                outer_uv_component_grow_threshold
+            ),
+            outer_uv_component_min_size=outer_uv_component_min_size,
             observed_foreground=canonical_observed_foreground,
             cross_view_outer_consistency=(
                 geometry_cross_view_outer_consistency

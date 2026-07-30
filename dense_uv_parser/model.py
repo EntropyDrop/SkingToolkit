@@ -4,6 +4,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from SkingToolkit.dense_uv_parser.uv_topology import (
+    build_outer_uv_graph,
+    build_simple_uv_topology,
+)
+
 
 def norm_groups(channels):
     for groups in (8, 4, 2, 1):
@@ -215,6 +220,106 @@ class SpatialSemanticFusion(nn.Module):
         )
 
 
+class OuterUVGraphBlock(nn.Module):
+    """Message passing over physical neighbours of Minecraft outer texels."""
+
+    def __init__(self, channels, dropout=0.05):
+        super().__init__()
+        self.self_projection = nn.Linear(channels, channels)
+        self.neighbour_projection = nn.Linear(channels, channels)
+        self.norm = nn.LayerNorm(channels)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, nodes, edge_index, degree):
+        source, target = edge_index
+        neighbour_sum = torch.zeros_like(nodes)
+        neighbour_sum.index_add_(1, target, nodes[:, source])
+        neighbour_mean = neighbour_sum / degree.view(1, -1, 1).clamp_min(1.0)
+        update = self.self_projection(nodes)
+        update = update + self.neighbour_projection(neighbour_mean)
+        return self.norm(nodes + self.dropout(F.gelu(update)))
+
+
+class ProjectedOuterUVTopologyHead(nn.Module):
+    """Predict outer alpha from projected image features and cube topology."""
+
+    def __init__(
+        self,
+        input_channels,
+        global_context_dim,
+        hidden_channels=64,
+        layers=3,
+        dropout=0.05,
+        uv_size=64,
+    ):
+        super().__init__()
+        if layers < 1:
+            raise ValueError("outer_uv_topology_layers must be positive.")
+        flat_indices, edge_index = build_outer_uv_graph()
+        topology = build_simple_uv_topology()
+        parts = topology.part.reshape(-1)[flat_indices]
+        faces = topology.face.reshape(-1)[flat_indices]
+        local_uv = topology.local_uv.reshape(-1, 2)[flat_indices]
+        degree = torch.bincount(
+            edge_index[1],
+            minlength=flat_indices.numel(),
+        ).float()
+        self.uv_size = int(uv_size)
+        self.register_buffer("flat_indices", flat_indices, persistent=False)
+        self.register_buffer("edge_index", edge_index, persistent=False)
+        self.register_buffer("degree", degree, persistent=False)
+        self.register_buffer("parts", parts, persistent=False)
+        self.register_buffer("faces", faces, persistent=False)
+        self.register_buffer("local_uv", local_uv, persistent=False)
+        self.input_projection = nn.Linear(input_channels, hidden_channels)
+        self.part_embedding = nn.Embedding(6, hidden_channels)
+        self.face_embedding = nn.Embedding(6, hidden_channels)
+        self.position_projection = nn.Linear(2, hidden_channels)
+        self.global_projection = nn.Sequential(
+            nn.LayerNorm(global_context_dim),
+            nn.Linear(global_context_dim, hidden_channels),
+            nn.GELU(),
+        )
+        self.blocks = nn.ModuleList(
+            OuterUVGraphBlock(hidden_channels, dropout=dropout)
+            for _ in range(layers)
+        )
+        self.output = nn.Sequential(
+            nn.LayerNorm(hidden_channels),
+            nn.Linear(hidden_channels, 1),
+        )
+        nn.init.constant_(self.output[-1].bias, -2.0)
+
+    def forward(self, atlas_features, global_context):
+        if atlas_features.dim() != 4:
+            raise ValueError("Projected outer UV features must be BCHW.")
+        if atlas_features.shape[-2:] != (self.uv_size, self.uv_size):
+            raise ValueError(
+                "Projected outer UV feature size must match the UV atlas."
+            )
+        flattened = atlas_features.flatten(2).transpose(1, 2)
+        nodes = flattened.index_select(1, self.flat_indices)
+        nodes = self.input_projection(nodes.float())
+        nodes = nodes + self.part_embedding(self.parts).unsqueeze(0)
+        nodes = nodes + self.face_embedding(self.faces).unsqueeze(0)
+        nodes = nodes + self.position_projection(self.local_uv).unsqueeze(0)
+        nodes = nodes + self.global_projection(global_context.float()).unsqueeze(1)
+        for block in self.blocks:
+            nodes = block(nodes, self.edge_index, self.degree)
+        node_logits = self.output(nodes).squeeze(-1)
+        atlas_logits = node_logits.new_full(
+            (node_logits.shape[0], self.uv_size * self.uv_size),
+            -12.0,
+        )
+        atlas_logits[:, self.flat_indices] = node_logits
+        return atlas_logits.reshape(
+            node_logits.shape[0],
+            1,
+            self.uv_size,
+            self.uv_size,
+        )
+
+
 class DenseUVParserNet(nn.Module):
     """Predict dense Minecraft UV routing for each render pixel."""
 
@@ -249,6 +354,10 @@ class DenseUVParserNet(nn.Module):
         route_prior_logit_cap=1.5,
         route_prior_dropout=0.10,
         predict_outer_uv_occupancy=False,
+        outer_uv_feature_channels=32,
+        outer_uv_topology_channels=64,
+        outer_uv_topology_layers=3,
+        outer_uv_topology_dropout=0.05,
     ):
         super().__init__()
         self.geometry_only = bool(geometry_only)
@@ -276,6 +385,10 @@ class DenseUVParserNet(nn.Module):
         self.route_prior_logit_cap = float(route_prior_logit_cap)
         self.route_prior_dropout = float(route_prior_dropout)
         self.predict_outer_uv_occupancy = bool(predict_outer_uv_occupancy)
+        self.outer_uv_feature_channels = int(outer_uv_feature_channels)
+        self.outer_uv_topology_channels = int(outer_uv_topology_channels)
+        self.outer_uv_topology_layers = int(outer_uv_topology_layers)
+        self.outer_uv_topology_dropout = float(outer_uv_topology_dropout)
         if self.route_prior_height < 1 or self.route_prior_width < 1:
             raise ValueError("Route-prior dimensions must be positive.")
         if self.route_prior_logit_cap <= 0.0:
@@ -352,19 +465,26 @@ class DenseUVParserNet(nn.Module):
                 raise ValueError(
                     "Outer UV occupancy prediction requires grouped fixed-view inputs."
                 )
-            occupancy_input_channels = c * 8 + (
+            if self.outer_uv_feature_channels < 1:
+                raise ValueError("outer_uv_feature_channels must be positive.")
+            occupancy_context_channels = c * 8 + (
                 self.semantic_channels if self.semantic_fusion is not None else 0
             )
-            occupancy_hidden_channels = max(self.semantic_channels, c * 4, 128)
-            self.outer_uv_occupancy_head = nn.Sequential(
-                nn.LayerNorm(occupancy_input_channels),
-                nn.Linear(occupancy_input_channels, occupancy_hidden_channels),
+            self.outer_uv_feature_projection = nn.Sequential(
+                nn.Conv2d(c, self.outer_uv_feature_channels, kernel_size=1),
                 nn.GELU(),
-                nn.Linear(occupancy_hidden_channels, uv_size * uv_size),
             )
-            # Outer-layer alpha is sparse. Starting below 0.5 avoids an
-            # untrained head behaving as an all-outer prior.
-            nn.init.constant_(self.outer_uv_occupancy_head[-1].bias, -2.0)
+            # Projected feature mean + mean/max p_outer + foreground coverage
+            # + number of supporting views.
+            occupancy_input_channels = self.outer_uv_feature_channels + 4
+            self.outer_uv_occupancy_head = ProjectedOuterUVTopologyHead(
+                occupancy_input_channels,
+                occupancy_context_channels,
+                hidden_channels=self.outer_uv_topology_channels,
+                layers=self.outer_uv_topology_layers,
+                dropout=self.outer_uv_topology_dropout,
+                uv_size=uv_size,
+            )
         if not self.geometry_only:
             self.part = nn.Conv2d(c, part_classes, kernel_size=1)
             self.face = nn.Conv2d(c, face_classes, kernel_size=1)
@@ -528,6 +648,7 @@ class DenseUVParserNet(nn.Module):
         x = self.up1(x, s1)
         x = self.up0(x, s0)
         x = self.features(x)
+        occupancy_feature_source = x
         x = self.feature_dropout(x)
         layer_evidence = self.layer(x)
         outputs = {
@@ -580,14 +701,14 @@ class DenseUVParserNet(nn.Module):
                 if semantic_summary is not None
                 else visual_summary
             )
-            # Keep this auxiliary calibration head read-only with respect to
-            # the parser trunk. Joint gradients previously increased outer
-            # recall by shifting the shared route representation, but caused
-            # a larger regression in inner-to-outer precision.
-            occupancy_summary = occupancy_summary.detach()
-            outputs["outer_uv_occupancy_logits"] = self.outer_uv_occupancy_head(
-                occupancy_summary.float()
-            ).reshape(-1, 1, self.uv_size, self.uv_size)
+            # Occupancy learns from the parser representation without allowing
+            # its sparse atlas loss to destabilize the proven image-space route
+            # trunk. A separate agreement loss later transfers calibrated UV
+            # structure back into the route head after warm-up.
+            outputs["outer_uv_features"] = self.outer_uv_feature_projection(
+                occupancy_feature_source.detach()
+            )
+            outputs["outer_uv_global_context"] = occupancy_summary.detach()
         if not self.geometry_only:
             outputs["part"] = self.part(x)
             outputs["face"] = self.face(x)
@@ -603,6 +724,18 @@ class DenseUVParserNet(nn.Module):
             if self.surface_classes > 0:
                 outputs["surface"] = self.surface(x)
         return outputs
+
+    def predict_projected_outer_uv_occupancy(
+        self,
+        atlas_features,
+        global_context,
+    ):
+        if not self.predict_outer_uv_occupancy:
+            raise ValueError("This parser has no outer UV occupancy head.")
+        return self.outer_uv_occupancy_head(
+            atlas_features,
+            global_context,
+        )
 
 
 def count_parameters(model):

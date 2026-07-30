@@ -37,10 +37,12 @@ from SkingToolkit.dense_uv_parser.utils import (  # noqa: E402
     PART_PALETTE,
     ROUTE_ROLE_PALETTE,
     SPLAT_COLOR_AGGREGATIONS,
+    attach_projected_outer_uv_occupancy,
     combine_layer_face,
     build_geometry_grid_debug,
     fill_geometry_grid_debug,
     overlay_geometry_grid_debug,
+    outer_uv_topology_hysteresis,
     colorize_foreground,
     colorize_labels,
     colorize_surface,
@@ -154,6 +156,18 @@ def load_parser(checkpoint_path, device):
         route_prior_dropout=model_config.get("route_prior_dropout", 0.0),
         predict_outer_uv_occupancy=model_config.get(
             "predict_outer_uv_occupancy", has_outer_uv_occupancy
+        ),
+        outer_uv_feature_channels=model_config.get(
+            "outer_uv_feature_channels", 32
+        ),
+        outer_uv_topology_channels=model_config.get(
+            "outer_uv_topology_channels", 64
+        ),
+        outer_uv_topology_layers=model_config.get(
+            "outer_uv_topology_layers", 3
+        ),
+        outer_uv_topology_dropout=model_config.get(
+            "outer_uv_topology_dropout", 0.05
         ),
     ).to(device)
     model.load_state_dict(state_dict)
@@ -723,6 +737,15 @@ def build_arg_parser():
         help="Inner/outer UV grids overlaid on only the pixels routed to that layer.",
     )
     parser.add_argument("--geometry_fill_output", default=None, help="Classified RGB filled onto inner/outer cuboid grids.")
+    parser.add_argument(
+        "--outer_uv_occupancy_output",
+        default=None,
+        help=(
+            "Projected outer-UV occupancy diagnostic. Columns show raw "
+            "probability, topology-propagated probability, and component "
+            "routing masks (red=rejected, green=accepted, blue=seed)."
+        ),
+    )
     parser.add_argument("--front", default=None)
     parser.add_argument("--back", default=None)
     parser.add_argument("--combined", default=None)
@@ -916,6 +939,26 @@ def build_arg_parser():
         default=None,
     )
     parser.add_argument(
+        "--outer_uv_component_routing",
+        dest="outer_uv_component_routing",
+        action="store_true",
+        default=None,
+    )
+    parser.add_argument(
+        "--no_outer_uv_component_routing",
+        dest="outer_uv_component_routing",
+        action="store_false",
+    )
+    parser.add_argument(
+        "--outer_uv_component_seed_threshold", type=float, default=None
+    )
+    parser.add_argument(
+        "--outer_uv_component_grow_threshold", type=float, default=None
+    )
+    parser.add_argument(
+        "--outer_uv_component_min_size", type=int, default=None
+    )
+    parser.add_argument(
         "--color_aggregation",
         choices=SPLAT_COLOR_AGGREGATIONS,
         default="grid_mode",
@@ -968,6 +1011,7 @@ def main():
             args.geometry_overlay_output,
             args.geometry_routed_overlay_output,
             args.geometry_fill_output,
+            args.outer_uv_occupancy_output,
             args.simple_inpaint_render_output,
         )
     ):
@@ -1120,6 +1164,26 @@ def main():
         if args.outer_uv_occupancy_rescue_route_threshold is None
         else args.outer_uv_occupancy_rescue_route_threshold
     )
+    outer_uv_component_routing = (
+        parser_args.get("outer_uv_component_routing", True)
+        if args.outer_uv_component_routing is None
+        else args.outer_uv_component_routing
+    )
+    outer_uv_component_seed_threshold = (
+        parser_args.get("outer_uv_component_seed_threshold", 0.80)
+        if args.outer_uv_component_seed_threshold is None
+        else args.outer_uv_component_seed_threshold
+    )
+    outer_uv_component_grow_threshold = (
+        parser_args.get("outer_uv_component_grow_threshold", 0.50)
+        if args.outer_uv_component_grow_threshold is None
+        else args.outer_uv_component_grow_threshold
+    )
+    outer_uv_component_min_size = (
+        parser_args.get("outer_uv_component_min_size", 2)
+        if args.outer_uv_component_min_size is None
+        else args.outer_uv_component_min_size
+    )
     outer_uv_min_coverage = (
         parser_args.get("outer_uv_min_coverage", 0.0)
         if args.outer_uv_min_coverage is None
@@ -1196,6 +1260,49 @@ def main():
             view_ids=view_ids,
             semantic_foreground=observed_foreground,
         )
+        outputs = attach_projected_outer_uv_occupancy(
+            parser_model,
+            outputs,
+            renderer,
+            views,
+            observed_foreground=observed_foreground,
+            center_power=float(
+                parser_args.get("route_texel_center_power", 2.0)
+            ),
+        )
+        if (
+            args.outer_uv_occupancy_output
+            and "outer_uv_occupancy_logits" in outputs
+        ):
+            occupancy_probability = torch.sigmoid(
+                outputs["outer_uv_occupancy_logits"]
+            )
+            occupancy_components = outer_uv_topology_hysteresis(
+                occupancy_probability,
+                seed_threshold=outer_uv_component_seed_threshold,
+                grow_threshold=outer_uv_component_grow_threshold,
+                min_component_size=outer_uv_component_min_size,
+            )
+            raw_preview = occupancy_probability.expand(-1, 3, -1, -1)
+            structured_preview = occupancy_components[
+                "probability"
+            ].expand(-1, 3, -1, -1)
+            component_preview = torch.cat(
+                (
+                    occupancy_components["rejected_candidate"].float(),
+                    occupancy_components["accepted"].float(),
+                    occupancy_components["seed"].float(),
+                ),
+                dim=1,
+            )
+            occupancy_preview = torch.cat(
+                (raw_preview, structured_preview, component_preview),
+                dim=-1,
+            )
+            occupancy_path = Path(args.outer_uv_occupancy_output)
+            occupancy_path.parent.mkdir(parents=True, exist_ok=True)
+            save_image(occupancy_preview.detach().cpu(), occupancy_path)
+            print(f"Saved outer_uv_occupancy={occupancy_path}")
         conditioning, routing_details = splat_parser_predictions_to_uv_conditioning(
             rendered,
             outputs,
@@ -1275,6 +1382,14 @@ def main():
             outer_uv_occupancy_rescue_route_threshold=(
                 outer_uv_occupancy_rescue_route_threshold
             ),
+            outer_uv_component_routing=outer_uv_component_routing,
+            outer_uv_component_seed_threshold=(
+                outer_uv_component_seed_threshold
+            ),
+            outer_uv_component_grow_threshold=(
+                outer_uv_component_grow_threshold
+            ),
+            outer_uv_component_min_size=outer_uv_component_min_size,
             observed_foreground=observed_foreground,
             background_color_tolerance=args.background_color_tolerance,
             color_background_tolerance=args.color_background_tolerance,
@@ -1467,6 +1582,24 @@ def main():
                 torch.zeros_like(raw_outer),
             ).sum().item()
         )
+        occupancy_component_seed_count = int(
+            routing.get(
+                "projected_outer_component_seed",
+                torch.zeros_like(raw_outer),
+            ).sum().item()
+        )
+        occupancy_component_grown_count = int(
+            routing.get(
+                "projected_outer_component_grown",
+                torch.zeros_like(raw_outer),
+            ).sum().item()
+        )
+        occupancy_component_rejected_count = int(
+            routing.get(
+                "projected_outer_component_rejected",
+                torch.zeros_like(raw_outer),
+            ).sum().item()
+        )
         print(
             "routing_filter="
             + json.dumps(
@@ -1591,6 +1724,24 @@ def main():
                     "outer_uv_occupancy_blend_weight": round(
                         float(outer_uv_occupancy_blend_weight), 6
                     ),
+                    "outer_uv_component_routing": bool(
+                        outer_uv_component_routing
+                    ),
+                    "outer_uv_component_seed_pixels": (
+                        occupancy_component_seed_count
+                    ),
+                    "outer_uv_component_grown_pixels": (
+                        occupancy_component_grown_count
+                    ),
+                    "outer_uv_component_rejected_pixels": (
+                        occupancy_component_rejected_count
+                    ),
+                    "outer_uv_component_seed_threshold": round(
+                        float(outer_uv_component_seed_threshold), 6
+                    ),
+                    "outer_uv_component_grow_threshold": round(
+                        float(outer_uv_component_grow_threshold), 6
+                    ),
                 },
                 sort_keys=True,
             )
@@ -1636,6 +1787,7 @@ def main():
             args.geometry_overlay_output,
             args.geometry_routed_overlay_output,
             args.geometry_fill_output,
+            args.outer_uv_occupancy_output,
         )
     ):
         save_debug_preview(

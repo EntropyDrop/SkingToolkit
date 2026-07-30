@@ -38,6 +38,8 @@ class SimpleUVTopology:
     world_position: torch.Tensor
     mirrored_texel: torch.Tensor
     inner_fill_order: torch.Tensor
+    outer_flat_indices: torch.Tensor
+    outer_edge_index: torch.Tensor
 
 
 def _axis_coordinate(index, size):
@@ -91,7 +93,7 @@ def _inward_ring_key(cell, width, height):
 
 @lru_cache(maxsize=1)
 def build_simple_uv_topology():
-    """Build only the metadata consumed by deterministic inner-layer repair."""
+    """Build Minecraft atlas metadata and the physical outer-surface graph."""
     valid = torch.zeros(UV_SIZE * UV_SIZE, dtype=torch.bool)
     layer_map = torch.full((UV_SIZE * UV_SIZE,), INVALID_LAYER, dtype=torch.long)
     part_map = torch.full((UV_SIZE * UV_SIZE,), INVALID_PART, dtype=torch.long)
@@ -204,6 +206,25 @@ def build_simple_uv_topology():
                 )
             inner_fill_order.extend(cell["flat"] for cell in cells)
 
+    outer_flat_indices = (
+        valid & (layer_map == 1)
+    ).nonzero(as_tuple=False).flatten()
+    outer_edges = []
+    # Atlas-neighbourhood alone is incorrect at cube seams: UV islands that
+    # touch in the PNG need not touch in 3D, while adjacent cube faces are
+    # usually separated in the atlas. World-space texel centres give us a
+    # deterministic face/seam-aware graph. The largest outer-layer step is
+    # 1.125 texels (limb/torso depth expansion), while a same-face diagonal is
+    # at least sqrt(2), leaving a useful gap for the threshold below.
+    for part in range(PART_COUNT):
+        part_nodes = outer_flat_indices[part_map[outer_flat_indices] == part]
+        positions = world_position[part_nodes]
+        distances = torch.cdist(positions, positions)
+        adjacent = (distances > 1e-6) & (distances <= 1.20)
+        source, target = adjacent.nonzero(as_tuple=True)
+        outer_edges.append(torch.stack([part_nodes[source], part_nodes[target]]))
+    outer_edge_index = torch.cat(outer_edges, dim=1)
+
     return SimpleUVTopology(
         valid=valid.reshape(UV_SIZE, UV_SIZE),
         layer=layer_map.reshape(UV_SIZE, UV_SIZE),
@@ -213,4 +234,26 @@ def build_simple_uv_topology():
         world_position=world_position.reshape(UV_SIZE, UV_SIZE, 3),
         mirrored_texel=mirrored.reshape(UV_SIZE, UV_SIZE),
         inner_fill_order=torch.tensor(inner_fill_order, dtype=torch.long),
+        outer_flat_indices=outer_flat_indices,
+        outer_edge_index=outer_edge_index,
     )
+
+
+@lru_cache(maxsize=1)
+def build_outer_uv_graph():
+    """Return valid outer atlas indices and directed edges in node coordinates."""
+    topology = build_simple_uv_topology()
+    flat_indices = topology.outer_flat_indices
+    flat_to_node = torch.full(
+        (UV_SIZE * UV_SIZE,),
+        -1,
+        dtype=torch.long,
+    )
+    flat_to_node[flat_indices] = torch.arange(
+        flat_indices.numel(),
+        dtype=torch.long,
+    )
+    edge_index = flat_to_node[topology.outer_edge_index]
+    if (edge_index < 0).any():
+        raise ValueError("Outer topology contains an edge outside the outer atlas.")
+    return flat_indices, edge_index

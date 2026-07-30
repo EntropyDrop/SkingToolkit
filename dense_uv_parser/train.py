@@ -36,6 +36,7 @@ from SkingToolkit.dense_uv_parser.utils import (  # noqa: E402
     SPLAT_COLOR_AGGREGATIONS,
     UV_SIZE,
     aggregate_direct_outer_values_by_view,
+    attach_projected_outer_uv_occupancy,
     build_dense_parser_batch,
     build_geometry_grid_debug,
     build_static_surface_routing,
@@ -70,6 +71,9 @@ from SkingToolkit.dense_uv_parser.semantic_targets import (  # noqa: E402
 from SkingToolkit.dense_uv_parser.runtime import get_device  # noqa: E402
 from SkingToolkit.dense_uv_parser.skin_dataset import SkinUVDataset  # noqa: E402
 from SkingToolkit.dense_uv_parser.uv_layout import build_uv_masks  # noqa: E402
+from SkingToolkit.dense_uv_parser.uv_topology import (  # noqa: E402
+    build_outer_uv_graph,
+)
 from SkingToolkit.renderer import DifferentiableRenderer  # noqa: E402
 
 try:
@@ -779,8 +783,10 @@ def outer_uv_occupancy_losses(
     target_uv,
     outer_part_masks,
     alpha_threshold=0.5,
+    hard_positive_fraction=0.25,
+    topology_max_steps=64,
 ):
-    """Train the grouped semantic head on exact outer-layer atlas occupancy."""
+    """Train projected outer occupancy with component and topology structure."""
     if logits.shape != (target_uv.shape[0], 1, UV_SIZE, UV_SIZE):
         raise ValueError(
             "Expected grouped outer occupancy logits shaped "
@@ -806,6 +812,100 @@ def outer_uv_occupancy_losses(
         pos_weight=pos_weight,
     )
     probability = torch.sigmoid(logits.float()) * valid
+    positive_loss = F.softplus(-selected_logits[selected_target > 0.5])
+    if positive_loss.numel() > 0 and hard_positive_fraction > 0.0:
+        hard_positive_count = max(
+            1,
+            math.ceil(positive_loss.numel() * hard_positive_fraction),
+        )
+        hard_positive_loss = positive_loss.topk(
+            hard_positive_count,
+            sorted=False,
+        ).values.mean()
+    else:
+        hard_positive_count = 0
+        hard_positive_loss = logits.sum() * 0.0
+
+    flat_indices, edge_index = build_outer_uv_graph()
+    flat_indices = flat_indices.to(logits.device)
+    edge_index = edge_index.to(logits.device)
+    probability_nodes = probability.flatten(2)[:, 0].index_select(
+        1, flat_indices
+    )
+    target_nodes = target.bool().flatten(2)[:, 0].index_select(
+        1, flat_indices
+    )
+    source, destination = edge_index
+    positive_edges = target_nodes[:, source] & target_nodes[:, destination]
+    edge_difference = (
+        probability_nodes[:, source] - probability_nodes[:, destination]
+    ).square()
+    topology_consistency = (
+        edge_difference[positive_edges].mean()
+        if positive_edges.any()
+        else logits.sum() * 0.0
+    )
+
+    node_count = probability_nodes.shape[1]
+    component_labels = torch.arange(
+        node_count,
+        device=logits.device,
+        dtype=torch.long,
+    ).view(1, -1).expand(target_nodes.shape[0], -1).clone()
+    component_labels[~target_nodes] = node_count
+    expanded_destination = destination.view(1, -1).expand(
+        target_nodes.shape[0], -1
+    )
+    connected_edge = (
+        target_nodes[:, source] & target_nodes[:, destination]
+    )
+    with torch.no_grad():
+        for _ in range(int(topology_max_steps)):
+            neighbour_label = torch.where(
+                connected_edge,
+                component_labels[:, source],
+                torch.full_like(component_labels[:, source], node_count),
+            )
+            updated = component_labels.clone()
+            updated.scatter_reduce_(
+                1,
+                expanded_destination,
+                neighbour_label,
+                reduce="amin",
+                include_self=True,
+            )
+            component_labels = updated
+    batch_offsets = (
+        torch.arange(target_nodes.shape[0], device=logits.device).view(-1, 1)
+        * (node_count + 1)
+    )
+    component_index = component_labels + batch_offsets
+    component_probability = probability_nodes.new_zeros(
+        target_nodes.shape[0] * (node_count + 1)
+    )
+    component_size = probability_nodes.new_zeros(
+        target_nodes.shape[0] * (node_count + 1)
+    )
+    component_probability.scatter_add_(
+        0,
+        component_index[target_nodes],
+        probability_nodes[target_nodes],
+    )
+    component_size.scatter_add_(
+        0,
+        component_index[target_nodes],
+        torch.ones_like(probability_nodes[target_nodes]),
+    )
+    existing_components = component_size > 0
+    component_recall = (
+        component_probability[existing_components]
+        / component_size[existing_components].clamp_min(1.0)
+    )
+    component_recall_loss = (
+        (1.0 - component_recall).mean()
+        if component_recall.numel() > 0
+        else logits.sum() * 0.0
+    )
     dice = 1.0 - (
         2.0 * (probability * target).sum() + 1.0
     ) / (probability.sum() + target.sum() + 1.0)
@@ -815,12 +915,82 @@ def outer_uv_occupancy_losses(
     return {
         "loss_outer_uv_occupancy_bce": loss_bce,
         "loss_outer_uv_occupancy_dice": dice,
+        "loss_outer_uv_occupancy_hard_positive": hard_positive_loss,
+        "loss_outer_topology_consistency": topology_consistency,
+        "loss_outer_component_recall": component_recall_loss,
+        "outer_component_recall": (
+            component_recall.mean()
+            if component_recall.numel() > 0
+            else logits.sum() * 0.0
+        ),
+        "count_outer_components": logits.new_tensor(
+            float(existing_components.sum())
+        ),
+        "count_outer_hard_positive_candidates": logits.new_tensor(
+            float(hard_positive_count)
+        ),
         "outer_uv_occupancy_precision": (
             true_positive / predicted.float().sum().clamp_min(1.0)
         ),
         "outer_uv_occupancy_recall": (
             true_positive / expected.float().sum().clamp_min(1.0)
         ),
+    }
+
+
+def route_occupancy_agreement_loss(
+    outputs,
+    renderer,
+    views,
+    center_power=2.0,
+):
+    """Align visible route probabilities to the calibrated UV occupancy head."""
+    if "outer_uv_occupancy_logits" not in outputs:
+        zero = outputs["layer"].sum() * 0.0
+        return {
+            "loss_route_occupancy_agreement": zero,
+            "route_occupancy_mae": zero,
+            "count_route_occupancy_texels": zero,
+        }
+    route_probability = torch.softmax(
+        outputs["layer"].float(), dim=1
+    )
+    pooled, support = aggregate_direct_outer_values_by_view(
+        renderer,
+        views,
+        route_probability,
+        center_power=center_power,
+    )
+    support_float = support.to(dtype=pooled.dtype)
+    visible_route_outer = (
+        (
+            pooled[:, :, ROUTE_OUTER_PRIMARY]
+            * support_float
+        ).sum(dim=1)
+        / support_float.sum(dim=1).clamp_min(1.0)
+    )
+    occupancy = torch.sigmoid(
+        outputs["outer_uv_occupancy_logits"].float()
+    ).flatten(2)[:, 0]
+    _, outer_mask = build_uv_masks()
+    selected = support.any(dim=1) & outer_mask[0].to(
+        device=occupancy.device,
+        dtype=torch.bool,
+    ).reshape(1, -1)
+    if not selected.any():
+        zero = occupancy.sum() * 0.0
+        return {
+            "loss_route_occupancy_agreement": zero,
+            "route_occupancy_mae": zero,
+            "count_route_occupancy_texels": zero,
+        }
+    difference = (
+        visible_route_outer[selected] - occupancy.detach()[selected]
+    )
+    return {
+        "loss_route_occupancy_agreement": difference.square().mean(),
+        "route_occupancy_mae": difference.abs().mean(),
+        "count_route_occupancy_texels": selected.float().sum(),
     }
 
 
@@ -1071,6 +1241,18 @@ def hard_uv_conditioning_metrics(
                 "outer_uv_occupancy_rescue_route_threshold",
                 0.30,
             ),
+            outer_uv_component_routing=getattr(
+                args, "outer_uv_component_routing", True
+            ),
+            outer_uv_component_seed_threshold=getattr(
+                args, "outer_uv_component_seed_threshold", 0.80
+            ),
+            outer_uv_component_grow_threshold=getattr(
+                args, "outer_uv_component_grow_threshold", 0.50
+            ),
+            outer_uv_component_min_size=getattr(
+                args, "outer_uv_component_min_size", 2
+            ),
             observed_foreground=None,
             background_color_tolerance=args.background_color_tolerance,
             color_background_tolerance=getattr(
@@ -1152,7 +1334,7 @@ def run_epoch(
     sample_count = 0
     iterator = tqdm(loader, leave=False, file=sys.__stderr__ or sys.stderr) if tqdm is not None else loader
 
-    for batch in iterator:
+    for batch_index, batch in enumerate(iterator):
         batch = move_batch(batch, device)
         rendered, targets, _, view_ids = build_parser_inputs(
             batch["uv"],
@@ -1177,6 +1359,14 @@ def run_epoch(
                     rendered,
                     view_ids=view_ids,
                     **semantic_kwargs,
+                )
+                outputs = attach_projected_outer_uv_occupancy(
+                    model,
+                    outputs,
+                    renderer,
+                    views,
+                    observed_foreground=targets["foreground"][:, 0],
+                    center_power=args.route_texel_center_power,
                 )
                 losses = criterion(outputs, targets)
                 zero = losses["loss_total"].new_zeros(())
@@ -1216,15 +1406,26 @@ def run_epoch(
                         batch["uv"],
                         outer_part_masks,
                         alpha_threshold=args.target_alpha_threshold,
+                        hard_positive_fraction=(
+                            args.outer_hard_positive_fraction
+                        ),
                     )
                     loss_outer_uv_occupancy = (
                         occupancy["loss_outer_uv_occupancy_bce"]
                         + args.outer_uv_occupancy_dice_weight
                         * occupancy["loss_outer_uv_occupancy_dice"]
+                        + args.outer_hard_positive_weight
+                        * occupancy[
+                            "loss_outer_uv_occupancy_hard_positive"
+                        ]
                     )
                     weighted_outer_uv_occupancy = (
                         args.lambda_outer_uv_occupancy
                         * loss_outer_uv_occupancy
+                        + args.lambda_outer_component_recall
+                        * occupancy["loss_outer_component_recall"]
+                        + args.lambda_outer_topology
+                        * occupancy["loss_outer_topology_consistency"]
                     )
                     losses.update(occupancy)
                     losses["loss_outer_uv_occupancy"] = (
@@ -1246,6 +1447,53 @@ def run_epoch(
                     losses["loss_outer_uv_occupancy_weighted"] = zero
                     losses["outer_uv_occupancy_precision"] = zero
                     losses["outer_uv_occupancy_recall"] = zero
+                    losses["loss_outer_uv_occupancy_hard_positive"] = zero
+                    losses["loss_outer_topology_consistency"] = zero
+                    losses["loss_outer_component_recall"] = zero
+                    losses["outer_component_recall"] = zero
+                    losses["count_outer_components"] = zero
+                    losses["count_outer_hard_positive_candidates"] = zero
+
+                agreement = route_occupancy_agreement_loss(
+                    outputs,
+                    renderer,
+                    views,
+                    center_power=args.route_texel_center_power,
+                )
+                if train:
+                    batch_progress = float(batch_index) / max(
+                        len(loader) - 1,
+                        1,
+                    )
+                    warmup = float(
+                        args.outer_occupancy_agreement_warmup_fraction
+                    )
+                    agreement_scale = max(
+                        0.0,
+                        min(
+                            1.0,
+                            (batch_progress - warmup)
+                            / max(warmup, 1e-6),
+                        ),
+                    )
+                else:
+                    agreement_scale = 1.0
+                weighted_agreement = (
+                    args.lambda_route_occupancy_agreement
+                    * agreement_scale
+                    * agreement["loss_route_occupancy_agreement"]
+                )
+                losses.update(agreement)
+                losses["route_occupancy_agreement_scale"] = zero.new_tensor(
+                    agreement_scale
+                )
+                losses["loss_route_occupancy_agreement_weighted"] = (
+                    weighted_agreement
+                )
+                losses["loss_total"] = losses["loss_total"] + weighted_agreement
+                losses["loss_routing"] = (
+                    losses["loss_routing"] + weighted_agreement
+                )
                 auxiliary_enabled = args.parser_mode == "geometry_fit" and any(
                     weight > 0
                     for weight in (
@@ -1456,6 +1704,14 @@ def save_preview(
             view_ids=view_ids,
             **semantic_kwargs,
         )
+        outputs = attach_projected_outer_uv_occupancy(
+            model,
+            outputs,
+            renderer,
+            views,
+            observed_foreground=targets["foreground"][:, 0],
+            center_power=getattr(args, "route_texel_center_power", 2.0),
+        )
         if "affine" in outputs:
             pred_conditioning, routing_details = splat_parser_predictions_to_uv_conditioning(
                 rendered,
@@ -1552,6 +1808,18 @@ def save_preview(
                     args,
                     "outer_uv_occupancy_rescue_route_threshold",
                     0.30,
+                ),
+                outer_uv_component_routing=getattr(
+                    args, "outer_uv_component_routing", True
+                ),
+                outer_uv_component_seed_threshold=getattr(
+                    args, "outer_uv_component_seed_threshold", 0.80
+                ),
+                outer_uv_component_grow_threshold=getattr(
+                    args, "outer_uv_component_grow_threshold", 0.50
+                ),
+                outer_uv_component_min_size=getattr(
+                    args, "outer_uv_component_min_size", 2
                 ),
                 observed_foreground=None,
                 background_color_tolerance=getattr(
@@ -1861,6 +2129,10 @@ def save_checkpoint(
             "predict_outer_uv_occupancy": (
                 model.predict_outer_uv_occupancy
             ),
+            "outer_uv_feature_channels": model.outer_uv_feature_channels,
+            "outer_uv_topology_channels": model.outer_uv_topology_channels,
+            "outer_uv_topology_layers": model.outer_uv_topology_layers,
+            "outer_uv_topology_dropout": model.outer_uv_topology_dropout,
             "arm_model": "steve",
         },
     }
@@ -1932,7 +2204,7 @@ def build_arg_parser():
         "--predict_outer_uv_occupancy",
         dest="predict_outer_uv_occupancy",
         action="store_true",
-        default=False,
+        default=True,
         help=(
             "Predict grouped 64x64 outer-layer occupancy as a semantic prior "
             "for inner/outer routing."
@@ -1943,6 +2215,10 @@ def build_arg_parser():
         dest="predict_outer_uv_occupancy",
         action="store_false",
     )
+    parser.add_argument("--outer_uv_feature_channels", type=int, default=32)
+    parser.add_argument("--outer_uv_topology_channels", type=int, default=64)
+    parser.add_argument("--outer_uv_topology_layers", type=int, default=3)
+    parser.add_argument("--outer_uv_topology_dropout", type=float, default=0.05)
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--num_workers", type=int, default=8)
     parser.add_argument("--prefetch_factor", type=int, default=4)
@@ -2103,7 +2379,7 @@ def build_arg_parser():
         "--outer_uv_occupancy_routing",
         dest="outer_uv_occupancy_routing",
         action="store_true",
-        default=False,
+        default=True,
         help=(
             "Experimental: let the auxiliary occupancy head alter hard "
             "routing and checkpoint selection."
@@ -2125,6 +2401,24 @@ def build_arg_parser():
         type=float,
         default=0.30,
     )
+    parser.add_argument(
+        "--outer_uv_component_routing",
+        dest="outer_uv_component_routing",
+        action="store_true",
+        default=True,
+    )
+    parser.add_argument(
+        "--no_outer_uv_component_routing",
+        dest="outer_uv_component_routing",
+        action="store_false",
+    )
+    parser.add_argument(
+        "--outer_uv_component_seed_threshold", type=float, default=0.80
+    )
+    parser.add_argument(
+        "--outer_uv_component_grow_threshold", type=float, default=0.50
+    )
+    parser.add_argument("--outer_uv_component_min_size", type=int, default=2)
     parser.add_argument(
         "--splat_color_aggregation",
         choices=SPLAT_COLOR_AGGREGATIONS,
@@ -2202,6 +2496,24 @@ def build_arg_parser():
     parser.add_argument("--lambda_outer_uv_occupancy", type=float, default=0.50)
     parser.add_argument(
         "--outer_uv_occupancy_dice_weight", type=float, default=0.25
+    )
+    parser.add_argument(
+        "--outer_hard_positive_fraction", type=float, default=0.25
+    )
+    parser.add_argument(
+        "--outer_hard_positive_weight", type=float, default=0.50
+    )
+    parser.add_argument(
+        "--lambda_outer_component_recall", type=float, default=0.25
+    )
+    parser.add_argument("--lambda_outer_topology", type=float, default=0.10)
+    parser.add_argument(
+        "--lambda_route_occupancy_agreement", type=float, default=0.25
+    )
+    parser.add_argument(
+        "--outer_occupancy_agreement_warmup_fraction",
+        type=float,
+        default=0.20,
     )
     parser.add_argument("--outer_false_positive_gamma", type=float, default=3.0)
     parser.add_argument("--outer_false_negative_gamma", type=float, default=2.0)
@@ -2307,6 +2619,8 @@ def main():
         "outer_uv_occupancy_gate_threshold",
         "outer_uv_occupancy_rescue_threshold",
         "outer_uv_occupancy_rescue_route_threshold",
+        "outer_uv_component_seed_threshold",
+        "outer_uv_component_grow_threshold",
     ):
         if not 0.0 <= getattr(args, name) <= 1.0:
             raise ValueError(f"--{name} must be in [0, 1].")
@@ -2334,6 +2648,10 @@ def main():
         args.lambda_semantic_coverage,
         args.lambda_outer_uv_occupancy,
         args.outer_uv_occupancy_dice_weight,
+        args.outer_hard_positive_weight,
+        args.lambda_outer_component_recall,
+        args.lambda_outer_topology,
+        args.lambda_route_occupancy_agreement,
     ) < 0:
         raise ValueError("Route, semantic, and confidence loss weights must be non-negative.")
     if args.route_texel_center_power < 0:
@@ -2353,6 +2671,43 @@ def main():
     if args.outer_visibility_hard_negative_weight < 0.0:
         raise ValueError(
             "--outer_visibility_hard_negative_weight must be non-negative."
+        )
+    if not 0.0 <= args.outer_hard_positive_fraction <= 1.0:
+        raise ValueError("--outer_hard_positive_fraction must be in [0, 1].")
+    if not (
+        0.0
+        <= args.outer_uv_component_grow_threshold
+        <= args.outer_uv_component_seed_threshold
+        <= 1.0
+    ):
+        raise ValueError(
+            "Require outer component grow <= seed threshold in [0, 1]."
+        )
+    if args.outer_uv_component_min_size < 1:
+        raise ValueError("--outer_uv_component_min_size must be positive.")
+    if not 0.0 <= args.outer_occupancy_agreement_warmup_fraction < 1.0:
+        raise ValueError(
+            "--outer_occupancy_agreement_warmup_fraction must be in [0, 1)."
+        )
+    if (
+        args.outer_uv_feature_channels < 1
+        or args.outer_uv_topology_channels < 1
+        or args.outer_uv_topology_layers < 1
+    ):
+        raise ValueError("Outer UV topology dimensions must be positive.")
+    if not 0.0 <= args.outer_uv_topology_dropout < 1.0:
+        raise ValueError("--outer_uv_topology_dropout must be in [0, 1).")
+    if (
+        args.outer_uv_occupancy_routing
+        or args.outer_uv_component_routing
+        or args.lambda_outer_uv_occupancy > 0.0
+        or args.lambda_outer_component_recall > 0.0
+        or args.lambda_outer_topology > 0.0
+        or args.lambda_route_occupancy_agreement > 0.0
+    ) and not args.predict_outer_uv_occupancy:
+        raise ValueError(
+            "Outer occupancy routing/losses require "
+            "--predict_outer_uv_occupancy."
         )
     if (
         args.semantic_channels < 1
@@ -2558,6 +2913,10 @@ def main():
         route_prior_logit_cap=args.route_prior_logit_cap,
         route_prior_dropout=args.route_prior_dropout,
         predict_outer_uv_occupancy=args.predict_outer_uv_occupancy,
+        outer_uv_feature_channels=args.outer_uv_feature_channels,
+        outer_uv_topology_channels=args.outer_uv_topology_channels,
+        outer_uv_topology_layers=args.outer_uv_topology_layers,
+        outer_uv_topology_dropout=args.outer_uv_topology_dropout,
     ).to(device)
     if runtime_semantic_backbone is not None:
         attach_semantic_runtime(
@@ -2832,7 +3191,18 @@ def main():
         "route_prior_logit_cap": model.route_prior_logit_cap,
         "route_prior_dropout": model.route_prior_dropout,
         "predict_outer_uv_occupancy": model.predict_outer_uv_occupancy,
+        "outer_uv_feature_channels": model.outer_uv_feature_channels,
+        "outer_uv_topology_channels": model.outer_uv_topology_channels,
+        "outer_uv_topology_layers": model.outer_uv_topology_layers,
         "outer_uv_occupancy_routing": args.outer_uv_occupancy_routing,
+        "outer_uv_component_routing": args.outer_uv_component_routing,
+        "outer_uv_component_seed_threshold": (
+            args.outer_uv_component_seed_threshold
+        ),
+        "outer_uv_component_grow_threshold": (
+            args.outer_uv_component_grow_threshold
+        ),
+        "outer_uv_component_min_size": args.outer_uv_component_min_size,
         "device": str(device),
         "parser_mode": args.parser_mode,
         "uv_classification": model.uv_classification,
@@ -2903,6 +3273,15 @@ def main():
         "lambda_outer_uv_occupancy": args.lambda_outer_uv_occupancy,
         "outer_uv_occupancy_dice_weight": (
             args.outer_uv_occupancy_dice_weight
+        ),
+        "outer_hard_positive_fraction": args.outer_hard_positive_fraction,
+        "outer_hard_positive_weight": args.outer_hard_positive_weight,
+        "lambda_outer_component_recall": (
+            args.lambda_outer_component_recall
+        ),
+        "lambda_outer_topology": args.lambda_outer_topology,
+        "lambda_route_occupancy_agreement": (
+            args.lambda_route_occupancy_agreement
         ),
         "outer_false_positive_gamma": args.outer_false_positive_gamma,
         "outer_false_negative_gamma": args.outer_false_negative_gamma,

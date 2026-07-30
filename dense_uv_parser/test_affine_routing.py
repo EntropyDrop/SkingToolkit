@@ -32,6 +32,7 @@ from SkingToolkit.dense_uv_parser.utils import (
     conditioning_to_pred_uv,
     estimate_solid_background_foreground,
     estimate_top_left_flood_foreground,
+    outer_uv_topology_hysteresis,
     fill_geometry_grid_debug,
     overlay_geometry_grid_debug,
     refine_parser_affine,
@@ -40,6 +41,10 @@ from SkingToolkit.dense_uv_parser.utils import (
     splat_deterministic_targets_to_uv_conditioning,
     splat_parser_predictions_to_uv_conditioning,
     splat_to_uv_conditioning,
+)
+from SkingToolkit.dense_uv_parser.uv_topology import (
+    build_outer_uv_graph,
+    build_simple_uv_topology,
 )
 
 
@@ -93,6 +98,51 @@ def dense_targets(batch, height, width):
 
 
 class GlobalAffineRoutingTest(unittest.TestCase):
+    def test_outer_topology_crosses_cube_seams(self):
+        flat_indices, edge_index = build_outer_uv_graph()
+        topology = build_simple_uv_topology()
+        faces = topology.face.reshape(-1)[flat_indices]
+        parts = topology.part.reshape(-1)[flat_indices]
+        source, target = edge_index
+        cross_seam = (
+            (parts[source] == parts[target])
+            & (faces[source] != faces[target])
+        )
+        self.assertTrue(cross_seam.any())
+
+    def test_outer_component_hysteresis_grows_and_rejects_isolated_seed(self):
+        flat_indices, edge_index = build_outer_uv_graph()
+        source, target = edge_index[:, 0]
+        source_flat = int(flat_indices[source])
+        target_flat = int(flat_indices[target])
+        probability = torch.zeros(1, 1, 64, 64)
+        probability.flatten()[source_flat] = 0.90
+        probability.flatten()[target_flat] = 0.60
+
+        result = outer_uv_topology_hysteresis(
+            probability,
+            seed_threshold=0.80,
+            grow_threshold=0.50,
+            min_component_size=2,
+        )
+        self.assertTrue(result["seed"].flatten()[source_flat])
+        self.assertTrue(result["grown"].flatten()[target_flat])
+        self.assertGreater(
+            float(result["probability"].flatten()[target_flat]),
+            0.80,
+        )
+
+        isolated = torch.zeros_like(probability)
+        isolated.flatten()[source_flat] = 0.90
+        rejected = outer_uv_topology_hysteresis(
+            isolated,
+            seed_threshold=0.80,
+            grow_threshold=0.50,
+            min_component_size=2,
+        )
+        self.assertFalse(rejected["accepted"].any())
+        self.assertTrue(rejected["rejected_candidate"].flatten()[source_flat])
+
     @staticmethod
     def two_view_shared_outer_renderer():
         renderer = FakeRenderer(mask=torch.ones(1, 1))
@@ -364,8 +414,21 @@ class GlobalAffineRoutingTest(unittest.TestCase):
             torch.rand(2, 4, 32, 16),
             view_ids=torch.tensor([0, 1]),
         )
+        projected = F.interpolate(
+            outputs["outer_uv_features"],
+            size=(64, 64),
+            mode="bilinear",
+            align_corners=False,
+        ).mean(dim=0, keepdim=True)
+        occupancy_logits = loaded.predict_projected_outer_uv_occupancy(
+            torch.cat(
+                [projected, projected.new_zeros(1, 4, 64, 64)],
+                dim=1,
+            ),
+            outputs["outer_uv_global_context"],
+        )
         self.assertEqual(
-            tuple(outputs["outer_uv_occupancy_logits"].shape),
+            tuple(occupancy_logits.shape),
             (1, 1, 64, 64),
         )
 
@@ -527,10 +590,14 @@ class GlobalAffineRoutingTest(unittest.TestCase):
             parser_args.outer_visibility_hard_negative_weight, 0.75
         )
         self.assertEqual(parser_args.route_texel_center_power, 2.0)
-        self.assertFalse(parser_args.predict_outer_uv_occupancy)
+        self.assertTrue(parser_args.predict_outer_uv_occupancy)
         self.assertEqual(parser_args.lambda_outer_uv_occupancy, 0.50)
         self.assertEqual(parser_args.outer_uv_occupancy_dice_weight, 0.25)
-        self.assertFalse(parser_args.outer_uv_occupancy_routing)
+        self.assertTrue(parser_args.outer_uv_occupancy_routing)
+        self.assertTrue(parser_args.outer_uv_component_routing)
+        self.assertEqual(parser_args.outer_uv_component_seed_threshold, 0.80)
+        self.assertEqual(parser_args.outer_uv_component_grow_threshold, 0.50)
+        self.assertEqual(parser_args.outer_uv_component_min_size, 2)
         self.assertEqual(parser_args.semantic_channels, 128)
         self.assertEqual(parser_args.semantic_attention_heads, 4)
         self.assertEqual(parser_args.semantic_layers, 1)
@@ -2080,6 +2147,7 @@ class GlobalAffineRoutingTest(unittest.TestCase):
             outer_semantic_rescue=False,
             geometry_route_texel_consensus=True,
             outer_uv_occupancy=True,
+            outer_uv_component_routing=False,
             return_details=True,
         )
 
