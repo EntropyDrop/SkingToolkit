@@ -358,6 +358,7 @@ class DenseUVParserNet(nn.Module):
         outer_uv_topology_channels=64,
         outer_uv_topology_layers=3,
         outer_uv_topology_dropout=0.05,
+        outer_uv_route_evidence_dropout=0.50,
     ):
         super().__init__()
         self.geometry_only = bool(geometry_only)
@@ -389,6 +390,9 @@ class DenseUVParserNet(nn.Module):
         self.outer_uv_topology_channels = int(outer_uv_topology_channels)
         self.outer_uv_topology_layers = int(outer_uv_topology_layers)
         self.outer_uv_topology_dropout = float(outer_uv_topology_dropout)
+        self.outer_uv_route_evidence_dropout = float(
+            outer_uv_route_evidence_dropout
+        )
         if self.route_prior_height < 1 or self.route_prior_width < 1:
             raise ValueError("Route-prior dimensions must be positive.")
         if self.route_prior_logit_cap <= 0.0:
@@ -404,6 +408,10 @@ class DenseUVParserNet(nn.Module):
         self.feature_dropout_probability = float(feature_dropout)
         if not 0.0 <= self.feature_dropout_probability < 1.0:
             raise ValueError("feature_dropout must be in [0, 1).")
+        if not 0.0 <= self.outer_uv_route_evidence_dropout < 1.0:
+            raise ValueError(
+                "outer_uv_route_evidence_dropout must be in [0, 1)."
+            )
         c = base_channels
         self.stem = ConvBlock(input_channels + self.view_classes, c)
         self.down1 = DownBlock(c, c * 2)

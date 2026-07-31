@@ -1077,7 +1077,6 @@ def outer_uv_topology_hysteresis(
     source, target = edge_index
     expanded_target = target.view(1, -1).expand(nodes.shape[0], -1)
     active = seeds.clone()
-    component_score = torch.where(seeds, nodes, torch.zeros_like(nodes))
     connected_edge = candidate[:, source] & candidate[:, target]
     for _ in range(int(max_steps)):
         neighbour_active = torch.where(
@@ -1094,24 +1093,6 @@ def outer_uv_topology_hysteresis(
             include_self=False,
         )
         active = active | (candidate & propagated_active.bool())
-
-        neighbour_score = torch.where(
-            connected_edge,
-            component_score[:, source],
-            torch.zeros_like(component_score[:, source]),
-        )
-        propagated_score = torch.zeros_like(component_score)
-        propagated_score.scatter_reduce_(
-            1,
-            expanded_target,
-            neighbour_score,
-            reduce="amax",
-            include_self=False,
-        )
-        component_score = torch.maximum(
-            component_score,
-            torch.where(candidate, propagated_score, torch.zeros_like(propagated_score)),
-        )
 
     labels = _outer_graph_component_labels(
         candidate,
@@ -1133,11 +1114,11 @@ def outer_uv_topology_hysteresis(
     node_component_size = component_sizes[component_index]
     active = active & (node_component_size >= int(min_component_size))
     grown = active & ~seeds
-    structured_nodes = torch.where(
-        active,
-        torch.maximum(nodes, component_score),
-        torch.zeros_like(nodes),
-    )
+    # Connectivity determines eligibility, not confidence. Propagating a
+    # single seed's score across the whole component made a 0.50 neighbour
+    # behave like a 0.90 texel and amplified one false seed into a large outer
+    # patch. Accepted nodes therefore retain their own calibrated score.
+    structured_nodes = torch.where(active, nodes, torch.zeros_like(nodes))
 
     def scatter_nodes(node_values, dtype=None):
         atlas = node_values.new_zeros(
@@ -1299,14 +1280,32 @@ def attach_projected_outer_uv_occupancy(
         per_view_outer,
         torch.zeros_like(per_view_outer),
     ).amax(dim=1)
+    route_evidence = torch.cat([mean_outer, max_outer], dim=1)
+    route_evidence_dropout = float(
+        getattr(model, "outer_uv_route_evidence_dropout", 0.0)
+    )
+    if model.training and route_evidence_dropout > 0.0:
+        # Drop the entire route-evidence pair per grouped skin. This prevents
+        # the occupancy head from learning the shortcut "copy p_outer" while
+        # leaving half of the batches available for useful route context.
+        keep_route_evidence = (
+            torch.rand(
+                (route_evidence.shape[0],)
+                + (1,) * (route_evidence.ndim - 1),
+                device=route_evidence.device,
+            )
+            >= route_evidence_dropout
+        )
+        route_evidence = route_evidence * keep_route_evidence.to(
+            dtype=route_evidence.dtype
+        )
     support_fraction = (
         support_count / max(float(len(views)), 1.0)
     )
     atlas_features = torch.cat(
         [
             mean_features,
-            mean_outer,
-            max_outer,
+            route_evidence,
             mean_foreground,
             support_fraction,
         ],
@@ -2952,6 +2951,25 @@ def render_direct_uv(skins, renderer, view):
     rgb = outer[:, 3:4] * outer[:, :3] + (1.0 - outer[:, 3:4]) * inner_rgb
     alpha = outer[:, 3:4] + (1.0 - outer[:, 3:4]) * inner[:, 3:4]
     return torch.cat([rgb, alpha], dim=1)
+
+
+def render_outer_alpha_uv(skins, renderer, view):
+    """Differentiably project only the outer-layer alpha into one view."""
+    if skins.dim() != 4 or skins.shape[1:] != (4, UV_SIZE, UV_SIZE):
+        raise ValueError(
+            f"Expected skins shaped (N, 4, 64, 64), got {tuple(skins.shape)}."
+        )
+    batch = skins.shape[0]
+    dtype = skins.dtype
+    outer_grid = getattr(renderer, f"{view}_outer_grid").to(dtype=dtype)
+    outer_mask = getattr(renderer, f"{view}_outer_mask").to(dtype=dtype)
+    return F.grid_sample(
+        skins[:, 3:4],
+        outer_grid.unsqueeze(0).expand(batch, -1, -1, -1),
+        mode="bilinear",
+        padding_mode="zeros",
+        align_corners=True,
+    ) * outer_mask.view(1, 1, *outer_mask.shape)
 
 
 def flat_uv_to_uv01(flat_uv, dtype):

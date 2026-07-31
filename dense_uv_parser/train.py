@@ -54,6 +54,7 @@ from SkingToolkit.dense_uv_parser.utils import (  # noqa: E402
     prediction_uv01,
     randomize_render_background,
     render_direct_uv,
+    render_outer_alpha_uv,
     soft_splat_geometry_predictions_to_uv,
     splat_deterministic_targets_to_uv_conditioning,
     splat_parser_predictions_to_uv_conditioning,
@@ -222,6 +223,8 @@ def format_metrics(
     outer_recall_weight=0.75,
     outer_iou_weight=0.5,
     hard_rgb_selection_weight=1.0,
+    outer_projection_fp_selection_weight=1.0,
+    outer_projection_area_selection_weight=0.5,
 ):
     result = {}
     for name, value in metric_sums.items():
@@ -285,6 +288,10 @@ def format_metrics(
                     result["hard_rgb_mae_inner"]
                     + result["hard_rgb_mae_outer"]
                 )
+                + outer_projection_fp_selection_weight
+                * result.get("loss_outer_projection_false_positive", 0.0)
+                + outer_projection_area_selection_weight
+                * result.get("loss_outer_projected_area", 0.0)
             )
     return result
 
@@ -778,12 +785,44 @@ def cross_view_outer_visibility_loss(
     }
 
 
+def _graph_component_labels(candidate, edge_index, max_steps=64):
+    """Label boolean graph components without creating gradient paths."""
+    batch, node_count = candidate.shape
+    source, destination = edge_index
+    labels = torch.arange(
+        node_count,
+        device=candidate.device,
+        dtype=torch.long,
+    ).view(1, -1).expand(batch, -1).clone()
+    labels[~candidate] = node_count
+    expanded_destination = destination.view(1, -1).expand(batch, -1)
+    connected_edge = candidate[:, source] & candidate[:, destination]
+    with torch.no_grad():
+        for _ in range(int(max_steps)):
+            neighbour_label = torch.where(
+                connected_edge,
+                labels[:, source],
+                torch.full_like(labels[:, source], node_count),
+            )
+            updated = labels.clone()
+            updated.scatter_reduce_(
+                1,
+                expanded_destination,
+                neighbour_label,
+                reduce="amin",
+                include_self=True,
+            )
+            labels = updated
+    return labels
+
+
 def outer_uv_occupancy_losses(
     logits,
     target_uv,
     outer_part_masks,
     alpha_threshold=0.5,
     hard_positive_fraction=0.25,
+    hard_negative_fraction=0.10,
     topology_max_steps=64,
 ):
     """Train projected outer occupancy with component and topology structure."""
@@ -825,6 +864,19 @@ def outer_uv_occupancy_losses(
     else:
         hard_positive_count = 0
         hard_positive_loss = logits.sum() * 0.0
+    negative_loss = F.softplus(selected_logits[selected_target < 0.5])
+    if negative_loss.numel() > 0 and hard_negative_fraction > 0.0:
+        hard_negative_count = max(
+            1,
+            math.ceil(negative_loss.numel() * hard_negative_fraction),
+        )
+        hard_negative_loss = negative_loss.topk(
+            hard_negative_count,
+            sorted=False,
+        ).values.mean()
+    else:
+        hard_negative_count = 0
+        hard_negative_loss = logits.sum() * 0.0
 
     flat_indices, edge_index = build_outer_uv_graph()
     flat_indices = flat_indices.to(logits.device)
@@ -845,36 +897,22 @@ def outer_uv_occupancy_losses(
         if positive_edges.any()
         else logits.sum() * 0.0
     )
+    negative_edges = ~target_nodes[:, source] & ~target_nodes[:, destination]
+    false_component_edge_score = (
+        probability_nodes[:, source] * probability_nodes[:, destination]
+    ).square()
+    negative_topology = (
+        false_component_edge_score[negative_edges].mean()
+        if negative_edges.any()
+        else logits.sum() * 0.0
+    )
 
     node_count = probability_nodes.shape[1]
-    component_labels = torch.arange(
-        node_count,
-        device=logits.device,
-        dtype=torch.long,
-    ).view(1, -1).expand(target_nodes.shape[0], -1).clone()
-    component_labels[~target_nodes] = node_count
-    expanded_destination = destination.view(1, -1).expand(
-        target_nodes.shape[0], -1
+    component_labels = _graph_component_labels(
+        target_nodes,
+        edge_index,
+        max_steps=topology_max_steps,
     )
-    connected_edge = (
-        target_nodes[:, source] & target_nodes[:, destination]
-    )
-    with torch.no_grad():
-        for _ in range(int(topology_max_steps)):
-            neighbour_label = torch.where(
-                connected_edge,
-                component_labels[:, source],
-                torch.full_like(component_labels[:, source], node_count),
-            )
-            updated = component_labels.clone()
-            updated.scatter_reduce_(
-                1,
-                expanded_destination,
-                neighbour_label,
-                reduce="amin",
-                include_self=True,
-            )
-            component_labels = updated
     batch_offsets = (
         torch.arange(target_nodes.shape[0], device=logits.device).view(-1, 1)
         * (node_count + 1)
@@ -906,6 +944,57 @@ def outer_uv_occupancy_losses(
         if component_recall.numel() > 0
         else logits.sum() * 0.0
     )
+
+    # Macro-average false mass over predicted connected components. This gives
+    # a small but coherent false accessory the same component-level attention
+    # as a large false patch instead of letting background negatives dominate
+    # by raw pixel count.
+    predicted_nodes = probability_nodes.detach() >= 0.5
+    predicted_labels = _graph_component_labels(
+        predicted_nodes,
+        edge_index,
+        max_steps=topology_max_steps,
+    )
+    predicted_component_index = predicted_labels + batch_offsets
+    predicted_component_size = probability_nodes.new_zeros(
+        target_nodes.shape[0] * (node_count + 1)
+    )
+    predicted_component_false_probability = probability_nodes.new_zeros(
+        target_nodes.shape[0] * (node_count + 1)
+    )
+    predicted_component_false_count = probability_nodes.new_zeros(
+        target_nodes.shape[0] * (node_count + 1)
+    )
+    predicted_component_size.scatter_add_(
+        0,
+        predicted_component_index[predicted_nodes],
+        torch.ones_like(probability_nodes[predicted_nodes]),
+    )
+    false_predicted_nodes = predicted_nodes & ~target_nodes
+    predicted_component_false_probability.scatter_add_(
+        0,
+        predicted_component_index[false_predicted_nodes],
+        probability_nodes[false_predicted_nodes],
+    )
+    predicted_component_false_count.scatter_add_(
+        0,
+        predicted_component_index[false_predicted_nodes],
+        torch.ones_like(probability_nodes[false_predicted_nodes]),
+    )
+    existing_predicted_components = predicted_component_size > 0
+    component_false_mass = (
+        predicted_component_false_probability[existing_predicted_components]
+        / predicted_component_size[existing_predicted_components].clamp_min(1.0)
+    )
+    component_precision = 1.0 - (
+        predicted_component_false_count[existing_predicted_components]
+        / predicted_component_size[existing_predicted_components].clamp_min(1.0)
+    )
+    component_false_positive_loss = (
+        component_false_mass.mean()
+        if component_false_mass.numel() > 0
+        else logits.sum() * 0.0
+    )
     dice = 1.0 - (
         2.0 * (probability * target).sum() + 1.0
     ) / (probability.sum() + target.sum() + 1.0)
@@ -916,8 +1005,13 @@ def outer_uv_occupancy_losses(
         "loss_outer_uv_occupancy_bce": loss_bce,
         "loss_outer_uv_occupancy_dice": dice,
         "loss_outer_uv_occupancy_hard_positive": hard_positive_loss,
+        "loss_outer_uv_occupancy_hard_negative": hard_negative_loss,
         "loss_outer_topology_consistency": topology_consistency,
+        "loss_outer_negative_topology": negative_topology,
         "loss_outer_component_recall": component_recall_loss,
+        "loss_outer_component_false_positive": (
+            component_false_positive_loss
+        ),
         "outer_component_recall": (
             component_recall.mean()
             if component_recall.numel() > 0
@@ -928,6 +1022,17 @@ def outer_uv_occupancy_losses(
         ),
         "count_outer_hard_positive_candidates": logits.new_tensor(
             float(hard_positive_count)
+        ),
+        "count_outer_occupancy_hard_negative_candidates": logits.new_tensor(
+            float(hard_negative_count)
+        ),
+        "count_predicted_outer_components": logits.new_tensor(
+            float(existing_predicted_components.sum())
+        ),
+        "outer_component_precision": (
+            component_precision.mean()
+            if component_precision.numel() > 0
+            else logits.sum() * 0.0
         ),
         "outer_uv_occupancy_precision": (
             true_positive / predicted.float().sum().clamp_min(1.0)
@@ -940,17 +1045,21 @@ def outer_uv_occupancy_losses(
 
 def route_occupancy_agreement_loss(
     outputs,
+    target_uv,
     renderer,
     views,
     center_power=2.0,
+    confidence_threshold=0.80,
 ):
-    """Align visible route probabilities to the calibrated UV occupancy head."""
+    """Align routes only to confident occupancy predictions agreeing with GT."""
     if "outer_uv_occupancy_logits" not in outputs:
         zero = outputs["layer"].sum() * 0.0
         return {
             "loss_route_occupancy_agreement": zero,
             "route_occupancy_mae": zero,
             "count_route_occupancy_texels": zero,
+            "count_route_occupancy_positive_texels": zero,
+            "count_route_occupancy_negative_texels": zero,
         }
     route_probability = torch.softmax(
         outputs["layer"].float(), dim=1
@@ -972,17 +1081,31 @@ def route_occupancy_agreement_loss(
     occupancy = torch.sigmoid(
         outputs["outer_uv_occupancy_logits"].float()
     ).flatten(2)[:, 0]
+    target_outer = (
+        target_uv[:, 3].float() > 0.5
+    ).flatten(1).to(device=occupancy.device)
     _, outer_mask = build_uv_masks()
-    selected = support.any(dim=1) & outer_mask[0].to(
+    valid_outer = outer_mask[0].to(
         device=occupancy.device,
         dtype=torch.bool,
     ).reshape(1, -1)
+    confidence_threshold = float(confidence_threshold)
+    confident_correct = (
+        (target_outer & (occupancy.detach() >= confidence_threshold))
+        | (
+            ~target_outer
+            & (occupancy.detach() <= 1.0 - confidence_threshold)
+        )
+    )
+    selected = support.any(dim=1) & valid_outer & confident_correct
     if not selected.any():
         zero = occupancy.sum() * 0.0
         return {
             "loss_route_occupancy_agreement": zero,
             "route_occupancy_mae": zero,
             "count_route_occupancy_texels": zero,
+            "count_route_occupancy_positive_texels": zero,
+            "count_route_occupancy_negative_texels": zero,
         }
     difference = (
         visible_route_outer[selected] - occupancy.detach()[selected]
@@ -991,6 +1114,12 @@ def route_occupancy_agreement_loss(
         "loss_route_occupancy_agreement": difference.square().mean(),
         "route_occupancy_mae": difference.abs().mean(),
         "count_route_occupancy_texels": selected.float().sum(),
+        "count_route_occupancy_positive_texels": (
+            selected & target_outer
+        ).float().sum(),
+        "count_route_occupancy_negative_texels": (
+            selected & ~target_outer
+        ).float().sum(),
     }
 
 
@@ -1084,10 +1213,94 @@ def differentiable_geometry_losses(
 
     render_rgb_total = pred_uv.new_zeros(())
     render_alpha_total = pred_uv.new_zeros(())
+    outer_projection_false_positive_total = pred_uv.new_zeros(())
+    outer_projection_false_negative_total = pred_uv.new_zeros(())
+    outer_projection_dice_total = pred_uv.new_zeros(())
+    outer_projected_area_total = pred_uv.new_zeros(())
+    outer_projected_false_positive_pixels = pred_uv.new_zeros(())
+    outer_projected_negative_pixels = pred_uv.new_zeros(())
     for view in views:
         pred_render = render_direct_uv(pred_uv, renderer, view)
         with torch.no_grad():
             gt_render = render_direct_uv(gt_uv, renderer, view)
+            gt_outer_alpha = render_outer_alpha_uv(gt_uv, renderer, view)
+        pred_outer_alpha = render_outer_alpha_uv(
+            pred_uv, renderer, view
+        ).clamp(1e-6, 1.0 - 1e-6)
+        outer_projection_mask = getattr(
+            renderer, f"{view}_outer_mask"
+        ).to(
+            device=pred_uv.device,
+            dtype=pred_uv.dtype,
+        ).view(1, 1, *pred_outer_alpha.shape[-2:])
+        outer_negative = (
+            outer_projection_mask - gt_outer_alpha.detach()
+        ).clamp(0.0, 1.0)
+        outer_positive = gt_outer_alpha.detach().clamp(0.0, 1.0)
+        outer_negative_denom = outer_negative.sum(
+            dim=(1, 2, 3)
+        ).clamp_min(1.0)
+        outer_positive_denom = outer_positive.sum(
+            dim=(1, 2, 3)
+        ).clamp_min(1.0)
+        outer_projection_false_positive_total = (
+            outer_projection_false_positive_total
+            + (
+                -torch.log1p(-pred_outer_alpha)
+                * outer_negative
+            ).sum(dim=(1, 2, 3)).div(outer_negative_denom).mean()
+        )
+        outer_projection_false_negative_total = (
+            outer_projection_false_negative_total
+            + (
+                -torch.log(pred_outer_alpha) * outer_positive
+            ).sum(dim=(1, 2, 3)).div(outer_positive_denom).mean()
+        )
+        outer_projection_dice_total = (
+            outer_projection_dice_total
+            + (
+                1.0
+                - (
+                    2.0
+                    * (pred_outer_alpha * outer_positive).sum(
+                        dim=(1, 2, 3)
+                    )
+                    + 1.0
+                )
+                / (
+                    (pred_outer_alpha * outer_projection_mask).sum(
+                        dim=(1, 2, 3)
+                    )
+                    + outer_positive.sum(dim=(1, 2, 3))
+                    + 1.0
+                )
+            ).mean()
+        )
+        predicted_outer_area = (
+            pred_outer_alpha * outer_projection_mask
+        ).sum(dim=(1, 2, 3))
+        expected_outer_area = outer_positive.sum(dim=(1, 2, 3))
+        outer_projected_area_total = (
+            outer_projected_area_total
+            + (
+                predicted_outer_area - expected_outer_area
+            ).abs().div(expected_outer_area.clamp_min(1.0)).mean()
+        )
+        outer_projected_false_positive_pixels = (
+            outer_projected_false_positive_pixels
+            + (
+                (pred_outer_alpha.detach() >= 0.5)
+                & (outer_positive < 0.5)
+                & (outer_projection_mask > 0.5)
+            ).float().sum()
+        )
+        outer_projected_negative_pixels = (
+            outer_projected_negative_pixels
+            + (
+                (outer_positive < 0.5)
+                & (outer_projection_mask > 0.5)
+            ).float().sum()
+        )
         foreground = gt_render[:, 3:4].detach()
         rgb_denom = (foreground.sum(dim=(1, 2, 3)) * 3.0).clamp_min(1.0)
         render_rgb_total = render_rgb_total + (
@@ -1120,6 +1333,28 @@ def differentiable_geometry_losses(
         "loss_soft_uv_outer_recall_hard": loss_soft_uv_outer_recall_hard,
         "loss_render_rgb": render_rgb_total / view_count,
         "loss_render_alpha": render_alpha_total / view_count,
+        "loss_outer_projection_false_positive": (
+            outer_projection_false_positive_total / view_count
+        ),
+        "loss_outer_projection_false_negative": (
+            outer_projection_false_negative_total / view_count
+        ),
+        "loss_outer_projection_dice": (
+            outer_projection_dice_total / view_count
+        ),
+        "loss_outer_projected_area": (
+            outer_projected_area_total / view_count
+        ),
+        "outer_projected_false_positive_rate": (
+            outer_projected_false_positive_pixels
+            / outer_projected_negative_pixels.clamp_min(1.0)
+        ),
+        "count_outer_projected_false_positive_pixels": (
+            outer_projected_false_positive_pixels
+        ),
+        "count_outer_projected_negative_pixels": (
+            outer_projected_negative_pixels
+        ),
         "visible_inner_uv_percent": visible_inner_uv.float().mean() * 100.0,
         "visible_outer_uv_percent": visible_outer_uv.float().mean() * 100.0,
         "soft_uv_known_percent": (
@@ -1409,6 +1644,9 @@ def run_epoch(
                         hard_positive_fraction=(
                             args.outer_hard_positive_fraction
                         ),
+                        hard_negative_fraction=(
+                            args.outer_hard_negative_fraction
+                        ),
                     )
                     loss_outer_uv_occupancy = (
                         occupancy["loss_outer_uv_occupancy_bce"]
@@ -1418,14 +1656,24 @@ def run_epoch(
                         * occupancy[
                             "loss_outer_uv_occupancy_hard_positive"
                         ]
+                        + args.outer_hard_negative_weight
+                        * occupancy[
+                            "loss_outer_uv_occupancy_hard_negative"
+                        ]
                     )
                     weighted_outer_uv_occupancy = (
                         args.lambda_outer_uv_occupancy
                         * loss_outer_uv_occupancy
                         + args.lambda_outer_component_recall
                         * occupancy["loss_outer_component_recall"]
+                        + args.lambda_outer_component_false_positive
+                        * occupancy[
+                            "loss_outer_component_false_positive"
+                        ]
                         + args.lambda_outer_topology
                         * occupancy["loss_outer_topology_consistency"]
+                        + args.lambda_outer_negative_topology
+                        * occupancy["loss_outer_negative_topology"]
                     )
                     losses.update(occupancy)
                     losses["loss_outer_uv_occupancy"] = (
@@ -1448,17 +1696,29 @@ def run_epoch(
                     losses["outer_uv_occupancy_precision"] = zero
                     losses["outer_uv_occupancy_recall"] = zero
                     losses["loss_outer_uv_occupancy_hard_positive"] = zero
+                    losses["loss_outer_uv_occupancy_hard_negative"] = zero
                     losses["loss_outer_topology_consistency"] = zero
+                    losses["loss_outer_negative_topology"] = zero
                     losses["loss_outer_component_recall"] = zero
+                    losses["loss_outer_component_false_positive"] = zero
                     losses["outer_component_recall"] = zero
+                    losses["outer_component_precision"] = zero
                     losses["count_outer_components"] = zero
+                    losses["count_predicted_outer_components"] = zero
                     losses["count_outer_hard_positive_candidates"] = zero
+                    losses[
+                        "count_outer_occupancy_hard_negative_candidates"
+                    ] = zero
 
                 agreement = route_occupancy_agreement_loss(
                     outputs,
+                    batch["uv"],
                     renderer,
                     views,
                     center_power=args.route_texel_center_power,
+                    confidence_threshold=(
+                        args.outer_occupancy_agreement_confidence_threshold
+                    ),
                 )
                 if train:
                     batch_progress = float(batch_index) / max(
@@ -1503,6 +1763,10 @@ def run_epoch(
                         args.lambda_soft_uv_outer_recall,
                         args.lambda_render_rgb,
                         args.lambda_render_alpha,
+                        args.lambda_outer_projection_false_positive,
+                        args.lambda_outer_projection_false_negative,
+                        args.lambda_outer_projection_dice,
+                        args.lambda_outer_projected_area,
                         args.lambda_route_texel_supervision,
                         args.lambda_cross_view_outer_visibility,
                     )
@@ -1553,6 +1817,13 @@ def run_epoch(
                         "loss_soft_uv_outer_recall_hard": zero,
                         "loss_render_rgb": zero,
                         "loss_render_alpha": zero,
+                        "loss_outer_projection_false_positive": zero,
+                        "loss_outer_projection_false_negative": zero,
+                        "loss_outer_projection_dice": zero,
+                        "loss_outer_projected_area": zero,
+                        "outer_projected_false_positive_rate": zero,
+                        "count_outer_projected_false_positive_pixels": zero,
+                        "count_outer_projected_negative_pixels": zero,
                         "loss_route_texel_supervision": zero,
                         "texel_route_accuracy": zero,
                         "texel_route_precision_outer": zero,
@@ -1583,6 +1854,14 @@ def run_epoch(
                     * auxiliary["loss_soft_uv_outer_recall"]
                     + args.lambda_render_rgb * auxiliary["loss_render_rgb"]
                     + args.lambda_render_alpha * auxiliary["loss_render_alpha"]
+                    + args.lambda_outer_projection_false_positive
+                    * auxiliary["loss_outer_projection_false_positive"]
+                    + args.lambda_outer_projection_false_negative
+                    * auxiliary["loss_outer_projection_false_negative"]
+                    + args.lambda_outer_projection_dice
+                    * auxiliary["loss_outer_projection_dice"]
+                    + args.lambda_outer_projected_area
+                    * auxiliary["loss_outer_projected_area"]
                     + args.lambda_route_texel_supervision
                     * auxiliary["loss_route_texel_supervision"]
                     + args.lambda_cross_view_outer_visibility
@@ -1639,6 +1918,12 @@ def run_epoch(
                 outer_recall_weight=args.outer_selection_recall_weight,
                 outer_iou_weight=args.outer_selection_iou_weight,
                 hard_rgb_selection_weight=args.hard_rgb_selection_weight,
+                outer_projection_fp_selection_weight=(
+                    args.outer_projection_fp_selection_weight
+                ),
+                outer_projection_area_selection_weight=(
+                    args.outer_projection_area_selection_weight
+                ),
             )
             postfix = {
                 "total": f"{avg['loss_total']:.4f}",
@@ -1668,6 +1953,12 @@ def run_epoch(
         outer_recall_weight=args.outer_selection_recall_weight,
         outer_iou_weight=args.outer_selection_iou_weight,
         hard_rgb_selection_weight=args.hard_rgb_selection_weight,
+        outer_projection_fp_selection_weight=(
+            args.outer_projection_fp_selection_weight
+        ),
+        outer_projection_area_selection_weight=(
+            args.outer_projection_area_selection_weight
+        ),
     )
 
 
@@ -2133,6 +2424,9 @@ def save_checkpoint(
             "outer_uv_topology_channels": model.outer_uv_topology_channels,
             "outer_uv_topology_layers": model.outer_uv_topology_layers,
             "outer_uv_topology_dropout": model.outer_uv_topology_dropout,
+            "outer_uv_route_evidence_dropout": (
+                model.outer_uv_route_evidence_dropout
+            ),
             "arm_model": "steve",
         },
     }
@@ -2219,6 +2513,9 @@ def build_arg_parser():
     parser.add_argument("--outer_uv_topology_channels", type=int, default=64)
     parser.add_argument("--outer_uv_topology_layers", type=int, default=3)
     parser.add_argument("--outer_uv_topology_dropout", type=float, default=0.05)
+    parser.add_argument(
+        "--outer_uv_route_evidence_dropout", type=float, default=0.50
+    )
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--num_workers", type=int, default=8)
     parser.add_argument("--prefetch_factor", type=int, default=4)
@@ -2501,19 +2798,38 @@ def build_arg_parser():
         "--outer_hard_positive_fraction", type=float, default=0.25
     )
     parser.add_argument(
-        "--outer_hard_positive_weight", type=float, default=0.50
+        "--outer_hard_positive_weight", type=float, default=0.25
     )
     parser.add_argument(
-        "--lambda_outer_component_recall", type=float, default=0.25
+        "--outer_hard_negative_fraction", type=float, default=0.10
+    )
+    parser.add_argument(
+        "--outer_hard_negative_weight", type=float, default=1.0
+    )
+    parser.add_argument(
+        "--lambda_outer_component_recall", type=float, default=0.10
+    )
+    parser.add_argument(
+        "--lambda_outer_component_false_positive",
+        type=float,
+        default=0.25,
     )
     parser.add_argument("--lambda_outer_topology", type=float, default=0.10)
+    parser.add_argument(
+        "--lambda_outer_negative_topology", type=float, default=0.15
+    )
     parser.add_argument(
         "--lambda_route_occupancy_agreement", type=float, default=0.25
     )
     parser.add_argument(
         "--outer_occupancy_agreement_warmup_fraction",
         type=float,
-        default=0.20,
+        default=0.50,
+    )
+    parser.add_argument(
+        "--outer_occupancy_agreement_confidence_threshold",
+        type=float,
+        default=0.80,
     )
     parser.add_argument("--outer_false_positive_gamma", type=float, default=3.0)
     parser.add_argument("--outer_false_negative_gamma", type=float, default=2.0)
@@ -2529,11 +2845,37 @@ def build_arg_parser():
     parser.add_argument("--soft_uv_recall_hard_weight", type=float, default=0.50)
     parser.add_argument("--lambda_render_rgb", type=float, default=0.20)
     parser.add_argument("--lambda_render_alpha", type=float, default=0.25)
+    parser.add_argument(
+        "--lambda_outer_projection_false_positive",
+        type=float,
+        default=1.0,
+    )
+    parser.add_argument(
+        "--lambda_outer_projection_false_negative",
+        type=float,
+        default=0.50,
+    )
+    parser.add_argument(
+        "--lambda_outer_projection_dice", type=float, default=0.25
+    )
+    parser.add_argument(
+        "--lambda_outer_projected_area", type=float, default=0.25
+    )
     parser.add_argument("--outer_selection_precision_weight", type=float, default=1.50)
     parser.add_argument("--outer_selection_recall_weight", type=float, default=0.50)
     parser.add_argument("--outer_selection_iou_weight", type=float, default=0.5)
     parser.add_argument("--inner_selection_recall_weight", type=float, default=0.5)
     parser.add_argument("--hard_rgb_selection_weight", type=float, default=1.0)
+    parser.add_argument(
+        "--outer_projection_fp_selection_weight",
+        type=float,
+        default=1.0,
+    )
+    parser.add_argument(
+        "--outer_projection_area_selection_weight",
+        type=float,
+        default=0.50,
+    )
     parser.add_argument(
         "--render_softmax_temperature",
         type=float,
@@ -2589,12 +2931,20 @@ def main():
         args.lambda_soft_uv_outer_recall,
         args.lambda_render_rgb,
         args.lambda_render_alpha,
+        args.lambda_outer_projection_false_positive,
+        args.lambda_outer_projection_false_negative,
+        args.lambda_outer_projection_dice,
+        args.lambda_outer_projected_area,
         args.lambda_cross_view_outer_visibility,
     )
     if any(weight < 0 for weight in differentiable_weights):
         raise ValueError("Differentiable parser loss weights must be non-negative.")
-    if args.hard_rgb_selection_weight < 0:
-        raise ValueError("--hard_rgb_selection_weight must be non-negative.")
+    if min(
+        args.hard_rgb_selection_weight,
+        args.outer_projection_fp_selection_weight,
+        args.outer_projection_area_selection_weight,
+    ) < 0:
+        raise ValueError("Checkpoint selection weights must be non-negative.")
     if not 0.0 <= args.background_color_tolerance <= 1.0:
         raise ValueError("--background_color_tolerance must be in [0, 1].")
     if not 0.0 <= args.color_background_tolerance <= 1.0:
@@ -2649,8 +2999,11 @@ def main():
         args.lambda_outer_uv_occupancy,
         args.outer_uv_occupancy_dice_weight,
         args.outer_hard_positive_weight,
+        args.outer_hard_negative_weight,
         args.lambda_outer_component_recall,
+        args.lambda_outer_component_false_positive,
         args.lambda_outer_topology,
+        args.lambda_outer_negative_topology,
         args.lambda_route_occupancy_agreement,
     ) < 0:
         raise ValueError("Route, semantic, and confidence loss weights must be non-negative.")
@@ -2674,6 +3027,8 @@ def main():
         )
     if not 0.0 <= args.outer_hard_positive_fraction <= 1.0:
         raise ValueError("--outer_hard_positive_fraction must be in [0, 1].")
+    if not 0.0 <= args.outer_hard_negative_fraction <= 1.0:
+        raise ValueError("--outer_hard_negative_fraction must be in [0, 1].")
     if not (
         0.0
         <= args.outer_uv_component_grow_threshold
@@ -2689,6 +3044,11 @@ def main():
         raise ValueError(
             "--outer_occupancy_agreement_warmup_fraction must be in [0, 1)."
         )
+    if not 0.5 <= args.outer_occupancy_agreement_confidence_threshold <= 1.0:
+        raise ValueError(
+            "--outer_occupancy_agreement_confidence_threshold must be in "
+            "[0.5, 1]."
+        )
     if (
         args.outer_uv_feature_channels < 1
         or args.outer_uv_topology_channels < 1
@@ -2697,12 +3057,18 @@ def main():
         raise ValueError("Outer UV topology dimensions must be positive.")
     if not 0.0 <= args.outer_uv_topology_dropout < 1.0:
         raise ValueError("--outer_uv_topology_dropout must be in [0, 1).")
+    if not 0.0 <= args.outer_uv_route_evidence_dropout < 1.0:
+        raise ValueError(
+            "--outer_uv_route_evidence_dropout must be in [0, 1)."
+        )
     if (
         args.outer_uv_occupancy_routing
         or args.outer_uv_component_routing
         or args.lambda_outer_uv_occupancy > 0.0
         or args.lambda_outer_component_recall > 0.0
+        or args.lambda_outer_component_false_positive > 0.0
         or args.lambda_outer_topology > 0.0
+        or args.lambda_outer_negative_topology > 0.0
         or args.lambda_route_occupancy_agreement > 0.0
     ) and not args.predict_outer_uv_occupancy:
         raise ValueError(
@@ -2917,6 +3283,9 @@ def main():
         outer_uv_topology_channels=args.outer_uv_topology_channels,
         outer_uv_topology_layers=args.outer_uv_topology_layers,
         outer_uv_topology_dropout=args.outer_uv_topology_dropout,
+        outer_uv_route_evidence_dropout=(
+            args.outer_uv_route_evidence_dropout
+        ),
     ).to(device)
     if runtime_semantic_backbone is not None:
         attach_semantic_runtime(
@@ -3194,6 +3563,9 @@ def main():
         "outer_uv_feature_channels": model.outer_uv_feature_channels,
         "outer_uv_topology_channels": model.outer_uv_topology_channels,
         "outer_uv_topology_layers": model.outer_uv_topology_layers,
+        "outer_uv_route_evidence_dropout": (
+            model.outer_uv_route_evidence_dropout
+        ),
         "outer_uv_occupancy_routing": args.outer_uv_occupancy_routing,
         "outer_uv_component_routing": args.outer_uv_component_routing,
         "outer_uv_component_seed_threshold": (
@@ -3276,12 +3648,26 @@ def main():
         ),
         "outer_hard_positive_fraction": args.outer_hard_positive_fraction,
         "outer_hard_positive_weight": args.outer_hard_positive_weight,
+        "outer_hard_negative_fraction": args.outer_hard_negative_fraction,
+        "outer_hard_negative_weight": args.outer_hard_negative_weight,
         "lambda_outer_component_recall": (
             args.lambda_outer_component_recall
         ),
+        "lambda_outer_component_false_positive": (
+            args.lambda_outer_component_false_positive
+        ),
         "lambda_outer_topology": args.lambda_outer_topology,
+        "lambda_outer_negative_topology": (
+            args.lambda_outer_negative_topology
+        ),
         "lambda_route_occupancy_agreement": (
             args.lambda_route_occupancy_agreement
+        ),
+        "outer_occupancy_agreement_warmup_fraction": (
+            args.outer_occupancy_agreement_warmup_fraction
+        ),
+        "outer_occupancy_agreement_confidence_threshold": (
+            args.outer_occupancy_agreement_confidence_threshold
         ),
         "outer_false_positive_gamma": args.outer_false_positive_gamma,
         "outer_false_negative_gamma": args.outer_false_negative_gamma,
@@ -3294,6 +3680,20 @@ def main():
         "outer_selection_iou_weight": args.outer_selection_iou_weight,
         "inner_selection_recall_weight": args.inner_selection_recall_weight,
         "hard_rgb_selection_weight": args.hard_rgb_selection_weight,
+        "lambda_outer_projection_false_positive": (
+            args.lambda_outer_projection_false_positive
+        ),
+        "lambda_outer_projection_false_negative": (
+            args.lambda_outer_projection_false_negative
+        ),
+        "lambda_outer_projection_dice": args.lambda_outer_projection_dice,
+        "lambda_outer_projected_area": args.lambda_outer_projected_area,
+        "outer_projection_fp_selection_weight": (
+            args.outer_projection_fp_selection_weight
+        ),
+        "outer_projection_area_selection_weight": (
+            args.outer_projection_area_selection_weight
+        ),
         "render_softmax_temperature": args.render_softmax_temperature,
     }
     with open(output_dir / "config.json", "w", encoding="utf-8") as handle:

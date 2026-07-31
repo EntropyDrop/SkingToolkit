@@ -169,6 +169,9 @@ def load_parser(checkpoint_path, device):
         outer_uv_topology_dropout=model_config.get(
             "outer_uv_topology_dropout", 0.05
         ),
+        outer_uv_route_evidence_dropout=model_config.get(
+            "outer_uv_route_evidence_dropout", 0.50
+        ),
     ).to(device)
     model.load_state_dict(state_dict)
     if (

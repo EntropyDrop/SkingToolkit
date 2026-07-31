@@ -21,6 +21,7 @@ from SkingToolkit.dense_uv_parser.utils import splat_to_uv_conditioning
 from SkingToolkit.dense_uv_parser.semantic_targets import (
     build_part_layer_masks,
 )
+from SkingToolkit.dense_uv_parser.uv_topology import build_outer_uv_graph
 
 
 class SemanticDenseUVParserTest(unittest.TestCase):
@@ -236,6 +237,40 @@ class SemanticDenseUVParserTest(unittest.TestCase):
         self.assertTrue(torch.isfinite(total))
         self.assertIsNotNone(logits.grad)
         self.assertGreater(float(logits.grad.abs().sum()), 0.0)
+
+    def test_outer_uv_occupancy_penalizes_coherent_false_component(self):
+        flat_indices, edge_index = build_outer_uv_graph()
+        source, target = edge_index[:, 0]
+        false_flats = flat_indices[torch.tensor([source, target])]
+        logits = torch.full((1, 1, 64, 64), -8.0, requires_grad=True)
+        with torch.no_grad():
+            logits.flatten()[false_flats] = 4.0
+        target_uv = torch.zeros(1, 4, 64, 64)
+        _, outer_masks = build_part_layer_masks()
+
+        losses = outer_uv_occupancy_losses(
+            logits,
+            target_uv,
+            outer_masks,
+            hard_negative_fraction=0.10,
+        )
+        false_loss = (
+            losses["loss_outer_uv_occupancy_hard_negative"]
+            + losses["loss_outer_negative_topology"]
+            + losses["loss_outer_component_false_positive"]
+        )
+        false_loss.backward()
+
+        self.assertGreater(float(false_loss.detach()), 1.0)
+        self.assertGreater(
+            float(losses["loss_outer_component_false_positive"].detach()),
+            0.9,
+        )
+        self.assertGreater(
+            float(losses["loss_outer_negative_topology"].detach()),
+            0.0,
+        )
+        self.assertGreater(float(logits.grad.flatten()[false_flats].min()), 0.0)
 
     def test_outer_uv_occupancy_head_does_not_shift_parser_trunk(self):
         model = self.build_model().train()

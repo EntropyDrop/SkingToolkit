@@ -127,9 +127,10 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         )
         self.assertTrue(result["seed"].flatten()[source_flat])
         self.assertTrue(result["grown"].flatten()[target_flat])
-        self.assertGreater(
+        self.assertAlmostEqual(
             float(result["probability"].flatten()[target_flat]),
-            0.80,
+            0.60,
+            places=5,
         )
 
         isolated = torch.zeros_like(probability)
@@ -593,6 +594,40 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         self.assertTrue(parser_args.predict_outer_uv_occupancy)
         self.assertEqual(parser_args.lambda_outer_uv_occupancy, 0.50)
         self.assertEqual(parser_args.outer_uv_occupancy_dice_weight, 0.25)
+        self.assertEqual(parser_args.outer_uv_route_evidence_dropout, 0.50)
+        self.assertEqual(parser_args.outer_hard_positive_weight, 0.25)
+        self.assertEqual(parser_args.outer_hard_negative_fraction, 0.10)
+        self.assertEqual(parser_args.outer_hard_negative_weight, 1.0)
+        self.assertEqual(parser_args.lambda_outer_component_recall, 0.10)
+        self.assertEqual(
+            parser_args.lambda_outer_component_false_positive,
+            0.25,
+        )
+        self.assertEqual(parser_args.lambda_outer_negative_topology, 0.15)
+        self.assertEqual(parser_args.lambda_route_occupancy_agreement, 0.25)
+        self.assertEqual(
+            parser_args.outer_occupancy_agreement_warmup_fraction,
+            0.50,
+        )
+        self.assertEqual(
+            parser_args.outer_occupancy_agreement_confidence_threshold,
+            0.80,
+        )
+        self.assertEqual(
+            parser_args.lambda_outer_projection_false_positive,
+            1.0,
+        )
+        self.assertEqual(
+            parser_args.lambda_outer_projection_false_negative,
+            0.50,
+        )
+        self.assertEqual(parser_args.lambda_outer_projection_dice, 0.25)
+        self.assertEqual(parser_args.lambda_outer_projected_area, 0.25)
+        self.assertEqual(parser_args.outer_projection_fp_selection_weight, 1.0)
+        self.assertEqual(
+            parser_args.outer_projection_area_selection_weight,
+            0.50,
+        )
         self.assertTrue(parser_args.outer_uv_occupancy_routing)
         self.assertTrue(parser_args.outer_uv_component_routing)
         self.assertEqual(parser_args.outer_uv_component_seed_threshold, 0.80)
@@ -1556,6 +1591,93 @@ class GlobalAffineRoutingTest(unittest.TestCase):
 
         self.assertGreater(float(losses["loss_soft_uv_inner_recall"].detach()), 0.9)
         self.assertLess(float(role_logits.grad[0, 0, 0, 0]), 0.0)
+
+    def test_outer_projection_penalizes_inner_routed_to_empty_outer_texel(self):
+        renderer = FakeRenderer(valid_pixels=1)
+        renderer.front_outer_mask.copy_(renderer.front_inner_mask)
+        outer_x, outer_y = 40, 8
+        renderer.front_outer_grid[..., 0] = 2.0 * outer_x / 63.0 - 1.0
+        renderer.front_outer_grid[..., 1] = 2.0 * outer_y / 63.0 - 1.0
+        rendered = torch.zeros(1, 4, 8, 8)
+        rendered[:, 0, 0, 0] = 1.0
+        rendered[:, 3] = 1.0
+        role_logits = torch.full((1, 3, 8, 8), -5.0)
+        role_logits[:, 1] = 5.0
+        role_logits.requires_grad_()
+        outputs = {
+            "foreground": torch.full((1, 1, 8, 8), 10.0),
+            "layer": role_logits,
+            "surface": torch.zeros(1, 2, 8, 8),
+            "affine": torch.zeros(1, 3),
+        }
+        targets = {
+            "layer": torch.full((1, 8, 8), IGNORE_INDEX, dtype=torch.long),
+            "uv": torch.zeros(1, 2, 8, 8),
+        }
+        targets["layer"][0, 0, 0] = 0
+        gt_uv = torch.zeros(1, 4, 64, 64)
+        gt_uv[0, 3, 0, 0] = 1.0
+
+        losses = parser_train.differentiable_geometry_losses(
+            rendered,
+            gt_uv,
+            outputs,
+            targets,
+            renderer,
+            ["front"],
+            canonicalize=False,
+        )
+        loss = losses["loss_outer_projection_false_positive"]
+        loss.backward()
+
+        self.assertGreater(float(loss.detach()), 1.0)
+        self.assertGreater(float(role_logits.grad[0, 1, 0, 0]), 0.0)
+        self.assertEqual(
+            int(losses["count_outer_projected_false_positive_pixels"]),
+            1,
+        )
+
+    def test_route_agreement_ignores_confidently_wrong_occupancy(self):
+        renderer = self.two_view_shared_outer_renderer()
+        role_logits = torch.full((2, 3, 1, 1), -5.0)
+        role_logits[:, 1] = 5.0
+        role_logits.requires_grad_()
+        occupancy_logits = torch.full((1, 1, 64, 64), -10.0)
+        occupancy_logits[0, 0, 8, 40] = 10.0
+        target_uv = torch.zeros(1, 4, 64, 64)
+        outputs = {
+            "layer": role_logits,
+            "outer_uv_occupancy_logits": occupancy_logits,
+        }
+
+        rejected = parser_train.route_occupancy_agreement_loss(
+            outputs,
+            target_uv,
+            renderer,
+            ["front", "back"],
+            confidence_threshold=0.80,
+        )
+        self.assertEqual(int(rejected["count_route_occupancy_texels"]), 0)
+
+        outputs["outer_uv_occupancy_logits"] = torch.full(
+            (1, 1, 64, 64),
+            -10.0,
+        )
+        accepted = parser_train.route_occupancy_agreement_loss(
+            outputs,
+            target_uv,
+            renderer,
+            ["front", "back"],
+            confidence_threshold=0.80,
+        )
+        accepted["loss_route_occupancy_agreement"].backward()
+
+        self.assertEqual(int(accepted["count_route_occupancy_texels"]), 1)
+        self.assertEqual(
+            int(accepted["count_route_occupancy_negative_texels"]),
+            1,
+        )
+        self.assertGreater(float(role_logits.grad[:, 1].min()), 0.0)
 
     def test_cosine_learning_rate_reduces_late_epoch_updates(self):
         first = parser_train.learning_rate_for_epoch(2e-4, 1, 30)
