@@ -170,7 +170,7 @@ def load_parser(checkpoint_path, device):
             "outer_uv_topology_dropout", 0.05
         ),
         outer_uv_route_evidence_dropout=model_config.get(
-            "outer_uv_route_evidence_dropout", 0.50
+            "outer_uv_route_evidence_dropout", 0.15
         ),
     ).to(device)
     model.load_state_dict(state_dict)
@@ -1146,12 +1146,12 @@ def main():
         else args.outer_uv_occupancy
     )
     outer_uv_occupancy_blend_weight = (
-        parser_args.get("outer_uv_occupancy_blend_weight", 0.30)
+        parser_args.get("outer_uv_occupancy_blend_weight", 0.0)
         if args.outer_uv_occupancy_blend_weight is None
         else args.outer_uv_occupancy_blend_weight
     )
     outer_uv_occupancy_gate_threshold = (
-        parser_args.get("outer_uv_occupancy_gate_threshold", 0.10)
+        parser_args.get("outer_uv_occupancy_gate_threshold", 0.0)
         if args.outer_uv_occupancy_gate_threshold is None
         else args.outer_uv_occupancy_gate_threshold
     )

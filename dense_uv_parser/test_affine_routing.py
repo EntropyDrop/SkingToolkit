@@ -571,8 +571,8 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         self.assertEqual(parser_args.lr_schedule, "cosine")
         self.assertEqual(parser_args.min_lr_ratio, 0.05)
         self.assertEqual(parser_args.route_class_weight_floor, 0.75)
-        self.assertEqual(parser_args.lambda_outer_false_positive, 1.0)
-        self.assertEqual(parser_args.lambda_outer_false_negative, 0.75)
+        self.assertEqual(parser_args.lambda_outer_false_positive, 0.75)
+        self.assertEqual(parser_args.lambda_outer_false_negative, 1.0)
         self.assertEqual(parser_args.outer_false_positive_gamma, 3.0)
         self.assertEqual(parser_args.route_outer_class_weight_cap, 0.90)
         self.assertEqual(parser_args.lambda_primary_route_swap, 1.0)
@@ -593,21 +593,22 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         self.assertEqual(parser_args.route_texel_center_power, 2.0)
         self.assertTrue(parser_args.predict_outer_uv_occupancy)
         self.assertEqual(parser_args.lambda_outer_uv_occupancy, 0.50)
-        self.assertEqual(parser_args.outer_uv_occupancy_dice_weight, 0.25)
-        self.assertEqual(parser_args.outer_uv_route_evidence_dropout, 0.50)
-        self.assertEqual(parser_args.outer_hard_positive_weight, 0.25)
-        self.assertEqual(parser_args.outer_hard_negative_fraction, 0.10)
-        self.assertEqual(parser_args.outer_hard_negative_weight, 1.0)
-        self.assertEqual(parser_args.lambda_outer_component_recall, 0.10)
+        self.assertEqual(parser_args.outer_uv_occupancy_dice_weight, 0.50)
+        self.assertEqual(parser_args.outer_uv_occupancy_positive_balance, 0.60)
+        self.assertEqual(parser_args.outer_uv_route_evidence_dropout, 0.15)
+        self.assertEqual(parser_args.outer_hard_positive_weight, 0.50)
+        self.assertEqual(parser_args.outer_hard_negative_fraction, 0.02)
+        self.assertEqual(parser_args.outer_hard_negative_weight, 0.25)
+        self.assertEqual(parser_args.lambda_outer_component_recall, 0.25)
         self.assertEqual(
             parser_args.lambda_outer_component_false_positive,
-            0.25,
+            0.05,
         )
-        self.assertEqual(parser_args.lambda_outer_negative_topology, 0.15)
+        self.assertEqual(parser_args.lambda_outer_negative_topology, 0.03)
         self.assertEqual(parser_args.lambda_route_occupancy_agreement, 0.25)
         self.assertEqual(
             parser_args.outer_occupancy_agreement_warmup_fraction,
-            0.50,
+            0.25,
         )
         self.assertEqual(
             parser_args.outer_occupancy_agreement_confidence_threshold,
@@ -615,18 +616,18 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         )
         self.assertEqual(
             parser_args.lambda_outer_projection_false_positive,
-            1.0,
+            0.25,
         )
         self.assertEqual(
             parser_args.lambda_outer_projection_false_negative,
-            0.50,
+            1.0,
         )
-        self.assertEqual(parser_args.lambda_outer_projection_dice, 0.25)
-        self.assertEqual(parser_args.lambda_outer_projected_area, 0.25)
-        self.assertEqual(parser_args.outer_projection_fp_selection_weight, 1.0)
+        self.assertEqual(parser_args.lambda_outer_projection_dice, 0.50)
+        self.assertEqual(parser_args.lambda_outer_projected_area, 0.10)
+        self.assertEqual(parser_args.outer_projection_fp_selection_weight, 0.25)
         self.assertEqual(
             parser_args.outer_projection_area_selection_weight,
-            0.50,
+            0.10,
         )
         self.assertTrue(parser_args.outer_uv_occupancy_routing)
         self.assertTrue(parser_args.outer_uv_component_routing)
@@ -672,16 +673,16 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         self.assertEqual(
             parser_args.geometry_cross_view_outer_min_views, 2
         )
-        self.assertEqual(parser_args.outer_uv_occupancy_blend_weight, 0.30)
-        self.assertEqual(parser_args.outer_uv_occupancy_gate_threshold, 0.10)
+        self.assertEqual(parser_args.outer_uv_occupancy_blend_weight, 0.0)
+        self.assertEqual(parser_args.outer_uv_occupancy_gate_threshold, 0.0)
         self.assertEqual(
             parser_args.outer_uv_occupancy_rescue_threshold, 0.70
         )
         self.assertEqual(
             parser_args.outer_uv_occupancy_rescue_route_threshold, 0.30
         )
-        self.assertEqual(parser_args.outer_selection_precision_weight, 1.50)
-        self.assertEqual(parser_args.outer_selection_recall_weight, 0.50)
+        self.assertEqual(parser_args.outer_selection_precision_weight, 1.0)
+        self.assertEqual(parser_args.outer_selection_recall_weight, 1.0)
 
     def test_reproducibility_state_restores_all_random_streams(self):
         train_generator = torch.Generator().manual_seed(101)
@@ -1637,7 +1638,7 @@ class GlobalAffineRoutingTest(unittest.TestCase):
             1,
         )
 
-    def test_route_agreement_ignores_confidently_wrong_occupancy(self):
+    def test_route_agreement_uses_only_verified_positive_occupancy(self):
         renderer = self.two_view_shared_outer_renderer()
         role_logits = torch.full((2, 3, 1, 1), -5.0)
         role_logits[:, 1] = 5.0
@@ -1659,10 +1660,11 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         )
         self.assertEqual(int(rejected["count_route_occupancy_texels"]), 0)
 
-        outputs["outer_uv_occupancy_logits"] = torch.full(
-            (1, 1, 64, 64),
-            -10.0,
-        )
+        positive_role_logits = torch.full((2, 3, 1, 1), -5.0)
+        positive_role_logits[:, 0] = 5.0
+        positive_role_logits.requires_grad_()
+        target_uv[0, 3, 8, 40] = 1.0
+        outputs["layer"] = positive_role_logits
         accepted = parser_train.route_occupancy_agreement_loss(
             outputs,
             target_uv,
@@ -1674,10 +1676,14 @@ class GlobalAffineRoutingTest(unittest.TestCase):
 
         self.assertEqual(int(accepted["count_route_occupancy_texels"]), 1)
         self.assertEqual(
-            int(accepted["count_route_occupancy_negative_texels"]),
+            int(accepted["count_route_occupancy_positive_texels"]),
             1,
         )
-        self.assertGreater(float(role_logits.grad[:, 1].min()), 0.0)
+        self.assertEqual(
+            int(accepted["count_route_occupancy_negative_texels"]),
+            0,
+        )
+        self.assertLess(float(positive_role_logits.grad[:, 1].max()), 0.0)
 
     def test_cosine_learning_rate_reduces_late_epoch_updates(self):
         first = parser_train.learning_rate_for_epoch(2e-4, 1, 30)
@@ -2281,6 +2287,49 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         self.assertTrue(routing["outer_occupancy_rescued"][0, 0, 0])
         self.assertTrue(routing["foreground"][0, 0, 0])
         self.assertTrue(routing["outer_uv_occupancy_available"].all())
+
+    def test_collapsed_occupancy_cannot_veto_strong_outer_route_by_default(self):
+        renderer = FakeRenderer(mask=torch.ones(1, 4))
+        renderer.front_outer_mask.copy_(renderer.front_inner_mask)
+        rendered = torch.rand(1, 4, 1, 4)
+        rendered[:, 3] = 1.0
+        outputs = {
+            "foreground": torch.full((1, 1, 1, 4), 10.0),
+            "layer": torch.tensor(
+                [[[[0.0] * 4], [[5.0] * 4], [[-8.0] * 4]]]
+            ),
+            "outer_uv_occupancy_logits": torch.full(
+                (1, 1, 64, 64),
+                -10.0,
+            ),
+            "affine": torch.zeros(1, 3),
+        }
+
+        _, details = splat_parser_predictions_to_uv_conditioning(
+            rendered,
+            outputs,
+            renderer=renderer,
+            views=["front"],
+            group_size=1,
+            affine_refine=False,
+            route_confidence_threshold=0.0,
+            route_margin_threshold=0.0,
+            outer_route_confidence_threshold=0.0,
+            outer_route_margin_threshold=0.0,
+            outer_uv_min_coverage=0.0,
+            outer_uv_min_source_pixels=1,
+            outer_geometry_rescue=False,
+            outer_semantic_rescue=False,
+            geometry_route_texel_consensus=True,
+            outer_uv_occupancy=True,
+            outer_uv_component_routing=False,
+            return_details=True,
+        )
+
+        routing = details["routing"]
+        self.assertTrue((routing["raw_route_role"] == 1).all())
+        self.assertTrue((routing["route_role"] == 1).all())
+        self.assertFalse(routing["occupancy_rejected_outer"].any())
 
     def test_center_weighted_texel_route_supervision_backpropagates(self):
         renderer = FakeRenderer(mask=torch.ones(1, 4))

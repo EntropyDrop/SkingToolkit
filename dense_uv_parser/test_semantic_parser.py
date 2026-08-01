@@ -238,6 +238,28 @@ class SemanticDenseUVParserTest(unittest.TestCase):
         self.assertIsNotNone(logits.grad)
         self.assertGreater(float(logits.grad.abs().sum()), 0.0)
 
+    def test_balanced_occupancy_bce_does_not_prefer_all_transparent(self):
+        logits = torch.zeros(1, 1, 64, 64, requires_grad=True)
+        target_uv = torch.zeros(1, 4, 64, 64)
+        _, outer_masks = build_part_layer_masks()
+        occupied = outer_masks[:, 0].bool().any(dim=0)
+        y, x = occupied.nonzero()[0]
+        target_uv[0, 3, y, x] = 1.0
+
+        losses = outer_uv_occupancy_losses(
+            logits,
+            target_uv,
+            outer_masks,
+            positive_balance=0.60,
+            hard_positive_fraction=0.0,
+            hard_negative_fraction=0.0,
+        )
+        losses["loss_outer_uv_occupancy_bce"].backward()
+
+        valid_gradient = logits.grad[0, 0][occupied]
+        self.assertLess(float(valid_gradient.sum()), 0.0)
+        self.assertLess(float(logits.grad[0, 0, y, x]), 0.0)
+
     def test_outer_uv_occupancy_penalizes_coherent_false_component(self):
         flat_indices, edge_index = build_outer_uv_graph()
         source, target = edge_index[:, 0]

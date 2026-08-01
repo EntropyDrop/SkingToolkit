@@ -219,12 +219,12 @@ def format_metrics(
     metric_sums,
     count,
     inner_recall_weight=0.5,
-    outer_precision_weight=0.75,
-    outer_recall_weight=0.75,
+    outer_precision_weight=1.0,
+    outer_recall_weight=1.0,
     outer_iou_weight=0.5,
     hard_rgb_selection_weight=1.0,
-    outer_projection_fp_selection_weight=1.0,
-    outer_projection_area_selection_weight=0.5,
+    outer_projection_fp_selection_weight=0.25,
+    outer_projection_area_selection_weight=0.10,
 ):
     result = {}
     for name, value in metric_sums.items():
@@ -821,6 +821,7 @@ def outer_uv_occupancy_losses(
     target_uv,
     outer_part_masks,
     alpha_threshold=0.5,
+    positive_balance=0.60,
     hard_positive_fraction=0.25,
     hard_negative_fraction=0.10,
     topology_max_steps=64,
@@ -840,18 +841,26 @@ def outer_uv_occupancy_losses(
     ).float()
     selected_logits = logits.float()[valid]
     selected_target = target[valid]
-    positive = selected_target.sum().clamp_min(1.0)
-    negative = (selected_target.numel() - selected_target.sum()).clamp_min(1.0)
-    # Full inverse-frequency weighting made 0.5 badly calibrated and caused
-    # the sparse auxiliary head to overpredict outer alpha.
-    pos_weight = (negative / positive).sqrt().clamp(min=1.0, max=4.0)
-    loss_bce = F.binary_cross_entropy_with_logits(
-        selected_logits,
-        selected_target,
-        pos_weight=pos_weight,
-    )
+    if not 0.0 <= float(positive_balance) <= 1.0:
+        raise ValueError("positive_balance must be in [0, 1].")
+    positive_mask = selected_target > 0.5
+    negative_mask = ~positive_mask
+    positive_loss = F.softplus(-selected_logits[positive_mask])
+    negative_loss = F.softplus(selected_logits[negative_mask])
+    if positive_loss.numel() > 0 and negative_loss.numel() > 0:
+        # Average each class independently. Pixel-count BCE let transparent
+        # atlas texels dominate and converged to the all-empty shortcut.
+        loss_bce = (
+            float(positive_balance) * positive_loss.mean()
+            + (1.0 - float(positive_balance)) * negative_loss.mean()
+        )
+    elif positive_loss.numel() > 0:
+        loss_bce = positive_loss.mean()
+    elif negative_loss.numel() > 0:
+        loss_bce = negative_loss.mean()
+    else:
+        loss_bce = logits.sum() * 0.0
     probability = torch.sigmoid(logits.float()) * valid
-    positive_loss = F.softplus(-selected_logits[selected_target > 0.5])
     if positive_loss.numel() > 0 and hard_positive_fraction > 0.0:
         hard_positive_count = max(
             1,
@@ -864,7 +873,6 @@ def outer_uv_occupancy_losses(
     else:
         hard_positive_count = 0
         hard_positive_loss = logits.sum() * 0.0
-    negative_loss = F.softplus(selected_logits[selected_target < 0.5])
     if negative_loss.numel() > 0 and hard_negative_fraction > 0.0:
         hard_negative_count = max(
             1,
@@ -1051,7 +1059,13 @@ def route_occupancy_agreement_loss(
     center_power=2.0,
     confidence_threshold=0.80,
 ):
-    """Align routes only to confident occupancy predictions agreeing with GT."""
+    """Use only verified positive occupancy as an auxiliary route teacher.
+
+    Negative occupancy is deliberately excluded: a collapsed occupancy head
+    otherwise teaches the route branch to erase every outer observation.
+    Ordinary route supervision already contains explicit outer false-positive
+    losses, so agreement is most useful as recall-preserving positive evidence.
+    """
     if "outer_uv_occupancy_logits" not in outputs:
         zero = outputs["layer"].sum() * 0.0
         return {
@@ -1090,14 +1104,11 @@ def route_occupancy_agreement_loss(
         dtype=torch.bool,
     ).reshape(1, -1)
     confidence_threshold = float(confidence_threshold)
-    confident_correct = (
-        (target_outer & (occupancy.detach() >= confidence_threshold))
-        | (
-            ~target_outer
-            & (occupancy.detach() <= 1.0 - confidence_threshold)
-        )
+    confident_positive = (
+        target_outer
+        & (occupancy.detach() >= confidence_threshold)
     )
-    selected = support.any(dim=1) & valid_outer & confident_correct
+    selected = support.any(dim=1) & valid_outer & confident_positive
     if not selected.any():
         zero = occupancy.sum() * 0.0
         return {
@@ -1641,6 +1652,9 @@ def run_epoch(
                         batch["uv"],
                         outer_part_masks,
                         alpha_threshold=args.target_alpha_threshold,
+                        positive_balance=(
+                            args.outer_uv_occupancy_positive_balance
+                        ),
                         hard_positive_fraction=(
                             args.outer_hard_positive_fraction
                         ),
@@ -2514,7 +2528,7 @@ def build_arg_parser():
     parser.add_argument("--outer_uv_topology_layers", type=int, default=3)
     parser.add_argument("--outer_uv_topology_dropout", type=float, default=0.05)
     parser.add_argument(
-        "--outer_uv_route_evidence_dropout", type=float, default=0.50
+        "--outer_uv_route_evidence_dropout", type=float, default=0.15
     )
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--num_workers", type=int, default=8)
@@ -2670,7 +2684,7 @@ def build_arg_parser():
         "--geometry_cross_view_outer_min_views", type=int, default=2
     )
     parser.add_argument(
-        "--outer_uv_occupancy_blend_weight", type=float, default=0.30
+        "--outer_uv_occupancy_blend_weight", type=float, default=0.0
     )
     parser.add_argument(
         "--outer_uv_occupancy_routing",
@@ -2688,7 +2702,7 @@ def build_arg_parser():
         action="store_false",
     )
     parser.add_argument(
-        "--outer_uv_occupancy_gate_threshold", type=float, default=0.10
+        "--outer_uv_occupancy_gate_threshold", type=float, default=0.0
     )
     parser.add_argument(
         "--outer_uv_occupancy_rescue_threshold", type=float, default=0.70
@@ -2736,8 +2750,8 @@ def build_arg_parser():
     parser.add_argument("--lambda_uv_class", type=float, default=1.0)
     parser.add_argument("--lambda_affine", type=float, default=1.0)
     parser.add_argument("--lambda_surface", type=float, default=1.0)
-    parser.add_argument("--lambda_outer_false_positive", type=float, default=1.0)
-    parser.add_argument("--lambda_outer_false_negative", type=float, default=0.75)
+    parser.add_argument("--lambda_outer_false_positive", type=float, default=0.75)
+    parser.add_argument("--lambda_outer_false_negative", type=float, default=1.0)
     parser.add_argument("--lambda_route_confidence", type=float, default=0.25)
     parser.add_argument("--lambda_primary_route_swap", type=float, default=1.0)
     parser.add_argument(
@@ -2792,31 +2806,36 @@ def build_arg_parser():
     parser.add_argument("--lambda_semantic_coverage", type=float, default=0.25)
     parser.add_argument("--lambda_outer_uv_occupancy", type=float, default=0.50)
     parser.add_argument(
-        "--outer_uv_occupancy_dice_weight", type=float, default=0.25
+        "--outer_uv_occupancy_dice_weight", type=float, default=0.50
+    )
+    parser.add_argument(
+        "--outer_uv_occupancy_positive_balance",
+        type=float,
+        default=0.60,
     )
     parser.add_argument(
         "--outer_hard_positive_fraction", type=float, default=0.25
     )
     parser.add_argument(
-        "--outer_hard_positive_weight", type=float, default=0.25
+        "--outer_hard_positive_weight", type=float, default=0.50
     )
     parser.add_argument(
-        "--outer_hard_negative_fraction", type=float, default=0.10
+        "--outer_hard_negative_fraction", type=float, default=0.02
     )
     parser.add_argument(
-        "--outer_hard_negative_weight", type=float, default=1.0
+        "--outer_hard_negative_weight", type=float, default=0.25
     )
     parser.add_argument(
-        "--lambda_outer_component_recall", type=float, default=0.10
+        "--lambda_outer_component_recall", type=float, default=0.25
     )
     parser.add_argument(
         "--lambda_outer_component_false_positive",
         type=float,
-        default=0.25,
+        default=0.05,
     )
     parser.add_argument("--lambda_outer_topology", type=float, default=0.10)
     parser.add_argument(
-        "--lambda_outer_negative_topology", type=float, default=0.15
+        "--lambda_outer_negative_topology", type=float, default=0.03
     )
     parser.add_argument(
         "--lambda_route_occupancy_agreement", type=float, default=0.25
@@ -2824,7 +2843,7 @@ def build_arg_parser():
     parser.add_argument(
         "--outer_occupancy_agreement_warmup_fraction",
         type=float,
-        default=0.50,
+        default=0.25,
     )
     parser.add_argument(
         "--outer_occupancy_agreement_confidence_threshold",
@@ -2848,33 +2867,33 @@ def build_arg_parser():
     parser.add_argument(
         "--lambda_outer_projection_false_positive",
         type=float,
-        default=1.0,
+        default=0.25,
     )
     parser.add_argument(
         "--lambda_outer_projection_false_negative",
         type=float,
-        default=0.50,
+        default=1.0,
     )
     parser.add_argument(
-        "--lambda_outer_projection_dice", type=float, default=0.25
+        "--lambda_outer_projection_dice", type=float, default=0.50
     )
     parser.add_argument(
-        "--lambda_outer_projected_area", type=float, default=0.25
+        "--lambda_outer_projected_area", type=float, default=0.10
     )
-    parser.add_argument("--outer_selection_precision_weight", type=float, default=1.50)
-    parser.add_argument("--outer_selection_recall_weight", type=float, default=0.50)
+    parser.add_argument("--outer_selection_precision_weight", type=float, default=1.0)
+    parser.add_argument("--outer_selection_recall_weight", type=float, default=1.0)
     parser.add_argument("--outer_selection_iou_weight", type=float, default=0.5)
     parser.add_argument("--inner_selection_recall_weight", type=float, default=0.5)
     parser.add_argument("--hard_rgb_selection_weight", type=float, default=1.0)
     parser.add_argument(
         "--outer_projection_fp_selection_weight",
         type=float,
-        default=1.0,
+        default=0.25,
     )
     parser.add_argument(
         "--outer_projection_area_selection_weight",
         type=float,
-        default=0.50,
+        default=0.10,
     )
     parser.add_argument(
         "--render_softmax_temperature",
@@ -3027,6 +3046,10 @@ def main():
         )
     if not 0.0 <= args.outer_hard_positive_fraction <= 1.0:
         raise ValueError("--outer_hard_positive_fraction must be in [0, 1].")
+    if not 0.0 <= args.outer_uv_occupancy_positive_balance <= 1.0:
+        raise ValueError(
+            "--outer_uv_occupancy_positive_balance must be in [0, 1]."
+        )
     if not 0.0 <= args.outer_hard_negative_fraction <= 1.0:
         raise ValueError("--outer_hard_negative_fraction must be in [0, 1].")
     if not (
@@ -3645,6 +3668,9 @@ def main():
         "lambda_outer_uv_occupancy": args.lambda_outer_uv_occupancy,
         "outer_uv_occupancy_dice_weight": (
             args.outer_uv_occupancy_dice_weight
+        ),
+        "outer_uv_occupancy_positive_balance": (
+            args.outer_uv_occupancy_positive_balance
         ),
         "outer_hard_positive_fraction": args.outer_hard_positive_fraction,
         "outer_hard_positive_weight": args.outer_hard_positive_weight,

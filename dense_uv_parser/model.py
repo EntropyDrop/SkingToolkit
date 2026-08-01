@@ -288,7 +288,10 @@ class ProjectedOuterUVTopologyHead(nn.Module):
             nn.LayerNorm(hidden_channels),
             nn.Linear(hidden_channels, 1),
         )
-        nn.init.constant_(self.output[-1].bias, -2.0)
+        # A very negative initialization made the one-epoch recipe prone to
+        # the all-transparent solution after precision penalties were added.
+        # Keep a sparse prior without starving early positive gradients.
+        nn.init.constant_(self.output[-1].bias, -1.0)
 
     def forward(self, atlas_features, global_context):
         if atlas_features.dim() != 4:
@@ -358,7 +361,7 @@ class DenseUVParserNet(nn.Module):
         outer_uv_topology_channels=64,
         outer_uv_topology_layers=3,
         outer_uv_topology_dropout=0.05,
-        outer_uv_route_evidence_dropout=0.50,
+        outer_uv_route_evidence_dropout=0.15,
     ):
         super().__init__()
         self.geometry_only = bool(geometry_only)
