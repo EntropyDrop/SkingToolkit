@@ -1284,7 +1284,13 @@ def attach_projected_outer_uv_occupancy(
     route_evidence_dropout = float(
         getattr(model, "outer_uv_route_evidence_dropout", 0.0)
     )
-    if model.training and route_evidence_dropout > 0.0:
+    if route_evidence_dropout >= 1.0:
+        # The projected ownership classifier must remain independent from the
+        # already-unreliable per-pixel route prediction. Keep the two channels
+        # for checkpoint compatibility, but disable the shortcut in both
+        # training and inference.
+        route_evidence = torch.zeros_like(route_evidence)
+    elif model.training and route_evidence_dropout > 0.0:
         # Drop the entire route-evidence pair per grouped skin. This prevents
         # the occupancy head from learning the shortcut "copy p_outer" while
         # leaving half of the batches available for useful route context.
@@ -1484,7 +1490,7 @@ def _soft_route_role_consensus(
     outer_margin=0.35,
     outer_uv_occupancy=None,
     occupancy_blend_weight=0.0,
-    occupancy_gate_threshold=0.0,
+    occupancy_gate_threshold=0.15,
     occupancy_rescue_threshold=0.70,
     occupancy_rescue_route_threshold=0.30,
     cross_view_outer_prior=None,
@@ -1787,10 +1793,10 @@ def _routing_from_geometry_outputs(
     consensus_outer_margin=0.35,
     outer_uv_occupancy=False,
     outer_uv_occupancy_blend_weight=0.0,
-    outer_uv_occupancy_gate_threshold=0.0,
+    outer_uv_occupancy_gate_threshold=0.15,
     outer_uv_occupancy_rescue_threshold=0.70,
     outer_uv_occupancy_rescue_route_threshold=0.30,
-    outer_uv_component_routing=True,
+    outer_uv_component_routing=False,
     outer_uv_component_seed_threshold=0.80,
     outer_uv_component_grow_threshold=0.50,
     outer_uv_component_min_size=2,
@@ -2163,10 +2169,10 @@ def _routing_from_geometry_surface_outputs(
     consensus_outer_margin=0.35,
     outer_uv_occupancy=False,
     outer_uv_occupancy_blend_weight=0.0,
-    outer_uv_occupancy_gate_threshold=0.0,
+    outer_uv_occupancy_gate_threshold=0.15,
     outer_uv_occupancy_rescue_threshold=0.70,
     outer_uv_occupancy_rescue_route_threshold=0.30,
-    outer_uv_component_routing=True,
+    outer_uv_component_routing=False,
     outer_uv_component_seed_threshold=0.80,
     outer_uv_component_grow_threshold=0.50,
     outer_uv_component_min_size=2,
@@ -3025,10 +3031,10 @@ def splat_parser_predictions_to_uv_conditioning(
     geometry_cross_view_outer_min_views=2,
     outer_uv_occupancy=False,
     outer_uv_occupancy_blend_weight=0.0,
-    outer_uv_occupancy_gate_threshold=0.0,
+    outer_uv_occupancy_gate_threshold=0.15,
     outer_uv_occupancy_rescue_threshold=0.70,
     outer_uv_occupancy_rescue_route_threshold=0.30,
-    outer_uv_component_routing=True,
+    outer_uv_component_routing=False,
     outer_uv_component_seed_threshold=0.80,
     outer_uv_component_grow_threshold=0.50,
     outer_uv_component_min_size=2,

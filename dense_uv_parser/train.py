@@ -820,6 +820,7 @@ def outer_uv_occupancy_losses(
     logits,
     target_uv,
     outer_part_masks,
+    support_mask=None,
     alpha_threshold=0.5,
     positive_balance=0.60,
     hard_positive_fraction=0.25,
@@ -835,6 +836,16 @@ def outer_uv_occupancy_losses(
         )
     valid = outer_part_masks[:, 0].bool().any(dim=0)
     valid = valid.view(1, 1, UV_SIZE, UV_SIZE).expand_as(logits)
+    if support_mask is not None:
+        if support_mask.shape != logits.shape:
+            raise ValueError(
+                "support_mask must match occupancy logits, got "
+                f"{tuple(support_mask.shape)} and {tuple(logits.shape)}."
+            )
+        # This branch owns visible route decisions. Unseen atlas texels have
+        # no projected evidence and are completed later, so treating them as
+        # supervised negatives teaches the all-transparent shortcut.
+        valid = valid & support_mask.to(device=logits.device, dtype=torch.bool)
     target = (
         (target_uv[:, 3:4].float() > float(alpha_threshold))
         & valid
@@ -892,11 +903,17 @@ def outer_uv_occupancy_losses(
     probability_nodes = probability.flatten(2)[:, 0].index_select(
         1, flat_indices
     )
+    valid_nodes = valid.flatten(2)[:, 0].index_select(1, flat_indices)
     target_nodes = target.bool().flatten(2)[:, 0].index_select(
         1, flat_indices
     )
     source, destination = edge_index
-    positive_edges = target_nodes[:, source] & target_nodes[:, destination]
+    valid_edges = valid_nodes[:, source] & valid_nodes[:, destination]
+    positive_edges = (
+        valid_edges
+        & target_nodes[:, source]
+        & target_nodes[:, destination]
+    )
     edge_difference = (
         probability_nodes[:, source] - probability_nodes[:, destination]
     ).square()
@@ -905,7 +922,11 @@ def outer_uv_occupancy_losses(
         if positive_edges.any()
         else logits.sum() * 0.0
     )
-    negative_edges = ~target_nodes[:, source] & ~target_nodes[:, destination]
+    negative_edges = (
+        valid_edges
+        & ~target_nodes[:, source]
+        & ~target_nodes[:, destination]
+    )
     false_component_edge_score = (
         probability_nodes[:, source] * probability_nodes[:, destination]
     ).square()
@@ -957,7 +978,7 @@ def outer_uv_occupancy_losses(
     # a small but coherent false accessory the same component-level attention
     # as a large false patch instead of letting background negatives dominate
     # by raw pixel count.
-    predicted_nodes = probability_nodes.detach() >= 0.5
+    predicted_nodes = (probability_nodes.detach() >= 0.5) & valid_nodes
     predicted_labels = _graph_component_labels(
         predicted_nodes,
         edge_index,
@@ -1037,6 +1058,7 @@ def outer_uv_occupancy_losses(
         "count_predicted_outer_components": logits.new_tensor(
             float(existing_predicted_components.sum())
         ),
+        "count_outer_occupancy_supervised_texels": valid.float().sum(),
         "outer_component_precision": (
             component_precision.mean()
             if component_precision.numel() > 0
@@ -1477,7 +1499,7 @@ def hard_uv_conditioning_metrics(
                 args, "outer_uv_occupancy_blend_weight", 0.30
             ),
             outer_uv_occupancy_gate_threshold=getattr(
-                args, "outer_uv_occupancy_gate_threshold", 0.10
+                args, "outer_uv_occupancy_gate_threshold", 0.15
             ),
             outer_uv_occupancy_rescue_threshold=getattr(
                 args, "outer_uv_occupancy_rescue_threshold", 0.70
@@ -1488,7 +1510,7 @@ def hard_uv_conditioning_metrics(
                 0.30,
             ),
             outer_uv_component_routing=getattr(
-                args, "outer_uv_component_routing", True
+                args, "outer_uv_component_routing", False
             ),
             outer_uv_component_seed_threshold=getattr(
                 args, "outer_uv_component_seed_threshold", 0.80
@@ -1651,6 +1673,9 @@ def run_epoch(
                         outputs["outer_uv_occupancy_logits"],
                         batch["uv"],
                         outer_part_masks,
+                        support_mask=outputs.get(
+                            "outer_uv_occupancy_support"
+                        ),
                         alpha_threshold=args.target_alpha_threshold,
                         positive_balance=(
                             args.outer_uv_occupancy_positive_balance
@@ -1719,6 +1744,7 @@ def run_epoch(
                     losses["outer_component_precision"] = zero
                     losses["count_outer_components"] = zero
                     losses["count_predicted_outer_components"] = zero
+                    losses["count_outer_occupancy_supervised_texels"] = zero
                     losses["count_outer_hard_positive_candidates"] = zero
                     losses[
                         "count_outer_occupancy_hard_negative_candidates"
@@ -2104,7 +2130,7 @@ def save_preview(
                     args, "outer_uv_occupancy_blend_weight", 0.30
                 ),
                 outer_uv_occupancy_gate_threshold=getattr(
-                    args, "outer_uv_occupancy_gate_threshold", 0.10
+                    args, "outer_uv_occupancy_gate_threshold", 0.15
                 ),
                 outer_uv_occupancy_rescue_threshold=getattr(
                     args, "outer_uv_occupancy_rescue_threshold", 0.70
@@ -2115,7 +2141,7 @@ def save_preview(
                     0.30,
                 ),
                 outer_uv_component_routing=getattr(
-                    args, "outer_uv_component_routing", True
+                    args, "outer_uv_component_routing", False
                 ),
                 outer_uv_component_seed_threshold=getattr(
                     args, "outer_uv_component_seed_threshold", 0.80
@@ -2528,7 +2554,7 @@ def build_arg_parser():
     parser.add_argument("--outer_uv_topology_layers", type=int, default=3)
     parser.add_argument("--outer_uv_topology_dropout", type=float, default=0.05)
     parser.add_argument(
-        "--outer_uv_route_evidence_dropout", type=float, default=0.15
+        "--outer_uv_route_evidence_dropout", type=float, default=1.0
     )
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--num_workers", type=int, default=8)
@@ -2702,7 +2728,7 @@ def build_arg_parser():
         action="store_false",
     )
     parser.add_argument(
-        "--outer_uv_occupancy_gate_threshold", type=float, default=0.0
+        "--outer_uv_occupancy_gate_threshold", type=float, default=0.15
     )
     parser.add_argument(
         "--outer_uv_occupancy_rescue_threshold", type=float, default=0.70
@@ -2716,7 +2742,7 @@ def build_arg_parser():
         "--outer_uv_component_routing",
         dest="outer_uv_component_routing",
         action="store_true",
-        default=True,
+        default=False,
     )
     parser.add_argument(
         "--no_outer_uv_component_routing",
@@ -3080,9 +3106,9 @@ def main():
         raise ValueError("Outer UV topology dimensions must be positive.")
     if not 0.0 <= args.outer_uv_topology_dropout < 1.0:
         raise ValueError("--outer_uv_topology_dropout must be in [0, 1).")
-    if not 0.0 <= args.outer_uv_route_evidence_dropout < 1.0:
+    if not 0.0 <= args.outer_uv_route_evidence_dropout <= 1.0:
         raise ValueError(
-            "--outer_uv_route_evidence_dropout must be in [0, 1)."
+            "--outer_uv_route_evidence_dropout must be in [0, 1]."
         )
     if (
         args.outer_uv_occupancy_routing
@@ -3583,6 +3609,7 @@ def main():
         "route_prior_logit_cap": model.route_prior_logit_cap,
         "route_prior_dropout": model.route_prior_dropout,
         "predict_outer_uv_occupancy": model.predict_outer_uv_occupancy,
+        "outer_uv_occupancy_supervision": "visible_projected_texels",
         "outer_uv_feature_channels": model.outer_uv_feature_channels,
         "outer_uv_topology_channels": model.outer_uv_topology_channels,
         "outer_uv_topology_layers": model.outer_uv_topology_layers,

@@ -260,6 +260,33 @@ class SemanticDenseUVParserTest(unittest.TestCase):
         self.assertLess(float(valid_gradient.sum()), 0.0)
         self.assertLess(float(logits.grad[0, 0, y, x]), 0.0)
 
+    def test_occupancy_loss_ignores_unseen_outer_texels(self):
+        logits = torch.zeros(1, 1, 64, 64, requires_grad=True)
+        target_uv = torch.zeros(1, 4, 64, 64)
+        _, outer_masks = build_part_layer_masks()
+        occupied = outer_masks[:, 0].bool().any(dim=0)
+        first, second = occupied.nonzero()[:2]
+        target_uv[0, 3, first[0], first[1]] = 1.0
+        support = torch.zeros_like(logits, dtype=torch.bool)
+        support[0, 0, first[0], first[1]] = True
+
+        losses = outer_uv_occupancy_losses(
+            logits,
+            target_uv,
+            outer_masks,
+            support_mask=support,
+            hard_positive_fraction=0.0,
+            hard_negative_fraction=0.0,
+        )
+        losses["loss_outer_uv_occupancy_bce"].backward()
+
+        self.assertLess(float(logits.grad[0, 0, first[0], first[1]]), 0.0)
+        self.assertEqual(float(logits.grad[0, 0, second[0], second[1]]), 0.0)
+        self.assertEqual(
+            int(losses["count_outer_occupancy_supervised_texels"]),
+            1,
+        )
+
     def test_outer_uv_occupancy_penalizes_coherent_false_component(self):
         flat_indices, edge_index = build_outer_uv_graph()
         source, target = edge_index[:, 0]

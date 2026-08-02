@@ -392,6 +392,12 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         )
         checkpoint = {
             "model": model.state_dict(),
+            "metrics": {
+                "val": {
+                    "outer_uv_occupancy_precision": 0.72,
+                    "outer_uv_occupancy_recall": 0.61,
+                }
+            },
             "model_config": {
                 "base_channels": 8,
                 "uv_size": 64,
@@ -408,9 +414,17 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "occupancy.pt"
             torch.save(checkpoint, path)
-            loaded, _ = load_parser(path, torch.device("cpu"))
+            loaded, loaded_args = load_parser(path, torch.device("cpu"))
 
         self.assertTrue(loaded.predict_outer_uv_occupancy)
+        self.assertEqual(
+            loaded_args["_checkpoint_outer_uv_occupancy_precision"],
+            0.72,
+        )
+        self.assertEqual(
+            loaded_args["_checkpoint_outer_uv_occupancy_recall"],
+            0.61,
+        )
         outputs = loaded(
             torch.rand(2, 4, 32, 16),
             view_ids=torch.tensor([0, 1]),
@@ -595,7 +609,7 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         self.assertEqual(parser_args.lambda_outer_uv_occupancy, 0.50)
         self.assertEqual(parser_args.outer_uv_occupancy_dice_weight, 0.50)
         self.assertEqual(parser_args.outer_uv_occupancy_positive_balance, 0.60)
-        self.assertEqual(parser_args.outer_uv_route_evidence_dropout, 0.15)
+        self.assertEqual(parser_args.outer_uv_route_evidence_dropout, 1.0)
         self.assertEqual(parser_args.outer_hard_positive_weight, 0.50)
         self.assertEqual(parser_args.outer_hard_negative_fraction, 0.02)
         self.assertEqual(parser_args.outer_hard_negative_weight, 0.25)
@@ -630,7 +644,7 @@ class GlobalAffineRoutingTest(unittest.TestCase):
             0.10,
         )
         self.assertTrue(parser_args.outer_uv_occupancy_routing)
-        self.assertTrue(parser_args.outer_uv_component_routing)
+        self.assertFalse(parser_args.outer_uv_component_routing)
         self.assertEqual(parser_args.outer_uv_component_seed_threshold, 0.80)
         self.assertEqual(parser_args.outer_uv_component_grow_threshold, 0.50)
         self.assertEqual(parser_args.outer_uv_component_min_size, 2)
@@ -674,7 +688,7 @@ class GlobalAffineRoutingTest(unittest.TestCase):
             parser_args.geometry_cross_view_outer_min_views, 2
         )
         self.assertEqual(parser_args.outer_uv_occupancy_blend_weight, 0.0)
-        self.assertEqual(parser_args.outer_uv_occupancy_gate_threshold, 0.0)
+        self.assertEqual(parser_args.outer_uv_occupancy_gate_threshold, 0.15)
         self.assertEqual(
             parser_args.outer_uv_occupancy_rescue_threshold, 0.70
         )
@@ -2288,7 +2302,7 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         self.assertTrue(routing["foreground"][0, 0, 0])
         self.assertTrue(routing["outer_uv_occupancy_available"].all())
 
-    def test_collapsed_occupancy_cannot_veto_strong_outer_route_by_default(self):
+    def test_neutral_occupancy_gate_cannot_veto_strong_outer_route(self):
         renderer = FakeRenderer(mask=torch.ones(1, 4))
         renderer.front_outer_mask.copy_(renderer.front_inner_mask)
         rendered = torch.rand(1, 4, 1, 4)
@@ -2322,6 +2336,7 @@ class GlobalAffineRoutingTest(unittest.TestCase):
             outer_semantic_rescue=False,
             geometry_route_texel_consensus=True,
             outer_uv_occupancy=True,
+            outer_uv_occupancy_gate_threshold=0.0,
             outer_uv_component_routing=False,
             return_details=True,
         )

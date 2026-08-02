@@ -85,7 +85,21 @@ def image_to_render_tensor(image, view_size, bg_color=(128, 128, 128)):
 
 def load_parser(checkpoint_path, device):
     checkpoint = torch.load(checkpoint_path, map_location=device)
-    checkpoint_args = checkpoint.get("args", {})
+    checkpoint_args = dict(checkpoint.get("args", {}))
+    checkpoint_metrics = checkpoint.get("metrics", {})
+    checkpoint_metric_source = (
+        checkpoint_metrics.get("val")
+        or checkpoint_metrics.get("train")
+        or {}
+    )
+    for metric_name in (
+        "outer_uv_occupancy_precision",
+        "outer_uv_occupancy_recall",
+    ):
+        if metric_name in checkpoint_metric_source:
+            checkpoint_args[f"_checkpoint_{metric_name}"] = float(
+                checkpoint_metric_source[metric_name]
+            )
     model_config = checkpoint.get("model_config", {})
     if model_config.get("arm_model", "steve") != "steve":
         raise ValueError("Geometry parser only supports standard Steve arms.")
@@ -170,7 +184,7 @@ def load_parser(checkpoint_path, device):
             "outer_uv_topology_dropout", 0.05
         ),
         outer_uv_route_evidence_dropout=model_config.get(
-            "outer_uv_route_evidence_dropout", 0.15
+            "outer_uv_route_evidence_dropout", 1.0
         ),
     ).to(device)
     model.load_state_dict(state_dict)
@@ -942,6 +956,27 @@ def build_arg_parser():
         default=None,
     )
     parser.add_argument(
+        "--outer_uv_occupancy_auto_reliability",
+        dest="outer_uv_occupancy_auto_reliability",
+        action="store_true",
+        default=True,
+        help=(
+            "Allow occupancy to alter routing only when checkpoint validation "
+            "precision and recall clear the configured floors."
+        ),
+    )
+    parser.add_argument(
+        "--no_outer_uv_occupancy_auto_reliability",
+        dest="outer_uv_occupancy_auto_reliability",
+        action="store_false",
+    )
+    parser.add_argument(
+        "--outer_uv_occupancy_min_precision", type=float, default=0.60
+    )
+    parser.add_argument(
+        "--outer_uv_occupancy_min_recall", type=float, default=0.40
+    )
+    parser.add_argument(
         "--outer_uv_component_routing",
         dest="outer_uv_component_routing",
         action="store_true",
@@ -994,6 +1029,14 @@ def main():
         raise ValueError("--outer_uv_min_source_pixels must be positive.")
     if not 0.0 <= args.foreground_flood_tolerance <= 1.0:
         raise ValueError("--foreground_flood_tolerance must be in [0, 1].")
+    if not 0.0 <= args.outer_uv_occupancy_min_precision <= 1.0:
+        raise ValueError(
+            "--outer_uv_occupancy_min_precision must be in [0, 1]."
+        )
+    if not 0.0 <= args.outer_uv_occupancy_min_recall <= 1.0:
+        raise ValueError(
+            "--outer_uv_occupancy_min_recall must be in [0, 1]."
+        )
     if not any(
         (
             args.output,
@@ -1137,7 +1180,7 @@ def main():
         if args.geometry_cross_view_outer_min_views is None
         else args.geometry_cross_view_outer_min_views
     )
-    outer_uv_occupancy = (
+    outer_uv_occupancy_requested = (
         parser_args.get(
             "outer_uv_occupancy_routing",
             False,
@@ -1145,13 +1188,48 @@ def main():
         if args.outer_uv_occupancy is None
         else args.outer_uv_occupancy
     )
+    occupancy_checkpoint_precision = parser_args.get(
+        "_checkpoint_outer_uv_occupancy_precision"
+    )
+    occupancy_checkpoint_recall = parser_args.get(
+        "_checkpoint_outer_uv_occupancy_recall"
+    )
+    occupancy_reliable = (
+        occupancy_checkpoint_precision is not None
+        and occupancy_checkpoint_recall is not None
+        and occupancy_checkpoint_precision
+        >= float(args.outer_uv_occupancy_min_precision)
+        and occupancy_checkpoint_recall
+        >= float(args.outer_uv_occupancy_min_recall)
+    )
+    outer_uv_occupancy = bool(outer_uv_occupancy_requested) and (
+        occupancy_reliable
+        or not args.outer_uv_occupancy_auto_reliability
+    )
+    print(
+        "outer_uv_occupancy_reliability="
+        + json.dumps(
+            {
+                "auto": bool(args.outer_uv_occupancy_auto_reliability),
+                "enabled": bool(outer_uv_occupancy),
+                "requested": bool(outer_uv_occupancy_requested),
+                "checkpoint_precision": occupancy_checkpoint_precision,
+                "checkpoint_recall": occupancy_checkpoint_recall,
+                "min_precision": float(
+                    args.outer_uv_occupancy_min_precision
+                ),
+                "min_recall": float(args.outer_uv_occupancy_min_recall),
+            },
+            sort_keys=True,
+        )
+    )
     outer_uv_occupancy_blend_weight = (
         parser_args.get("outer_uv_occupancy_blend_weight", 0.0)
         if args.outer_uv_occupancy_blend_weight is None
         else args.outer_uv_occupancy_blend_weight
     )
     outer_uv_occupancy_gate_threshold = (
-        parser_args.get("outer_uv_occupancy_gate_threshold", 0.0)
+        parser_args.get("outer_uv_occupancy_gate_threshold", 0.15)
         if args.outer_uv_occupancy_gate_threshold is None
         else args.outer_uv_occupancy_gate_threshold
     )
@@ -1168,7 +1246,7 @@ def main():
         else args.outer_uv_occupancy_rescue_route_threshold
     )
     outer_uv_component_routing = (
-        parser_args.get("outer_uv_component_routing", True)
+        parser_args.get("outer_uv_component_routing", False)
         if args.outer_uv_component_routing is None
         else args.outer_uv_component_routing
     )
