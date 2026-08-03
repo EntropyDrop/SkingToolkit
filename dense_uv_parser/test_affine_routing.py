@@ -585,15 +585,15 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         self.assertEqual(parser_args.lr_schedule, "cosine")
         self.assertEqual(parser_args.min_lr_ratio, 0.05)
         self.assertEqual(parser_args.route_class_weight_floor, 0.75)
-        self.assertEqual(parser_args.lambda_outer_false_positive, 0.75)
-        self.assertEqual(parser_args.lambda_outer_false_negative, 1.0)
+        self.assertEqual(parser_args.lambda_outer_false_positive, 1.0)
+        self.assertEqual(parser_args.lambda_outer_false_negative, 0.75)
         self.assertEqual(parser_args.outer_false_positive_gamma, 3.0)
         self.assertEqual(parser_args.route_outer_class_weight_cap, 0.90)
         self.assertEqual(parser_args.lambda_primary_route_swap, 1.0)
         self.assertEqual(parser_args.lambda_route_texel_consistency, 0.25)
         self.assertEqual(parser_args.lambda_route_texel_supervision, 0.0)
         self.assertEqual(
-            parser_args.lambda_cross_view_outer_visibility, 0.50
+            parser_args.lambda_cross_view_outer_visibility, 0.0
         )
         self.assertEqual(
             parser_args.cross_view_outer_consistency_loss_weight, 0.25
@@ -605,21 +605,22 @@ class GlobalAffineRoutingTest(unittest.TestCase):
             parser_args.outer_visibility_hard_negative_weight, 0.75
         )
         self.assertEqual(parser_args.route_texel_center_power, 2.0)
-        self.assertTrue(parser_args.predict_outer_uv_occupancy)
-        self.assertEqual(parser_args.lambda_outer_uv_occupancy, 0.50)
+        self.assertFalse(parser_args.predict_outer_uv_occupancy)
+        self.assertEqual(parser_args.lambda_outer_uv_occupancy, 0.0)
         self.assertEqual(parser_args.outer_uv_occupancy_dice_weight, 0.50)
         self.assertEqual(parser_args.outer_uv_occupancy_positive_balance, 0.60)
         self.assertEqual(parser_args.outer_uv_route_evidence_dropout, 1.0)
         self.assertEqual(parser_args.outer_hard_positive_weight, 0.50)
         self.assertEqual(parser_args.outer_hard_negative_fraction, 0.02)
         self.assertEqual(parser_args.outer_hard_negative_weight, 0.25)
-        self.assertEqual(parser_args.lambda_outer_component_recall, 0.25)
+        self.assertEqual(parser_args.lambda_outer_component_recall, 0.0)
         self.assertEqual(
             parser_args.lambda_outer_component_false_positive,
-            0.05,
+            0.0,
         )
-        self.assertEqual(parser_args.lambda_outer_negative_topology, 0.03)
-        self.assertEqual(parser_args.lambda_route_occupancy_agreement, 0.25)
+        self.assertEqual(parser_args.lambda_outer_topology, 0.0)
+        self.assertEqual(parser_args.lambda_outer_negative_topology, 0.0)
+        self.assertEqual(parser_args.lambda_route_occupancy_agreement, 0.0)
         self.assertEqual(
             parser_args.outer_occupancy_agreement_warmup_fraction,
             0.25,
@@ -630,20 +631,20 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         )
         self.assertEqual(
             parser_args.lambda_outer_projection_false_positive,
-            0.25,
+            0.0,
         )
         self.assertEqual(
             parser_args.lambda_outer_projection_false_negative,
-            1.0,
+            0.0,
         )
-        self.assertEqual(parser_args.lambda_outer_projection_dice, 0.50)
-        self.assertEqual(parser_args.lambda_outer_projected_area, 0.10)
-        self.assertEqual(parser_args.outer_projection_fp_selection_weight, 0.25)
+        self.assertEqual(parser_args.lambda_outer_projection_dice, 0.0)
+        self.assertEqual(parser_args.lambda_outer_projected_area, 0.0)
+        self.assertEqual(parser_args.outer_projection_fp_selection_weight, 0.0)
         self.assertEqual(
             parser_args.outer_projection_area_selection_weight,
-            0.10,
+            0.0,
         )
-        self.assertTrue(parser_args.outer_uv_occupancy_routing)
+        self.assertFalse(parser_args.outer_uv_occupancy_routing)
         self.assertFalse(parser_args.outer_uv_component_routing)
         self.assertEqual(parser_args.outer_uv_component_seed_threshold, 0.80)
         self.assertEqual(parser_args.outer_uv_component_grow_threshold, 0.50)
@@ -675,12 +676,12 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         )
         self.assertEqual(parser_args.geometry_route_preserve_outer_margin, 0.35)
         self.assertEqual(
-            parser_args.geometry_route_consensus_outer_confidence, 0.80
+            parser_args.geometry_route_consensus_outer_confidence, 0.70
         )
         self.assertEqual(
-            parser_args.geometry_route_consensus_outer_margin, 0.35
+            parser_args.geometry_route_consensus_outer_margin, 0.20
         )
-        self.assertTrue(parser_args.geometry_cross_view_outer_consistency)
+        self.assertFalse(parser_args.geometry_cross_view_outer_consistency)
         self.assertEqual(
             parser_args.geometry_cross_view_outer_weight, 0.50
         )
@@ -695,8 +696,37 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         self.assertEqual(
             parser_args.outer_uv_occupancy_rescue_route_threshold, 0.30
         )
-        self.assertEqual(parser_args.outer_selection_precision_weight, 1.0)
-        self.assertEqual(parser_args.outer_selection_recall_weight, 1.0)
+        self.assertEqual(parser_args.outer_selection_precision_weight, 1.5)
+        self.assertEqual(parser_args.outer_selection_recall_weight, 0.5)
+
+    def test_shell_defaults_keep_failed_outer_experiments_opt_in(self):
+        parser_dir = Path(__file__).parent
+        training_script = (
+            parser_dir / "run_dense_uv_parser_training.sh"
+        ).read_text(encoding="utf-8")
+        inference_script = (parser_dir / "run_infer.sh").read_text(
+            encoding="utf-8"
+        )
+
+        for expected in (
+            'PREDICT_OUTER_UV_OCCUPANCY="${PREDICT_OUTER_UV_OCCUPANCY:-false}"',
+            'OUTER_UV_MIN_SOURCE_PIXELS="${OUTER_UV_MIN_SOURCE_PIXELS:-15}"',
+            'GEOMETRY_CROSS_VIEW_OUTER_CONSISTENCY="${GEOMETRY_CROSS_VIEW_OUTER_CONSISTENCY:-false}"',
+            'OUTER_UV_OCCUPANCY_ROUTING="${OUTER_UV_OCCUPANCY_ROUTING:-false}"',
+            'LAMBDA_OUTER_FALSE_POSITIVE="${LAMBDA_OUTER_FALSE_POSITIVE:-1.0}"',
+            'LAMBDA_OUTER_FALSE_NEGATIVE="${LAMBDA_OUTER_FALSE_NEGATIVE:-0.75}"',
+            'LAMBDA_CROSS_VIEW_OUTER_VISIBILITY="${LAMBDA_CROSS_VIEW_OUTER_VISIBILITY:-0.0}"',
+            'LAMBDA_ROUTE_OCCUPANCY_AGREEMENT="${LAMBDA_ROUTE_OCCUPANCY_AGREEMENT:-0.0}"',
+        ):
+            self.assertIn(expected, training_script)
+        self.assertIn(
+            'OUTER_UV_OCCUPANCY="${OUTER_UV_OCCUPANCY:-false}"',
+            inference_script,
+        )
+        self.assertIn(
+            'GEOMETRY_CROSS_VIEW_OUTER_CONSISTENCY="${GEOMETRY_CROSS_VIEW_OUTER_CONSISTENCY:-false}"',
+            inference_script,
+        )
 
     def test_reproducibility_state_restores_all_random_streams(self):
         train_generator = torch.Generator().manual_seed(101)

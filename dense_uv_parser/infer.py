@@ -1125,17 +1125,17 @@ def main():
         else args.geometry_route_preserve_outer_margin
     )
     geometry_route_consensus_outer_confidence = (
-        parser_args.get("geometry_route_consensus_outer_confidence", 0.80)
+        parser_args.get("geometry_route_consensus_outer_confidence", 0.70)
         if args.geometry_route_consensus_outer_confidence is None
         else args.geometry_route_consensus_outer_confidence
     )
     geometry_route_consensus_outer_margin = (
-        parser_args.get("geometry_route_consensus_outer_margin", 0.35)
+        parser_args.get("geometry_route_consensus_outer_margin", 0.20)
         if args.geometry_route_consensus_outer_margin is None
         else args.geometry_route_consensus_outer_margin
     )
     geometry_cross_view_outer_consistency = (
-        parser_args.get("geometry_cross_view_outer_consistency", True)
+        parser_args.get("geometry_cross_view_outer_consistency", False)
         if args.geometry_cross_view_outer_consistency is None
         else args.geometry_cross_view_outer_consistency
     )

@@ -1457,13 +1457,13 @@ def hard_uv_conditioning_metrics(
                 args, "geometry_route_preserve_outer_margin", 0.35
             ),
             geometry_route_consensus_outer_confidence=getattr(
-                args, "geometry_route_consensus_outer_confidence", 0.80
+                args, "geometry_route_consensus_outer_confidence", 0.70
             ),
             geometry_route_consensus_outer_margin=getattr(
-                args, "geometry_route_consensus_outer_margin", 0.35
+                args, "geometry_route_consensus_outer_margin", 0.20
             ),
             geometry_cross_view_outer_consistency=getattr(
-                args, "geometry_cross_view_outer_consistency", True
+                args, "geometry_cross_view_outer_consistency", False
             ),
             geometry_cross_view_outer_weight=getattr(
                 args, "geometry_cross_view_outer_weight", 0.50
@@ -2088,13 +2088,13 @@ def save_preview(
                     args, "geometry_route_preserve_outer_margin", 0.35
                 ),
                 geometry_route_consensus_outer_confidence=getattr(
-                    args, "geometry_route_consensus_outer_confidence", 0.80
+                    args, "geometry_route_consensus_outer_confidence", 0.70
                 ),
                 geometry_route_consensus_outer_margin=getattr(
-                    args, "geometry_route_consensus_outer_margin", 0.35
+                    args, "geometry_route_consensus_outer_margin", 0.20
                 ),
                 geometry_cross_view_outer_consistency=getattr(
-                    args, "geometry_cross_view_outer_consistency", True
+                    args, "geometry_cross_view_outer_consistency", False
                 ),
                 geometry_cross_view_outer_weight=getattr(
                     args, "geometry_cross_view_outer_weight", 0.50
@@ -2538,7 +2538,7 @@ def build_arg_parser():
         "--predict_outer_uv_occupancy",
         dest="predict_outer_uv_occupancy",
         action="store_true",
-        default=True,
+        default=False,
         help=(
             "Predict grouped 64x64 outer-layer occupancy as a semantic prior "
             "for inner/outer routing."
@@ -2658,16 +2658,16 @@ def build_arg_parser():
         "--geometry_route_preserve_outer_margin", type=float, default=0.35
     )
     parser.add_argument(
-        "--geometry_route_consensus_outer_confidence", type=float, default=0.80
+        "--geometry_route_consensus_outer_confidence", type=float, default=0.70
     )
     parser.add_argument(
-        "--geometry_route_consensus_outer_margin", type=float, default=0.35
+        "--geometry_route_consensus_outer_margin", type=float, default=0.20
     )
     parser.add_argument(
         "--geometry_cross_view_outer_consistency",
         dest="geometry_cross_view_outer_consistency",
         action="store_true",
-        default=True,
+        default=False,
         help=(
             "Reject an outer route when another view provides strong "
             "background/inner evidence for the same outer UV texel."
@@ -2716,7 +2716,7 @@ def build_arg_parser():
         "--outer_uv_occupancy_routing",
         dest="outer_uv_occupancy_routing",
         action="store_true",
-        default=True,
+        default=False,
         help=(
             "Experimental: let the auxiliary occupancy head alter hard "
             "routing and checkpoint selection."
@@ -2776,8 +2776,8 @@ def build_arg_parser():
     parser.add_argument("--lambda_uv_class", type=float, default=1.0)
     parser.add_argument("--lambda_affine", type=float, default=1.0)
     parser.add_argument("--lambda_surface", type=float, default=1.0)
-    parser.add_argument("--lambda_outer_false_positive", type=float, default=0.75)
-    parser.add_argument("--lambda_outer_false_negative", type=float, default=1.0)
+    parser.add_argument("--lambda_outer_false_positive", type=float, default=1.0)
+    parser.add_argument("--lambda_outer_false_negative", type=float, default=0.75)
     parser.add_argument("--lambda_route_confidence", type=float, default=0.25)
     parser.add_argument("--lambda_primary_route_swap", type=float, default=1.0)
     parser.add_argument(
@@ -2792,7 +2792,7 @@ def build_arg_parser():
     parser.add_argument(
         "--lambda_cross_view_outer_visibility",
         type=float,
-        default=0.50,
+        default=0.0,
         help=(
             "Weight for direct outer-alpha supervision over the union of "
             "visible candidates and consistency over shared-view candidates."
@@ -2830,7 +2830,7 @@ def build_arg_parser():
     )
     parser.add_argument("--lambda_semantic_presence", type=float, default=0.25)
     parser.add_argument("--lambda_semantic_coverage", type=float, default=0.25)
-    parser.add_argument("--lambda_outer_uv_occupancy", type=float, default=0.50)
+    parser.add_argument("--lambda_outer_uv_occupancy", type=float, default=0.0)
     parser.add_argument(
         "--outer_uv_occupancy_dice_weight", type=float, default=0.50
     )
@@ -2852,19 +2852,19 @@ def build_arg_parser():
         "--outer_hard_negative_weight", type=float, default=0.25
     )
     parser.add_argument(
-        "--lambda_outer_component_recall", type=float, default=0.25
+        "--lambda_outer_component_recall", type=float, default=0.0
     )
     parser.add_argument(
         "--lambda_outer_component_false_positive",
         type=float,
-        default=0.05,
+        default=0.0,
     )
-    parser.add_argument("--lambda_outer_topology", type=float, default=0.10)
+    parser.add_argument("--lambda_outer_topology", type=float, default=0.0)
     parser.add_argument(
-        "--lambda_outer_negative_topology", type=float, default=0.03
+        "--lambda_outer_negative_topology", type=float, default=0.0
     )
     parser.add_argument(
-        "--lambda_route_occupancy_agreement", type=float, default=0.25
+        "--lambda_route_occupancy_agreement", type=float, default=0.0
     )
     parser.add_argument(
         "--outer_occupancy_agreement_warmup_fraction",
@@ -2893,33 +2893,33 @@ def build_arg_parser():
     parser.add_argument(
         "--lambda_outer_projection_false_positive",
         type=float,
-        default=0.25,
+        default=0.0,
     )
     parser.add_argument(
         "--lambda_outer_projection_false_negative",
         type=float,
-        default=1.0,
+        default=0.0,
     )
     parser.add_argument(
-        "--lambda_outer_projection_dice", type=float, default=0.50
+        "--lambda_outer_projection_dice", type=float, default=0.0
     )
     parser.add_argument(
-        "--lambda_outer_projected_area", type=float, default=0.10
+        "--lambda_outer_projected_area", type=float, default=0.0
     )
-    parser.add_argument("--outer_selection_precision_weight", type=float, default=1.0)
-    parser.add_argument("--outer_selection_recall_weight", type=float, default=1.0)
+    parser.add_argument("--outer_selection_precision_weight", type=float, default=1.5)
+    parser.add_argument("--outer_selection_recall_weight", type=float, default=0.5)
     parser.add_argument("--outer_selection_iou_weight", type=float, default=0.5)
     parser.add_argument("--inner_selection_recall_weight", type=float, default=0.5)
     parser.add_argument("--hard_rgb_selection_weight", type=float, default=1.0)
     parser.add_argument(
         "--outer_projection_fp_selection_weight",
         type=float,
-        default=0.25,
+        default=0.0,
     )
     parser.add_argument(
         "--outer_projection_area_selection_weight",
         type=float,
-        default=0.10,
+        default=0.0,
     )
     parser.add_argument(
         "--render_softmax_temperature",
@@ -3609,7 +3609,11 @@ def main():
         "route_prior_logit_cap": model.route_prior_logit_cap,
         "route_prior_dropout": model.route_prior_dropout,
         "predict_outer_uv_occupancy": model.predict_outer_uv_occupancy,
-        "outer_uv_occupancy_supervision": "visible_projected_texels",
+        "outer_uv_occupancy_supervision": (
+            "visible_projected_texels"
+            if model.predict_outer_uv_occupancy
+            else "disabled"
+        ),
         "outer_uv_feature_channels": model.outer_uv_feature_channels,
         "outer_uv_topology_channels": model.outer_uv_topology_channels,
         "outer_uv_topology_layers": model.outer_uv_topology_layers,
