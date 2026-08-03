@@ -2650,7 +2650,7 @@ def _outer_silhouette_coverage(
     flat_uv,
     renderer,
     views,
-    dilation=1,
+    dilation=0,
     min_pixels=4,
 ):
     """Measure whether an outer texel's protruding pixels exist in the cutout.
@@ -2659,6 +2659,11 @@ def _outer_silhouette_coverage(
     useful silhouette evidence. Interior projections are deliberately left
     unassessed because an absent outer texel and the inner surface behind it
     have the same foreground mask there.
+
+    Coverage is calculated independently for every view and the least
+    supported assessed view wins. Averaging views would let a texel that is
+    visible in one view but absent in another pass at exactly 50% coverage,
+    which creates the characteristic head-top and clothing-edge spikes.
     """
     views = parse_views(views)
     if not views:
@@ -2687,9 +2692,11 @@ def _outer_silhouette_coverage(
     views_per_group = len(views)
     group_count = observed.shape[0] // views_per_group
     uv_count = UV_SIZE * UV_SIZE
-    expected = observed.new_zeros(uv_count, dtype=torch.float32)
+    expected = observed.new_zeros(
+        (views_per_group, uv_count), dtype=torch.float32
+    )
     supported = observed.new_zeros(
-        (group_count, uv_count), dtype=torch.float32
+        (group_count, views_per_group, uv_count), dtype=torch.float32
     )
     for view_index, view in enumerate(views):
         static = build_static_surface_routing(
@@ -2703,20 +2710,27 @@ def _outer_silhouette_coverage(
         protruding_uv = static["flat_uv"][ROUTE_OUTER_PRIMARY][
             protruding
         ]
-        expected.scatter_add_(
+        expected[view_index].scatter_add_(
             0,
             protruding_uv,
             torch.ones_like(protruding_uv, dtype=expected.dtype),
         )
         observed_view = observed[view_index::views_per_group, protruding]
-        supported.scatter_add_(
+        supported[:, view_index].scatter_add_(
             1,
             protruding_uv.view(1, -1).expand(group_count, -1),
             observed_view.to(dtype=supported.dtype),
         )
 
-    assessed_uv = expected >= float(min_pixels)
-    coverage_uv = supported / expected.clamp_min(1.0).view(1, -1)
+    assessed_by_view = expected >= float(min_pixels)
+    coverage_by_view = supported / expected.clamp_min(1.0).unsqueeze(0)
+    coverage_by_view = torch.where(
+        assessed_by_view.unsqueeze(0),
+        coverage_by_view,
+        torch.ones_like(coverage_by_view),
+    )
+    coverage_uv = coverage_by_view.amin(dim=1)
+    assessed_uv = assessed_by_view.any(dim=0)
     item_groups = (
         torch.arange(observed.shape[0], device=observed.device)
         // views_per_group
@@ -3091,7 +3105,7 @@ def splat_parser_predictions_to_uv_conditioning(
     outer_uv_min_source_pixels=1,
     outer_silhouette_consistency=True,
     outer_silhouette_min_coverage=0.50,
-    outer_silhouette_dilation=1,
+    outer_silhouette_dilation=0,
     outer_silhouette_min_pixels=4,
     outer_geometry_rescue=False,
     outer_semantic_rescue=True,
@@ -3594,7 +3608,11 @@ def splat_parser_predictions_to_uv_conditioning(
             outer_silhouette_coverage,
             outer_silhouette_assessed,
         ) = _outer_silhouette_coverage(
-            canonical_observed_foreground,
+            # A one-pixel antialias/background fringe often survives flood
+            # fill. It is unsafe silhouette evidence even when it is already
+            # excluded from RGB pickup. Use the inset foreground here so that
+            # such a fringe cannot validate a false outer shell.
+            color_support["interior"],
             routing["flat_uv"],
             renderer,
             views,

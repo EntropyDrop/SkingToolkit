@@ -2077,7 +2077,7 @@ def save_preview(
                     args, "outer_silhouette_min_coverage", 0.50
                 ),
                 outer_silhouette_dilation=getattr(
-                    args, "outer_silhouette_dilation", 1
+                    args, "outer_silhouette_dilation", 0
                 ),
                 outer_silhouette_min_pixels=getattr(
                     args, "outer_silhouette_min_pixels", 4
@@ -2654,7 +2654,7 @@ def build_arg_parser():
     parser.add_argument(
         "--outer_silhouette_min_coverage", type=float, default=0.50
     )
-    parser.add_argument("--outer_silhouette_dilation", type=int, default=1)
+    parser.add_argument("--outer_silhouette_dilation", type=int, default=0)
     parser.add_argument("--outer_silhouette_min_pixels", type=int, default=4)
     parser.add_argument(
         "--outer_geometry_rescue",

@@ -825,7 +825,7 @@ def build_arg_parser():
         "--outer_silhouette_min_coverage", type=float, default=0.50
     )
     parser.add_argument(
-        "--outer_silhouette_dilation", type=int, default=1
+        "--outer_silhouette_dilation", type=int, default=0
     )
     parser.add_argument(
         "--outer_silhouette_min_pixels", type=int, default=4
@@ -1783,6 +1783,13 @@ def main():
                     ),
                     "outer_silhouette_min_coverage": float(
                         args.outer_silhouette_min_coverage
+                    ),
+                    "outer_silhouette_view_reduction": "minimum",
+                    "outer_silhouette_dilation": int(
+                        args.outer_silhouette_dilation
+                    ),
+                    "outer_silhouette_evidence_inset": int(
+                        args.color_foreground_inset
                     ),
                     "outer_silhouette_assessed_pixels": (
                         outer_silhouette_assessed_count

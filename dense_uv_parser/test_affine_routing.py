@@ -129,6 +129,39 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         self.assertTrue(visible_assessed.all())
         self.assertTrue(torch.equal(visible_coverage, torch.ones_like(visible_coverage)))
 
+    def test_outer_silhouette_coverage_uses_least_supported_view(self):
+        inner = torch.tensor([[False, True, True, False]])
+        renderer = FakeRenderer(mask=inner)
+        renderer.front_outer_mask.fill_(1.0)
+        renderer.register_buffer(
+            "back_inner_grid", renderer.front_inner_grid.clone()
+        )
+        renderer.register_buffer(
+            "back_outer_grid", renderer.front_outer_grid.clone()
+        )
+        renderer.register_buffer(
+            "back_inner_mask", renderer.front_inner_mask.clone()
+        )
+        renderer.register_buffer(
+            "back_outer_mask", renderer.front_outer_mask.clone()
+        )
+        flat_uv = torch.zeros(2, 1, 4, dtype=torch.long)
+        observed = torch.stack(
+            [torch.ones_like(inner), inner], dim=0
+        )
+
+        coverage, assessed = _outer_silhouette_coverage(
+            observed,
+            flat_uv,
+            renderer,
+            ["front", "back"],
+            dilation=0,
+            min_pixels=2,
+        )
+
+        self.assertTrue(assessed.all())
+        self.assertTrue(torch.equal(coverage, torch.zeros_like(coverage)))
+
     def test_outer_silhouette_consistency_vetoes_inner_edge_as_outer(self):
         inner = torch.tensor([[False, True, True, False]])
         renderer = FakeRenderer(mask=inner)
@@ -749,7 +782,7 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         self.assertEqual(parser_args.outer_uv_min_source_pixels, 15)
         self.assertTrue(parser_args.outer_silhouette_consistency)
         self.assertEqual(parser_args.outer_silhouette_min_coverage, 0.50)
-        self.assertEqual(parser_args.outer_silhouette_dilation, 1)
+        self.assertEqual(parser_args.outer_silhouette_dilation, 0)
         self.assertEqual(parser_args.outer_silhouette_min_pixels, 4)
         self.assertTrue(parser_args.outer_geometry_rescue)
         self.assertEqual(parser_args.outer_rescue_confidence_threshold, 0.60)
