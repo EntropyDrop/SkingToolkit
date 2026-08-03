@@ -120,10 +120,9 @@ class MultiViewSemanticFusion(nn.Module):
 
     def forward(self, raw_features, view_ids, sample_count):
         if raw_features.dim() == 3:
-            if raw_features.shape[1] != self.view_classes:
-                raise ValueError(
-                    f"Expected {self.view_classes} semantic views, got {raw_features.shape[1]}."
-                )
+            # Training may cache multiple complete view groups per skin, for
+            # example the inference pair followed by a privileged right-side
+            # pair. Each group is still fused independently below.
             raw_features = raw_features.reshape(-1, raw_features.shape[-1])
         if raw_features.dim() != 2 or raw_features.shape != (
             sample_count,

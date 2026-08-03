@@ -681,6 +681,7 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         self.assertFalse(parser_args.strict_determinism)
         self.assertFalse(parser_args.cudnn_benchmark)
         self.assertEqual(parser_args.feature_dropout, 0.10)
+        self.assertEqual(parser_args.gradient_accumulation_steps, 1)
         self.assertFalse(hasattr(parser_args, "augment"))
         self.assertFalse(hasattr(parser_args, "augment_validation"))
         self.assertFalse(hasattr(parser_args, "translation_scale"))
@@ -709,6 +710,13 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         self.assertEqual(parser_args.lambda_route_texel_supervision, 0.0)
         self.assertEqual(
             parser_args.lambda_cross_view_outer_visibility, 0.0
+        )
+        self.assertEqual(parser_args.privileged_views, "")
+        self.assertEqual(
+            parser_args.lambda_privileged_view_distillation, 0.0
+        )
+        self.assertEqual(
+            parser_args.privileged_view_teacher_confidence, 0.70
         )
         self.assertEqual(
             parser_args.cross_view_outer_consistency_loss_weight, 0.25
@@ -2350,6 +2358,81 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         )
         split["loss_cross_view_outer_visibility"].backward()
         self.assertGreater(float(split_logits.grad.abs().sum()), 0.0)
+
+    def test_privileged_view_distillation_updates_only_primary_views(self):
+        renderer = self.two_view_shared_outer_renderer()
+        for prefix, source in (
+            ("front_aux", "front"),
+            ("back_aux", "back"),
+        ):
+            renderer.register_buffer(
+                f"{prefix}_inner_grid",
+                getattr(renderer, f"{source}_inner_grid").clone(),
+            )
+            renderer.register_buffer(
+                f"{prefix}_outer_grid",
+                getattr(renderer, f"{source}_outer_grid").clone(),
+            )
+            renderer.register_buffer(
+                f"{prefix}_inner_mask",
+                getattr(renderer, f"{source}_inner_mask").clone(),
+            )
+            renderer.register_buffer(
+                f"{prefix}_outer_mask",
+                getattr(renderer, f"{source}_outer_mask").clone(),
+            )
+        logits = torch.tensor(
+            [
+                [[[5.0]], [[0.0]], [[-8.0]]],
+                [[[5.0]], [[0.0]], [[-8.0]]],
+                [[[0.0]], [[5.0]], [[-8.0]]],
+                [[[0.0]], [[5.0]], [[-8.0]]],
+            ],
+            requires_grad=True,
+        )
+        target_uv = torch.zeros(1, 4, 64, 64)
+        target_uv[:, 3, 8, 40] = 1.0
+
+        metrics = parser_train.privileged_view_outer_distillation_loss(
+            {"layer": logits},
+            target_uv,
+            renderer,
+            ["front", "back", "front_aux", "back_aux"],
+            primary_view_count=2,
+            teacher_confidence=0.70,
+        )
+
+        self.assertEqual(
+            int(metrics["count_privileged_distillation_texels"]), 1
+        )
+        self.assertGreater(
+            float(metrics["loss_privileged_view_distillation"].detach()),
+            1.0,
+        )
+        metrics["loss_privileged_view_distillation"].backward()
+        self.assertGreater(float(logits.grad[:2].abs().sum()), 0.0)
+        self.assertEqual(float(logits.grad[2:].abs().sum()), 0.0)
+
+    def test_cached_semantic_view_selection_keeps_primary_pair(self):
+        features = {
+            "raw_global": torch.arange(8).reshape(1, 4, 2),
+            "raw_spatial": torch.arange(16).reshape(1, 4, 1, 2, 2),
+        }
+
+        selected = parser_train.select_cached_semantic_views(
+            features, [0, 1]
+        )
+
+        self.assertTrue(
+            torch.equal(
+                selected["raw_global"], features["raw_global"][:, :2]
+            )
+        )
+        self.assertTrue(
+            torch.equal(
+                selected["raw_spatial"], features["raw_spatial"][:, :2]
+            )
+        )
 
     def test_outer_visibility_loss_supervises_single_view_candidates(self):
         renderer = self.two_view_shared_outer_renderer()

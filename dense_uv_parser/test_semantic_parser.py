@@ -97,6 +97,30 @@ class SemanticDenseUVParserTest(unittest.TestCase):
         self.assertIsNotNone(occupancy_gradient)
         self.assertGreater(float(occupancy_gradient.abs().sum()), 0.0)
 
+    def test_privileged_semantics_form_independent_primary_role_groups(self):
+        model = DenseUVParserNet(
+            base_channels=8,
+            view_classes=2,
+            predict_affine=True,
+            surface_classes=4,
+            geometry_only=True,
+            semantic_feature_dim=16,
+            semantic_channels=16,
+            semantic_attention_heads=4,
+            semantic_layers=1,
+            semantic_dropout=0.0,
+        )
+        images = torch.rand(4, 4, 32, 32)
+        semantics = torch.rand(1, 4, 16)
+        outputs = model(
+            images,
+            view_ids=torch.tensor([0, 1, 0, 1]),
+            semantic_features=semantics,
+        )
+
+        self.assertEqual(tuple(outputs["layer"].shape), (4, 3, 32, 32))
+        self.assertEqual(tuple(outputs["outer_presence_logits"].shape), (2, 6))
+
     def test_spatial_semantics_start_as_zero_residual_then_learn(self):
         model = DenseUVParserNet(
             base_channels=8,

@@ -338,7 +338,14 @@ def stack_view_targets(targets_by_view):
     return result
 
 
-def build_parser_inputs(batch_uv, renderer, views, train, args):
+def build_parser_inputs(
+    batch_uv,
+    renderer,
+    views,
+    train,
+    args,
+    view_role_ids=None,
+):
     rendered_by_view = []
     targets_by_view = []
     with torch.no_grad():
@@ -366,9 +373,66 @@ def build_parser_inputs(batch_uv, renderer, views, train, args):
     rendered = torch.stack(rendered_by_view, dim=1)
     B, V, C, H, W = rendered.shape
     rendered = rendered.reshape(B * V, C, H, W)
-    view_ids = torch.arange(V, device=rendered.device).view(1, V).expand(B, -1).reshape(B * V)
+    if view_role_ids is None:
+        view_role_ids = list(range(V))
+    if len(view_role_ids) != V:
+        raise ValueError(
+            "view_role_ids must contain one role for every rendered view."
+        )
+    view_ids = torch.tensor(
+        view_role_ids,
+        device=rendered.device,
+        dtype=torch.long,
+    ).view(1, V).expand(B, -1).reshape(B * V)
     targets = stack_view_targets(targets_by_view)
     return rendered, targets, V, view_ids
+
+
+def privileged_training_views(args):
+    """Return primary inference views followed by training-only view groups."""
+    primary = parse_views(args.views)
+    privileged = parse_views(getattr(args, "privileged_views", ""))
+    if not primary:
+        raise ValueError("At least one primary inference view is required.")
+    if privileged and len(privileged) % len(primary) != 0:
+        raise ValueError(
+            "--privileged_views must contain complete groups matching the "
+            f"{len(primary)} primary view roles."
+        )
+    return primary, privileged, primary + privileged
+
+
+def repeated_view_role_ids(primary_view_count, total_view_count):
+    """Map every privileged group onto the same canonical view roles."""
+    if primary_view_count < 1 or total_view_count % primary_view_count != 0:
+        raise ValueError(
+            "total_view_count must contain complete primary-role groups."
+        )
+    return [
+        index % primary_view_count for index in range(total_view_count)
+    ]
+
+
+def select_cached_semantic_views(features, view_indices):
+    """Select cached BxV semantic tensors for an active renderer view subset."""
+    if features is None:
+        return None
+
+    def select(value):
+        if value.dim() < 3:
+            raise ValueError(
+                "Cached semantic features must retain a BxV prefix."
+            )
+        indices = torch.tensor(
+            view_indices,
+            device=value.device,
+            dtype=torch.long,
+        )
+        return value.index_select(1, indices)
+
+    if isinstance(features, dict):
+        return {name: select(value) for name, value in features.items()}
+    return select(features)
 
 
 def visible_target_layer_uv_counts(targets, layer_index, group_size):
@@ -782,6 +846,131 @@ def cross_view_outer_visibility_loss(
             float(hard_negative_count)
         ),
         "count_cross_view_outer_shared_texels": shared.float().sum(),
+    }
+
+
+def privileged_view_outer_distillation_loss(
+    outputs,
+    target_uv,
+    renderer,
+    views,
+    primary_view_count,
+    center_power=2.0,
+    teacher_confidence=0.70,
+):
+    """Distil training-only views into the two-view inference prediction.
+
+    Primary and privileged views are processed as independent semantic groups
+    by the shared parser. Their outer-route probabilities are then projected
+    into the same canonical UV atlas. A privileged consensus becomes a
+    stop-gradient soft teacher only where it is confident and agrees with the
+    ground-truth outer alpha. This gives the inference views gradients from
+    right-side evidence without making inference depend on those images.
+    """
+    views = parse_views(views)
+    if not 0.0 <= teacher_confidence <= 1.0:
+        raise ValueError("teacher_confidence must be in [0, 1].")
+    if primary_view_count < 1 or primary_view_count >= len(views):
+        zero = outputs["layer"].sum() * 0.0
+        return {
+            "loss_privileged_view_distillation": zero,
+            "privileged_teacher_accuracy": zero,
+            "privileged_student_teacher_agreement": zero,
+            "privileged_distillation_coverage_percent": zero,
+            "count_privileged_distillation_texels": zero,
+        }
+
+    probabilities = torch.softmax(outputs["layer"].float(), dim=1)
+    pooled, support = aggregate_direct_outer_values_by_view(
+        renderer,
+        views,
+        probabilities,
+        center_power=center_power,
+    )
+    outer_probability = pooled[:, :, ROUTE_OUTER_PRIMARY].clamp(
+        1e-6, 1.0 - 1e-6
+    )
+    primary_probability = outer_probability[:, :primary_view_count]
+    primary_support = support[:, :primary_view_count]
+    privileged_probability = outer_probability[:, primary_view_count:]
+    privileged_support = support[:, primary_view_count:]
+
+    def supported_mean(values, valid):
+        weight = valid.to(dtype=values.dtype)
+        return (
+            (values * weight).sum(dim=1)
+            / weight.sum(dim=1).clamp_min(1.0)
+        )
+
+    student_probability = supported_mean(
+        primary_probability, primary_support
+    ).clamp(1e-6, 1.0 - 1e-6)
+    teacher_probability = supported_mean(
+        privileged_probability, privileged_support
+    ).detach().clamp(1e-6, 1.0 - 1e-6)
+    student_visible = primary_support.any(dim=1)
+    teacher_visible = privileged_support.any(dim=1)
+
+    _, outer_mask = build_uv_masks()
+    valid_outer = outer_mask[0].to(
+        device=probabilities.device,
+        dtype=torch.bool,
+    ).reshape(1, -1)
+    target_outer = (
+        target_uv[:, 3].float().reshape(target_uv.shape[0], -1) > 0.5
+    )
+    teacher_prediction = teacher_probability >= 0.5
+    teacher_correct = teacher_prediction == target_outer
+    confidence = torch.maximum(
+        teacher_probability, 1.0 - teacher_probability
+    )
+    selected = (
+        valid_outer
+        & student_visible
+        & teacher_visible
+        & teacher_correct
+        & (confidence >= float(teacher_confidence))
+    )
+    if not selected.any():
+        zero = probabilities.sum() * 0.0
+        return {
+            "loss_privileged_view_distillation": zero,
+            "privileged_teacher_accuracy": zero,
+            "privileged_student_teacher_agreement": zero,
+            "privileged_distillation_coverage_percent": zero,
+            "count_privileged_distillation_texels": zero,
+        }
+
+    per_texel_loss = F.binary_cross_entropy(
+        student_probability[selected],
+        teacher_probability[selected],
+        reduction="none",
+    )
+    selected_target = target_outer[selected]
+    class_losses = [
+        per_texel_loss[selected_target == expected].mean()
+        for expected in (False, True)
+        if (selected_target == expected).any()
+    ]
+    loss = torch.stack(class_losses).mean()
+    eligible = valid_outer & student_visible & teacher_visible
+    student_prediction = student_probability >= 0.5
+    return {
+        "loss_privileged_view_distillation": loss,
+        "privileged_teacher_accuracy": (
+            teacher_correct[eligible].float().mean()
+            if eligible.any()
+            else probabilities.sum() * 0.0
+        ),
+        "privileged_student_teacher_agreement": (
+            student_prediction[selected] == teacher_prediction[selected]
+        ).float().mean(),
+        "privileged_distillation_coverage_percent": (
+            100.0
+            * selected.float().sum()
+            / eligible.float().sum().clamp_min(1.0)
+        ),
+        "count_privileged_distillation_texels": selected.float().sum(),
     }
 
 
@@ -1603,10 +1792,20 @@ def run_epoch(
     semantic_masks=None,
 ):
     model.train(train)
-    views = parse_views(args.views)
+    primary_views, privileged_views, all_training_views = (
+        privileged_training_views(args)
+    )
+    # Validation and checkpoint selection must exactly match inference. Only
+    # the training pass receives the privileged right-side view group.
+    views = all_training_views if train else primary_views
+    view_role_ids = repeated_view_role_ids(
+        len(primary_views), len(views)
+    )
     metric_sums = {}
     sample_count = 0
     iterator = tqdm(loader, leave=False, file=sys.__stderr__ or sys.stderr) if tqdm is not None else loader
+    if train:
+        optimizer.zero_grad(set_to_none=True)
 
     for batch_index, batch in enumerate(iterator):
         batch = move_batch(batch, device)
@@ -1616,11 +1815,17 @@ def run_epoch(
             views,
             train=train,
             args=args,
+            view_role_ids=view_role_ids,
         )
         parser_samples = rendered.shape[0]
         semantic_features = cached_semantic_batch(
             semantic_cache, batch["path"], device
         )
+        if semantic_features is not None and not train and privileged_views:
+            semantic_features = select_cached_semantic_views(
+                semantic_features,
+                range(len(primary_views)),
+            )
 
         with torch.set_grad_enabled(train):
             with autocast_context(device, precision):
@@ -1649,6 +1854,17 @@ def run_epoch(
                     attributes = build_semantic_attribute_targets(
                         batch["uv"], inner_part_masks, outer_part_masks
                     )
+                    semantic_group_repeats = (
+                        outputs["outer_presence_logits"].shape[0]
+                        // attributes["outer_presence"].shape[0]
+                    )
+                    if semantic_group_repeats > 1:
+                        attributes = {
+                            name: value.repeat_interleave(
+                                semantic_group_repeats, dim=0
+                            )
+                            for name, value in attributes.items()
+                        }
                     loss_semantic_presence = F.binary_cross_entropy_with_logits(
                         outputs["outer_presence_logits"].float(),
                         attributes["outer_presence"],
@@ -1891,6 +2107,29 @@ def run_epoch(
                         "visible_inner_uv_percent": zero,
                         "visible_outer_uv_percent": zero,
                     }
+                if train and privileged_views:
+                    privileged_distillation = (
+                        privileged_view_outer_distillation_loss(
+                            outputs,
+                            batch["uv"],
+                            renderer,
+                            views,
+                            primary_view_count=len(primary_views),
+                            center_power=args.route_texel_center_power,
+                            teacher_confidence=(
+                                args.privileged_view_teacher_confidence
+                            ),
+                        )
+                    )
+                else:
+                    privileged_distillation = {
+                        "loss_privileged_view_distillation": zero,
+                        "privileged_teacher_accuracy": zero,
+                        "privileged_student_teacher_agreement": zero,
+                        "privileged_distillation_coverage_percent": zero,
+                        "count_privileged_distillation_texels": zero,
+                    }
+                auxiliary.update(privileged_distillation)
                 weighted_auxiliary = (
                     args.lambda_soft_uv_rgb * auxiliary["loss_soft_uv_rgb"]
                     + args.lambda_soft_uv_alpha * auxiliary["loss_soft_uv_alpha"]
@@ -1912,6 +2151,8 @@ def run_epoch(
                     * auxiliary["loss_route_texel_supervision"]
                     + args.lambda_cross_view_outer_visibility
                     * auxiliary["loss_cross_view_outer_visibility"]
+                    + args.lambda_privileged_view_distillation
+                    * auxiliary["loss_privileged_view_distillation"]
                 )
                 losses.update(auxiliary)
                 losses["loss_differentiable"] = weighted_auxiliary
@@ -1921,17 +2162,34 @@ def run_epoch(
                 loss = losses["loss_total"]
 
         if train:
-            optimizer.zero_grad(set_to_none=True)
+            final_group_size = len(loader) % args.gradient_accumulation_steps
+            accumulation_denominator = args.gradient_accumulation_steps
+            if (
+                final_group_size
+                and batch_index >= len(loader) - final_group_size
+            ):
+                accumulation_denominator = final_group_size
+            accumulated_loss = loss / float(
+                accumulation_denominator
+            )
+            should_step = (
+                (batch_index + 1) % args.gradient_accumulation_steps == 0
+                or batch_index + 1 == len(loader)
+            )
             if scaler is not None:
-                scaler.scale(loss).backward()
-                scaler.unscale_(optimizer)
-                clip_parser_gradients(model, args.grad_clip)
-                scaler.step(optimizer)
-                scaler.update()
+                scaler.scale(accumulated_loss).backward()
+                if should_step:
+                    scaler.unscale_(optimizer)
+                    clip_parser_gradients(model, args.grad_clip)
+                    scaler.step(optimizer)
+                    scaler.update()
             else:
-                loss.backward()
-                clip_parser_gradients(model, args.grad_clip)
-                optimizer.step()
+                accumulated_loss.backward()
+                if should_step:
+                    clip_parser_gradients(model, args.grad_clip)
+                    optimizer.step()
+            if should_step:
+                optimizer.zero_grad(set_to_none=True)
 
         if compute_hard_metrics:
             with torch.no_grad():
@@ -2030,6 +2288,13 @@ def save_preview(
     semantic_features = cached_semantic_batch(
         semantic_cache, batch["path"], device
     )
+    if semantic_features is not None and parse_views(
+        getattr(args, "privileged_views", "")
+    ):
+        semantic_features = select_cached_semantic_views(
+            semantic_features,
+            range(len(views)),
+        )
     with torch.no_grad():
         semantic_kwargs = {}
         if semantic_features is not None:
@@ -2441,7 +2706,7 @@ def save_checkpoint(
             "base_channels": args.base_channels,
             "uv_size": UV_SIZE,
             "uv_classification": model.uv_classification,
-            "view_classes": len(parse_views(args.views)),
+            "view_classes": model.view_classes,
             "parser_mode": args.parser_mode,
             "predict_affine": model.predict_affine,
             "affine_translation_scale": model.affine_translation_scale,
@@ -2501,6 +2766,15 @@ def build_arg_parser():
     parser.add_argument("--resume", default=None, help="Checkpoint to resume; --epochs remains the final epoch number.")
     parser.add_argument("--mappings_dir", default=None)
     parser.add_argument("--views", default="walk_front_both_layer_ortho,walk_back_both_layer_ortho")
+    parser.add_argument(
+        "--privileged_views",
+        default="",
+        help=(
+            "Training-only renderer views arranged in complete groups matching "
+            "the primary --views roles. They are never used for validation or "
+            "checkpoint inference."
+        ),
+    )
     parser.add_argument(
         "--parser_mode",
         choices=["geometry_fit", "global_affine", "dense"],
@@ -2575,6 +2849,9 @@ def build_arg_parser():
         "--outer_uv_route_evidence_dropout", type=float, default=1.0
     )
     parser.add_argument("--batch_size", type=int, default=8)
+    parser.add_argument(
+        "--gradient_accumulation_steps", type=int, default=1
+    )
     parser.add_argument("--num_workers", type=int, default=8)
     parser.add_argument("--prefetch_factor", type=int, default=4)
     parser.add_argument("--epochs", type=int, default=1)
@@ -2839,6 +3116,24 @@ def build_arg_parser():
         help="Within-loss penalty for disagreement across shared views.",
     )
     parser.add_argument(
+        "--lambda_privileged_view_distillation",
+        type=float,
+        default=0.0,
+        help=(
+            "Weight for UV-space distillation from training-only views into "
+            "the primary inference views."
+        ),
+    )
+    parser.add_argument(
+        "--privileged_view_teacher_confidence",
+        type=float,
+        default=0.70,
+        help=(
+            "Minimum calibrated confidence for a privileged UV texel to act "
+            "as a stop-gradient teacher."
+        ),
+    )
+    parser.add_argument(
         "--outer_visibility_hard_negative_fraction",
         type=float,
         default=0.20,
@@ -2993,6 +3288,8 @@ def main():
     seed_everything(args.seed, reproducible=args.reproducible)
     if not 0.0 <= args.feature_dropout < 1.0:
         raise ValueError("--feature_dropout must be in [0, 1).")
+    if args.gradient_accumulation_steps < 1:
+        raise ValueError("--gradient_accumulation_steps must be positive.")
     if args.route_prior_height < 1 or args.route_prior_width < 1:
         raise ValueError("Route-prior dimensions must be positive.")
     if args.route_prior_logit_cap <= 0:
@@ -3002,6 +3299,14 @@ def main():
     if args.route_role_spatial_prior and args.parser_mode != "geometry_fit":
         raise ValueError(
             "--route_role_spatial_prior is supported only by geometry_fit."
+        )
+    if (
+        args.lambda_privileged_view_distillation > 0.0
+        and not parse_views(args.privileged_views)
+    ):
+        raise ValueError(
+            "--lambda_privileged_view_distillation requires "
+            "--privileged_views."
         )
     differentiable_weights = (
         args.lambda_soft_uv_rgb,
@@ -3015,6 +3320,7 @@ def main():
         args.lambda_outer_projection_dice,
         args.lambda_outer_projected_area,
         args.lambda_cross_view_outer_visibility,
+        args.lambda_privileged_view_distillation,
     )
     if any(weight < 0 for weight in differentiable_weights):
         raise ValueError("Differentiable parser loss weights must be non-negative.")
@@ -3100,6 +3406,10 @@ def main():
     if not 0.0 <= args.cross_view_outer_consistency_loss_weight <= 1.0:
         raise ValueError(
             "--cross_view_outer_consistency_loss_weight must be in [0, 1]."
+        )
+    if not 0.0 <= args.privileged_view_teacher_confidence <= 1.0:
+        raise ValueError(
+            "--privileged_view_teacher_confidence must be in [0, 1]."
         )
     if not 0.0 <= args.outer_visibility_hard_negative_fraction <= 1.0:
         raise ValueError(
@@ -3204,6 +3514,19 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "previews").mkdir(exist_ok=True)
 
+    primary_views, privileged_views, training_views = (
+        privileged_training_views(args)
+    )
+    if len(set(training_views)) != len(training_views):
+        raise ValueError(
+            "Primary and privileged renderer views must be unique."
+        )
+    if privileged_views and args.predict_outer_uv_occupancy:
+        raise ValueError(
+            "The experimental occupancy head does not support training-only "
+            "view groups. Keep PREDICT_OUTER_UV_OCCUPANCY=false."
+        )
+
     dataset = SkinUVDataset(
         data_dir=args.data_dir,
         mappings_dir=args.mappings_dir,
@@ -3231,7 +3554,7 @@ def main():
         if args.siglip_cache_dir:
             semantic_cache = SigLIPGlobalCache(
                 args.siglip_cache_dir,
-                expected_views=parse_views(args.views),
+                expected_views=training_views,
                 expected_model=args.siglip_model,
                 expected_data_dir=args.data_dir,
                 require_spatial=args.siglip_cache_require_spatial,
@@ -3329,14 +3652,16 @@ def main():
         mappings_dir=args.mappings_dir,
         bg_color=tuple(channel / 255.0 for channel in args.bg_color),
     ).to(device)
-    missing_views = [view for view in parse_views(args.views) if view not in renderer.views]
+    missing_views = [
+        view for view in training_views if view not in renderer.views
+    ]
     if missing_views:
         raise ValueError(f"Unknown renderer views {missing_views}. Available views: {', '.join(renderer.views)}")
 
     affine_mode = args.parser_mode in ("geometry_fit", "global_affine")
     geometry_only = args.parser_mode == "geometry_fit"
     surface_classes = (
-        surface_class_count(renderer, parse_views(args.views))
+        surface_class_count(renderer, training_views)
         if args.parser_mode in ("geometry_fit", "global_affine")
         else 0
     )
@@ -3344,7 +3669,9 @@ def main():
         base_channels=args.base_channels,
         uv_size=UV_SIZE,
         uv_classification=args.uv_classification and not geometry_only,
-        view_classes=len(parse_views(args.views)),
+        # Only the primary inference roles receive distinct embeddings. Every
+        # privileged group reuses the same ordered role ids.
+        view_classes=len(primary_views),
         predict_affine=affine_mode,
         affine_translation_scale=0.0,
         affine_scale_range=0.0,
@@ -3628,8 +3955,15 @@ def main():
         "cublas_workspace_config": os.environ.get(
             "CUBLAS_WORKSPACE_CONFIG"
         ),
-        "views": parse_views(args.views),
+        "views": primary_views,
+        "privileged_views": privileged_views,
+        "training_views": training_views,
         "parameters": count_parameters(model),
+        "batch_size": args.batch_size,
+        "gradient_accumulation_steps": args.gradient_accumulation_steps,
+        "effective_skin_batch_size": (
+            args.batch_size * args.gradient_accumulation_steps
+        ),
         "feature_dropout": args.feature_dropout,
         "semantic_backbone": args.semantic_backbone,
         "semantic_model": (
@@ -3671,7 +4005,7 @@ def main():
         "device": str(device),
         "parser_mode": args.parser_mode,
         "uv_classification": model.uv_classification,
-        "view_classes": len(parse_views(args.views)),
+        "view_classes": model.view_classes,
         "surface_classes": surface_classes,
         "layer_classes": model.layer_classes,
         "route_role_classes": model.layer_classes if geometry_only else 0,
@@ -3728,6 +4062,12 @@ def main():
         ),
         "cross_view_outer_consistency_loss_weight": (
             args.cross_view_outer_consistency_loss_weight
+        ),
+        "lambda_privileged_view_distillation": (
+            args.lambda_privileged_view_distillation
+        ),
+        "privileged_view_teacher_confidence": (
+            args.privileged_view_teacher_confidence
         ),
         "outer_visibility_hard_negative_fraction": (
             args.outer_visibility_hard_negative_fraction
