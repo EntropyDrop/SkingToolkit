@@ -941,8 +941,11 @@ def privileged_view_outer_distillation_loss(
             "count_privileged_distillation_texels": zero,
         }
 
-    per_texel_loss = F.binary_cross_entropy(
-        student_probability[selected],
+    # BCE(probability, target) is intentionally rejected by PyTorch autocast.
+    # Convert the pooled student probability back to a stable logit and use
+    # the fused loss so bf16/fp16 training follows the safe kernel path.
+    per_texel_loss = F.binary_cross_entropy_with_logits(
+        torch.logit(student_probability[selected]),
         teacher_probability[selected],
         reduction="none",
     )

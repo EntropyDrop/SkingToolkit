@@ -2393,14 +2393,15 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         target_uv = torch.zeros(1, 4, 64, 64)
         target_uv[:, 3, 8, 40] = 1.0
 
-        metrics = parser_train.privileged_view_outer_distillation_loss(
-            {"layer": logits},
-            target_uv,
-            renderer,
-            ["front", "back", "front_aux", "back_aux"],
-            primary_view_count=2,
-            teacher_confidence=0.70,
-        )
+        with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+            metrics = parser_train.privileged_view_outer_distillation_loss(
+                {"layer": logits},
+                target_uv,
+                renderer,
+                ["front", "back", "front_aux", "back_aux"],
+                primary_view_count=2,
+                teacher_confidence=0.70,
+            )
 
         self.assertEqual(
             int(metrics["count_privileged_distillation_texels"]), 1
