@@ -155,6 +155,10 @@ OUTER_ROUTE_CONFIDENCE_THRESHOLD="${OUTER_ROUTE_CONFIDENCE_THRESHOLD:-0.80}"
 OUTER_ROUTE_MARGIN_THRESHOLD="${OUTER_ROUTE_MARGIN_THRESHOLD:-0.55}"
 OUTER_UV_MIN_COVERAGE="${OUTER_UV_MIN_COVERAGE:-0.25}"
 OUTER_UV_MIN_SOURCE_PIXELS="${OUTER_UV_MIN_SOURCE_PIXELS:-15}"
+OUTER_SILHOUETTE_CONSISTENCY="${OUTER_SILHOUETTE_CONSISTENCY:-true}"
+OUTER_SILHOUETTE_MIN_COVERAGE="${OUTER_SILHOUETTE_MIN_COVERAGE:-0.50}"
+OUTER_SILHOUETTE_DILATION="${OUTER_SILHOUETTE_DILATION:-1}"
+OUTER_SILHOUETTE_MIN_PIXELS="${OUTER_SILHOUETTE_MIN_PIXELS:-4}"
 OUTER_GEOMETRY_RESCUE="${OUTER_GEOMETRY_RESCUE:-true}"
 OUTER_RESCUE_CONFIDENCE_THRESHOLD="${OUTER_RESCUE_CONFIDENCE_THRESHOLD:-0.60}"
 OUTER_RESCUE_MARGIN_THRESHOLD="${OUTER_RESCUE_MARGIN_THRESHOLD:-0.25}"
@@ -292,6 +296,12 @@ if [[ "$GEOMETRY_ROUTE_TEXEL_CONSENSUS" == "true" ]]; then
   routing_consensus_args=(--geometry_route_texel_consensus)
 else
   routing_consensus_args=(--no_geometry_route_texel_consensus)
+fi
+outer_silhouette_args=()
+if [[ "$OUTER_SILHOUETTE_CONSISTENCY" == "true" ]]; then
+  outer_silhouette_args=(--outer_silhouette_consistency)
+else
+  outer_silhouette_args=(--no_outer_silhouette_consistency)
 fi
 cross_view_outer_args=()
 if [[ "$GEOMETRY_CROSS_VIEW_OUTER_CONSISTENCY" == "true" ]]; then
@@ -495,6 +505,9 @@ python train.py \
   --outer_route_margin_threshold "$OUTER_ROUTE_MARGIN_THRESHOLD" \
   --outer_uv_min_coverage "$OUTER_UV_MIN_COVERAGE" \
   --outer_uv_min_source_pixels "$OUTER_UV_MIN_SOURCE_PIXELS" \
+  --outer_silhouette_min_coverage "$OUTER_SILHOUETTE_MIN_COVERAGE" \
+  --outer_silhouette_dilation "$OUTER_SILHOUETTE_DILATION" \
+  --outer_silhouette_min_pixels "$OUTER_SILHOUETTE_MIN_PIXELS" \
   --outer_rescue_confidence_threshold "$OUTER_RESCUE_CONFIDENCE_THRESHOLD" \
   --outer_rescue_margin_threshold "$OUTER_RESCUE_MARGIN_THRESHOLD" \
   --outer_rescue_min_coverage "$OUTER_RESCUE_MIN_COVERAGE" \
@@ -524,6 +537,7 @@ python train.py \
   "${affine_refine_args[@]}" \
   "${fallback_args[@]}" \
   "${routing_consensus_args[@]}" \
+  "${outer_silhouette_args[@]}" \
   "${cross_view_outer_args[@]}" \
   "${outer_occupancy_head_args[@]}" \
   "${outer_occupancy_routing_args[@]}" \

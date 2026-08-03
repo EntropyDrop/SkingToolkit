@@ -33,6 +33,7 @@ from SkingToolkit.dense_uv_parser.utils import (
     estimate_solid_background_foreground,
     estimate_top_left_flood_foreground,
     outer_uv_topology_hysteresis,
+    _outer_silhouette_coverage,
     fill_geometry_grid_debug,
     overlay_geometry_grid_debug,
     refine_parser_affine,
@@ -98,6 +99,87 @@ def dense_targets(batch, height, width):
 
 
 class GlobalAffineRoutingTest(unittest.TestCase):
+    def test_outer_silhouette_coverage_uses_only_protruding_pixels(self):
+        inner = torch.tensor([[False, True, True, False]])
+        renderer = FakeRenderer(mask=inner)
+        renderer.front_outer_mask.fill_(1.0)
+        flat_uv = torch.zeros(1, 1, 4, dtype=torch.long)
+
+        missing_outer = inner.unsqueeze(0)
+        missing_coverage, assessed = _outer_silhouette_coverage(
+            missing_outer,
+            flat_uv,
+            renderer,
+            ["front"],
+            dilation=0,
+            min_pixels=2,
+        )
+        self.assertTrue(assessed.all())
+        self.assertTrue(torch.equal(missing_coverage, torch.zeros_like(missing_coverage)))
+
+        visible_outer = torch.ones_like(missing_outer)
+        visible_coverage, visible_assessed = _outer_silhouette_coverage(
+            visible_outer,
+            flat_uv,
+            renderer,
+            ["front"],
+            dilation=0,
+            min_pixels=2,
+        )
+        self.assertTrue(visible_assessed.all())
+        self.assertTrue(torch.equal(visible_coverage, torch.ones_like(visible_coverage)))
+
+    def test_outer_silhouette_consistency_vetoes_inner_edge_as_outer(self):
+        inner = torch.tensor([[False, True, True, False]])
+        renderer = FakeRenderer(mask=inner)
+        renderer.front_outer_mask.fill_(1.0)
+        rendered = torch.ones(1, 4, 1, 4)
+        role_logits = torch.full((1, 3, 1, 4), -10.0)
+        role_logits[:, 1] = 10.0
+        outputs = {
+            "foreground": torch.full((1, 1, 1, 4), 10.0),
+            "layer": role_logits,
+            "affine": torch.zeros(1, 3),
+        }
+        observed = inner.unsqueeze(0)
+        common = dict(
+            renderer=renderer,
+            views=["front"],
+            group_size=1,
+            affine_refine=False,
+            observed_foreground=observed,
+            outer_route_confidence_threshold=0.0,
+            outer_route_margin_threshold=0.0,
+            outer_uv_min_coverage=0.0,
+            outer_uv_min_source_pixels=1,
+            outer_geometry_rescue=False,
+            outer_semantic_rescue=False,
+            geometry_route_texel_consensus=False,
+            outer_silhouette_min_coverage=0.50,
+            outer_silhouette_dilation=0,
+            outer_silhouette_min_pixels=2,
+            return_details=True,
+        )
+
+        _, unchecked = splat_parser_predictions_to_uv_conditioning(
+            rendered,
+            outputs,
+            outer_silhouette_consistency=False,
+            **common,
+        )
+        self.assertTrue(unchecked["routing"]["foreground"][0, 0, 1])
+
+        _, checked = splat_parser_predictions_to_uv_conditioning(
+            rendered,
+            outputs,
+            outer_silhouette_consistency=True,
+            **common,
+        )
+        routing = checked["routing"]
+        self.assertTrue(routing["outer_silhouette_assessed"][0, 0, 1])
+        self.assertTrue(routing["outer_silhouette_rejected"][0, 0, 1])
+        self.assertFalse(routing["foreground"][0, 0, 1])
+
     def test_outer_topology_crosses_cube_seams(self):
         flat_indices, edge_index = build_outer_uv_graph()
         topology = build_simple_uv_topology()
@@ -665,6 +747,10 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         self.assertEqual(parser_args.outer_route_margin_threshold, 0.55)
         self.assertEqual(parser_args.outer_uv_min_coverage, 0.25)
         self.assertEqual(parser_args.outer_uv_min_source_pixels, 15)
+        self.assertTrue(parser_args.outer_silhouette_consistency)
+        self.assertEqual(parser_args.outer_silhouette_min_coverage, 0.50)
+        self.assertEqual(parser_args.outer_silhouette_dilation, 1)
+        self.assertEqual(parser_args.outer_silhouette_min_pixels, 4)
         self.assertTrue(parser_args.outer_geometry_rescue)
         self.assertEqual(parser_args.outer_rescue_confidence_threshold, 0.60)
         self.assertEqual(parser_args.outer_rescue_margin_threshold, 0.25)
@@ -711,6 +797,7 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         for expected in (
             'PREDICT_OUTER_UV_OCCUPANCY="${PREDICT_OUTER_UV_OCCUPANCY:-false}"',
             'OUTER_UV_MIN_SOURCE_PIXELS="${OUTER_UV_MIN_SOURCE_PIXELS:-15}"',
+            'OUTER_SILHOUETTE_CONSISTENCY="${OUTER_SILHOUETTE_CONSISTENCY:-true}"',
             'GEOMETRY_CROSS_VIEW_OUTER_CONSISTENCY="${GEOMETRY_CROSS_VIEW_OUTER_CONSISTENCY:-false}"',
             'OUTER_UV_OCCUPANCY_ROUTING="${OUTER_UV_OCCUPANCY_ROUTING:-false}"',
             'LAMBDA_OUTER_FALSE_POSITIVE="${LAMBDA_OUTER_FALSE_POSITIVE:-1.0}"',

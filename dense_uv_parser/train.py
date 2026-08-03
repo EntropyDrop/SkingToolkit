@@ -1433,6 +1433,12 @@ def hard_uv_conditioning_metrics(
             outer_route_margin_threshold=args.outer_route_margin_threshold,
             outer_uv_min_coverage=args.outer_uv_min_coverage,
             outer_uv_min_source_pixels=args.outer_uv_min_source_pixels,
+            outer_silhouette_consistency=args.outer_silhouette_consistency,
+            outer_silhouette_min_coverage=(
+                args.outer_silhouette_min_coverage
+            ),
+            outer_silhouette_dilation=args.outer_silhouette_dilation,
+            outer_silhouette_min_pixels=args.outer_silhouette_min_pixels,
             outer_geometry_rescue=getattr(args, "outer_geometry_rescue", False),
             outer_rescue_confidence_threshold=getattr(
                 args, "outer_rescue_confidence_threshold", 0.60
@@ -2064,6 +2070,18 @@ def save_preview(
                 outer_uv_min_source_pixels=getattr(
                     args, "outer_uv_min_source_pixels", 15
                 ),
+                outer_silhouette_consistency=getattr(
+                    args, "outer_silhouette_consistency", True
+                ),
+                outer_silhouette_min_coverage=getattr(
+                    args, "outer_silhouette_min_coverage", 0.50
+                ),
+                outer_silhouette_dilation=getattr(
+                    args, "outer_silhouette_dilation", 1
+                ),
+                outer_silhouette_min_pixels=getattr(
+                    args, "outer_silhouette_min_pixels", 4
+                ),
                 outer_geometry_rescue=getattr(args, "outer_geometry_rescue", False),
                 outer_rescue_confidence_threshold=getattr(
                     args, "outer_rescue_confidence_threshold", 0.60
@@ -2623,6 +2641,22 @@ def build_arg_parser():
     parser.add_argument("--outer_uv_min_coverage", type=float, default=0.25)
     parser.add_argument("--outer_uv_min_source_pixels", type=int, default=15)
     parser.add_argument(
+        "--outer_silhouette_consistency",
+        dest="outer_silhouette_consistency",
+        action="store_true",
+        default=True,
+    )
+    parser.add_argument(
+        "--no_outer_silhouette_consistency",
+        dest="outer_silhouette_consistency",
+        action="store_false",
+    )
+    parser.add_argument(
+        "--outer_silhouette_min_coverage", type=float, default=0.50
+    )
+    parser.add_argument("--outer_silhouette_dilation", type=int, default=1)
+    parser.add_argument("--outer_silhouette_min_pixels", type=int, default=4)
+    parser.add_argument(
         "--outer_geometry_rescue",
         dest="outer_geometry_rescue",
         action="store_true",
@@ -2998,7 +3032,12 @@ def main():
         raise ValueError("--color_foreground_inset must be non-negative.")
     if args.outer_uv_min_source_pixels < 1:
         raise ValueError("--outer_uv_min_source_pixels must be positive.")
+    if args.outer_silhouette_dilation < 0:
+        raise ValueError("--outer_silhouette_dilation must be non-negative.")
+    if args.outer_silhouette_min_pixels < 1:
+        raise ValueError("--outer_silhouette_min_pixels must be positive.")
     for name in (
+        "outer_silhouette_min_coverage",
         "geometry_route_texel_consensus_weight",
         "geometry_route_preserve_outer_confidence",
         "geometry_route_preserve_outer_margin",
@@ -3656,6 +3695,12 @@ def main():
             args.geometry_cross_view_outer_min_views
         ),
         "outer_uv_min_source_pixels": args.outer_uv_min_source_pixels,
+        "outer_silhouette_consistency": args.outer_silhouette_consistency,
+        "outer_silhouette_min_coverage": (
+            args.outer_silhouette_min_coverage
+        ),
+        "outer_silhouette_dilation": args.outer_silhouette_dilation,
+        "outer_silhouette_min_pixels": args.outer_silhouette_min_pixels,
         "background_color_tolerance": args.background_color_tolerance,
         "color_background_tolerance": args.color_background_tolerance,
         "color_foreground_inset": args.color_foreground_inset,

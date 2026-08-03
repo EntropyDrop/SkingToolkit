@@ -2645,6 +2645,89 @@ def _surface_aware_outer_coverage(routing, trusted, selected_outer, renderer, vi
     )
 
 
+def _outer_silhouette_coverage(
+    observed_foreground,
+    flat_uv,
+    renderer,
+    views,
+    dilation=1,
+    min_pixels=4,
+):
+    """Measure whether an outer texel's protruding pixels exist in the cutout.
+
+    Only pixels covered by the outer cuboid but not by the inner cuboid carry
+    useful silhouette evidence. Interior projections are deliberately left
+    unassessed because an absent outer texel and the inner surface behind it
+    have the same foreground mask there.
+    """
+    views = parse_views(views)
+    if not views:
+        raise ValueError("At least one renderer view is required.")
+    if observed_foreground.shape != flat_uv.shape:
+        raise ValueError(
+            "observed_foreground and flat_uv must have identical shapes."
+        )
+    if observed_foreground.shape[0] % len(views) != 0:
+        raise ValueError("The routed batch must contain complete view groups.")
+    if dilation < 0:
+        raise ValueError("dilation must be non-negative.")
+    if min_pixels < 1:
+        raise ValueError("min_pixels must be positive.")
+
+    observed = observed_foreground.to(dtype=torch.bool)
+    if dilation > 0:
+        kernel_size = 2 * int(dilation) + 1
+        observed = F.max_pool2d(
+            observed.unsqueeze(1).float(),
+            kernel_size=kernel_size,
+            stride=1,
+            padding=int(dilation),
+        )[:, 0] > 0.5
+
+    views_per_group = len(views)
+    group_count = observed.shape[0] // views_per_group
+    uv_count = UV_SIZE * UV_SIZE
+    expected = observed.new_zeros(uv_count, dtype=torch.float32)
+    supported = observed.new_zeros(
+        (group_count, uv_count), dtype=torch.float32
+    )
+    for view_index, view in enumerate(views):
+        static = build_static_surface_routing(
+            renderer, view, observed.device
+        )
+        inner_silhouette = static["masks"][ROUTE_INNER_PRIMARY]
+        outer_silhouette = static["masks"][ROUTE_OUTER_PRIMARY]
+        protruding = outer_silhouette & ~inner_silhouette
+        if not protruding.any():
+            continue
+        protruding_uv = static["flat_uv"][ROUTE_OUTER_PRIMARY][
+            protruding
+        ]
+        expected.scatter_add_(
+            0,
+            protruding_uv,
+            torch.ones_like(protruding_uv, dtype=expected.dtype),
+        )
+        observed_view = observed[view_index::views_per_group, protruding]
+        supported.scatter_add_(
+            1,
+            protruding_uv.view(1, -1).expand(group_count, -1),
+            observed_view.to(dtype=supported.dtype),
+        )
+
+    assessed_uv = expected >= float(min_pixels)
+    coverage_uv = supported / expected.clamp_min(1.0).view(1, -1)
+    item_groups = (
+        torch.arange(observed.shape[0], device=observed.device)
+        // views_per_group
+    )
+    pixel_coverage = coverage_uv[
+        item_groups.view(-1, 1, 1), flat_uv
+    ]
+    pixel_assessed = assessed_uv[flat_uv]
+    return pixel_coverage, pixel_assessed
+
+
 def _grouped_uv_support(mask, flat_uv, group_size):
     """Broadcast per-pixel evidence to matching UV texels across all input views."""
     if mask.shape != flat_uv.shape:
@@ -3006,6 +3089,10 @@ def splat_parser_predictions_to_uv_conditioning(
     outer_route_margin_threshold=None,
     outer_uv_min_coverage=0.5,
     outer_uv_min_source_pixels=1,
+    outer_silhouette_consistency=True,
+    outer_silhouette_min_coverage=0.50,
+    outer_silhouette_dilation=1,
+    outer_silhouette_min_pixels=4,
     outer_geometry_rescue=False,
     outer_semantic_rescue=True,
     outer_semantic_presence_threshold=0.80,
@@ -3069,6 +3156,12 @@ def splat_parser_predictions_to_uv_conditioning(
         raise ValueError("outer_uv_min_coverage must be in [0, 1].")
     if outer_uv_min_source_pixels < 1:
         raise ValueError("outer_uv_min_source_pixels must be positive.")
+    if not 0.0 <= outer_silhouette_min_coverage <= 1.0:
+        raise ValueError("outer_silhouette_min_coverage must be in [0, 1].")
+    if outer_silhouette_dilation < 0:
+        raise ValueError("outer_silhouette_dilation must be non-negative.")
+    if outer_silhouette_min_pixels < 1:
+        raise ValueError("outer_silhouette_min_pixels must be positive.")
     if not (
         0.0
         <= outer_uv_component_grow_threshold
@@ -3493,6 +3586,34 @@ def splat_parser_predictions_to_uv_conditioning(
             )
         outer_occupancy_rescued = occupancy_rescue_trusted & ~trusted
         trusted = trusted | occupancy_rescue_trusted
+    outer_silhouette_coverage = torch.ones_like(routing["confidence"])
+    outer_silhouette_assessed = torch.zeros_like(selected_outer)
+    outer_silhouette_rejected = torch.zeros_like(selected_outer)
+    if outer_silhouette_consistency:
+        (
+            outer_silhouette_coverage,
+            outer_silhouette_assessed,
+        ) = _outer_silhouette_coverage(
+            canonical_observed_foreground,
+            routing["flat_uv"],
+            renderer,
+            views,
+            dilation=outer_silhouette_dilation,
+            min_pixels=outer_silhouette_min_pixels,
+        )
+        outer_silhouette_rejected = (
+            trusted
+            & selected_outer
+            & outer_silhouette_assessed
+            & (
+                outer_silhouette_coverage
+                < float(outer_silhouette_min_coverage)
+            )
+        )
+        # This is direct input evidence, so it remains a final veto after all
+        # semantic/geometry rescues. Reclassifying to inner would contaminate
+        # inner UV; rejected observations are left unknown instead.
+        trusted = trusted & ~outer_silhouette_rejected
     outer_uv_coverage = torch.ones_like(routing["confidence"])
     outer_required_coverage = torch.zeros_like(routing["confidence"])
     if outer_uv_min_coverage > 0.0:
@@ -3594,6 +3715,9 @@ def splat_parser_predictions_to_uv_conditioning(
     routing["outer_occupancy_supported"] = occupancy_supported_outer
     routing["outer_occupancy_rescued"] = outer_occupancy_rescued & trusted
     routing["outer_required_coverage"] = outer_required_coverage
+    routing["outer_silhouette_coverage"] = outer_silhouette_coverage
+    routing["outer_silhouette_assessed"] = outer_silhouette_assessed
+    routing["outer_silhouette_rejected"] = outer_silhouette_rejected
     routing["outer_source_support"] = outer_source_support
     routing["outer_source_rejected"] = outer_source_rejected
     routing["foreground"] = trusted

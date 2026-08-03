@@ -807,6 +807,30 @@ def build_arg_parser():
         help="Minimum routed source pixels required to keep an outer UV texel.",
     )
     parser.add_argument(
+        "--outer_silhouette_consistency",
+        dest="outer_silhouette_consistency",
+        action="store_true",
+        default=True,
+        help=(
+            "Reject an outer texel when its protruding projection is absent "
+            "from the observed foreground silhouette."
+        ),
+    )
+    parser.add_argument(
+        "--no_outer_silhouette_consistency",
+        dest="outer_silhouette_consistency",
+        action="store_false",
+    )
+    parser.add_argument(
+        "--outer_silhouette_min_coverage", type=float, default=0.50
+    )
+    parser.add_argument(
+        "--outer_silhouette_dilation", type=int, default=1
+    )
+    parser.add_argument(
+        "--outer_silhouette_min_pixels", type=int, default=4
+    )
+    parser.add_argument(
         "--outer_geometry_rescue",
         dest="outer_geometry_rescue",
         action="store_true",
@@ -1027,6 +1051,14 @@ def main():
         raise ValueError("--color_foreground_inset must be non-negative.")
     if args.outer_uv_min_source_pixels < 1:
         raise ValueError("--outer_uv_min_source_pixels must be positive.")
+    if not 0.0 <= args.outer_silhouette_min_coverage <= 1.0:
+        raise ValueError(
+            "--outer_silhouette_min_coverage must be in [0, 1]."
+        )
+    if args.outer_silhouette_dilation < 0:
+        raise ValueError("--outer_silhouette_dilation must be non-negative.")
+    if args.outer_silhouette_min_pixels < 1:
+        raise ValueError("--outer_silhouette_min_pixels must be positive.")
     if not 0.0 <= args.foreground_flood_tolerance <= 1.0:
         raise ValueError("--foreground_flood_tolerance must be in [0, 1].")
     if not 0.0 <= args.outer_uv_occupancy_min_precision <= 1.0:
@@ -1402,6 +1434,12 @@ def main():
             outer_route_margin_threshold=args.outer_route_margin_threshold,
             outer_uv_min_coverage=outer_uv_min_coverage,
             outer_uv_min_source_pixels=args.outer_uv_min_source_pixels,
+            outer_silhouette_consistency=args.outer_silhouette_consistency,
+            outer_silhouette_min_coverage=(
+                args.outer_silhouette_min_coverage
+            ),
+            outer_silhouette_dilation=args.outer_silhouette_dilation,
+            outer_silhouette_min_pixels=args.outer_silhouette_min_pixels,
             outer_geometry_rescue=args.outer_geometry_rescue,
             outer_semantic_rescue=args.outer_semantic_rescue,
             outer_semantic_presence_threshold=args.outer_semantic_presence_threshold,
@@ -1539,6 +1577,18 @@ def main():
                 "outer_required_coverage",
                 torch.full_like(routing["confidence"], outer_uv_min_coverage),
             )
+        )
+        outer_silhouette_assessed_count = int(
+            routing.get(
+                "outer_silhouette_assessed",
+                torch.zeros_like(raw_outer),
+            ).sum().item()
+        )
+        outer_silhouette_rejected_count = int(
+            routing.get(
+                "outer_silhouette_rejected",
+                torch.zeros_like(raw_outer),
+            ).sum().item()
         )
         secondary_count = int(routing.get("secondary", torch.zeros_like(raw_outer)).sum().item())
         routed_secondary_count = int(
@@ -1727,6 +1777,18 @@ def main():
                     "outer_source_rejected_pixels": outer_source_rejected_count,
                     "outer_uv_min_source_pixels": int(
                         args.outer_uv_min_source_pixels
+                    ),
+                    "outer_silhouette_consistency": bool(
+                        args.outer_silhouette_consistency
+                    ),
+                    "outer_silhouette_min_coverage": float(
+                        args.outer_silhouette_min_coverage
+                    ),
+                    "outer_silhouette_assessed_pixels": (
+                        outer_silhouette_assessed_count
+                    ),
+                    "outer_silhouette_rejected_pixels": (
+                        outer_silhouette_rejected_count
                     ),
                     "outer_geometry_supported_pixels": outer_geometry_supported_count,
                     "outer_geometry_rescued_pixels": outer_geometry_rescued_count,
