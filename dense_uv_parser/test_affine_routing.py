@@ -213,6 +213,58 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         self.assertTrue(routing["outer_silhouette_rejected"][0, 0, 1])
         self.assertFalse(routing["foreground"][0, 0, 1])
 
+    def test_outer_silhouette_preserves_thin_color_safe_detail(self):
+        inner = torch.tensor(
+            [
+                [False, False, False, False],
+                [False, True, True, False],
+                [False, False, False, False],
+            ]
+        )
+        renderer = FakeRenderer(mask=inner)
+        renderer.front_outer_mask[1].fill_(1.0)
+        rendered = torch.zeros(1, 4, 3, 4)
+        rendered[:, 0, 1] = 1.0
+        rendered[:, 3] = 1.0
+        role_logits = torch.full((1, 3, 3, 4), -10.0)
+        role_logits[:, 1] = 10.0
+        outputs = {
+            "foreground": torch.full((1, 1, 3, 4), 10.0),
+            "layer": role_logits,
+            "affine": torch.zeros(1, 3),
+        }
+        observed = renderer.front_outer_mask.bool().unsqueeze(0)
+
+        _, details = splat_parser_predictions_to_uv_conditioning(
+            rendered,
+            outputs,
+            renderer=renderer,
+            views=["front"],
+            group_size=1,
+            affine_refine=False,
+            observed_foreground=observed,
+            color_background_tolerance=1.0 / 255.0,
+            color_foreground_inset=1,
+            outer_route_confidence_threshold=0.0,
+            outer_route_margin_threshold=0.0,
+            outer_uv_min_coverage=0.0,
+            outer_uv_min_source_pixels=1,
+            outer_geometry_rescue=False,
+            outer_semantic_rescue=False,
+            geometry_route_texel_consensus=False,
+            outer_silhouette_consistency=True,
+            outer_silhouette_min_coverage=0.50,
+            outer_silhouette_dilation=0,
+            outer_silhouette_min_pixels=2,
+            return_details=True,
+        )
+
+        routing = details["routing"]
+        protruding = observed & ~inner.unsqueeze(0)
+        self.assertTrue(routing["outer_silhouette_assessed"][protruding].all())
+        self.assertFalse(routing["outer_silhouette_rejected"][protruding].any())
+        self.assertTrue(routing["foreground"][protruding].all())
+
     def test_outer_topology_crosses_cube_seams(self):
         flat_indices, edge_index = build_outer_uv_graph()
         topology = build_simple_uv_topology()

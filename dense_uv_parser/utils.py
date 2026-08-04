@@ -3608,11 +3608,13 @@ def splat_parser_predictions_to_uv_conditioning(
             outer_silhouette_coverage,
             outer_silhouette_assessed,
         ) = _outer_silhouette_coverage(
-            # A one-pixel antialias/background fringe often survives flood
-            # fill. It is unsafe silhouette evidence even when it is already
-            # excluded from RGB pickup. Use the inset foreground here so that
-            # such a fringe cannot validate a false outer shell.
-            color_support["interior"],
+            # Use the color-safe foreground rather than the eroded interior.
+            # Thin but real outer details (hair tips, glasses and headphone
+            # bands) can be only one projected pixel wide and disappear after
+            # an inset. ``valid`` still removes background-colored boundary
+            # contamination, so it does not re-enable the fringe that this
+            # silhouette veto is intended to reject.
+            color_support["valid"],
             routing["flat_uv"],
             renderer,
             views,

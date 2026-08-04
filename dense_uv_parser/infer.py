@@ -1788,9 +1788,8 @@ def main():
                     "outer_silhouette_dilation": int(
                         args.outer_silhouette_dilation
                     ),
-                    "outer_silhouette_evidence_inset": int(
-                        args.color_foreground_inset
-                    ),
+                    "outer_silhouette_evidence_inset": 0,
+                    "outer_silhouette_evidence": "color_safe_foreground",
                     "outer_silhouette_assessed_pixels": (
                         outer_silhouette_assessed_count
                     ),
