@@ -219,6 +219,163 @@ class SpatialSemanticFusion(nn.Module):
         )
 
 
+class TextPromptRouteFusion(nn.Module):
+    """Turn frozen SigLIP2 text/image similarities into route-logit evidence.
+
+    Prompt embeddings remain fixed in the pretrained contrastive space. Only a
+    small convolutional mixer is trained, so the route head can learn which
+    semantic concepts support inner, outer, or secondary surfaces without
+    fine-tuning either SigLIP2 tower.
+    """
+
+    def __init__(
+        self,
+        raw_feature_dim,
+        prompt_count,
+        route_classes,
+        hidden_channels=32,
+        logit_scale=1.0,
+        logit_bias=0.0,
+    ):
+        super().__init__()
+        if raw_feature_dim < 1 or prompt_count < 1:
+            raise ValueError("Text-prompt feature dimensions must be positive.")
+        if route_classes < 2 or hidden_channels < 1:
+            raise ValueError("Text-prompt route dimensions must be positive.")
+        self.raw_feature_dim = int(raw_feature_dim)
+        self.prompt_count = int(prompt_count)
+        self.hidden_channels = int(hidden_channels)
+        self.register_buffer(
+            "prompt_embeddings",
+            torch.zeros(prompt_count, raw_feature_dim),
+        )
+        self.register_buffer(
+            "logit_scale",
+            torch.tensor(float(logit_scale), dtype=torch.float32),
+        )
+        self.register_buffer(
+            "logit_bias",
+            torch.tensor(float(logit_bias), dtype=torch.float32),
+        )
+        # SigLIP2's pooled vision and text outputs share the contrastive space,
+        # but raw patch tokens do not pass through the vision pooling head.
+        # Learn a small common local space instead of treating raw patch/text
+        # cosine values as calibrated open-vocabulary scores.
+        self.spatial_projection = nn.Conv2d(
+            raw_feature_dim, hidden_channels, kernel_size=1, bias=False
+        )
+        self.prompt_projection = nn.Linear(
+            raw_feature_dim, hidden_channels, bias=False
+        )
+        self.route_projection = nn.Sequential(
+            nn.Conv2d(prompt_count, hidden_channels, kernel_size=1),
+            nn.GELU(),
+            nn.Conv2d(hidden_channels, route_classes, kernel_size=1),
+        )
+        # Preserve the proven vision-only initialization. The prompt branch
+        # starts as a no-op and learns corrections from exact route targets.
+        nn.init.zeros_(self.route_projection[-1].weight)
+        nn.init.zeros_(self.route_projection[-1].bias)
+
+    def set_prompt_embeddings(self, embeddings, logit_scale=None, logit_bias=None):
+        if embeddings.shape != self.prompt_embeddings.shape:
+            raise ValueError(
+                "Expected text prompt embeddings shaped "
+                f"{tuple(self.prompt_embeddings.shape)}, got "
+                f"{tuple(embeddings.shape)}."
+            )
+        with torch.no_grad():
+            normalized = F.normalize(
+                embeddings.to(
+                    device=self.prompt_embeddings.device,
+                    dtype=torch.float32,
+                ),
+                dim=-1,
+            )
+            self.prompt_embeddings.copy_(normalized)
+            if logit_scale is not None:
+                self.logit_scale.fill_(float(logit_scale))
+            if logit_bias is not None:
+                self.logit_bias.fill_(float(logit_bias))
+
+    def forward(
+        self,
+        raw_features,
+        raw_global_features,
+        sample_count,
+        output_size,
+    ):
+        if raw_features.dim() == 5:
+            raw_features = raw_features.reshape(
+                -1,
+                raw_features.shape[-3],
+                raw_features.shape[-2],
+                raw_features.shape[-1],
+            )
+        if (
+            raw_features.dim() != 4
+            or raw_features.shape[0] != sample_count
+            or raw_features.shape[1] != self.raw_feature_dim
+        ):
+            raise ValueError(
+                "Text-prompt fusion requires spatial SigLIP2 features shaped "
+                f"NxCxHxW or BxVxCxHxW; got {tuple(raw_features.shape)}."
+            )
+        if raw_global_features is None:
+            raise ValueError(
+                "Text-prompt fusion requires pooled SigLIP2 vision features."
+            )
+        if raw_global_features.dim() == 3:
+            raw_global_features = raw_global_features.reshape(
+                -1, raw_global_features.shape[-1]
+            )
+        if raw_global_features.shape != (
+            sample_count,
+            self.raw_feature_dim,
+        ):
+            raise ValueError(
+                "Text-prompt fusion requires pooled SigLIP2 features shaped "
+                f"NxC or BxVxC; got {tuple(raw_global_features.shape)}."
+            )
+
+        prompt_embeddings = F.normalize(
+            self.prompt_embeddings.float(), dim=-1
+        )
+        global_features = F.normalize(
+            raw_global_features.float(), dim=-1
+        )
+        global_logits = torch.einsum(
+            "nc,pc->np", global_features, prompt_embeddings
+        )
+        global_logits = global_logits * self.logit_scale.clamp(0.01, 100.0)
+        global_logits = global_logits + self.logit_bias
+
+        local_image_features = F.normalize(
+            self.spatial_projection(raw_features.float()), dim=1
+        )
+        local_prompt_features = F.normalize(
+            self.prompt_projection(prompt_embeddings), dim=-1
+        )
+        local_similarity = torch.einsum(
+            "nchw,pc->nphw", local_image_features, local_prompt_features
+        )
+        # Relative global relevance suppresses prompts that are implausible for
+        # this view while preserving an average gate of one. Inner-surface
+        # prompts are included in the bank, so every sample retains useful
+        # route evidence even when no accessory is visible.
+        prompt_gate = torch.softmax(global_logits, dim=-1)
+        prompt_gate = (prompt_gate * self.prompt_count).clamp(0.05, 4.0)
+        prompt_evidence = local_similarity * prompt_gate[:, :, None, None]
+        route_logits = self.route_projection(prompt_evidence)
+        route_logits = F.interpolate(
+            route_logits,
+            size=output_size,
+            mode="bilinear",
+            align_corners=False,
+        )
+        return route_logits, global_logits
+
+
 class OuterUVGraphBlock(nn.Module):
     """Message passing over physical neighbours of Minecraft outer texels."""
 
@@ -349,6 +506,11 @@ class DenseUVParserNet(nn.Module):
         semantic_dropout=0.05,
         semantic_spatial_feature_dim=0,
         semantic_spatial_channels=64,
+        semantic_text_prompt_count=0,
+        semantic_text_prompt_feature_dim=0,
+        semantic_text_prompt_channels=32,
+        semantic_text_logit_scale=1.0,
+        semantic_text_logit_bias=0.0,
         predict_confidence=False,
         route_role_spatial_prior=False,
         route_prior_height=32,
@@ -381,6 +543,13 @@ class DenseUVParserNet(nn.Module):
         self.semantic_dropout = float(semantic_dropout)
         self.semantic_spatial_feature_dim = int(semantic_spatial_feature_dim)
         self.semantic_spatial_channels = int(semantic_spatial_channels)
+        self.semantic_text_prompt_count = int(semantic_text_prompt_count)
+        self.semantic_text_prompt_feature_dim = int(
+            semantic_text_prompt_feature_dim
+        )
+        self.semantic_text_prompt_channels = int(
+            semantic_text_prompt_channels
+        )
         self.predict_confidence = bool(predict_confidence)
         self.route_role_spatial_prior = bool(route_role_spatial_prior)
         self.route_prior_height = int(route_prior_height)
@@ -534,6 +703,30 @@ class DenseUVParserNet(nn.Module):
             upper_log_scale = math.log1p(self.affine_scale_range)
             self.affine_log_scale_limit = max(abs(lower_log_scale), abs(upper_log_scale))
 
+        # Construct the optional prompt branch after every established parser
+        # module. With a fixed seed this keeps the vision-only initialization
+        # bit-for-bit unchanged; the new branch starts as an additive no-op.
+        self.semantic_text_prompt_fusion = (
+            TextPromptRouteFusion(
+                self.semantic_text_prompt_feature_dim,
+                self.semantic_text_prompt_count,
+                self.layer_classes,
+                hidden_channels=self.semantic_text_prompt_channels,
+                logit_scale=semantic_text_logit_scale,
+                logit_bias=semantic_text_logit_bias,
+            )
+            if self.semantic_text_prompt_count > 0
+            else None
+        )
+        if self.semantic_text_prompt_fusion is not None and (
+            self.semantic_spatial_feature_dim
+            != self.semantic_text_prompt_feature_dim
+        ):
+            raise ValueError(
+                "SigLIP2 text prompts must share the spatial vision feature "
+                "dimension."
+            )
+
     def _runtime_semantic_features(self, images, foreground=None):
         backbone = getattr(self, "_runtime_semantic_backbone", None)
         if backbone is None:
@@ -568,6 +761,20 @@ class DenseUVParserNet(nn.Module):
             if hasattr(backbone, "encode_dense"):
                 return backbone.encode_dense(rgb)
             return backbone.encode_global(rgb)
+
+    def set_semantic_text_prompt_embeddings(
+        self,
+        embeddings,
+        logit_scale=None,
+        logit_bias=None,
+    ):
+        if self.semantic_text_prompt_fusion is None:
+            raise ValueError("This parser has no SigLIP2 text-prompt branch.")
+        self.semantic_text_prompt_fusion.set_prompt_embeddings(
+            embeddings,
+            logit_scale=logit_scale,
+            logit_bias=logit_bias,
+        )
 
     def forward(
         self,
@@ -661,10 +868,33 @@ class DenseUVParserNet(nn.Module):
         occupancy_feature_source = x
         x = self.feature_dropout(x)
         layer_evidence = self.layer(x)
+        text_prompt_route_logits = None
+        text_prompt_scores = None
+        if self.semantic_text_prompt_fusion is not None:
+            if semantic_spatial is None:
+                raise ValueError(
+                    "This parser checkpoint requires spatial SigLIP2 features "
+                    "for text-prompt fusion."
+                )
+            (
+                text_prompt_route_logits,
+                text_prompt_scores,
+            ) = self.semantic_text_prompt_fusion(
+                semantic_spatial,
+                semantic_global,
+                source_images.shape[0],
+                layer_evidence.shape[-2:],
+            )
+            layer_evidence = layer_evidence + text_prompt_route_logits.to(
+                dtype=layer_evidence.dtype
+            )
         outputs = {
             "foreground": self.foreground(x),
             "layer": layer_evidence,
         }
+        if text_prompt_route_logits is not None:
+            outputs["text_prompt_route_logits"] = text_prompt_route_logits
+            outputs["text_prompt_scores"] = text_prompt_scores
         if self.route_role_prior is not None:
             selected_prior_raw = self.route_role_prior.index_select(
                 0, view_ids.long()

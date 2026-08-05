@@ -110,6 +110,10 @@ def load_parser(checkpoint_path, device):
     has_outer_uv_occupancy = any(
         key.startswith("outer_uv_occupancy_head.") for key in state_dict
     )
+    text_prompt_key = (
+        "semantic_text_prompt_fusion.prompt_embeddings"
+    )
+    has_text_prompt_fusion = text_prompt_key in state_dict
     uv_classification = model_config.get("uv_classification", has_uv_classification)
     parser_mode = model_config.get("parser_mode", checkpoint_args.get("parser_mode", "dense"))
     predict_affine = model_config.get("predict_affine", parser_mode in ("global_affine", "geometry_fit"))
@@ -151,6 +155,27 @@ def load_parser(checkpoint_path, device):
         semantic_spatial_channels=model_config.get(
             "semantic_spatial_channels", 64
         ),
+        semantic_text_prompt_count=model_config.get(
+            "semantic_text_prompt_count",
+            state_dict[text_prompt_key].shape[0]
+            if has_text_prompt_fusion
+            else 0,
+        ),
+        semantic_text_prompt_feature_dim=model_config.get(
+            "semantic_text_prompt_feature_dim",
+            state_dict[text_prompt_key].shape[1]
+            if has_text_prompt_fusion
+            else 0,
+        ),
+        semantic_text_prompt_channels=model_config.get(
+            "semantic_text_prompt_channels", 32
+        ),
+        semantic_text_logit_scale=model_config.get(
+            "semantic_text_logit_scale", 1.0
+        ),
+        semantic_text_logit_bias=model_config.get(
+            "semantic_text_logit_bias", 0.0
+        ),
         predict_confidence=model_config.get(
             "predict_confidence",
             any(key.startswith("route_confidence.") for key in state_dict),
@@ -188,6 +213,11 @@ def load_parser(checkpoint_path, device):
         ),
     ).to(device)
     model.load_state_dict(state_dict)
+    object.__setattr__(
+        model,
+        "semantic_text_prompts",
+        tuple(model_config.get("siglip_text_prompts", ())),
+    )
     if (
         model.semantic_feature_dim > 0
         or model.semantic_spatial_feature_dim > 0
@@ -1373,6 +1403,33 @@ def main():
             view_ids=view_ids,
             semantic_foreground=observed_foreground,
         )
+        if "text_prompt_scores" in outputs:
+            prompts = getattr(parser_model, "semantic_text_prompts", ())
+            score_rows = []
+            for view, scores in zip(views, outputs["text_prompt_scores"]):
+                top_count = min(3, scores.numel())
+                top_scores, top_indices = scores.float().topk(top_count)
+                score_rows.append(
+                    {
+                        "view": view,
+                        "top_prompts": [
+                            {
+                                "index": int(index),
+                                "prompt": (
+                                    prompts[int(index)]
+                                    if int(index) < len(prompts)
+                                    else f"prompt_{int(index)}"
+                                ),
+                                "score": round(float(score), 6),
+                            }
+                            for score, index in zip(top_scores, top_indices)
+                        ],
+                    }
+                )
+            print(
+                "siglip_text_prompt_scores="
+                + json.dumps(score_rows, ensure_ascii=False, sort_keys=True)
+            )
         outputs = attach_projected_outer_uv_occupancy(
             parser_model,
             outputs,

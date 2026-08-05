@@ -162,6 +162,91 @@ class SemanticDenseUVParserTest(unittest.TestCase):
         self.assertIsNotNone(gradient)
         self.assertGreater(float(gradient.abs().sum()), 0.0)
 
+    def test_siglip_text_prompts_add_trainable_route_evidence(self):
+        model = DenseUVParserNet(
+            base_channels=8,
+            view_classes=2,
+            predict_affine=True,
+            surface_classes=4,
+            geometry_only=True,
+            semantic_feature_dim=12,
+            semantic_channels=8,
+            semantic_attention_heads=2,
+            semantic_layers=1,
+            semantic_dropout=0.0,
+            semantic_spatial_feature_dim=12,
+            semantic_spatial_channels=8,
+            semantic_text_prompt_count=3,
+            semantic_text_prompt_feature_dim=12,
+            semantic_text_prompt_channels=6,
+            semantic_text_logit_scale=4.0,
+            semantic_text_logit_bias=-1.0,
+        )
+        prompt_embeddings = torch.randn(3, 12)
+        model.set_semantic_text_prompt_embeddings(prompt_embeddings)
+        images = torch.rand(2, 4, 32, 32)
+        semantic_features = {
+            "raw_global": torch.rand(2, 12),
+            "raw_spatial": torch.rand(2, 12, 7, 5),
+        }
+
+        outputs = model(
+            images,
+            view_ids=torch.tensor([0, 1]),
+            semantic_features=semantic_features,
+        )
+
+        self.assertEqual(
+            tuple(outputs["text_prompt_route_logits"].shape),
+            (2, 3, 32, 32),
+        )
+        self.assertEqual(tuple(outputs["text_prompt_scores"].shape), (2, 3))
+        self.assertFalse(
+            model.semantic_text_prompt_fusion.prompt_embeddings.requires_grad
+        )
+        self.assertTrue(
+            torch.allclose(
+                model.semantic_text_prompt_fusion.prompt_embeddings.norm(
+                    dim=-1
+                ),
+                torch.ones(3),
+            )
+        )
+        outputs["layer"].mean().backward()
+        gradient = (
+            model.semantic_text_prompt_fusion.route_projection[-1].weight.grad
+        )
+        self.assertIsNotNone(gradient)
+        self.assertGreater(float(gradient.abs().sum()), 0.0)
+
+    def test_siglip_text_branch_preserves_seeded_base_initialization(self):
+        common_arguments = {
+            "base_channels": 8,
+            "view_classes": 2,
+            "geometry_only": True,
+            "semantic_feature_dim": 12,
+            "semantic_channels": 8,
+            "semantic_attention_heads": 2,
+            "semantic_spatial_feature_dim": 12,
+            "semantic_spatial_channels": 8,
+        }
+        torch.manual_seed(31415)
+        baseline = DenseUVParserNet(**common_arguments)
+        torch.manual_seed(31415)
+        prompted = DenseUVParserNet(
+            **common_arguments,
+            semantic_text_prompt_count=3,
+            semantic_text_prompt_feature_dim=12,
+            semantic_text_prompt_channels=6,
+        )
+
+        prompted_state = prompted.state_dict()
+        for name, value in baseline.state_dict().items():
+            self.assertTrue(
+                torch.equal(value, prompted_state[name]),
+                msg=f"Text branch changed seeded base parameter {name}.",
+            )
+
     def test_runtime_semantics_receive_neutralized_background(self):
         class FakeBackbone:
             raw_feature_dim = 16

@@ -25,6 +25,10 @@ from SkingToolkit.dense_uv_parser.semantic import (  # noqa: E402
     build_semantic_runtime,
     cached_semantic_batch,
 )
+from SkingToolkit.dense_uv_parser.semantic_backbone import (  # noqa: E402
+    DEFAULT_SIGLIP_ROUTE_PROMPTS,
+    encode_siglip2_text_prompts,
+)
 from SkingToolkit.dense_uv_parser.utils import (  # noqa: E402
     FACE_PALETTE,
     IGNORE_INDEX,
@@ -2737,6 +2741,37 @@ def save_checkpoint(
             "semantic_dropout": model.semantic_dropout,
             "semantic_spatial_feature_dim": model.semantic_spatial_feature_dim,
             "semantic_spatial_channels": model.semantic_spatial_channels,
+            "siglip_text_prompt_fusion": (
+                model.semantic_text_prompt_fusion is not None
+            ),
+            "siglip_text_prompts": (
+                list(getattr(model, "semantic_text_prompts", ()))
+                if model.semantic_text_prompt_fusion is not None
+                else []
+            ),
+            "semantic_text_prompt_count": (
+                model.semantic_text_prompt_count
+            ),
+            "semantic_text_prompt_feature_dim": (
+                model.semantic_text_prompt_feature_dim
+            ),
+            "semantic_text_prompt_channels": (
+                model.semantic_text_prompt_channels
+            ),
+            "semantic_text_logit_scale": (
+                float(
+                    model.semantic_text_prompt_fusion.logit_scale.item()
+                )
+                if model.semantic_text_prompt_fusion is not None
+                else 1.0
+            ),
+            "semantic_text_logit_bias": (
+                float(
+                    model.semantic_text_prompt_fusion.logit_bias.item()
+                )
+                if model.semantic_text_prompt_fusion is not None
+                else 0.0
+            ),
             "predict_confidence": model.predict_confidence,
             "route_role_spatial_prior": model.route_role_spatial_prior,
             "route_prior_height": model.route_prior_height,
@@ -2829,6 +2864,24 @@ def build_arg_parser():
     parser.add_argument("--semantic_dropout", type=float, default=0.05)
     parser.add_argument("--semantic_spatial_channels", type=int, default=64)
     parser.add_argument("--semantic_runtime_batch_size", type=int, default=32)
+    parser.add_argument(
+        "--siglip_text_prompt_fusion",
+        dest="siglip_text_prompt_fusion",
+        action="store_true",
+        default=False,
+        help=(
+            "Encode fixed inner/outer accessory prompts with SigLIP2's frozen "
+            "text tower and fuse their spatial similarity into route logits."
+        ),
+    )
+    parser.add_argument(
+        "--no_siglip_text_prompt_fusion",
+        dest="siglip_text_prompt_fusion",
+        action="store_false",
+    )
+    parser.add_argument(
+        "--semantic_text_prompt_channels", type=int, default=32
+    )
     parser.add_argument(
         "--predict_outer_uv_occupancy",
         dest="predict_outer_uv_occupancy",
@@ -3480,6 +3533,7 @@ def main():
         args.semantic_channels < 1
         or args.semantic_layers < 1
         or args.semantic_spatial_channels < 1
+        or args.semantic_text_prompt_channels < 1
         or args.semantic_runtime_batch_size < 1
     ):
         raise ValueError("Semantic channels and layers must be positive.")
@@ -3540,6 +3594,7 @@ def main():
     runtime_semantic_backbone = None
     semantic_feature_dim = 0
     semantic_spatial_feature_dim = 0
+    text_prompt_bundle = None
     semantic_masks = None
     semantic_model_name = (
         args.tipsv2_model
@@ -3606,6 +3661,39 @@ def main():
         semantic_feature_dim = runtime_semantic_backbone.raw_feature_dim
         semantic_spatial_feature_dim = (
             runtime_semantic_backbone.raw_spatial_feature_dim
+        )
+    if args.siglip_text_prompt_fusion:
+        if args.semantic_backbone != "siglip2":
+            raise ValueError(
+                "--siglip_text_prompt_fusion requires --semantic_backbone siglip2."
+            )
+        if semantic_spatial_feature_dim < 1:
+            raise ValueError(
+                "SigLIP2 text-prompt fusion requires cached or runtime spatial "
+                "vision features."
+            )
+        print(
+            "Encoding fixed SigLIP2 route prompts with the frozen text tower..."
+        )
+        text_prompt_bundle = encode_siglip2_text_prompts(
+            args.siglip_model,
+            prompts=DEFAULT_SIGLIP_ROUTE_PROMPTS,
+            device=device,
+            local_files_only=args.siglip_local_files_only,
+        )
+        if (
+            text_prompt_bundle["embeddings"].shape[1]
+            != semantic_spatial_feature_dim
+        ):
+            raise ValueError(
+                "SigLIP2 text and spatial feature dimensions differ: "
+                f"text={text_prompt_bundle['embeddings'].shape[1]}, "
+                f"vision={semantic_spatial_feature_dim}."
+            )
+        print(
+            "Encoded SigLIP2 route prompts: "
+            f"count={len(text_prompt_bundle['prompts'])}, "
+            f"dim={text_prompt_bundle['embeddings'].shape[1]}"
         )
     if args.semantic_backbone != "none" or args.predict_outer_uv_occupancy:
         semantic_masks = tuple(
@@ -3688,6 +3776,27 @@ def main():
         semantic_dropout=args.semantic_dropout,
         semantic_spatial_feature_dim=semantic_spatial_feature_dim,
         semantic_spatial_channels=args.semantic_spatial_channels,
+        semantic_text_prompt_count=(
+            len(text_prompt_bundle["prompts"])
+            if text_prompt_bundle is not None
+            else 0
+        ),
+        semantic_text_prompt_feature_dim=(
+            int(text_prompt_bundle["embeddings"].shape[1])
+            if text_prompt_bundle is not None
+            else 0
+        ),
+        semantic_text_prompt_channels=args.semantic_text_prompt_channels,
+        semantic_text_logit_scale=(
+            text_prompt_bundle["logit_scale"]
+            if text_prompt_bundle is not None
+            else 1.0
+        ),
+        semantic_text_logit_bias=(
+            text_prompt_bundle["logit_bias"]
+            if text_prompt_bundle is not None
+            else 0.0
+        ),
         predict_confidence=args.semantic_backbone != "none",
         route_role_spatial_prior=(
             geometry_only and args.route_role_spatial_prior
@@ -3705,6 +3814,17 @@ def main():
             args.outer_uv_route_evidence_dropout
         ),
     ).to(device)
+    if text_prompt_bundle is not None:
+        object.__setattr__(
+            model,
+            "semantic_text_prompts",
+            tuple(text_prompt_bundle["prompts"]),
+        )
+        model.set_semantic_text_prompt_embeddings(
+            text_prompt_bundle["embeddings"],
+            logit_scale=text_prompt_bundle["logit_scale"],
+            logit_bias=text_prompt_bundle["logit_bias"],
+        )
     if runtime_semantic_backbone is not None:
         attach_semantic_runtime(
             model,
@@ -3835,6 +3955,32 @@ def main():
                 raise ValueError(
                     "Cannot change semantic adapter shape while resuming: "
                     f"{mismatches}. Start a new run."
+                )
+            checkpoint_prompt_shape = (
+                int(checkpoint_config.get("semantic_text_prompt_count", 0)),
+                int(
+                    checkpoint_config.get(
+                        "semantic_text_prompt_feature_dim", 0
+                    )
+                ),
+                int(
+                    checkpoint_config.get(
+                        "semantic_text_prompt_channels",
+                        model.semantic_text_prompt_channels,
+                    )
+                ),
+            )
+            requested_prompt_shape = (
+                model.semantic_text_prompt_count,
+                model.semantic_text_prompt_feature_dim,
+                model.semantic_text_prompt_channels,
+            )
+            if checkpoint_prompt_shape != requested_prompt_shape:
+                raise ValueError(
+                    "Cannot change SigLIP2 text-prompt adapter shape while "
+                    "resuming: checkpoint="
+                    f"{checkpoint_prompt_shape}, requested="
+                    f"{requested_prompt_shape}. Start a new run."
                 )
         checkpoint_layer_classes = checkpoint.get("model_config", {}).get("layer_classes", 2)
         if geometry_only and checkpoint_layer_classes != model.layer_classes:
@@ -3977,6 +4123,18 @@ def main():
         "semantic_layers": args.semantic_layers,
         "semantic_spatial_feature_dim": semantic_spatial_feature_dim,
         "semantic_spatial_channels": args.semantic_spatial_channels,
+        "siglip_text_prompt_fusion": (
+            model.semantic_text_prompt_fusion is not None
+        ),
+        "siglip_text_prompt_count": model.semantic_text_prompt_count,
+        "semantic_text_prompt_channels": (
+            model.semantic_text_prompt_channels
+        ),
+        "siglip_text_prompts": (
+            list(getattr(model, "semantic_text_prompts", ()))
+            if model.semantic_text_prompt_fusion is not None
+            else []
+        ),
         "semantic_runtime_batch_size": args.semantic_runtime_batch_size,
         "predict_confidence": model.predict_confidence,
         "route_role_spatial_prior": model.route_role_spatial_prior,

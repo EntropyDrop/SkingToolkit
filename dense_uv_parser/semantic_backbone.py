@@ -12,6 +12,109 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+DEFAULT_SIGLIP_ROUTE_PROMPTS = (
+    "a rendered Minecraft character with raised outer hair protruding from the head",
+    "a rendered Minecraft character wearing a raised hat or crown",
+    "a rendered Minecraft character wearing a raised hood helmet or headband",
+    "a rendered Minecraft character wearing raised glasses or goggles",
+    "a rendered Minecraft character wearing a raised visor or face mask",
+    "a rendered Minecraft character wearing raised headphones",
+    "a rendered Minecraft character with raised animal ears horns or side accessories",
+    "a rendered Minecraft character wearing a raised scarf or high collar",
+    "a rendered Minecraft character wearing a raised jacket coat or outer sleeves",
+    "a rendered Minecraft character with raised decoration on the arms or legs",
+    "a rendered Minecraft character with flat hair painted on the base head surface",
+    "a rendered Minecraft character with flat eyes eyebrows mouth and facial texture",
+    "a rendered Minecraft character with exposed base skin on the face arms or legs",
+    "a rendered Minecraft character with flat shirt pants and clothing texture",
+    "a rendered Minecraft character with a flat logo symbol or picture printed on clothing",
+    "a rendered Minecraft character with flat stripes checks or trim painted on clothing",
+)
+
+
+def encode_siglip2_text_prompts(
+    model_name,
+    prompts=DEFAULT_SIGLIP_ROUTE_PROMPTS,
+    device="cpu",
+    local_files_only=False,
+):
+    """Encode fixed route prompts once in SigLIP2's aligned text space.
+
+    The resulting normalized embeddings are tiny and are stored in the parser
+    checkpoint. Training can therefore reuse an existing image-feature cache,
+    and inference does not need to run the text tower again.
+    """
+    prompts = tuple(str(prompt).strip() for prompt in prompts)
+    if not prompts or any(not prompt for prompt in prompts):
+        raise ValueError("SigLIP2 route prompts must be non-empty strings.")
+    try:
+        from transformers import AutoModel, AutoTokenizer
+    except ImportError as error:
+        raise ImportError(
+            "SigLIP2 text prompts require Hugging Face Transformers. Install "
+            "with: pip install -U transformers sentencepiece safetensors"
+        ) from error
+
+    target_device = torch.device(device)
+    cuda_devices = []
+    if target_device.type == "cuda":
+        cuda_devices = [
+            target_device.index
+            if target_device.index is not None
+            else torch.cuda.current_device()
+        ]
+    # Loading a pretrained module constructs it before materializing weights
+    # and can otherwise advance the global RNG. Preserve the parser's proven
+    # seeded initialization when this optional one-shot encoder is enabled.
+    with torch.random.fork_rng(devices=cuda_devices):
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_name,
+            local_files_only=bool(local_files_only),
+        )
+        full_model = AutoModel.from_pretrained(
+            model_name,
+            local_files_only=bool(local_files_only),
+        ).to(device)
+        if not hasattr(full_model, "text_model"):
+            raise ValueError(
+                f"{model_name} does not expose a SigLIP2 text tower."
+            )
+        full_model.eval()
+        tokens = tokenizer(
+            list(prompts),
+            padding="max_length",
+            truncation=True,
+            max_length=64,
+            return_tensors="pt",
+        )
+        tokens = {
+            name: value.to(device)
+            for name, value in tokens.items()
+            if name in ("input_ids", "attention_mask", "position_ids")
+            and isinstance(value, torch.Tensor)
+        }
+        with torch.inference_mode():
+            text_outputs = full_model.text_model(**tokens)
+            embeddings = F.normalize(
+                text_outputs.pooler_output.float(), dim=-1
+            ).cpu()
+            logit_scale = float(
+                full_model.logit_scale.detach().float().exp().item()
+            )
+            logit_bias = float(
+                full_model.logit_bias.detach().float().item()
+            )
+        del full_model
+    if torch.cuda.is_available() and torch.device(device).type == "cuda":
+        torch.cuda.empty_cache()
+    return {
+        "prompts": prompts,
+        "embeddings": embeddings,
+        "logit_scale": logit_scale,
+        "logit_bias": logit_bias,
+    }
+
+
 class SigLIP2VisionBackbone(nn.Module):
     """Frozen SigLIP2 vision tower with differentiable image preprocessing.
 

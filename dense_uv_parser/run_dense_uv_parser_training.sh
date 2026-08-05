@@ -121,6 +121,8 @@ SEMANTIC_LAYERS="${SEMANTIC_LAYERS:-1}"
 SEMANTIC_DROPOUT="${SEMANTIC_DROPOUT:-0.05}"
 SEMANTIC_SPATIAL_CHANNELS="${SEMANTIC_SPATIAL_CHANNELS:-64}"
 SEMANTIC_RUNTIME_BATCH_SIZE="${SEMANTIC_RUNTIME_BATCH_SIZE:-32}"
+SIGLIP_TEXT_PROMPT_FUSION="${SIGLIP_TEXT_PROMPT_FUSION:-true}"
+SEMANTIC_TEXT_PROMPT_CHANNELS="${SEMANTIC_TEXT_PROMPT_CHANNELS:-32}"
 PREDICT_OUTER_UV_OCCUPANCY="${PREDICT_OUTER_UV_OCCUPANCY:-false}"
 OUTER_UV_FEATURE_CHANNELS="${OUTER_UV_FEATURE_CHANNELS:-32}"
 OUTER_UV_TOPOLOGY_CHANNELS="${OUTER_UV_TOPOLOGY_CHANNELS:-64}"
@@ -410,6 +412,11 @@ if [[ "$SEMANTIC_BACKBONE" == "siglip2" ]]; then
     fi
   fi
   semantic_args+=(--siglip_model "$SIGLIP_MODEL")
+  if [[ "$SIGLIP_TEXT_PROMPT_FUSION" == "true" ]]; then
+    semantic_args+=(--siglip_text_prompt_fusion)
+  else
+    semantic_args+=(--no_siglip_text_prompt_fusion)
+  fi
 elif [[ "$SEMANTIC_BACKBONE" == "tipsv2" ]]; then
   semantic_args+=(--tipsv2_model "$TIPSV2_MODEL")
   if [[ "$TIPSV2_LOCAL_FILES_ONLY" == "true" ]]; then
@@ -423,6 +430,7 @@ if [[ "$SEMANTIC_BACKBONE" != "none" ]]; then
     --semantic_layers "$SEMANTIC_LAYERS"
     --semantic_dropout "$SEMANTIC_DROPOUT"
     --semantic_spatial_channels "$SEMANTIC_SPATIAL_CHANNELS"
+    --semantic_text_prompt_channels "$SEMANTIC_TEXT_PROMPT_CHANNELS"
     --semantic_runtime_batch_size "$SEMANTIC_RUNTIME_BATCH_SIZE"
   )
 fi

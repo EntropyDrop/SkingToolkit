@@ -614,6 +614,64 @@ class GlobalAffineRoutingTest(unittest.TestCase):
             (1, 1, 64, 64),
         )
 
+    def test_siglip_text_prompt_checkpoint_round_trip(self):
+        model = DenseUVParserNet(
+            base_channels=8,
+            geometry_only=True,
+            view_classes=2,
+            semantic_feature_dim=12,
+            semantic_channels=8,
+            semantic_attention_heads=2,
+            semantic_spatial_feature_dim=12,
+            semantic_spatial_channels=8,
+            semantic_text_prompt_count=3,
+            semantic_text_prompt_feature_dim=12,
+            semantic_text_prompt_channels=6,
+            semantic_text_logit_scale=3.0,
+            semantic_text_logit_bias=-0.5,
+        )
+        model.set_semantic_text_prompt_embeddings(torch.randn(3, 12))
+        checkpoint = {
+            "model": model.state_dict(),
+            "model_config": {
+                "base_channels": 8,
+                "uv_size": 64,
+                "view_classes": 2,
+                "parser_mode": "geometry_fit",
+                "predict_affine": False,
+                "surface_classes": 0,
+                "layer_classes": 3,
+                "geometry_only": True,
+                "semantic_backbone": "siglip2",
+                "semantic_model": "unused-siglip",
+                "semantic_feature_dim": 12,
+                "semantic_channels": 8,
+                "semantic_attention_heads": 2,
+                "semantic_spatial_feature_dim": 12,
+                "semantic_spatial_channels": 8,
+                "semantic_text_prompt_count": 3,
+                "semantic_text_prompt_feature_dim": 12,
+                "semantic_text_prompt_channels": 6,
+                "semantic_text_logit_scale": 3.0,
+                "semantic_text_logit_bias": -0.5,
+            },
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "text-prompts.pt"
+            torch.save(checkpoint, path)
+            with patch(
+                "SkingToolkit.dense_uv_parser.infer.attach_semantic_runtime"
+            ):
+                loaded, _ = load_parser(path, torch.device("cpu"))
+
+        self.assertEqual(loaded.semantic_text_prompt_count, 3)
+        self.assertEqual(loaded.semantic_text_prompt_feature_dim, 12)
+        self.assertTrue(
+            torch.equal(
+                loaded.semantic_text_prompt_fusion.prompt_embeddings,
+                model.semantic_text_prompt_fusion.prompt_embeddings,
+            )
+        )
     def test_route_prior_and_new_route_losses_backpropagate_together(self):
         model = DenseUVParserNet(
             base_channels=8,
@@ -827,6 +885,8 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         self.assertEqual(parser_args.semantic_channels, 128)
         self.assertEqual(parser_args.semantic_attention_heads, 4)
         self.assertEqual(parser_args.semantic_layers, 1)
+        self.assertFalse(parser_args.siglip_text_prompt_fusion)
+        self.assertEqual(parser_args.semantic_text_prompt_channels, 32)
         self.assertTrue(parser_args.route_role_spatial_prior)
         self.assertEqual(parser_args.route_prior_height, 32)
         self.assertEqual(parser_args.route_prior_width, 16)
@@ -897,6 +957,8 @@ class GlobalAffineRoutingTest(unittest.TestCase):
             'LAMBDA_OUTER_FALSE_NEGATIVE="${LAMBDA_OUTER_FALSE_NEGATIVE:-0.75}"',
             'LAMBDA_CROSS_VIEW_OUTER_VISIBILITY="${LAMBDA_CROSS_VIEW_OUTER_VISIBILITY:-0.0}"',
             'LAMBDA_ROUTE_OCCUPANCY_AGREEMENT="${LAMBDA_ROUTE_OCCUPANCY_AGREEMENT:-0.0}"',
+            'SIGLIP_TEXT_PROMPT_FUSION="${SIGLIP_TEXT_PROMPT_FUSION:-true}"',
+            'SEMANTIC_TEXT_PROMPT_CHANNELS="${SEMANTIC_TEXT_PROMPT_CHANNELS:-32}"',
         ):
             self.assertIn(expected, training_script)
         self.assertIn(

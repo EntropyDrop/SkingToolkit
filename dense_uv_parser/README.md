@@ -5,6 +5,7 @@ This module trains a geometry-fitted parser for slightly transformed Steve rende
 ```text
 front/back render pixels
   -> high-resolution CNN + frozen SigLIP2 spatial/multi-view context
+  -> frozen SigLIP2 text prototypes for flat texture vs raised accessories
   -> image evidence + bounded fixed-view route prior
   -> global translation/scale + confidence-calibrated inner/outer/backface routing
   -> fixed Steve cuboids provide body part + face + exact UV
@@ -38,17 +39,25 @@ trunk: occupancy loss trains only the auxiliary head and cannot shift the
 primary route-role representation.
 
 The standard launcher uses `geometry_fit` plus the frozen
-`google/siglip2-base-patch16-224` vision tower. SigLIP2 is not trained. Before
-the parser starts, the launcher caches both its pooled front/back embeddings and
-its raw 768-channel patch features as FP16 memory-mapped arrays. Only
+`google/siglip2-base-patch16-224` vision and text towers. SigLIP2 is not
+trained. Before the parser starts, the launcher caches pooled image embeddings
+and raw 768-channel patch features as FP16 memory-mapped arrays. Only
 deterministic letterbox-only patch columns are omitted; the semantic feature
 dimension is not compressed in the cache.
 
-For the default `256x512` fixed views, each sample stores two cropped
-`768x14x8` spatial maps. A 180,000-skin cache is about 58 GiB for spatial
-features plus about 0.5 GiB for pooled features. Keeping the uncropped
-`768x14x14` square maps would be about 101 GiB. The mmap reader transfers only
-the current batch instead of loading the cache into RAM.
+For the default `256x512` fixed views, each view stores one cropped
+`768x14x8` spatial map. The production training launcher stores two primary
+views plus two privileged training-only views, so a 180,000-skin cache is about
+115 GiB. The mmap reader transfers only the current batch instead of loading
+the cache into RAM.
+
+At training startup the frozen SigLIP2 text tower encodes a small fixed prompt
+bank describing raised hair, hats, glasses, headphones, layered clothing, flat
+facial texture, and flat clothing patterns. The normalized embeddings and
+SigLIP calibration scalars are stored directly in the parser checkpoint. A
+small zero-initialized route adapter compares them with the already-cached
+spatial image features; no per-image text cache is created, and inference does
+not rerun the text tower. Set `SIGLIP_TEXT_PROMPT_FUSION=false` for an ablation.
 
 The raw spatial features pass through a trainable 64-channel adapter whose final
 projection is initialized to zero. Pooled front/back features retain the
@@ -233,8 +242,9 @@ The final shared feature map also uses `FEATURE_DROPOUT=0.10` during training. T
 Set `LR_SCHEDULE=constant` only for comparison with the former behavior. Inference should use `best.pt`, not `latest.pt`; later preview epochs are diagnostic and are not assumed to improve monotonically. Checkpoints are written to a temporary file and atomically replaced, so an inference process started during training sees either the complete previous checkpoint or the complete new checkpoint.
 
 Routing is geometry-anchored and semantics-conditioned. The route-role head uses
-local pixels, the configured view identity, SigLIP2 spatial features, and pooled
-front/back context to decide whether a region is inner, outer, or secondary;
+local pixels, the configured view identity, SigLIP2 spatial features, pooled
+front/back context, and text-prototype response maps to decide whether a region
+is inner, outer, or secondary;
 fixed cuboids still own body-part, face, and UV coordinates. Exact-surface logits disambiguate deeper
 renderer slots. Projected-texel voting and conservative outer footprint
 rejection are enabled for production-aligned validation. The default
