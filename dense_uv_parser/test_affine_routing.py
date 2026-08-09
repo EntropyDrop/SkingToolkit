@@ -25,6 +25,7 @@ from SkingToolkit.dense_uv_parser import train as parser_train
 from SkingToolkit.dense_uv_parser.utils import (
     IGNORE_INDEX,
     canonicalize_foreground_mask,
+    canonicalize_parser_outputs,
     canonicalize_parser_render,
     canonicalize_tensor,
     build_color_sampling_support,
@@ -99,6 +100,23 @@ def dense_targets(batch, height, width):
 
 
 class GlobalAffineRoutingTest(unittest.TestCase):
+    def test_canonicalize_parser_outputs_preserves_grouped_auxiliary_maps(self):
+        outputs = {
+            "affine": torch.zeros(4, 3),
+            "layer": torch.randn(4, 3, 16, 16),
+            "head_outer_face_occupancy_logits": torch.randn(2, 6, 8, 8),
+        }
+
+        canonical = canonicalize_parser_outputs(outputs)
+
+        self.assertEqual(tuple(canonical["layer"].shape), (4, 3, 16, 16))
+        self.assertTrue(
+            torch.equal(
+                canonical["head_outer_face_occupancy_logits"],
+                outputs["head_outer_face_occupancy_logits"],
+            )
+        )
+
     def test_outer_silhouette_coverage_uses_only_protruding_pixels(self):
         inner = torch.tensor([[False, True, True, False]])
         renderer = FakeRenderer(mask=inner)
