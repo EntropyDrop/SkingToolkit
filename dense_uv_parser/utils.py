@@ -631,6 +631,10 @@ def canonicalize_parser_outputs(outputs):
             or name == "outer_uv_global_context"
             or not torch.is_tensor(value)
             or value.dim() != 4
+            # Group-level auxiliary predictions (for example one six-face
+            # head structure per front/back pair) do not live in per-view
+            # render coordinates and must not be warped by per-view affine.
+            or value.shape[0] != affine.shape[0]
         ):
             canonical[name] = value
         else:
