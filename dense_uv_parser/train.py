@@ -70,6 +70,7 @@ from SkingToolkit.dense_uv_parser.semantic_cache import (  # noqa: E402
     SigLIPGlobalCache,
 )
 from SkingToolkit.dense_uv_parser.semantic_targets import (  # noqa: E402
+    build_head_outer_face_targets,
     build_part_layer_masks,
     build_semantic_attribute_targets,
 )
@@ -77,6 +78,7 @@ from SkingToolkit.dense_uv_parser.runtime import get_device  # noqa: E402
 from SkingToolkit.dense_uv_parser.skin_dataset import SkinUVDataset  # noqa: E402
 from SkingToolkit.dense_uv_parser.uv_layout import build_uv_masks  # noqa: E402
 from SkingToolkit.dense_uv_parser.uv_topology import (  # noqa: E402
+    build_head_outer_face_graph,
     build_outer_uv_graph,
 )
 from SkingToolkit.renderer import DifferentiableRenderer  # noqa: E402
@@ -1269,6 +1271,176 @@ def outer_uv_occupancy_losses(
     }
 
 
+def head_outer_structure_losses(outputs, target_uv, alpha_threshold=0.5):
+    """Supervise the six 8x8 head outer faces without gating parser routes."""
+    logits = outputs["head_outer_face_occupancy_logits"].float()
+    targets = build_head_outer_face_targets(
+        target_uv, alpha_threshold=alpha_threshold
+    )
+    if logits.shape[0] % targets["occupancy"].shape[0] != 0:
+        raise ValueError(
+            "Head structure batch must be an integer multiple of UV targets."
+        )
+    repeats = logits.shape[0] // targets["occupancy"].shape[0]
+    if repeats > 1:
+        targets = {
+            name: value.repeat_interleave(repeats, dim=0)
+            for name, value in targets.items()
+        }
+    occupancy = targets["occupancy"].to(
+        device=logits.device, dtype=logits.dtype
+    )
+    presence = targets["presence"].to(
+        device=logits.device, dtype=logits.dtype
+    )
+    coverage = targets["coverage"].to(
+        device=logits.device, dtype=logits.dtype
+    )
+    if logits.shape != occupancy.shape:
+        raise ValueError(
+            "Expected head occupancy logits shaped "
+            f"{tuple(occupancy.shape)}, got {tuple(logits.shape)}."
+        )
+
+    positive = occupancy > 0.5
+    negative = ~positive
+    positive_loss = F.softplus(-logits[positive])
+    negative_loss = F.softplus(logits[negative])
+    if positive_loss.numel() and negative_loss.numel():
+        loss_bce = 0.60 * positive_loss.mean() + 0.40 * negative_loss.mean()
+    elif positive_loss.numel():
+        loss_bce = positive_loss.mean()
+    elif negative_loss.numel():
+        loss_bce = negative_loss.mean()
+    else:
+        loss_bce = logits.sum() * 0.0
+
+    probability = torch.sigmoid(logits)
+    face_intersection = (probability * occupancy).sum(dim=(-2, -1))
+    per_face_dice = (
+        1.0
+        - (2.0 * face_intersection + 1.0)
+        / (
+            probability.sum(dim=(-2, -1))
+            + occupancy.sum(dim=(-2, -1))
+            + 1.0
+        )
+    )
+    present_faces = occupancy.sum(dim=(-2, -1)) > 0.0
+    loss_dice = (
+        per_face_dice[present_faces].mean()
+        if present_faces.any()
+        else logits.sum() * 0.0
+    )
+    loss_presence = F.binary_cross_entropy_with_logits(
+        outputs["head_outer_face_presence_logits"].float(), presence
+    )
+    loss_coverage = F.smooth_l1_loss(
+        outputs["head_outer_face_coverage"].float(), coverage
+    )
+
+    # Use the physical cube graph, including edges across UV seams. A hat brim
+    # or headphone band can therefore be learned as one structure spanning
+    # front/side/top faces instead of six unrelated bitmap fragments.
+    edge_index = build_head_outer_face_graph().to(logits.device)
+    probability_nodes = probability.flatten(1)
+    target_nodes = positive.flatten(1)
+    source, destination = edge_index
+    edge_difference = (
+        probability_nodes[:, source] - probability_nodes[:, destination]
+    ).abs()
+    positive_edges = target_nodes[:, source] & target_nodes[:, destination]
+    negative_edges = ~target_nodes[:, source] & ~target_nodes[:, destination]
+    boundary_edges = target_nodes[:, source] ^ target_nodes[:, destination]
+    zero = logits.sum() * 0.0
+    positive_continuity = (
+        edge_difference[positive_edges].square().mean()
+        if positive_edges.any()
+        else zero
+    )
+    negative_connectivity = (
+        (
+            probability_nodes[:, source]
+            * probability_nodes[:, destination]
+        )[negative_edges].square().mean()
+        if negative_edges.any()
+        else zero
+    )
+    boundary_contrast = (
+        (1.0 - edge_difference[boundary_edges]).square().mean()
+        if boundary_edges.any()
+        else zero
+    )
+
+    component_labels = _graph_component_labels(
+        target_nodes, edge_index, max_steps=16
+    )
+    node_count = target_nodes.shape[1]
+    batch_offsets = (
+        torch.arange(target_nodes.shape[0], device=logits.device).view(-1, 1)
+        * (node_count + 1)
+    )
+    component_index = component_labels + batch_offsets
+    component_probability = probability_nodes.new_zeros(
+        target_nodes.shape[0] * (node_count + 1)
+    )
+    component_size = probability_nodes.new_zeros(
+        target_nodes.shape[0] * (node_count + 1)
+    )
+    component_probability.scatter_add_(
+        0,
+        component_index[target_nodes],
+        probability_nodes[target_nodes],
+    )
+    component_size.scatter_add_(
+        0,
+        component_index[target_nodes],
+        torch.ones_like(probability_nodes[target_nodes]),
+    )
+    existing_components = component_size > 0
+    component_recall = (
+        component_probability[existing_components]
+        / component_size[existing_components].clamp_min(1.0)
+    )
+    loss_component_recall = (
+        (1.0 - component_recall).mean()
+        if component_recall.numel()
+        else zero
+    )
+    loss_topology = (
+        positive_continuity
+        + 0.25 * negative_connectivity
+        + 0.25 * boundary_contrast
+        + loss_component_recall
+    )
+
+    predicted = probability >= 0.5
+    true_positive = (predicted & positive).float().sum()
+    false_positive = (predicted & negative).float().sum()
+    false_negative = (~predicted & positive).float().sum()
+    return {
+        "loss_head_outer_occupancy_bce": loss_bce,
+        "loss_head_outer_occupancy_dice": loss_dice,
+        "loss_head_outer_presence": loss_presence,
+        "loss_head_outer_coverage": loss_coverage,
+        "loss_head_outer_topology": loss_topology,
+        "loss_head_outer_positive_continuity": positive_continuity,
+        "loss_head_outer_negative_connectivity": negative_connectivity,
+        "loss_head_outer_boundary_contrast": boundary_contrast,
+        "loss_head_outer_component_recall": loss_component_recall,
+        "head_outer_occupancy_precision": (
+            true_positive / (true_positive + false_positive).clamp_min(1.0)
+        ),
+        "head_outer_occupancy_recall": (
+            true_positive / (true_positive + false_negative).clamp_min(1.0)
+        ),
+        "head_outer_component_recall": (
+            component_recall.mean() if component_recall.numel() else zero
+        ),
+        "count_head_outer_components": existing_components.float().sum(),
+    }
+
+
 def route_occupancy_agreement_loss(
     outputs,
     target_uv,
@@ -1893,6 +2065,59 @@ def run_epoch(
                     losses["loss_semantic_presence"] = zero
                     losses["loss_semantic_coverage"] = zero
                     losses["loss_semantic_attributes"] = zero
+                if "head_outer_face_occupancy_logits" in outputs:
+                    head_structure = head_outer_structure_losses(
+                        outputs,
+                        batch["uv"],
+                        alpha_threshold=args.target_alpha_threshold,
+                    )
+                    loss_head_outer_occupancy = (
+                        head_structure["loss_head_outer_occupancy_bce"]
+                        + args.head_outer_occupancy_dice_weight
+                        * head_structure["loss_head_outer_occupancy_dice"]
+                    )
+                    weighted_head_structure = (
+                        args.lambda_head_outer_occupancy
+                        * loss_head_outer_occupancy
+                        + args.lambda_head_outer_presence
+                        * head_structure["loss_head_outer_presence"]
+                        + args.lambda_head_outer_coverage
+                        * head_structure["loss_head_outer_coverage"]
+                        + args.lambda_head_outer_topology
+                        * head_structure["loss_head_outer_topology"]
+                    )
+                    losses.update(head_structure)
+                    losses["loss_head_outer_occupancy"] = (
+                        loss_head_outer_occupancy
+                    )
+                    losses["loss_head_outer_structure_weighted"] = (
+                        weighted_head_structure
+                    )
+                    losses["loss_total"] = (
+                        losses["loss_total"] + weighted_head_structure
+                    )
+                    losses["loss_routing"] = (
+                        losses["loss_routing"] + weighted_head_structure
+                    )
+                else:
+                    for name in (
+                        "loss_head_outer_occupancy_bce",
+                        "loss_head_outer_occupancy_dice",
+                        "loss_head_outer_occupancy",
+                        "loss_head_outer_presence",
+                        "loss_head_outer_coverage",
+                        "loss_head_outer_topology",
+                        "loss_head_outer_positive_continuity",
+                        "loss_head_outer_negative_connectivity",
+                        "loss_head_outer_boundary_contrast",
+                        "loss_head_outer_component_recall",
+                        "loss_head_outer_structure_weighted",
+                        "head_outer_occupancy_precision",
+                        "head_outer_occupancy_recall",
+                        "head_outer_component_recall",
+                        "count_head_outer_components",
+                    ):
+                        losses[name] = zero
                 if (
                     semantic_masks is not None
                     and "outer_uv_occupancy_logits" in outputs
@@ -2781,6 +3006,9 @@ def save_checkpoint(
             "predict_outer_uv_occupancy": (
                 model.predict_outer_uv_occupancy
             ),
+            "predict_head_outer_structure": (
+                model.predict_head_outer_structure
+            ),
             "outer_uv_feature_channels": model.outer_uv_feature_channels,
             "outer_uv_topology_channels": model.outer_uv_topology_channels,
             "outer_uv_topology_layers": model.outer_uv_topology_layers,
@@ -2881,6 +3109,21 @@ def build_arg_parser():
     )
     parser.add_argument(
         "--semantic_text_prompt_channels", type=int, default=32
+    )
+    parser.add_argument(
+        "--predict_head_outer_structure",
+        dest="predict_head_outer_structure",
+        action="store_true",
+        default=False,
+        help=(
+            "Train an auxiliary six-face 8x8 head outer-layer structure head. "
+            "The head regularizes semantic features but never gates inference."
+        ),
+    )
+    parser.add_argument(
+        "--no_predict_head_outer_structure",
+        dest="predict_head_outer_structure",
+        action="store_false",
     )
     parser.add_argument(
         "--predict_outer_uv_occupancy",
@@ -3215,6 +3458,22 @@ def build_arg_parser():
     )
     parser.add_argument("--lambda_semantic_presence", type=float, default=0.25)
     parser.add_argument("--lambda_semantic_coverage", type=float, default=0.25)
+    parser.add_argument("--lambda_text_prompt_route", type=float, default=0.0)
+    parser.add_argument(
+        "--lambda_head_outer_presence", type=float, default=0.0
+    )
+    parser.add_argument(
+        "--lambda_head_outer_coverage", type=float, default=0.0
+    )
+    parser.add_argument(
+        "--lambda_head_outer_occupancy", type=float, default=0.0
+    )
+    parser.add_argument(
+        "--head_outer_occupancy_dice_weight", type=float, default=0.50
+    )
+    parser.add_argument(
+        "--lambda_head_outer_topology", type=float, default=0.0
+    )
     parser.add_argument("--lambda_outer_uv_occupancy", type=float, default=0.0)
     parser.add_argument(
         "--outer_uv_occupancy_dice_weight", type=float, default=0.50
@@ -3436,12 +3695,18 @@ def main():
         args.lambda_route_confidence,
         args.lambda_primary_route_swap,
         args.lambda_route_texel_consistency,
+        args.lambda_text_prompt_route,
         args.lambda_route_texel_supervision,
         args.lambda_cross_view_outer_visibility,
         args.cross_view_outer_consistency_loss_weight,
         args.lambda_route_prior_regularization,
         args.lambda_semantic_presence,
         args.lambda_semantic_coverage,
+        args.lambda_head_outer_presence,
+        args.lambda_head_outer_coverage,
+        args.lambda_head_outer_occupancy,
+        args.head_outer_occupancy_dice_weight,
+        args.lambda_head_outer_topology,
         args.lambda_outer_uv_occupancy,
         args.outer_uv_occupancy_dice_weight,
         args.outer_hard_positive_weight,
@@ -3528,6 +3793,27 @@ def main():
         raise ValueError(
             "Outer occupancy routing/losses require "
             "--predict_outer_uv_occupancy."
+        )
+    if args.lambda_text_prompt_route > 0.0 and not args.siglip_text_prompt_fusion:
+        raise ValueError(
+            "--lambda_text_prompt_route requires --siglip_text_prompt_fusion."
+        )
+    head_structure_weights = (
+        args.lambda_head_outer_presence,
+        args.lambda_head_outer_coverage,
+        args.lambda_head_outer_occupancy,
+        args.lambda_head_outer_topology,
+    )
+    if any(weight > 0.0 for weight in head_structure_weights) and not (
+        args.predict_head_outer_structure
+    ):
+        raise ValueError(
+            "Head outer structure losses require "
+            "--predict_head_outer_structure."
+        )
+    if args.predict_head_outer_structure and args.semantic_backbone == "none":
+        raise ValueError(
+            "--predict_head_outer_structure requires a semantic backbone."
         )
     if (
         args.semantic_channels < 1
@@ -3806,6 +4092,7 @@ def main():
         route_prior_logit_cap=args.route_prior_logit_cap,
         route_prior_dropout=args.route_prior_dropout,
         predict_outer_uv_occupancy=args.predict_outer_uv_occupancy,
+        predict_head_outer_structure=args.predict_head_outer_structure,
         outer_uv_feature_channels=args.outer_uv_feature_channels,
         outer_uv_topology_channels=args.outer_uv_topology_channels,
         outer_uv_topology_layers=args.outer_uv_topology_layers,
@@ -3850,6 +4137,7 @@ def main():
         lambda_route_confidence=args.lambda_route_confidence,
         lambda_primary_route_swap=args.lambda_primary_route_swap,
         lambda_route_texel_consistency=args.lambda_route_texel_consistency,
+        lambda_text_prompt_route=args.lambda_text_prompt_route,
         lambda_route_prior_regularization=(
             args.lambda_route_prior_regularization
         ),
@@ -4010,6 +4298,18 @@ def main():
                 "Cannot add or remove the outer UV occupancy head while "
                 "resuming. Start a new parser run."
             )
+        checkpoint_head_structure = checkpoint_config.get(
+            "predict_head_outer_structure",
+            any(
+                key.startswith("head_outer_face_occupancy_head.")
+                for key in checkpoint["model"]
+            ),
+        )
+        if checkpoint_head_structure != model.predict_head_outer_structure:
+            raise ValueError(
+                "Cannot add or remove the head outer structure auxiliary head "
+                "while resuming. Start a new parser run."
+            )
         checkpoint_route_prior = checkpoint_config.get(
             "route_role_spatial_prior",
             "route_role_prior" in checkpoint["model"],
@@ -4143,6 +4443,9 @@ def main():
         "route_prior_logit_cap": model.route_prior_logit_cap,
         "route_prior_dropout": model.route_prior_dropout,
         "predict_outer_uv_occupancy": model.predict_outer_uv_occupancy,
+        "predict_head_outer_structure": (
+            model.predict_head_outer_structure
+        ),
         "outer_uv_occupancy_supervision": (
             "visible_projected_texels"
             if model.predict_outer_uv_occupancy
@@ -4215,6 +4518,7 @@ def main():
         "lambda_route_confidence": args.lambda_route_confidence,
         "lambda_primary_route_swap": args.lambda_primary_route_swap,
         "lambda_route_texel_consistency": args.lambda_route_texel_consistency,
+        "lambda_text_prompt_route": args.lambda_text_prompt_route,
         "lambda_route_texel_supervision": (
             args.lambda_route_texel_supervision
         ),
@@ -4242,6 +4546,13 @@ def main():
         ),
         "lambda_semantic_presence": args.lambda_semantic_presence,
         "lambda_semantic_coverage": args.lambda_semantic_coverage,
+        "lambda_head_outer_presence": args.lambda_head_outer_presence,
+        "lambda_head_outer_coverage": args.lambda_head_outer_coverage,
+        "lambda_head_outer_occupancy": args.lambda_head_outer_occupancy,
+        "head_outer_occupancy_dice_weight": (
+            args.head_outer_occupancy_dice_weight
+        ),
+        "lambda_head_outer_topology": args.lambda_head_outer_topology,
         "lambda_outer_uv_occupancy": args.lambda_outer_uv_occupancy,
         "outer_uv_occupancy_dice_weight": (
             args.outer_uv_occupancy_dice_weight

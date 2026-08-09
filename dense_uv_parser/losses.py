@@ -245,6 +245,7 @@ class DenseUVParserLoss(nn.Module):
         lambda_route_confidence=0.25,
         lambda_primary_route_swap=1.0,
         lambda_route_texel_consistency=0.25,
+        lambda_text_prompt_route=0.0,
         lambda_route_prior_regularization=0.001,
         outer_false_positive_gamma=2.0,
         outer_false_negative_gamma=2.0,
@@ -275,6 +276,7 @@ class DenseUVParserLoss(nn.Module):
         self.lambda_route_texel_consistency = float(
             lambda_route_texel_consistency
         )
+        self.lambda_text_prompt_route = float(lambda_text_prompt_route)
         self.lambda_route_prior_regularization = float(
             lambda_route_prior_regularization
         )
@@ -344,6 +346,37 @@ class DenseUVParserLoss(nn.Module):
             )
             if geometry_route_roles
             else zero
+        )
+        if geometry_route_roles and "text_prompt_route_logits" in outputs:
+            loss_text_prompt_route_ce = _balanced_cross_entropy(
+                outputs["text_prompt_route_logits"],
+                layer_target,
+                min_weight=self.route_class_weight_floor,
+                class_weight_caps=(
+                    float("inf"),
+                    self.route_outer_class_weight_cap,
+                    float("inf"),
+                ),
+            )
+            loss_text_prompt_route_swap = primary_route_swap_loss(
+                outputs["text_prompt_route_logits"],
+                layer_target,
+                gamma=self.primary_route_swap_gamma,
+            )
+            loss_text_prompt_route = (
+                loss_text_prompt_route_ce
+                + 0.5 * loss_text_prompt_route_swap
+            )
+            acc_text_prompt_route = _masked_accuracy(
+                outputs["text_prompt_route_logits"], layer_target
+            )
+        else:
+            loss_text_prompt_route_ce = zero
+            loss_text_prompt_route_swap = zero
+            loss_text_prompt_route = zero
+            acc_text_prompt_route = zero
+        weighted_text_prompt_route = (
+            self.lambda_text_prompt_route * loss_text_prompt_route
         )
         loss_route_prior_regularization = route_prior_regularization(
             outputs, tv_weight=self.route_prior_tv_weight
@@ -506,6 +539,7 @@ class DenseUVParserLoss(nn.Module):
             + self.lambda_primary_route_swap * loss_primary_route_swap
             + self.lambda_route_texel_consistency
             * loss_route_texel_consistency
+            + weighted_text_prompt_route
             + self.lambda_route_prior_regularization
             * loss_route_prior_regularization
             if geometry_route_roles
@@ -517,6 +551,7 @@ class DenseUVParserLoss(nn.Module):
             self.lambda_primary_route_swap * loss_primary_route_swap
             + self.lambda_route_texel_consistency
             * loss_route_texel_consistency
+            + weighted_text_prompt_route
             + self.lambda_route_prior_regularization
             * loss_route_prior_regularization
             if geometry_route_roles
@@ -539,6 +574,7 @@ class DenseUVParserLoss(nn.Module):
             + self.lambda_primary_route_swap * loss_primary_route_swap
             + self.lambda_route_texel_consistency
             * loss_route_texel_consistency
+            + weighted_text_prompt_route
             + self.lambda_route_prior_regularization
             * loss_route_prior_regularization
         )
@@ -570,6 +606,11 @@ class DenseUVParserLoss(nn.Module):
             "loss_route_confidence": loss_route_confidence,
             "loss_primary_route_swap": loss_primary_route_swap,
             "loss_route_texel_consistency": loss_route_texel_consistency,
+            "loss_text_prompt_route": loss_text_prompt_route,
+            "loss_text_prompt_route_ce": loss_text_prompt_route_ce,
+            "loss_text_prompt_route_swap": loss_text_prompt_route_swap,
+            "loss_text_prompt_route_weighted": weighted_text_prompt_route,
+            "acc_text_prompt_route": acc_text_prompt_route,
             "loss_route_prior_regularization": loss_route_prior_regularization,
             "confidence_mae": confidence_mae,
             "precision_trusted_route": precision_trusted_route,

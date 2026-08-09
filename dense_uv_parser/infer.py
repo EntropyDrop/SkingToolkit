@@ -110,6 +110,10 @@ def load_parser(checkpoint_path, device):
     has_outer_uv_occupancy = any(
         key.startswith("outer_uv_occupancy_head.") for key in state_dict
     )
+    has_head_outer_structure = any(
+        key.startswith("head_outer_face_occupancy_head.")
+        for key in state_dict
+    )
     text_prompt_key = (
         "semantic_text_prompt_fusion.prompt_embeddings"
     )
@@ -195,6 +199,9 @@ def load_parser(checkpoint_path, device):
         route_prior_dropout=model_config.get("route_prior_dropout", 0.0),
         predict_outer_uv_occupancy=model_config.get(
             "predict_outer_uv_occupancy", has_outer_uv_occupancy
+        ),
+        predict_head_outer_structure=model_config.get(
+            "predict_head_outer_structure", has_head_outer_structure
         ),
         outer_uv_feature_channels=model_config.get(
             "outer_uv_feature_channels", 32

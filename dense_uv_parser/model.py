@@ -359,13 +359,21 @@ class TextPromptRouteFusion(nn.Module):
         local_similarity = torch.einsum(
             "nchw,pc->nphw", local_image_features, local_prompt_features
         )
-        # Relative global relevance suppresses prompts that are implausible for
-        # this view while preserving an average gate of one. Inner-surface
-        # prompts are included in the bank, so every sample retains useful
-        # route evidence even when no accessory is visible.
-        prompt_gate = torch.softmax(global_logits, dim=-1)
-        prompt_gate = (prompt_gate * self.prompt_count).clamp(0.05, 4.0)
-        prompt_evidence = local_similarity * prompt_gate[:, :, None, None]
+        # The frozen pooled image/text scores are weak accessory classifiers:
+        # in particular, a visible hat can receive a lower score than an image
+        # without one. Do not let those scores suppress trainable local prompt
+        # evidence. They are retained only as a bounded, per-image residual;
+        # exact route supervision decides how the local similarities are used.
+        centered_global = global_logits - global_logits.mean(
+            dim=-1, keepdim=True
+        )
+        normalized_global = centered_global / centered_global.std(
+            dim=-1, keepdim=True, unbiased=False
+        ).clamp_min(1e-4)
+        global_residual = 0.10 * torch.tanh(normalized_global)
+        prompt_evidence = (
+            local_similarity + global_residual[:, :, None, None]
+        )
         route_logits = self.route_projection(prompt_evidence)
         route_logits = F.interpolate(
             route_logits,
@@ -518,6 +526,7 @@ class DenseUVParserNet(nn.Module):
         route_prior_logit_cap=1.5,
         route_prior_dropout=0.10,
         predict_outer_uv_occupancy=False,
+        predict_head_outer_structure=False,
         outer_uv_feature_channels=32,
         outer_uv_topology_channels=64,
         outer_uv_topology_layers=3,
@@ -557,6 +566,9 @@ class DenseUVParserNet(nn.Module):
         self.route_prior_logit_cap = float(route_prior_logit_cap)
         self.route_prior_dropout = float(route_prior_dropout)
         self.predict_outer_uv_occupancy = bool(predict_outer_uv_occupancy)
+        self.predict_head_outer_structure = bool(
+            predict_head_outer_structure
+        )
         self.outer_uv_feature_channels = int(outer_uv_feature_channels)
         self.outer_uv_topology_channels = int(outer_uv_topology_channels)
         self.outer_uv_topology_layers = int(outer_uv_topology_layers)
@@ -726,6 +738,30 @@ class DenseUVParserNet(nn.Module):
                 "SigLIP2 text prompts must share the spatial vision feature "
                 "dimension."
             )
+        # Keep this auxiliary branch last so enabling it cannot perturb the
+        # seeded initialization of the established parser or prompt branch.
+        # It supervises head outer-layer structure during training but does not
+        # gate inference-time route logits.
+        if self.predict_head_outer_structure:
+            if self.semantic_fusion is None:
+                raise ValueError(
+                    "Head outer structure prediction requires global semantic "
+                    "features."
+                )
+            self.head_outer_face_presence_head = nn.Linear(
+                self.semantic_channels, 6
+            )
+            self.head_outer_face_coverage_head = nn.Linear(
+                self.semantic_channels, 6
+            )
+            self.head_outer_face_occupancy_head = nn.Sequential(
+                nn.LayerNorm(self.semantic_channels),
+                nn.Linear(self.semantic_channels, self.semantic_channels * 2),
+                nn.GELU(),
+                nn.Linear(self.semantic_channels * 2, 6 * 8 * 8),
+            )
+            nn.init.zeros_(self.head_outer_face_occupancy_head[-1].weight)
+            nn.init.zeros_(self.head_outer_face_occupancy_head[-1].bias)
 
     def _runtime_semantic_features(self, images, foreground=None):
         backbone = getattr(self, "_runtime_semantic_backbone", None)
@@ -935,6 +971,17 @@ class DenseUVParserNet(nn.Module):
             outputs["outer_coverage"] = torch.sigmoid(
                 self.outer_coverage_head(semantic_summary)
             )
+            if self.predict_head_outer_structure:
+                outputs["head_outer_face_presence_logits"] = (
+                    self.head_outer_face_presence_head(semantic_summary)
+                )
+                outputs["head_outer_face_coverage"] = torch.sigmoid(
+                    self.head_outer_face_coverage_head(semantic_summary)
+                )
+                outputs["head_outer_face_occupancy_logits"] = (
+                    self.head_outer_face_occupancy_head(semantic_summary)
+                    .reshape(-1, 6, 8, 8)
+                )
         if self.predict_outer_uv_occupancy:
             occupancy_summary = (
                 torch.cat([visual_summary, semantic_summary], dim=1)

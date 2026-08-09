@@ -257,3 +257,29 @@ def build_outer_uv_graph():
     if (edge_index < 0).any():
         raise ValueError("Outer topology contains an edge outside the outer atlas.")
     return flat_indices, edge_index
+
+
+@lru_cache(maxsize=1)
+def build_head_outer_face_graph():
+    """Return physical head-outer edges in face-major 6x8x8 node order."""
+    head_flat_indices = []
+    for x, y, width, height, decor_dx, decor_dy in (
+        minecraft_layer_rects(is_slim=False)[:FACE_COUNT]
+    ):
+        outer_x = x + decor_dx
+        outer_y = y + decor_dy
+        head_flat_indices.extend(
+            _flat_index(outer_x + u, outer_y + v)
+            for v in range(height)
+            for u in range(width)
+        )
+    head_flat_indices = torch.tensor(head_flat_indices, dtype=torch.long)
+    flat_to_head = torch.full(
+        (UV_SIZE * UV_SIZE,), -1, dtype=torch.long
+    )
+    flat_to_head[head_flat_indices] = torch.arange(
+        head_flat_indices.numel(), dtype=torch.long
+    )
+    mapped_edges = flat_to_head[build_simple_uv_topology().outer_edge_index]
+    selected = (mapped_edges >= 0).all(dim=0)
+    return mapped_edges[:, selected]

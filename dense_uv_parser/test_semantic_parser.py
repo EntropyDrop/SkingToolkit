@@ -16,12 +16,19 @@ from SkingToolkit.dense_uv_parser.semantic import (
     attach_semantic_runtime,
     cached_semantic_batch,
 )
-from SkingToolkit.dense_uv_parser.train import outer_uv_occupancy_losses
+from SkingToolkit.dense_uv_parser.train import (
+    head_outer_structure_losses,
+    outer_uv_occupancy_losses,
+)
 from SkingToolkit.dense_uv_parser.utils import splat_to_uv_conditioning
 from SkingToolkit.dense_uv_parser.semantic_targets import (
+    build_head_outer_face_targets,
     build_part_layer_masks,
 )
-from SkingToolkit.dense_uv_parser.uv_topology import build_outer_uv_graph
+from SkingToolkit.dense_uv_parser.uv_topology import (
+    build_head_outer_face_graph,
+    build_outer_uv_graph,
+)
 
 
 class SemanticDenseUVParserTest(unittest.TestCase):
@@ -218,6 +225,114 @@ class SemanticDenseUVParserTest(unittest.TestCase):
         )
         self.assertIsNotNone(gradient)
         self.assertGreater(float(gradient.abs().sum()), 0.0)
+
+    def test_text_prompt_route_has_independent_deep_supervision(self):
+        model = DenseUVParserNet(
+            base_channels=8,
+            view_classes=2,
+            geometry_only=True,
+            semantic_feature_dim=12,
+            semantic_channels=8,
+            semantic_attention_heads=2,
+            semantic_spatial_feature_dim=12,
+            semantic_spatial_channels=8,
+            semantic_text_prompt_count=3,
+            semantic_text_prompt_feature_dim=12,
+            semantic_text_prompt_channels=6,
+        )
+        model.set_semantic_text_prompt_embeddings(torch.randn(3, 12))
+        outputs = model(
+            torch.rand(2, 4, 16, 16),
+            view_ids=torch.tensor([0, 1]),
+            semantic_features={
+                "raw_global": torch.rand(2, 12),
+                "raw_spatial": torch.rand(2, 12, 5, 5),
+            },
+        )
+        targets = {
+            "foreground": torch.ones(2, 1, 16, 16),
+            "route_role": torch.zeros(2, 16, 16, dtype=torch.long),
+            "layer": torch.zeros(2, 16, 16, dtype=torch.long),
+            "part": torch.zeros(2, 16, 16, dtype=torch.long),
+            "face": torch.zeros(2, 16, 16, dtype=torch.long),
+            "surface": torch.zeros(2, 16, 16, dtype=torch.long),
+            "uv": torch.zeros(2, 2, 16, 16),
+            "affine": torch.zeros(2, 3),
+        }
+        losses = DenseUVParserLoss(
+            lambda_text_prompt_route=0.25,
+            use_uv=False,
+        )(outputs, targets)
+        losses["loss_text_prompt_route_weighted"].backward()
+
+        self.assertGreater(
+            float(losses["loss_text_prompt_route"].detach()), 0.0
+        )
+        self.assertIsNotNone(
+            model.semantic_text_prompt_fusion.route_projection[-1].weight.grad
+        )
+        self.assertGreater(
+            float(
+                model.semantic_text_prompt_fusion.route_projection[-1]
+                .weight.grad.abs().sum()
+            ),
+            0.0,
+        )
+
+    def test_head_outer_structure_targets_and_auxiliary_gradients(self):
+        target_uv = torch.zeros(1, 4, 64, 64)
+        # Head outer front starts at (40, 8); form one connected component.
+        target_uv[0, 3, 9:11, 41:44] = 1.0
+        targets = build_head_outer_face_targets(target_uv)
+        self.assertEqual(tuple(targets["occupancy"].shape), (1, 6, 8, 8))
+        self.assertEqual(float(targets["presence"][0, 0]), 1.0)
+        self.assertEqual(float(targets["presence"][0, 1:].sum()), 0.0)
+        head_edges = build_head_outer_face_graph()
+        self.assertTrue(
+            ((head_edges[0] // 64) != (head_edges[1] // 64)).any()
+        )
+
+        model = DenseUVParserNet(
+            base_channels=8,
+            view_classes=2,
+            geometry_only=True,
+            semantic_feature_dim=12,
+            semantic_channels=8,
+            semantic_attention_heads=2,
+            predict_head_outer_structure=True,
+        )
+        outputs = model(
+            torch.rand(4, 4, 16, 16),
+            view_ids=torch.tensor([0, 1, 0, 1]),
+            semantic_features=torch.rand(1, 4, 12),
+        )
+        self.assertEqual(
+            tuple(outputs["head_outer_face_occupancy_logits"].shape),
+            (2, 6, 8, 8),
+        )
+        losses = head_outer_structure_losses(outputs, target_uv)
+        total = (
+            losses["loss_head_outer_occupancy_bce"]
+            + losses["loss_head_outer_occupancy_dice"]
+            + losses["loss_head_outer_presence"]
+            + losses["loss_head_outer_coverage"]
+            + losses["loss_head_outer_topology"]
+        )
+        total.backward()
+        self.assertTrue(torch.isfinite(total))
+        self.assertIsNotNone(
+            model.head_outer_face_occupancy_head[-1].weight.grad
+        )
+        self.assertGreater(
+            float(
+                model.head_outer_face_occupancy_head[-1]
+                .weight.grad.abs().sum()
+            ),
+            0.0,
+        )
+        self.assertIsNotNone(
+            model.semantic_fusion.input_projection[1].weight.grad
+        )
 
     def test_siglip_text_branch_preserves_seeded_base_initialization(self):
         common_arguments = {
