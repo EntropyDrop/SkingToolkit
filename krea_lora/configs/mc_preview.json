@@ -1,0 +1,67 @@
+{
+  "model": {
+    "path": "/home/ds/llms/krea/Krea-2-Raw",
+    "dtype": "bf16",
+    "max_sequence_length": 512,
+    "vae_scale_factor": 8,
+    "patch_size": 2
+  },
+  "data": {
+    "toolkit_dir": "/home/ds/llms/SkingToolkit",
+    "skins_dir": "/home/ds/llms/SkingToolkit/skins",
+    "mappings_dir": "/home/ds/llms/github/differentiable_minecraft_renderer/mappings_256x512",
+    "dataset_dir": "/home/ds/llms/SkingToolkit/krea_lora/data/mc_preview_512",
+    "front_view": "walk_front_both_layer_ortho",
+    "back_view": "walk_back_both_layer_ortho",
+    "background_rgb": [1.0, 1.0, 1.0],
+    "max_images": 20000,
+    "render_batch_size": 8,
+    "validation_fraction": 0.02,
+    "prompt_id": "mc_preview",
+    "training_prompt": "mc45preview, a clean Minecraft character skin preview sheet showing the same full-body character twice, front-left three-quarter orthographic view on the left and back-right three-quarter orthographic view on the right, fixed 45-degree elevated camera, identical scale and neutral standing pose in both views, exact classic block proportions, crisp square texels painted directly on valid Minecraft base and outer skin layers, pure white background, no shadows, no floor, no text, no labels, no interface, no props, no weapons, no extra geometry"
+  },
+  "cache": {
+    "vae_batch_size": 2
+  },
+  "training": {
+    "output_dir": "/home/ds/llms/SkingToolkit/krea_lora/runs/mc_preview_raw_lora",
+    "seed": 20260810,
+    "batch_size": 1,
+    "gradient_accumulation_steps": 4,
+    "num_workers": 2,
+    "max_train_steps": 3000,
+    "learning_rate": 0.0001,
+    "rank": 16,
+    "lora_alpha": 16,
+    "lora_dropout": 0.0,
+    "target_modules": ["to_q", "to_k", "to_v", "to_out.0"],
+    "gradient_checkpointing": true,
+    "layerwise_casting": false,
+    "mixed_precision": "bf16",
+    "weighting_scheme": "logit_normal",
+    "logit_mean": 0.0,
+    "logit_std": 1.0,
+    "mode_scale": 1.29,
+    "lr_scheduler": "cosine",
+    "lr_warmup_steps": 100,
+    "weight_decay": 0.01,
+    "adam_beta1": 0.9,
+    "adam_beta2": 0.999,
+    "adam_epsilon": 1e-8,
+    "max_grad_norm": 1.0,
+    "save_every": 250
+  },
+  "validation": {
+    "output_dir": "/home/ds/llms/SkingToolkit/krea_lora/runs/mc_preview_raw_lora/validation",
+    "height": 512,
+    "width": 512,
+    "steps": 28,
+    "guidance_scale": 4.5,
+    "seed": 20260810,
+    "negative_prompt": "perspective distortion, rounded limbs, smooth surfaces, extra geometry, text, UI, shadows, floor",
+    "prompts": [
+      "mc45preview, a blue-haired anime-inspired Minecraft character wearing a navy beret, a black capelet, a pale blue plaid skirt and dark shoes; a clean preview sheet with front-left and back-right fixed orthographic views on pure white",
+      "mc45preview, a forest ranger Minecraft character with a moss green hood, brown tunic, belt and dark boots; a clean preview sheet with front-left and back-right fixed orthographic views on pure white"
+    ]
+  }
+}

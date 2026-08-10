@@ -1,0 +1,6 @@
+data/
+runs/
+.smoke/
+__pycache__/
+*.pyc
+

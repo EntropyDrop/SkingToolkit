@@ -1,0 +1,8 @@
+# torch, torchvision, diffusers and transformers deliberately come from the cloned `krea` environment.
+accelerate>=1.8
+peft>=0.17
+safetensors>=0.5
+Pillow>=10
+tqdm>=4.66
+numpy>=1.26
+
