@@ -128,3 +128,10 @@ From the directory containing `SkingToolkit`:
 ```bash
 python -m unittest discover -s SkingToolkit/dense_uv_parser -p 'test_*.py'
 ```
+
+## Krea2 LoRA
+
+The independent Krea-2-Raw Minecraft preview fine-tuning project lives in
+[`krea_lora`](krea_lora/README.md). It renders exact fixed-view supervision
+from the existing skins, caches frozen Qwen Image VAE/text features, and trains
+only a Diffusers-compatible Krea2 Transformer LoRA.
