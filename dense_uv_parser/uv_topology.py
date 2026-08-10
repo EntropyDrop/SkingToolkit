@@ -260,8 +260,8 @@ def build_outer_uv_graph():
 
 
 @lru_cache(maxsize=1)
-def build_head_outer_face_graph():
-    """Return physical head-outer edges in face-major 6x8x8 node order."""
+def build_head_outer_face_indices():
+    """Return head-outer atlas indices in face-major 6x8x8 node order."""
     head_flat_indices = []
     for x, y, width, height, decor_dx, decor_dy in (
         minecraft_layer_rects(is_slim=False)[:FACE_COUNT]
@@ -273,7 +273,13 @@ def build_head_outer_face_graph():
             for v in range(height)
             for u in range(width)
         )
-    head_flat_indices = torch.tensor(head_flat_indices, dtype=torch.long)
+    return torch.tensor(head_flat_indices, dtype=torch.long)
+
+
+@lru_cache(maxsize=1)
+def build_head_outer_face_graph():
+    """Return physical head-outer edges in face-major 6x8x8 node order."""
+    head_flat_indices = build_head_outer_face_indices()
     flat_to_head = torch.full(
         (UV_SIZE * UV_SIZE,), -1, dtype=torch.long
     )

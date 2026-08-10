@@ -79,6 +79,7 @@ from SkingToolkit.dense_uv_parser.skin_dataset import SkinUVDataset  # noqa: E40
 from SkingToolkit.dense_uv_parser.uv_layout import build_uv_masks  # noqa: E402
 from SkingToolkit.dense_uv_parser.uv_topology import (  # noqa: E402
     build_head_outer_face_graph,
+    build_head_outer_face_indices,
     build_outer_uv_graph,
 )
 from SkingToolkit.renderer import DifferentiableRenderer  # noqa: E402
@@ -1441,6 +1442,175 @@ def head_outer_structure_losses(outputs, target_uv, alpha_threshold=0.5):
     }
 
 
+def _head_outer_route_connectivity_terms(
+    probability_nodes,
+    target_nodes,
+    visible_nodes,
+    hard_fraction=0.25,
+):
+    """Penalize holes inside visible ground-truth head-outer components."""
+    if probability_nodes.shape != target_nodes.shape:
+        raise ValueError("Head route probability and target shapes must match.")
+    if visible_nodes.shape != target_nodes.shape:
+        raise ValueError("Head route visibility and target shapes must match.")
+    if not 0.0 < float(hard_fraction) <= 1.0:
+        raise ValueError("hard_fraction must be in (0, 1].")
+    selected = target_nodes & visible_nodes
+    zero = probability_nodes.sum() * 0.0
+    if not selected.any():
+        return {
+            "loss_head_outer_route_recall": zero,
+            "loss_head_outer_route_hard_recall": zero,
+            "loss_head_outer_route_edge_connectivity": zero,
+            "loss_head_outer_route_component_recall": zero,
+            "loss_head_outer_route_connectivity": zero,
+            "head_outer_route_recall": zero,
+            "head_outer_route_component_recall": zero,
+            "count_head_outer_route_visible_texels": zero,
+            "count_head_outer_route_positive_edges": zero,
+            "count_head_outer_route_visible_components": zero,
+        }
+
+    probability_nodes = probability_nodes.clamp(1e-6, 1.0 - 1e-6)
+    deficits = 1.0 - probability_nodes[selected]
+    loss_recall = deficits.mean()
+    hard_count = max(
+        1, math.ceil(deficits.numel() * float(hard_fraction))
+    )
+    loss_hard_recall = deficits.topk(
+        hard_count, sorted=False
+    ).values.mean()
+
+    edge_index = build_head_outer_face_graph().to(probability_nodes.device)
+    source, destination = edge_index
+    positive_edges = (
+        target_nodes[:, source]
+        & target_nodes[:, destination]
+        & visible_nodes[:, source]
+        & visible_nodes[:, destination]
+    )
+    loss_edge_connectivity = (
+        (
+            1.0
+            - probability_nodes[:, source]
+            * probability_nodes[:, destination]
+        )[positive_edges].mean()
+        if positive_edges.any()
+        else zero
+    )
+
+    # Macro-average recall over physical connected components so a one-pixel
+    # gap in a thin brim receives comparable attention to a large hair mass.
+    component_labels = _graph_component_labels(
+        target_nodes, edge_index, max_steps=16
+    )
+    node_count = target_nodes.shape[1]
+    batch_offsets = (
+        torch.arange(target_nodes.shape[0], device=target_nodes.device)
+        .view(-1, 1)
+        * (node_count + 1)
+    )
+    component_index = component_labels + batch_offsets
+    component_probability = probability_nodes.new_zeros(
+        target_nodes.shape[0] * (node_count + 1)
+    )
+    component_size = probability_nodes.new_zeros(
+        target_nodes.shape[0] * (node_count + 1)
+    )
+    component_probability.scatter_add_(
+        0,
+        component_index[selected],
+        probability_nodes[selected],
+    )
+    component_size.scatter_add_(
+        0,
+        component_index[selected],
+        torch.ones_like(probability_nodes[selected]),
+    )
+    existing_components = component_size > 0
+    component_recall = (
+        component_probability[existing_components]
+        / component_size[existing_components].clamp_min(1.0)
+    )
+    loss_component_recall = (1.0 - component_recall).mean()
+    loss_connectivity = 0.25 * (
+        loss_recall
+        + loss_hard_recall
+        + loss_edge_connectivity
+        + loss_component_recall
+    )
+    return {
+        "loss_head_outer_route_recall": loss_recall,
+        "loss_head_outer_route_hard_recall": loss_hard_recall,
+        "loss_head_outer_route_edge_connectivity": (
+            loss_edge_connectivity
+        ),
+        "loss_head_outer_route_component_recall": (
+            loss_component_recall
+        ),
+        "loss_head_outer_route_connectivity": loss_connectivity,
+        "head_outer_route_recall": (
+            (probability_nodes[selected] >= 0.5).float().mean()
+        ),
+        "head_outer_route_component_recall": component_recall.mean(),
+        "count_head_outer_route_visible_texels": selected.float().sum(),
+        "count_head_outer_route_positive_edges": positive_edges.float().sum(),
+        "count_head_outer_route_visible_components": (
+            existing_components.float().sum()
+        ),
+    }
+
+
+def head_outer_route_connectivity_loss(
+    outputs,
+    target_uv,
+    renderer,
+    views,
+    center_power=2.0,
+    alpha_threshold=0.5,
+    hard_fraction=0.25,
+):
+    """Connect the head structure target directly to image-space routing."""
+    canonical_outputs = canonicalize_parser_outputs(outputs)
+    route_probability = torch.softmax(
+        canonical_outputs["layer"].float(), dim=1
+    )
+    pooled, support = aggregate_direct_outer_values_by_view(
+        renderer,
+        views,
+        route_probability,
+        center_power=center_power,
+    )
+    support_float = support.to(dtype=pooled.dtype)
+    consensus_outer = (
+        (
+            pooled[:, :, ROUTE_OUTER_PRIMARY]
+            * support_float
+        ).sum(dim=1)
+        / support_float.sum(dim=1).clamp_min(1.0)
+    )
+    head_indices = build_head_outer_face_indices().to(
+        route_probability.device
+    )
+    probability_nodes = consensus_outer.index_select(1, head_indices)
+    visible_nodes = support.any(dim=1).index_select(1, head_indices)
+    target_nodes = build_head_outer_face_targets(
+        target_uv, alpha_threshold=alpha_threshold
+    )["occupancy"].to(
+        device=route_probability.device, dtype=torch.bool
+    ).flatten(1)
+    if probability_nodes.shape != target_nodes.shape:
+        raise ValueError(
+            "Projected head route batch does not match target UV batch."
+        )
+    return _head_outer_route_connectivity_terms(
+        probability_nodes,
+        target_nodes,
+        visible_nodes,
+        hard_fraction=hard_fraction,
+    )
+
+
 def route_occupancy_agreement_loss(
     outputs,
     target_uv,
@@ -2116,6 +2286,49 @@ def run_epoch(
                         "head_outer_occupancy_recall",
                         "head_outer_component_recall",
                         "count_head_outer_components",
+                    ):
+                        losses[name] = zero
+                if args.lambda_head_outer_route_connectivity > 0.0:
+                    head_route = head_outer_route_connectivity_loss(
+                        outputs,
+                        batch["uv"],
+                        renderer,
+                        views,
+                        center_power=args.route_texel_center_power,
+                        alpha_threshold=args.target_alpha_threshold,
+                        hard_fraction=(
+                            args.head_outer_route_hard_fraction
+                        ),
+                    )
+                    weighted_head_route = (
+                        args.lambda_head_outer_route_connectivity
+                        * head_route[
+                            "loss_head_outer_route_connectivity"
+                        ]
+                    )
+                    losses.update(head_route)
+                    losses[
+                        "loss_head_outer_route_connectivity_weighted"
+                    ] = weighted_head_route
+                    losses["loss_total"] = (
+                        losses["loss_total"] + weighted_head_route
+                    )
+                    losses["loss_routing"] = (
+                        losses["loss_routing"] + weighted_head_route
+                    )
+                else:
+                    for name in (
+                        "loss_head_outer_route_recall",
+                        "loss_head_outer_route_hard_recall",
+                        "loss_head_outer_route_edge_connectivity",
+                        "loss_head_outer_route_component_recall",
+                        "loss_head_outer_route_connectivity",
+                        "loss_head_outer_route_connectivity_weighted",
+                        "head_outer_route_recall",
+                        "head_outer_route_component_recall",
+                        "count_head_outer_route_visible_texels",
+                        "count_head_outer_route_positive_edges",
+                        "count_head_outer_route_visible_components",
                     ):
                         losses[name] = zero
                 if (
@@ -3474,6 +3687,14 @@ def build_arg_parser():
     parser.add_argument(
         "--lambda_head_outer_topology", type=float, default=0.0
     )
+    parser.add_argument(
+        "--lambda_head_outer_route_connectivity",
+        type=float,
+        default=0.0,
+    )
+    parser.add_argument(
+        "--head_outer_route_hard_fraction", type=float, default=0.25
+    )
     parser.add_argument("--lambda_outer_uv_occupancy", type=float, default=0.0)
     parser.add_argument(
         "--outer_uv_occupancy_dice_weight", type=float, default=0.50
@@ -3707,6 +3928,7 @@ def main():
         args.lambda_head_outer_occupancy,
         args.head_outer_occupancy_dice_weight,
         args.lambda_head_outer_topology,
+        args.lambda_head_outer_route_connectivity,
         args.lambda_outer_uv_occupancy,
         args.outer_uv_occupancy_dice_weight,
         args.outer_hard_positive_weight,
@@ -3814,6 +4036,10 @@ def main():
     if args.predict_head_outer_structure and args.semantic_backbone == "none":
         raise ValueError(
             "--predict_head_outer_structure requires a semantic backbone."
+        )
+    if not 0.0 < args.head_outer_route_hard_fraction <= 1.0:
+        raise ValueError(
+            "--head_outer_route_hard_fraction must be in (0, 1]."
         )
     if (
         args.semantic_channels < 1
@@ -4553,6 +4779,12 @@ def main():
             args.head_outer_occupancy_dice_weight
         ),
         "lambda_head_outer_topology": args.lambda_head_outer_topology,
+        "lambda_head_outer_route_connectivity": (
+            args.lambda_head_outer_route_connectivity
+        ),
+        "head_outer_route_hard_fraction": (
+            args.head_outer_route_hard_fraction
+        ),
         "lambda_outer_uv_occupancy": args.lambda_outer_uv_occupancy,
         "outer_uv_occupancy_dice_weight": (
             args.outer_uv_occupancy_dice_weight
