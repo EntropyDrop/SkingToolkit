@@ -17,6 +17,7 @@ from SkingToolkit.dense_uv_parser.semantic import (
     cached_semantic_batch,
 )
 from SkingToolkit.dense_uv_parser.train import (
+    _head_outer_route_connectivity_terms,
     head_outer_structure_losses,
     outer_uv_occupancy_losses,
 )
@@ -332,6 +333,41 @@ class SemanticDenseUVParserTest(unittest.TestCase):
         )
         self.assertIsNotNone(
             model.semantic_fusion.input_projection[1].weight.grad
+        )
+
+    def test_head_outer_route_connectivity_penalizes_brim_gap(self):
+        edge = build_head_outer_face_graph()[:, 0]
+        target = torch.zeros(1, 6 * 8 * 8, dtype=torch.bool)
+        visible = torch.zeros_like(target)
+        target[0, edge] = True
+        visible[0, edge] = True
+        logits = torch.full((1, 6 * 8 * 8), 2.2, requires_grad=True)
+        with torch.no_grad():
+            logits[0, edge[1]] = -2.2
+        probability = torch.sigmoid(logits)
+
+        broken = _head_outer_route_connectivity_terms(
+            probability, target, visible
+        )
+        connected = _head_outer_route_connectivity_terms(
+            torch.full_like(probability.detach(), 0.90),
+            target,
+            visible,
+        )
+        broken["loss_head_outer_route_connectivity"].backward()
+
+        self.assertGreater(
+            float(
+                broken["loss_head_outer_route_connectivity"].detach()
+            ),
+            float(
+                connected["loss_head_outer_route_connectivity"].detach()
+            ),
+        )
+        self.assertLess(float(logits.grad[0, edge[1]]), 0.0)
+        self.assertGreater(
+            float(broken["count_head_outer_route_positive_edges"]),
+            0.0,
         )
 
     def test_siglip_text_branch_preserves_seeded_base_initialization(self):
