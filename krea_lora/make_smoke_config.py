@@ -25,6 +25,10 @@ def main() -> None:
     config["training"]["layerwise_casting"] = True
     config["training"]["max_train_steps"] = 1
     config["training"]["save_every"] = 0
+    if "inference" in config:
+        config["inference"]["output_path"] = str(root / "generated.png")
+        config["inference"]["steps"] = 2
+        config["inference"]["layerwise_casting"] = True
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("w", encoding="utf-8") as handle:

@@ -1,5 +1,63 @@
 # Krea-2-Raw Minecraft Preview LoRA
 
+## Recommended: SKING_DDJ paired conditional LoRA
+
+`configs/ddj_conditional.json` is the real reference-image training path. It
+uses 8,087 matching `_source` and `_result` records from
+`/home/ds/llms/SKING_DDJ_Dataset`. Existing historical `_edited` files are not
+used as ground truth because many contain gradients, smooth detail, or older
+camera layouts. Every target is regenerated from the valid 64x64 RGBA result
+skin with the renderer's `front_left` and `back_left` mappings.
+
+This makes all target pixels consequences of Minecraft's base/outer UV layers:
+there are no handheld meshes, capes, lighting effects, or geometry outside the
+skin model. The target background is one uniform solid blue.
+
+The conditional transformer sequence is:
+
+```text
+[text | noisy edited-target latent (t/h/w region 0) | clean source-image latent (region 1)]
+```
+
+Both images are compressed by the frozen Qwen Image VAE. Krea2 attention LoRA
+learns to read the clean source tokens while predicting flow only for the
+target tokens. The source is therefore present at every denoising step; this is
+not ordinary high-strength img2img and does not depend on a generated text
+caption.
+
+Run the paired workflow remotely:
+
+```bash
+cd /home/ds/llms/SkingToolkit/krea_lora
+bash scripts/11_prepare_ddj_pairs.sh
+bash scripts/12_cache_ddj_prompt.sh
+bash scripts/13_cache_ddj_latents.sh
+bash scripts/14_train_ddj_conditional.sh
+```
+
+Or run the idempotent sequence with:
+
+```bash
+bash scripts/run_ddj_conditional.sh
+```
+
+Generate from an arbitrary image after training:
+
+```bash
+bash scripts/15_generate_ddj_conditional.sh \
+  --source /path/to/reference.png \
+  --output /path/to/mc_preview.png
+```
+
+The paired one-step integration test is `bash scripts/smoke_test_ddj.sh`.
+Production training defaults to rank 32, 6,000 steps, effective batch 4, and a
+65GB free-VRAM launch guard. Its final adapter is written to
+`runs/ddj_conditional_raw_lora/final/pytorch_lora_weights.safetensors`.
+
+The earlier `mc_preview.json` workflow below remains useful as an unpaired
+camera/layout LoRA, but it cannot reproduce an arbitrary source identity as
+reliably as the paired workflow.
+
 This subproject trains a LoRA on the Krea2 transformer to make the requested
 Minecraft preview layout more stable:
 

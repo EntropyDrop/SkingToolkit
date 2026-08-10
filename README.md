@@ -133,5 +133,7 @@ python -m unittest discover -s SkingToolkit/dense_uv_parser -p 'test_*.py'
 
 The independent Krea-2-Raw Minecraft preview fine-tuning project lives in
 [`krea_lora`](krea_lora/README.md). It renders exact fixed-view supervision
-from the existing skins, caches frozen Qwen Image VAE/text features, and trains
-only a Diffusers-compatible Krea2 Transformer LoRA.
+from the existing skins and includes a paired SKING_DDJ workflow that conditions
+each denoising step on an arbitrary source-image latent. It caches frozen Qwen
+Image VAE/text features and trains only a Diffusers-compatible Krea2 Transformer
+LoRA.

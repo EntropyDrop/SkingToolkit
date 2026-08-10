@@ -1,6 +1,6 @@
 data/
 runs/
 .smoke/
+.smoke_ddj/
 __pycache__/
 *.pyc
-
