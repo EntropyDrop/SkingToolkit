@@ -8,3 +8,4 @@ output
 control_imgs
 examples
 target_imgs
+dense_uv_parser/output_history
