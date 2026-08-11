@@ -18,6 +18,7 @@ from safetensors.torch import load_file
 from torch.utils.data import DataLoader, Dataset
 from tqdm.auto import tqdm
 
+from checkpoint_preview import CheckpointPreviewer, checkpoint_test_image_paths
 from common import load_config, prompt_cache_key, read_jsonl, resolve_dtype, write_json
 from reference_conditioning import prepare_paired_position_ids
 
@@ -81,6 +82,9 @@ def main() -> None:
     conditioning_mode = str(train_config.get("conditioning_mode", "source_bridge"))
     if conditioning_mode not in {"source_bridge", "target_reference_concat"}:
         raise ValueError(f"Unsupported conditioning_mode: {conditioning_mode}")
+    checkpoint_test_paths = checkpoint_test_image_paths()
+    if checkpoint_test_paths and conditioning_mode != "source_bridge":
+        raise ValueError("KREA_CHECKPOINT_TEST_IMAGES requires training.conditioning_mode=source_bridge")
     model_path = Path(model_config["path"]).expanduser().resolve()
     dataset_dir = Path(data_config["dataset_dir"]).expanduser().resolve()
     output_dir = Path(args.output_dir or train_config["output_dir"]).expanduser().resolve()
@@ -240,6 +244,28 @@ def main() -> None:
     source_noise_strength = float(train_config.get("source_noise_strength", 0.0))
     if not 0.0 <= source_noise_strength <= 1.0:
         raise ValueError("source_noise_strength must be between 0 and 1")
+    checkpoint_previewer = None
+    if checkpoint_test_paths and accelerator.is_main_process:
+        inference_config = config["inference"]
+        checkpoint_previewer = CheckpointPreviewer(
+            image_paths=checkpoint_test_paths,
+            model_path=model_path,
+            prompt_embeds=prompt_cache[prompt_cache_key("embeds", first_prompt_id)],
+            prompt_mask=prompt_cache[prompt_cache_key("mask", first_prompt_id)],
+            device=accelerator.device,
+            dtype=weight_dtype,
+            width=int(inference_config.get("width", width)),
+            height=int(inference_config.get("height", height)),
+            vae_scale_factor=int(model_config.get("vae_scale_factor", 8)),
+            patch_size=int(model_config.get("patch_size", 2)),
+            steps=int(inference_config.get("steps", 28)),
+            seed=int(inference_config.get("seed", train_config["seed"])),
+            source_noise_strength=float(inference_config.get("source_noise_strength", 0.0)),
+        )
+        print(
+            f"checkpoint previews: {len(checkpoint_test_paths)} image(s), "
+            f"{checkpoint_previewer.steps} steps, positive prompt without CFG"
+        )
     global_step = 0
     progress = tqdm(range(max_train_steps), disable=not accelerator.is_local_main_process, desc="Krea2 paired LoRA")
     metadata = {
@@ -333,12 +359,51 @@ def main() -> None:
                 save_every = int(train_config.get("save_every", 500))
                 if save_every > 0 and global_step % save_every == 0:
                     accelerator.wait_for_everyone()
-                    save_lora(transformer, accelerator, output_dir / f"checkpoint-{global_step}", metadata)
+                    checkpoint_dir = output_dir / f"checkpoint-{global_step}"
+                    save_lora(transformer, accelerator, checkpoint_dir, metadata)
+                    if accelerator.is_main_process and checkpoint_previewer is not None:
+                        generated = checkpoint_previewer.save(
+                            accelerator.unwrap_model(transformer),
+                            checkpoint_dir / "tests",
+                        )
+                        write_json(
+                            checkpoint_dir / "tests" / "preview.json",
+                            {
+                                "checkpoint": global_step,
+                                "source_images": [str(path) for path in checkpoint_test_paths],
+                                "generated_images": [str(path) for path in generated],
+                                "steps": checkpoint_previewer.steps,
+                                "guidance_scale": 0.0,
+                                "prompt_id": first_prompt_id,
+                                "conditioning_schema": conditioning_mode,
+                            },
+                        )
+                        print(f"checkpoint previews saved: {checkpoint_dir / 'tests'}")
+                    accelerator.wait_for_everyone()
             if global_step >= max_train_steps:
                 break
 
     accelerator.wait_for_everyone()
-    save_lora(transformer, accelerator, output_dir / "final", metadata)
+    final_dir = output_dir / "final"
+    save_lora(transformer, accelerator, final_dir, metadata)
+    if accelerator.is_main_process and checkpoint_previewer is not None:
+        generated = checkpoint_previewer.save(
+            accelerator.unwrap_model(transformer),
+            final_dir / "tests",
+        )
+        write_json(
+            final_dir / "tests" / "preview.json",
+            {
+                "checkpoint": "final",
+                "source_images": [str(path) for path in checkpoint_test_paths],
+                "generated_images": [str(path) for path in generated],
+                "steps": checkpoint_previewer.steps,
+                "guidance_scale": 0.0,
+                "prompt_id": first_prompt_id,
+                "conditioning_schema": conditioning_mode,
+            },
+        )
+        print(f"final previews saved: {final_dir / 'tests'}")
     if accelerator.is_main_process:
         write_json(
             output_dir / "training_state.json",

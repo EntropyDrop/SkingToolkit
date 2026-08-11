@@ -69,6 +69,30 @@ bash scripts/14_train_ddj_conditional.sh \
   --resume-lora runs/ddj_conditional_raw_lora/final
 ```
 
+To render the same arbitrary reference image whenever a `checkpoint-N` is
+saved, set `KREA_CHECKPOINT_TEST_IMAGES` before launching training:
+
+```bash
+export KREA_CHECKPOINT_TEST_IMAGES="/home/ds/llms/SKING_DDJ_Dataset/test_input/img9.png"
+bash scripts/14_train_ddj_conditional.sh \
+  --resume-lora runs/ddj_conditional_raw_lora/final
+```
+
+The value can contain multiple absolute paths separated by `:` on Linux:
+
+```bash
+export KREA_CHECKPOINT_TEST_IMAGES="/path/to/a.png:/path/to/b.jpg"
+```
+
+Each periodic result is saved under
+`runs/ddj_source_bridge_raw_lora/checkpoint-N/tests/`; the final result is also
+saved under `final/tests/`. Every directory contains the fitted reference,
+generated PNG, and `preview.json`. The preview reuses the cached positive
+training prompt and current in-memory LoRA, with the configured inference step
+count and no CFG. It therefore does not load the Qwen3-VL text encoder. The
+Qwen Image VAE is loaded only when the environment variable is non-empty; when
+the variable is unset, training behavior and memory use are unchanged.
+
 The earlier `mc_preview.json` workflow below remains useful as an unpaired
 camera/layout LoRA, but it cannot reproduce an arbitrary source identity as
 reliably as the paired workflow.

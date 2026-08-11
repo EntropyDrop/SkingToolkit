@@ -11,4 +11,7 @@ if (( KREA_FREE_MB < KREA_MIN_FREE_MB )); then
   echo "Let other GPU jobs finish, or lower KREA_MIN_FREE_MB only after enabling training.layerwise_casting."
   exit 2
 fi
+if [[ -n "${KREA_CHECKPOINT_TEST_IMAGES:-}" ]]; then
+  echo "Checkpoint test image(s): ${KREA_CHECKPOINT_TEST_IMAGES}"
+fi
 accelerate launch --num_processes 1 --mixed_precision bf16 train_conditional_lora.py --config "${KREA_CONFIG}" "$@"
