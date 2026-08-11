@@ -22,17 +22,25 @@ from reference_conditioning import (
 CHECKPOINT_TEST_IMAGES_ENV = "KREA_CHECKPOINT_TEST_IMAGES"
 
 
-def checkpoint_test_image_paths(value: str | None = None) -> list[Path]:
-    """Resolve colon-separated checkpoint test images from one environment variable."""
-    raw_value = os.environ.get(CHECKPOINT_TEST_IMAGES_ENV, "") if value is None else value
+def checkpoint_test_image_paths(configured_paths: list[str] | None = None) -> list[Path]:
+    """Resolve configured paths, with the environment variable as an optional override."""
+    env_value = os.environ.get(CHECKPOINT_TEST_IMAGES_ENV)
+    if env_value is not None:
+        candidates = env_value.split(os.pathsep)
+        source = CHECKPOINT_TEST_IMAGES_ENV
+    else:
+        candidates = configured_paths or []
+        source = "checkpoint_preview.test_images"
     paths: list[Path] = []
     seen: set[Path] = set()
-    for item in raw_value.split(os.pathsep):
+    for item in candidates:
+        if not isinstance(item, str):
+            raise TypeError(f"{source} entries must be strings, got {type(item).__name__}")
         if not item.strip():
             continue
         path = Path(item.strip()).expanduser().resolve()
         if not path.is_file():
-            raise FileNotFoundError(f"{CHECKPOINT_TEST_IMAGES_ENV} image does not exist: {path}")
+            raise FileNotFoundError(f"{source} image does not exist: {path}")
         if path not in seen:
             paths.append(path)
             seen.add(path)
@@ -236,4 +244,3 @@ class CheckpointPreviewer:
         finally:
             transformer.train(was_training)
         return generated_paths
-

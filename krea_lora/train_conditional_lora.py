@@ -82,9 +82,10 @@ def main() -> None:
     conditioning_mode = str(train_config.get("conditioning_mode", "source_bridge"))
     if conditioning_mode not in {"source_bridge", "target_reference_concat"}:
         raise ValueError(f"Unsupported conditioning_mode: {conditioning_mode}")
-    checkpoint_test_paths = checkpoint_test_image_paths()
+    checkpoint_preview_config = config.get("checkpoint_preview", {})
+    checkpoint_test_paths = checkpoint_test_image_paths(checkpoint_preview_config.get("test_images", []))
     if checkpoint_test_paths and conditioning_mode != "source_bridge":
-        raise ValueError("KREA_CHECKPOINT_TEST_IMAGES requires training.conditioning_mode=source_bridge")
+        raise ValueError("Checkpoint previews require training.conditioning_mode=source_bridge")
     model_path = Path(model_config["path"]).expanduser().resolve()
     dataset_dir = Path(data_config["dataset_dir"]).expanduser().resolve()
     output_dir = Path(args.output_dir or train_config["output_dir"]).expanduser().resolve()

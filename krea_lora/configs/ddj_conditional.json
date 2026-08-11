@@ -26,6 +26,13 @@
   "cache": {
     "vae_batch_size": 2
   },
+  "checkpoint_preview": {
+    "test_images": [
+      "/home/ds/llms/SkingDataset/DDJ_real2render/test_input/img3.png",
+      "/home/ds/llms/SkingDataset/DDJ_real2render/test_input/img14.png",
+      "/home/ds/llms/SkingDataset/DDJ_real2render/test_input/img17.png"
+    ]
+  },
   "training": {
     "output_dir": "/home/ds/llms/SkingToolkit/krea_lora/runs/ddj_source_bridge_raw_lora",
     "conditioning_mode": "source_bridge",

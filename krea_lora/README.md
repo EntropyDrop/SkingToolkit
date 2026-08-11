@@ -69,19 +69,32 @@ bash scripts/14_train_ddj_conditional.sh \
   --resume-lora runs/ddj_conditional_raw_lora/final
 ```
 
-To render the same arbitrary reference image whenever a `checkpoint-N` is
-saved, set `KREA_CHECKPOINT_TEST_IMAGES` before launching training:
+The fixed checkpoint test set is configured in
+`configs/ddj_conditional.json`:
+
+```json
+"checkpoint_preview": {
+  "test_images": [
+    "/home/ds/llms/SkingDataset/DDJ_real2render/test_input/img3.png",
+    "/home/ds/llms/SkingDataset/DDJ_real2render/test_input/img14.png",
+    "/home/ds/llms/SkingDataset/DDJ_real2render/test_input/img17.png"
+  ]
+}
+```
+
+`KREA_CHECKPOINT_TEST_IMAGES` remains available as a temporary override. Its
+value can contain multiple absolute paths separated by `:` on Linux:
 
 ```bash
-export KREA_CHECKPOINT_TEST_IMAGES="/home/ds/llms/SKING_DDJ_Dataset/test_input/img9.png"
+export KREA_CHECKPOINT_TEST_IMAGES="/path/to/a.png:/path/to/b.jpg"
 bash scripts/14_train_ddj_conditional.sh \
   --resume-lora runs/ddj_conditional_raw_lora/final
 ```
 
-The value can contain multiple absolute paths separated by `:` on Linux:
+Set it to an empty string to temporarily disable configured previews:
 
 ```bash
-export KREA_CHECKPOINT_TEST_IMAGES="/path/to/a.png:/path/to/b.jpg"
+export KREA_CHECKPOINT_TEST_IMAGES=""
 ```
 
 Each periodic result is saved under
@@ -90,8 +103,9 @@ saved under `final/tests/`. Every directory contains the fitted reference,
 generated PNG, and `preview.json`. The preview reuses the cached positive
 training prompt and current in-memory LoRA, with the configured inference step
 count and no CFG. It therefore does not load the Qwen3-VL text encoder. The
-Qwen Image VAE is loaded only when the environment variable is non-empty; when
-the variable is unset, training behavior and memory use are unchanged.
+Qwen Image VAE is loaded only when at least one test image is selected. An
+explicitly empty environment override disables the extra inference time and
+memory use.
 
 The earlier `mc_preview.json` workflow below remains useful as an unpaired
 camera/layout LoRA, but it cannot reproduce an arbitrary source identity as
