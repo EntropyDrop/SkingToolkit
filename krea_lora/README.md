@@ -108,6 +108,10 @@ Qwen Image VAE is loaded only when at least one test image is selected. An
 explicitly empty environment override disables the extra inference time and
 memory use.
 
+Before the first optimizer update, training also saves `checkpoint-0` and its
+`tests/` previews. With `--resume-lora`, this is the resumed adapter's baseline;
+without it, this is the newly initialized LoRA baseline.
+
 The earlier `mc_preview.json` workflow below remains useful as an unpaired
 camera/layout LoRA, but it cannot reproduce an arbitrary source identity as
 reliably as the paired workflow.

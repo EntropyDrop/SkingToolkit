@@ -73,6 +73,31 @@ def save_lora(transformer: torch.nn.Module, accelerator: Accelerator, output_dir
     write_json(output_dir / "adapter_metadata.json", metadata)
 
 
+def save_checkpoint_previews(
+    previewer: CheckpointPreviewer,
+    transformer: torch.nn.Module,
+    checkpoint_dir: Path,
+    checkpoint: int | str,
+    source_images: list[Path],
+    prompt_id: str,
+    conditioning_schema: str,
+) -> None:
+    generated = previewer.save(transformer, checkpoint_dir / "tests")
+    write_json(
+        checkpoint_dir / "tests" / "preview.json",
+        {
+            "checkpoint": checkpoint,
+            "source_images": [str(path) for path in source_images],
+            "generated_images": [str(path) for path in generated],
+            "steps": previewer.steps,
+            "guidance_scale": 0.0,
+            "prompt_id": prompt_id,
+            "conditioning_schema": conditioning_schema,
+        },
+    )
+    print(f"checkpoint previews saved: {checkpoint_dir / 'tests'}")
+
+
 def main() -> None:
     args = parse_args()
     config = load_config(args.config)
@@ -280,6 +305,24 @@ def main() -> None:
         "layerwise_casting": str(bool(train_config.get("layerwise_casting", False))),
     }
 
+    if checkpoint_test_paths:
+        accelerator.wait_for_everyone()
+        checkpoint_dir = output_dir / "checkpoint-0"
+        save_lora(transformer, accelerator, checkpoint_dir, metadata)
+        if accelerator.is_main_process:
+            if checkpoint_previewer is None:
+                raise RuntimeError("Main process did not initialize the checkpoint previewer")
+            save_checkpoint_previews(
+                checkpoint_previewer,
+                accelerator.unwrap_model(transformer),
+                checkpoint_dir,
+                0,
+                checkpoint_test_paths,
+                first_prompt_id,
+                conditioning_mode,
+            )
+        accelerator.wait_for_everyone()
+
     transformer.train()
     while global_step < max_train_steps:
         for clean_target, clean_source, prompt_ids in loader:
@@ -363,23 +406,15 @@ def main() -> None:
                     checkpoint_dir = output_dir / f"checkpoint-{global_step}"
                     save_lora(transformer, accelerator, checkpoint_dir, metadata)
                     if accelerator.is_main_process and checkpoint_previewer is not None:
-                        generated = checkpoint_previewer.save(
+                        save_checkpoint_previews(
+                            checkpoint_previewer,
                             accelerator.unwrap_model(transformer),
-                            checkpoint_dir / "tests",
+                            checkpoint_dir,
+                            global_step,
+                            checkpoint_test_paths,
+                            first_prompt_id,
+                            conditioning_mode,
                         )
-                        write_json(
-                            checkpoint_dir / "tests" / "preview.json",
-                            {
-                                "checkpoint": global_step,
-                                "source_images": [str(path) for path in checkpoint_test_paths],
-                                "generated_images": [str(path) for path in generated],
-                                "steps": checkpoint_previewer.steps,
-                                "guidance_scale": 0.0,
-                                "prompt_id": first_prompt_id,
-                                "conditioning_schema": conditioning_mode,
-                            },
-                        )
-                        print(f"checkpoint previews saved: {checkpoint_dir / 'tests'}")
                     accelerator.wait_for_everyone()
             if global_step >= max_train_steps:
                 break
@@ -388,23 +423,15 @@ def main() -> None:
     final_dir = output_dir / "final"
     save_lora(transformer, accelerator, final_dir, metadata)
     if accelerator.is_main_process and checkpoint_previewer is not None:
-        generated = checkpoint_previewer.save(
+        save_checkpoint_previews(
+            checkpoint_previewer,
             accelerator.unwrap_model(transformer),
-            final_dir / "tests",
+            final_dir,
+            "final",
+            checkpoint_test_paths,
+            first_prompt_id,
+            conditioning_mode,
         )
-        write_json(
-            final_dir / "tests" / "preview.json",
-            {
-                "checkpoint": "final",
-                "source_images": [str(path) for path in checkpoint_test_paths],
-                "generated_images": [str(path) for path in generated],
-                "steps": checkpoint_previewer.steps,
-                "guidance_scale": 0.0,
-                "prompt_id": first_prompt_id,
-                "conditioning_schema": conditioning_mode,
-            },
-        )
-        print(f"final previews saved: {final_dir / 'tests'}")
     if accelerator.is_main_process:
         write_json(
             output_dir / "training_state.json",
