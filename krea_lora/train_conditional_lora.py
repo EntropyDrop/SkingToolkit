@@ -116,10 +116,35 @@ def main() -> None:
     transformer.requires_grad_(False)
     if bool(train_config.get("gradient_checkpointing", True)):
         transformer.enable_gradient_checkpointing()
+    lora_rank = int(train_config["rank"])
+    lora_alpha = int(train_config["lora_alpha"])
+    resume_transformer_state = None
+    if args.resume_lora:
+        state = Krea2Pipeline.lora_state_dict(args.resume_lora)
+        if isinstance(state, tuple):
+            state = state[0]
+        resume_transformer_state = {
+            key.removeprefix("transformer."): value
+            for key, value in state.items()
+            if key.startswith("transformer.")
+        }
+        inferred_ranks = {
+            int(value.shape[0])
+            for key, value in resume_transformer_state.items()
+            if key.endswith("lora_A.weight")
+        }
+        if len(inferred_ranks) != 1:
+            raise ValueError(f"Could not infer one LoRA rank from {args.resume_lora}: {sorted(inferred_ranks)}")
+        inferred_rank = inferred_ranks.pop()
+        if inferred_rank != lora_rank:
+            if lora_alpha == lora_rank:
+                lora_alpha = inferred_rank
+            print(f"overriding configured LoRA rank {lora_rank} with resumed rank {inferred_rank}")
+            lora_rank = inferred_rank
     transformer.add_adapter(
         LoraConfig(
-            r=int(train_config["rank"]),
-            lora_alpha=int(train_config["lora_alpha"]),
+            r=lora_rank,
+            lora_alpha=lora_alpha,
             lora_dropout=float(train_config.get("lora_dropout", 0.0)),
             init_lora_weights="gaussian",
             target_modules=list(train_config["target_modules"]),
@@ -130,18 +155,10 @@ def main() -> None:
             storage_dtype=torch.float8_e4m3fn,
             compute_dtype=weight_dtype,
         )
-    if args.resume_lora:
-        state = Krea2Pipeline.lora_state_dict(args.resume_lora)
-        if isinstance(state, tuple):
-            state = state[0]
-        transformer_state = {
-            key.removeprefix("transformer."): value
-            for key, value in state.items()
-            if key.startswith("transformer.")
-        }
+    if resume_transformer_state is not None:
         incompatible = set_peft_model_state_dict(
             transformer,
-            transformer_state,
+            resume_transformer_state,
             adapter_name="default",
         )
         if incompatible.unexpected_keys:
@@ -230,7 +247,8 @@ def main() -> None:
         "task": "arbitrary reference image to strict Minecraft front/back preview",
         "conditioning_schema": conditioning_mode,
         "source_noise_strength": str(source_noise_strength),
-        "rank": str(train_config["rank"]),
+        "rank": str(lora_rank),
+        "lora_alpha": str(lora_alpha),
         "resolution": f"{width}x{height}",
         "layerwise_casting": str(bool(train_config.get("layerwise_casting", False))),
     }
