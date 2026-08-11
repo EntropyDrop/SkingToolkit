@@ -7,11 +7,12 @@ uses 8,087 matching `_source` and `_result` records from
 `/home/ds/llms/SKING_DDJ_Dataset`. Existing historical `_edited` files are not
 used as ground truth because many contain gradients, smooth detail, or older
 camera layouts. Every target is regenerated from the valid 64x64 RGBA result
-skin with the renderer's `front_left` and `back_left` mappings.
+skin with the renderer's `front_right` and `back_left` mappings.
 
 This makes all target pixels consequences of Minecraft's base/outer UV layers:
 there are no handheld meshes, capes, lighting effects, or geometry outside the
-skin model. The target background is one uniform solid blue.
+skin model. The target background is uniform pure white, matching the default
+professional preview prompt in `configs/ddj_conditional.json`.
 
 The paired v2 objective is a source-to-target rectified-flow bridge:
 
@@ -59,7 +60,7 @@ The paired one-step integration test is `bash scripts/smoke_test_ddj.sh`.
 Production v2 training defaults to rank 32, 2,000 steps, effective batch 4,
 learning rate `2e-5`, and a
 65GB free-VRAM launch guard. Its final adapter is written to
-`runs/ddj_source_bridge_raw_lora/final/pytorch_lora_weights.safetensors`.
+`runs/ddj_source_bridge_professional_white_lora/final/pytorch_lora_weights.safetensors`.
 
 The completed legacy concat adapter can be used only as an MC-domain
 initialization for v2 (its old inference protocol should not be used):
@@ -98,7 +99,7 @@ export KREA_CHECKPOINT_TEST_IMAGES=""
 ```
 
 Each periodic result is saved under
-`runs/ddj_source_bridge_raw_lora/checkpoint-N/tests/`; the final result is also
+`runs/ddj_source_bridge_professional_white_lora/checkpoint-N/tests/`; the final result is also
 saved under `final/tests/`. Every directory contains the fitted reference,
 generated PNG, and `preview.json`. The preview reuses the cached positive
 training prompt and current in-memory LoRA, with the configured inference step

@@ -10,18 +10,18 @@
     "dataset_source_dir": "/home/ds/llms/SKING_DDJ_Dataset",
     "toolkit_dir": "/home/ds/llms/SkingToolkit",
     "mappings_dir": "/home/ds/llms/github/differentiable_minecraft_renderer/mappings_256x512",
-    "dataset_dir": "/home/ds/llms/SkingToolkit/krea_lora/data/ddj_conditional_512",
-    "front_view": "front_left",
+    "dataset_dir": "/home/ds/llms/SkingToolkit/krea_lora/data/ddj_conditional_professional_white_512",
+    "front_view": "front_right",
     "back_view": "back_left",
-    "background_rgb": [0.1843137255, 0.5019607843, 0.9294117647],
+    "background_rgb": [1.0, 1.0, 1.0],
     "source_background_rgb_255": [255, 255, 255],
     "width": 512,
     "height": 512,
     "max_images": 0,
     "render_batch_size": 8,
     "validation_fraction": 0.05,
-    "prompt_id": "ddj_reference",
-    "training_prompt": "mc_ref_to_preview. Convert the supplied reference character into one strict Minecraft skin preview sheet. Highest priority: use hard square texels no finer than a valid 64x64 Minecraft UV skin; discard details rather than drawing smooth, curved, anti-aliased, high-resolution, thin, or non-block elements. Show the same character in fixed front-left and back-left full-body views, one on each half, identical scale and neutral pose. Use only classic Minecraft cuboids and textures supported by the base and outer skin layers. Accurately preserve recognizable hair, face, body colors, all clothing, footwear, and wearable accessories from the reference, but omit handheld objects and capes. Use one uniform solid blue background with no lighting, shadows, floor, reflections, glow, text, labels, interface, extra characters, or extra geometry."
+    "prompt_id": "professional_mc_preview",
+    "training_prompt": "Create a professional Minecraft character skin 3D preview sheet. Exactly one square image containing exactly two full-body Minecraft characters of the same design, arranged side by side in two equal halves with equal margins: left is a front-right three-quarter view; right is a back-left three-quarter view rotated exactly 180 degrees. Use only the standard Minecraft Steve player model: one cube head, one rectangular torso, two straight 4-pixel-wide arms hanging down, and two separate straight rectangular legs on one baseline. Neutral standing pose. Use the same orthographic camera, approximately 45 degrees elevated and looking downward, with identical scale, distance, alignment, and pose in both views. No perspective distortion. Hair, face, clothing, footwear, and wearable accessories must be flat low-resolution square pixel textures painted directly on the cuboid surfaces, using a limited palette and two or three solid tones per material. Sharp equal-sized pixels, hard edges, no antialiasing, gradients, curves, rounded parts, smooth surfaces, realistic anatomy, or thin geometry. Use only the Minecraft base skin and outer skin layers. No extra geometry extending outside those layers. No handheld items, weapons, capes, loose flowing parts, props, extra views, extra characters, text, labels, UI, watermark, floor, environment, shadows, reflections, glow, or special effects. Isolate both characters on a uniform pure white background."
   },
   "cache": {
     "vae_batch_size": 2
@@ -34,7 +34,7 @@
     ]
   },
   "training": {
-    "output_dir": "/home/ds/llms/SkingToolkit/krea_lora/runs/ddj_source_bridge_raw_lora",
+    "output_dir": "/home/ds/llms/SkingToolkit/krea_lora/runs/ddj_source_bridge_professional_white_lora",
     "conditioning_mode": "source_bridge",
     "seed": 20260811,
     "batch_size": 1,
@@ -65,7 +65,7 @@
     "save_every": 250
   },
   "inference": {
-    "output_path": "/home/ds/llms/SkingToolkit/krea_lora/runs/ddj_source_bridge_raw_lora/generated.png",
+    "output_path": "/home/ds/llms/SkingToolkit/krea_lora/runs/ddj_source_bridge_professional_white_lora/generated.png",
     "width": 512,
     "height": 512,
     "steps": 28,
@@ -73,7 +73,7 @@
     "seed": 20260811,
     "layerwise_casting": false,
     "source_noise_strength": 0.0,
-    "base_prompt": "mc_ref_to_preview. Reproduce the supplied reference character as a strict 64x64-texture Minecraft skin preview, fixed front-left and back-left full-body views, pure solid blue background, no lighting, no handheld items, no cape, no extra geometry.",
+    "base_prompt": "Create a professional Minecraft character skin 3D preview sheet. Exactly one square image containing exactly two full-body Minecraft characters of the same design, arranged side by side in two equal halves with equal margins: left is a front-right three-quarter view; right is a back-left three-quarter view rotated exactly 180 degrees. Use only the standard Minecraft Steve player model: one cube head, one rectangular torso, two straight 4-pixel-wide arms hanging down, and two separate straight rectangular legs on one baseline. Neutral standing pose. Use the same orthographic camera, approximately 45 degrees elevated and looking downward, with identical scale, distance, alignment, and pose in both views. No perspective distortion. Hair, face, clothing, footwear, and wearable accessories must be flat low-resolution square pixel textures painted directly on the cuboid surfaces, using a limited palette and two or three solid tones per material. Sharp equal-sized pixels, hard edges, no antialiasing, gradients, curves, rounded parts, smooth surfaces, realistic anatomy, or thin geometry. Use only the Minecraft base skin and outer skin layers. No extra geometry extending outside those layers. No handheld items, weapons, capes, loose flowing parts, props, extra views, extra characters, text, labels, UI, watermark, floor, environment, shadows, reflections, glow, or special effects. Isolate both characters on a uniform pure white background.",
     "negative_prompt": "smooth texture, high resolution texture, anti-aliasing, curves, rounded body, realistic anatomy, extra geometry, protruding accessories, handheld object, weapon, cape, lighting, shadow, floor, gradient background, text, UI, watermark"
   }
 }
