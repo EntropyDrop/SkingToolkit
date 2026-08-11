@@ -13,7 +13,7 @@ from diffusers import FlowMatchEulerDiscreteScheduler, Krea2Pipeline, Krea2Trans
 from diffusers.optimization import get_scheduler
 from diffusers.training_utils import compute_density_for_timestep_sampling, compute_loss_weighting_for_sd3
 from peft import LoraConfig
-from peft.utils import get_peft_model_state_dict
+from peft.utils import get_peft_model_state_dict, set_peft_model_state_dict
 from safetensors.torch import load_file
 from torch.utils.data import DataLoader, Dataset
 from tqdm.auto import tqdm
@@ -135,7 +135,19 @@ def main() -> None:
         state = Krea2Pipeline.lora_state_dict(args.resume_lora)
         if isinstance(state, tuple):
             state = state[0]
-        Krea2Pipeline.load_lora_into_transformer(state, transformer=transformer)
+        transformer_state = {
+            key.removeprefix("transformer."): value
+            for key, value in state.items()
+            if key.startswith("transformer.")
+        }
+        incompatible = set_peft_model_state_dict(
+            transformer,
+            transformer_state,
+            adapter_name="default",
+        )
+        if incompatible.unexpected_keys:
+            raise ValueError(f"Unexpected resumed LoRA keys: {incompatible.unexpected_keys[:8]}")
+        print(f"resumed LoRA initialization: {args.resume_lora}")
 
     trainable_parameters = [parameter for parameter in transformer.parameters() if parameter.requires_grad]
     trainable_count = sum(parameter.numel() for parameter in trainable_parameters)

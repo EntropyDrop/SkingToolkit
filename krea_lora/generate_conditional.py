@@ -41,6 +41,9 @@ def generate(args: argparse.Namespace) -> Path:
     model_config = config["model"]
     training = config["training"]
     inference = config["inference"]
+    conditioning_mode = str(training.get("conditioning_mode", "source_bridge"))
+    if conditioning_mode not in {"source_bridge", "target_reference_concat"}:
+        raise ValueError(f"Unsupported conditioning_mode: {conditioning_mode}")
     model_path = Path(model_config["path"]).expanduser().resolve()
     lora_path = Path(args.lora or (Path(training["output_dir"]) / "final")).expanduser().resolve()
     output_path = Path(args.output or inference["output_path"]).expanduser().resolve()
@@ -87,23 +90,48 @@ def generate(args: argparse.Namespace) -> Path:
     )
     seed = int(args.seed if args.seed is not None else inference.get("seed", 20260811))
     generator = torch.Generator(device=device).manual_seed(seed)
-    num_channels = pipe.transformer.config.in_channels // (pipe.patch_size**2)
-    target_latents = pipe.prepare_latents(
-        1,
-        num_channels,
-        height,
-        width,
-        prompt_embeds.dtype,
-        device,
-        generator,
-    )
-    if source_latents.shape != target_latents.shape:
-        raise ValueError(
-            f"Source/target packed latent shapes differ: {source_latents.shape} vs {target_latents.shape}"
+    if conditioning_mode == "source_bridge":
+        source_noise_strength = float(inference.get("source_noise_strength", 0.0))
+        if not 0.0 <= source_noise_strength <= 1.0:
+            raise ValueError("inference.source_noise_strength must be between 0 and 1")
+        target_latents = source_latents.clone()
+        if source_noise_strength > 0:
+            source_noise = torch.randn(
+                source_latents.shape,
+                generator=generator,
+                device=device,
+                dtype=source_latents.dtype,
+            )
+            target_latents = (
+                (1.0 - source_noise_strength) * source_latents
+                + source_noise_strength * source_noise
+            )
+    else:
+        num_channels = pipe.transformer.config.in_channels // (pipe.patch_size**2)
+        target_latents = pipe.prepare_latents(
+            1,
+            num_channels,
+            height,
+            width,
+            prompt_embeds.dtype,
+            device,
+            generator,
         )
+        if source_latents.shape != target_latents.shape:
+            raise ValueError(
+                f"Source/target packed latent shapes differ: {source_latents.shape} vs {target_latents.shape}"
+            )
     grid_height = height // (pipe.vae_scale_factor * pipe.patch_size)
     grid_width = width // (pipe.vae_scale_factor * pipe.patch_size)
-    position_ids = prepare_paired_position_ids(prompt_embeds.shape[1], grid_height, grid_width, device)
+    if conditioning_mode == "source_bridge":
+        position_ids = Krea2Pipeline.prepare_position_ids(
+            prompt_embeds.shape[1],
+            grid_height,
+            grid_width,
+            device,
+        )
+    else:
+        position_ids = prepare_paired_position_ids(prompt_embeds.shape[1], grid_height, grid_width, device)
 
     steps = int(args.steps or inference.get("steps", 28))
     guidance_scale = float(
@@ -122,7 +150,11 @@ def generate(args: argparse.Namespace) -> Path:
     pipe.scheduler.set_begin_index(0)
     for timestep_value in tqdm(timesteps, desc="conditional denoise"):
         timestep = (timestep_value / pipe.scheduler.config.num_train_timesteps).expand(1).to(dtype)
-        model_input = torch.cat([target_latents, source_latents], dim=1)
+        model_input = (
+            target_latents
+            if conditioning_mode == "source_bridge"
+            else torch.cat([target_latents, source_latents], dim=1)
+        )
         conditional_full = pipe.transformer(
             hidden_states=model_input,
             encoder_hidden_states=prompt_embeds,
@@ -132,7 +164,11 @@ def generate(args: argparse.Namespace) -> Path:
             attention_kwargs={"scale": float(args.lora_scale)},
             return_dict=False,
         )[0]
-        prediction = conditional_full[:, :target_seq_len]
+        prediction = (
+            conditional_full
+            if conditioning_mode == "source_bridge"
+            else conditional_full[:, :target_seq_len]
+        )
         if guidance_scale > 0:
             negative_full = pipe.transformer(
                 hidden_states=model_input,
@@ -143,7 +179,11 @@ def generate(args: argparse.Namespace) -> Path:
                 attention_kwargs={"scale": float(args.lora_scale)},
                 return_dict=False,
             )[0]
-            negative_prediction = negative_full[:, :target_seq_len]
+            negative_prediction = (
+                negative_full
+                if conditioning_mode == "source_bridge"
+                else negative_full[:, :target_seq_len]
+            )
             prediction = prediction + guidance_scale * (prediction - negative_prediction)
         target_latents = pipe.scheduler.step(
             prediction,

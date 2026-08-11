@@ -13,17 +13,23 @@ This makes all target pixels consequences of Minecraft's base/outer UV layers:
 there are no handheld meshes, capes, lighting effects, or geometry outside the
 skin model. The target background is one uniform solid blue.
 
-The conditional transformer sequence is:
+The paired v2 objective is a source-to-target rectified-flow bridge:
 
 ```text
-[text | noisy edited-target latent (t/h/w region 0) | clean source-image latent (region 1)]
+x_sigma = (1 - sigma) * edited_target_latent + sigma * source_image_latent
+velocity_target = source_image_latent - edited_target_latent
 ```
 
-Both images are compressed by the frozen Qwen Image VAE. Krea2 attention LoRA
-learns to read the clean source tokens while predicting flow only for the
-target tokens. The source is therefore present at every denoising step; this is
-not ordinary high-strength img2img and does not depend on a generated text
-caption.
+Both images are compressed by the frozen Qwen Image VAE. Training must explain
+the complete transport from the source image at `sigma=1` to the edited MC
+target at `sigma=0`; it cannot minimize loss by denoising a target while
+ignoring a separate reference-token branch. Inference starts from the source
+latent itself and integrates the learned velocity to the target. This is not
+ordinary prompt-only generation and does not depend on a generated caption.
+
+The earlier `target_reference_concat` experiment is retained as a compatibility
+mode in code, but it is not recommended: the model can reconstruct the noisy
+target and ignore the side-channel reference even while training loss falls.
 
 Run the paired workflow remotely:
 
@@ -50,9 +56,18 @@ bash scripts/15_generate_ddj_conditional.sh \
 ```
 
 The paired one-step integration test is `bash scripts/smoke_test_ddj.sh`.
-Production training defaults to rank 32, 6,000 steps, effective batch 4, and a
+Production v2 training defaults to rank 32, 2,000 steps, effective batch 4,
+learning rate `2e-5`, and a
 65GB free-VRAM launch guard. Its final adapter is written to
-`runs/ddj_conditional_raw_lora/final/pytorch_lora_weights.safetensors`.
+`runs/ddj_source_bridge_raw_lora/final/pytorch_lora_weights.safetensors`.
+
+The completed legacy concat adapter can be used only as an MC-domain
+initialization for v2 (its old inference protocol should not be used):
+
+```bash
+bash scripts/14_train_ddj_conditional.sh \
+  --resume-lora runs/ddj_conditional_raw_lora/final
+```
 
 The earlier `mc_preview.json` workflow below remains useful as an unpaired
 camera/layout LoRA, but it cannot reproduce an arbitrary source identity as

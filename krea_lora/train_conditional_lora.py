@@ -10,9 +10,10 @@ from accelerate import Accelerator
 from accelerate.utils import ProjectConfiguration, set_seed
 from diffusers import FlowMatchEulerDiscreteScheduler, Krea2Pipeline, Krea2Transformer2DModel
 from diffusers.optimization import get_scheduler
+from diffusers.pipelines.krea2.pipeline_krea2 import calculate_shift
 from diffusers.training_utils import compute_density_for_timestep_sampling, compute_loss_weighting_for_sd3
 from peft import LoraConfig
-from peft.utils import get_peft_model_state_dict
+from peft.utils import get_peft_model_state_dict, set_peft_model_state_dict
 from safetensors.torch import load_file
 from torch.utils.data import DataLoader, Dataset
 from tqdm.auto import tqdm
@@ -49,7 +50,7 @@ class ConditionalLatentDataset(Dataset):
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Train Krea2 LoRA with [noisy target | clean reference] conditional latent tokens."
+        description="Train Krea2 LoRA with paired source-to-edited rectified flow."
     )
     parser.add_argument("--config", default=None)
     parser.add_argument("--max-train-steps", type=int, default=None)
@@ -77,6 +78,9 @@ def main() -> None:
     model_config = config["model"]
     data_config = config["data"]
     train_config = config["training"]
+    conditioning_mode = str(train_config.get("conditioning_mode", "source_bridge"))
+    if conditioning_mode not in {"source_bridge", "target_reference_concat"}:
+        raise ValueError(f"Unsupported conditioning_mode: {conditioning_mode}")
     model_path = Path(model_config["path"]).expanduser().resolve()
     dataset_dir = Path(data_config["dataset_dir"]).expanduser().resolve()
     output_dir = Path(args.output_dir or train_config["output_dir"]).expanduser().resolve()
@@ -130,14 +134,29 @@ def main() -> None:
         state = Krea2Pipeline.lora_state_dict(args.resume_lora)
         if isinstance(state, tuple):
             state = state[0]
-        Krea2Pipeline.load_lora_into_transformer(state, transformer=transformer)
+        transformer_state = {
+            key.removeprefix("transformer."): value
+            for key, value in state.items()
+            if key.startswith("transformer.")
+        }
+        incompatible = set_peft_model_state_dict(
+            transformer,
+            transformer_state,
+            adapter_name="default",
+        )
+        if incompatible.unexpected_keys:
+            raise ValueError(f"Unexpected resumed LoRA keys: {incompatible.unexpected_keys[:8]}")
+        print(f"resumed LoRA initialization: {args.resume_lora}")
 
     trainable_parameters = [parameter for parameter in transformer.parameters() if parameter.requires_grad]
     trainable_count = sum(parameter.numel() for parameter in trainable_parameters)
     total_count = sum(parameter.numel() for parameter in transformer.parameters())
     if accelerator.is_main_process:
         print(f"trainable parameters: {trainable_count:,} / {total_count:,} ({100 * trainable_count / total_count:.4f}%)")
-        print("conditional sequence: [noisy target tokens | clean source tokens]")
+        if conditioning_mode == "source_bridge":
+            print("conditioning: paired rectified flow source_latents -> target_latents")
+        else:
+            print("conditioning: legacy [noisy target tokens | clean source tokens]")
 
     optimizer = torch.optim.AdamW(
         trainable_parameters,
@@ -175,18 +194,42 @@ def main() -> None:
             f"Resolution implies {grid_height * grid_width} target tokens, cache has {target_sequence_length}"
         )
     prompt_length = prompt_cache[prompt_cache_key("embeds", first_prompt_id)].shape[1]
-    position_ids = prepare_paired_position_ids(prompt_length, grid_height, grid_width, accelerator.device)
+    if conditioning_mode == "source_bridge":
+        position_ids = Krea2Pipeline.prepare_position_ids(
+            prompt_length,
+            grid_height,
+            grid_width,
+            accelerator.device,
+        )
+    else:
+        position_ids = prepare_paired_position_ids(prompt_length, grid_height, grid_width, accelerator.device)
+    image_seq_len = target_sequence_length
+    mu = calculate_shift(
+        image_seq_len,
+        noise_scheduler.config.get("base_image_seq_len", 256),
+        noise_scheduler.config.get("max_image_seq_len", 6400),
+        noise_scheduler.config.get("base_shift", 0.5),
+        noise_scheduler.config.get("max_shift", 1.15),
+    )
+    noise_scheduler.set_timesteps(
+        noise_scheduler.config.num_train_timesteps,
+        device=accelerator.device,
+        mu=mu,
+    )
     schedule_timesteps = noise_scheduler.timesteps.to(accelerator.device)
     schedule_sigmas = noise_scheduler.sigmas.to(accelerator.device)
     weighting_scheme = str(train_config.get("weighting_scheme", "logit_normal"))
     reference_dropout = float(train_config.get("reference_dropout", 0.0))
+    source_noise_strength = float(train_config.get("source_noise_strength", 0.0))
+    if not 0.0 <= source_noise_strength <= 1.0:
+        raise ValueError("source_noise_strength must be between 0 and 1")
     global_step = 0
     progress = tqdm(range(max_train_steps), disable=not accelerator.is_local_main_process, desc="Krea2 paired LoRA")
     metadata = {
         "base_model": str(model_path),
         "task": "arbitrary reference image to strict Minecraft front/back preview",
-        "conditioning_schema": "target_then_reference_latents",
-        "reference_position_axis": "t=1",
+        "conditioning_schema": conditioning_mode,
+        "source_noise_strength": str(source_noise_strength),
         "rank": str(train_config["rank"]),
         "resolution": f"{width}x{height}",
         "layerwise_casting": str(bool(train_config.get("layerwise_casting", False))),
@@ -198,12 +241,11 @@ def main() -> None:
             with accelerator.accumulate(transformer):
                 clean_target = clean_target.to(accelerator.device, dtype=weight_dtype, non_blocking=True)
                 clean_source = clean_source.to(accelerator.device, dtype=weight_dtype, non_blocking=True)
-                if reference_dropout > 0:
+                if conditioning_mode == "target_reference_concat" and reference_dropout > 0:
                     keep = (torch.rand(clean_source.shape[0], device=accelerator.device) >= reference_dropout).to(
                         clean_source.dtype
                     ).view(-1, 1, 1)
                     clean_source = clean_source * keep
-                noise = torch.randn_like(clean_target)
                 u = compute_density_for_timestep_sampling(
                     weighting_scheme=weighting_scheme,
                     batch_size=clean_target.shape[0],
@@ -217,8 +259,21 @@ def main() -> None:
                 )
                 timesteps = schedule_timesteps[indices]
                 sigmas = schedule_sigmas[indices].to(dtype=clean_target.dtype).view(-1, 1, 1)
-                noisy_target = (1.0 - sigmas) * clean_target + sigmas * noise
-                model_input = torch.cat([noisy_target, clean_source], dim=1)
+                if conditioning_mode == "source_bridge":
+                    source_start = clean_source
+                    if source_noise_strength > 0:
+                        source_noise = torch.randn_like(clean_source)
+                        source_start = (
+                            (1.0 - source_noise_strength) * clean_source
+                            + source_noise_strength * source_noise
+                        )
+                    model_input = (1.0 - sigmas) * clean_target + sigmas * source_start
+                    flow_target = source_start - clean_target
+                else:
+                    noise = torch.randn_like(clean_target)
+                    noisy_target = (1.0 - sigmas) * clean_target + sigmas * noise
+                    model_input = torch.cat([noisy_target, clean_source], dim=1)
+                    flow_target = noise - clean_target
                 embeds = torch.cat(
                     [prompt_cache[prompt_cache_key("embeds", prompt_id)] for prompt_id in prompt_ids], dim=0
                 ).to(accelerator.device, dtype=weight_dtype, non_blocking=True)
@@ -233,8 +288,11 @@ def main() -> None:
                     encoder_attention_mask=masks,
                     return_dict=False,
                 )[0]
-                target_prediction = full_prediction[:, :target_sequence_length]
-                flow_target = noise - clean_target
+                target_prediction = (
+                    full_prediction
+                    if conditioning_mode == "source_bridge"
+                    else full_prediction[:, :target_sequence_length]
+                )
                 weighting = compute_loss_weighting_for_sd3(weighting_scheme=weighting_scheme, sigmas=sigmas)
                 loss = (
                     weighting.float()
@@ -270,7 +328,7 @@ def main() -> None:
                 "global_step": global_step,
                 "trainable_parameters": trainable_count,
                 "dataset_items": len(dataset),
-                "conditioning_schema": "target_then_reference_latents",
+                "conditioning_schema": conditioning_mode,
                 "final_lora": str(output_dir / "final"),
             },
         )
