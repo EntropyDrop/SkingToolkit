@@ -33,7 +33,7 @@
       "/home/ds/llms/SkingDataset/DDJ_real2render/test_input/img17.png"
     ],
     "mode": "img2img",
-    "strength": 0.9,
+    "strength": 0.95,
     "width": 512,
     "height": 512,
     "steps": 28,
@@ -70,7 +70,7 @@
   "inference": {
     "output_path": "/home/ds/llms/SkingToolkit/krea_lora/runs/ddj_captioned_noise_white_lora/generated.png",
     "mode": "img2img",
-    "strength": 0.9,
+    "strength": 0.95,
     "width": 512,
     "height": 512,
     "steps": 28,

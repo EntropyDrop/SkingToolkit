@@ -56,6 +56,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-train-steps", type=int, default=None)
     parser.add_argument("--output-dir", default=None)
     parser.add_argument("--resume-lora", default=None)
+    parser.add_argument("--learning-rate", type=float, default=None)
+    parser.add_argument("--lr-warmup-steps", type=int, default=None)
     return parser.parse_args()
 
 
@@ -100,6 +102,14 @@ def main() -> None:
     model_config = config["model"]
     data_config = config["data"]
     train_config = config["training"]
+    if args.learning_rate is not None:
+        if args.learning_rate <= 0:
+            raise ValueError("--learning-rate must be positive")
+        train_config["learning_rate"] = args.learning_rate
+    if args.lr_warmup_steps is not None:
+        if args.lr_warmup_steps < 0:
+            raise ValueError("--lr-warmup-steps must be non-negative")
+        train_config["lr_warmup_steps"] = args.lr_warmup_steps
     if int(train_config["batch_size"]) != 1:
         raise ValueError("Captioned prompt embeddings have variable length; training.batch_size must be 1")
     model_path = Path(model_config["path"]).expanduser().resolve()
