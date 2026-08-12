@@ -3,7 +3,7 @@ from __future__ import annotations
 import gc
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 import torch
 from PIL import Image
@@ -50,10 +50,7 @@ class QwenCaptioner:
             local_files_only=True,
         ).eval()
 
-    @torch.inference_mode()
-    def describe(self, image_or_path: Image.Image | str | Path) -> str:
-        if self.model is None:
-            raise RuntimeError("Qwen captioner has already been closed")
+    def _load_image(self, image_or_path: Image.Image | str | Path) -> Image.Image:
         if isinstance(image_or_path, Image.Image):
             image = image_or_path.convert("RGB")
         else:
@@ -63,34 +60,9 @@ class QwenCaptioner:
             (int(self.config.get("analysis_size", 448)),) * 2,
             Image.Resampling.LANCZOS,
         )
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image", "image": image},
-                    {"type": "text", "text": str(self.config["instruction"])},
-                ],
-            }
-        ]
-        inputs = self.processor.apply_chat_template(
-            messages,
-            tokenize=True,
-            add_generation_prompt=True,
-            enable_thinking=False,
-            return_dict=True,
-            return_tensors="pt",
-        ).to(self.device)
-        generated = self.model.generate(
-            **inputs,
-            max_new_tokens=int(self.config.get("max_new_tokens", 140)),
-            do_sample=False,
-        )
-        trimmed = [output[len(input_ids) :] for input_ids, output in zip(inputs.input_ids, generated, strict=True)]
-        description = self.processor.batch_decode(
-            trimmed,
-            skip_special_tokens=True,
-            clean_up_tokenization_spaces=False,
-        )[0]
+        return image
+
+    def _normalize_description(self, description: str) -> str:
         description = " ".join(description.strip().split())
         max_words = int(self.config.get("max_words", 100))
         words = description.split()
@@ -105,6 +77,53 @@ class QwenCaptioner:
         if len(description) < 20:
             raise RuntimeError("Qwen3.6 returned an unexpectedly short character description")
         return description
+
+    @torch.inference_mode()
+    def describe_many(self, images_or_paths: Sequence[Image.Image | str | Path]) -> list[str]:
+        if self.model is None:
+            raise RuntimeError("Qwen captioner has already been closed")
+        if not images_or_paths:
+            return []
+        conversations = [
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image", "image": self._load_image(image_or_path)},
+                        {"type": "text", "text": str(self.config["instruction"])},
+                    ],
+                }
+            ]
+            for image_or_path in images_or_paths
+        ]
+        is_batch = len(conversations) > 1
+        if is_batch:
+            self.processor.tokenizer.padding_side = "left"
+        inputs = self.processor.apply_chat_template(
+            conversations if is_batch else conversations[0],
+            tokenize=True,
+            add_generation_prompt=True,
+            enable_thinking=False,
+            return_dict=True,
+            return_tensors="pt",
+            processor_kwargs={"padding": is_batch},
+        ).to(self.device)
+        generated = self.model.generate(
+            **inputs,
+            max_new_tokens=int(self.config.get("max_new_tokens", 140)),
+            do_sample=False,
+        )
+        input_length = inputs.input_ids.shape[1]
+        decoded = self.processor.batch_decode(
+            generated[:, input_length:],
+            skip_special_tokens=True,
+            clean_up_tokenization_spaces=False,
+        )
+        return [self._normalize_description(description) for description in decoded]
+
+    @torch.inference_mode()
+    def describe(self, image_or_path: Image.Image | str | Path) -> str:
+        return self.describe_many([image_or_path])[0]
 
     def close(self) -> None:
         model = self.model

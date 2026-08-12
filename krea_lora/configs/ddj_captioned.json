@@ -9,6 +9,7 @@
   "captioning": {
     "model_path": "/home/ds/llms/Qwen/Qwen3.6-27B-FP8",
     "fp8_kernel_dir": "/home/ds/llms/Qwen/kernels/finegrained-fp8-v4",
+    "batch_size": 2,
     "analysis_size": 448,
     "max_new_tokens": 160,
     "max_words": 110,

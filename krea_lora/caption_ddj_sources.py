@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
 
+import torch
 from tqdm.auto import tqdm
 
 from caption_prompt import caption_instruction_hash, checkpoint_prompt_id
@@ -81,10 +83,39 @@ def main() -> None:
 
     captioner = QwenCaptioner(config["captioning"], device=args.device)
     failures = 0
+    batch_size = max(1, int(config["captioning"].get("batch_size", 1)))
     try:
-        for row in tqdm(pending, desc="Qwen3.6 character captions"):
+        progress = tqdm(total=len(pending), desc=f"Qwen3.6 character captions (batch={batch_size})")
+        for start in range(0, len(pending), batch_size):
+            batch = pending[start : start + batch_size]
             try:
-                description = captioner.describe(row["source_image"])
+                descriptions = captioner.describe_many([row["source_image"] for row in batch])
+                if len(descriptions) != len(batch):
+                    raise RuntimeError(f"Qwen returned {len(descriptions)} captions for a batch of {len(batch)}")
+                completed = list(zip(batch, descriptions, strict=True))
+            except Exception as batch_exc:
+                if len(batch) == 1:
+                    completed = []
+                    failures += 1
+                    append_jsonl(
+                        error_path,
+                        {**batch[0], "error": repr(batch_exc), "instruction_hash": instruction_hash},
+                    )
+                    print(f"caption failed for {batch[0]['source_image']}: {batch_exc}")
+                else:
+                    print(f"caption batch failed; retrying {len(batch)} images individually: {batch_exc}")
+                    gc.collect()
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                    completed = []
+                    for row in batch:
+                        try:
+                            completed.append((row, captioner.describe(row["source_image"])))
+                        except Exception as exc:
+                            failures += 1
+                            append_jsonl(error_path, {**row, "error": repr(exc), "instruction_hash": instruction_hash})
+                            print(f"caption failed for {row['source_image']}: {exc}")
+            for row, description in completed:
                 append_jsonl(
                     output_path,
                     {
@@ -95,15 +126,13 @@ def main() -> None:
                         "created_at": datetime.now(timezone.utc).isoformat(),
                     },
                 )
-            except Exception as exc:
-                failures += 1
-                append_jsonl(error_path, {**row, "error": repr(exc), "instruction_hash": instruction_hash})
-                print(f"caption failed for {row['source_image']}: {exc}")
+            progress.update(len(batch))
+        progress.close()
     finally:
         captioner.close()
     if failures:
         raise RuntimeError(f"{failures} Qwen captions failed; successes are preserved for resume")
-    print({"captions": len(pending), "output": str(output_path)})
+    print({"captions": len(pending), "batch_size": batch_size, "output": str(output_path)})
 
 
 if __name__ == "__main__":
