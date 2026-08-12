@@ -95,7 +95,13 @@ class QwenCaptioner:
         max_words = int(self.config.get("max_words", 100))
         words = description.split()
         if len(words) > max_words:
-            description = " ".join(words[:max_words]).rstrip(" ,;:") + "."
+            candidate = " ".join(words[:max_words]).rstrip(" ,;:")
+            sentence_end = max(candidate.rfind("."), candidate.rfind("!"), candidate.rfind("?"))
+            if sentence_end >= len(candidate) // 2:
+                candidate = candidate[: sentence_end + 1]
+            elif not candidate.endswith((".", "!", "?")):
+                candidate += "."
+            description = candidate
         if len(description) < 20:
             raise RuntimeError("Qwen3.6 returned an unexpectedly short character description")
         return description
