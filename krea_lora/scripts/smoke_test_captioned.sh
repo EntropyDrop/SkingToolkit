@@ -5,14 +5,16 @@ source "$(dirname "$0")/_env.sh"
 
 SMOKE_ROOT="${KREA_LORA_DIR}/.smoke_captioned"
 SMOKE_CONFIG="${SMOKE_ROOT}/smoke.json"
+SMOKE_PAIRED_CONFIG="${SMOKE_ROOT}/paired.json"
 rm -rf -- "${SMOKE_ROOT}"
 mkdir -p "${SMOKE_ROOT}"
 python make_captioned_smoke_config.py \
   --source configs/ddj_captioned.json \
   --paired-source configs/ddj_conditional.json \
   --output "${SMOKE_CONFIG}" \
+  --paired-output "${SMOKE_PAIRED_CONFIG}" \
   --root "${SMOKE_ROOT}"
-python prepare_paired_dataset.py --config "${SMOKE_CONFIG}" --max-images 2 --force
+python prepare_paired_dataset.py --config "${SMOKE_PAIRED_CONFIG}" --max-images 2 --force
 python caption_ddj_sources.py --config "${SMOKE_CONFIG}" --limit 2 --force
 python prepare_captioned_dataset.py --config "${SMOKE_CONFIG}" --force
 python cache_captioned_prompts.py --config "${SMOKE_CONFIG}" --force

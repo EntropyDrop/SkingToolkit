@@ -11,6 +11,7 @@ def main() -> None:
     parser.add_argument("--source", required=True)
     parser.add_argument("--paired-source", required=True)
     parser.add_argument("--output", required=True)
+    parser.add_argument("--paired-output", required=True)
     parser.add_argument("--root", required=True)
     args = parser.parse_args()
     with Path(args.source).open("r", encoding="utf-8") as handle:
@@ -18,6 +19,9 @@ def main() -> None:
     with Path(args.paired_source).open("r", encoding="utf-8") as handle:
         paired_config = json.load(handle)
     root = Path(args.root).resolve()
+    paired_config["data"]["dataset_dir"] = str(root / "paired")
+    paired_config["data"]["max_images"] = 2
+    paired_config["data"]["validation_fraction"] = 0.5
     config["data"].update(paired_config["data"])
     config["data"]["paired_dataset_dir"] = str(root / "paired")
     config["data"]["dataset_dir"] = str(root / "data")
@@ -39,6 +43,11 @@ def main() -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("w", encoding="utf-8") as handle:
         json.dump(config, handle, ensure_ascii=False, indent=2)
+        handle.write("\n")
+    paired_output = Path(args.paired_output)
+    paired_output.parent.mkdir(parents=True, exist_ok=True)
+    with paired_output.open("w", encoding="utf-8") as handle:
+        json.dump(paired_config, handle, ensure_ascii=False, indent=2)
         handle.write("\n")
 
 
