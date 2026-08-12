@@ -14,6 +14,7 @@
     "front_view": "front_right",
     "back_view": "back_left",
     "background_rgb": [1.0, 1.0, 1.0],
+    "target_content_scale": 0.875,
     "source_background_rgb_255": [255, 255, 255],
     "width": 512,
     "height": 512,

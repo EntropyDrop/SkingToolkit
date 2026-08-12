@@ -9,6 +9,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from PIL import Image
 from tqdm.auto import tqdm
 
@@ -63,6 +64,44 @@ def load_skin(path: Path) -> torch.Tensor:
     return torch.from_numpy(rgba).permute(2, 0, 1).float().div_(255.0)
 
 
+def compose_target_views(
+    front: torch.Tensor,
+    back: torch.Tensor,
+    *,
+    width: int,
+    height: int,
+    content_scale: float,
+    background: tuple[float, float, float],
+) -> torch.Tensor:
+    """Scale both renderer views equally and center them in equal canvas halves."""
+    if width % 2:
+        raise ValueError("Merged target width must be even")
+    half_width = width // 2
+    expected_shape = (height, half_width)
+    if tuple(front.shape[-2:]) != expected_shape or tuple(back.shape[-2:]) != expected_shape:
+        raise ValueError(
+            f"Renderer views must be {half_width}x{height}; "
+            f"found front={tuple(front.shape[-2:])}, back={tuple(back.shape[-2:])}"
+        )
+    if not 0.0 < content_scale <= 1.0:
+        raise ValueError("data.target_content_scale must be in (0, 1]")
+
+    scaled_height = max(1, min(height, round(height * content_scale)))
+    scaled_width = max(1, min(half_width, round(half_width * content_scale)))
+    if (scaled_height, scaled_width) != expected_shape:
+        front = F.interpolate(front, size=(scaled_height, scaled_width), mode="nearest-exact")
+        back = F.interpolate(back, size=(scaled_height, scaled_width), mode="nearest-exact")
+
+    background_tensor = torch.tensor(background, device=front.device, dtype=front.dtype).view(1, 3, 1, 1)
+    target = background_tensor.expand(front.shape[0], 3, height, width).clone()
+    y = (height - scaled_height) // 2
+    left_x = (half_width - scaled_width) // 2
+    right_x = half_width + left_x
+    target[:, :, y : y + scaled_height, left_x : left_x + scaled_width] = front
+    target[:, :, y : y + scaled_height, right_x : right_x + scaled_width] = back
+    return target
+
+
 def main() -> None:
     args = parse_args()
     config = load_config(args.config)
@@ -97,6 +136,7 @@ def main() -> None:
     device = resolve_device(args.device)
     batch_size = int(args.batch_size or data.get("render_batch_size", 8))
     background = tuple(float(value) for value in data["background_rgb"])
+    target_content_scale = float(data.get("target_content_scale", 1.0))
     renderer = DifferentiableRenderer(str(mappings_dir), bg_color=background).to(device).eval()
     front_view = str(data["front_view"])
     back_view = str(data["back_view"])
@@ -135,7 +175,14 @@ def main() -> None:
         with torch.inference_mode():
             front = renderer.forward_view(skin_batch, front_view)[:, :3]
             back = renderer.forward_view(skin_batch, back_view)[:, :3]
-            targets = torch.cat([front, back], dim=3).clamp_(0, 1)
+            targets = compose_target_views(
+                front,
+                back,
+                width=width,
+                height=height,
+                content_scale=target_content_scale,
+                background=background,
+            ).clamp_(0, 1)
         target_arrays = targets.mul(255).round().byte().permute(0, 2, 3, 1).cpu().numpy()
         for item, target_array in zip(valid, target_arrays, strict=True):
             stable_key, source_path, result_path, original_edited = item
@@ -174,6 +221,7 @@ def main() -> None:
         "target_source": "64x64 RGBA result skin rendered with fixed mappings",
         "views": [front_view, back_view],
         "background_rgb": list(background),
+        "target_content_scale": target_content_scale,
         "resolution": [width, height],
     }
     write_json(dataset_dir / "summary.json", summary)
