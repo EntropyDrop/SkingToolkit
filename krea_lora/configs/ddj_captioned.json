@@ -1,0 +1,81 @@
+{
+  "model": {
+    "path": "/home/ds/llms/krea/Krea-2-Raw",
+    "dtype": "bf16",
+    "max_sequence_length": 512,
+    "vae_scale_factor": 8,
+    "patch_size": 2
+  },
+  "captioning": {
+    "model_path": "/home/ds/llms/Qwen/Qwen3.6-27B-FP8",
+    "fp8_kernel_dir": "/home/ds/llms/Qwen/kernels/finegrained-fp8-v4",
+    "analysis_size": 448,
+    "max_new_tokens": 140,
+    "max_words": 100,
+    "instruction": "Describe only the visible identity and wearable design of this character for another image-generation model. Include gender presentation, skin tone, hair style and colors, eye color, headwear, upper and lower garments, sleeves, legwear, footwear, dominant color palette, patterns, and wearable accessories. Ignore pose, expression, hands, held objects, text, watermark, background, lighting, and art style. If the input is a character sheet or collage, describe the single consistent character design rather than the layout. Use one precise English paragraph under 100 words. No introduction."
+  },
+  "prompt": {
+    "format_prompt": "Create a professional Minecraft character skin 3D preview sheet. Exactly one square image containing exactly two full-body Minecraft characters of the same design, arranged side by side in two equal halves with equal margins: left is a front-right three-quarter view; right is a back-left three-quarter view rotated exactly 180 degrees. Use only the standard Minecraft Steve player model: one cube head, one rectangular torso, two straight 4-pixel-wide arms hanging down, and two separate straight rectangular legs on one baseline. Neutral standing pose. Use the same orthographic camera, approximately 45 degrees elevated and looking downward, with identical scale, distance, alignment, and pose in both views. No perspective distortion. Hair, face, clothing, footwear, and wearable accessories must be flat low-resolution square pixel textures painted directly on the cuboid surfaces, using a limited palette and two or three solid tones per material. Sharp equal-sized pixels, hard edges, no antialiasing, gradients, curves, rounded parts, smooth surfaces, realistic anatomy, or thin geometry. Use only the Minecraft base skin and outer skin layers. No extra geometry extending outside those layers. No handheld items, weapons, capes, loose flowing parts, props, extra views, extra characters, text, labels, UI, watermark, floor, environment, shadows, reflections, glow, or special effects. Isolate both characters on a uniform pure white background.",
+    "identity_prefix": "Reference character identity and wearable design:"
+  },
+  "data": {
+    "paired_dataset_dir": "/home/ds/llms/SkingToolkit/krea_lora/data/ddj_conditional_professional_white_512",
+    "dataset_dir": "/home/ds/llms/SkingToolkit/krea_lora/data/ddj_captioned_noise_white_512"
+  },
+  "cache": {
+    "vae_batch_size": 2
+  },
+  "checkpoint_preview": {
+    "test_images": [
+      "/home/ds/llms/SkingDataset/DDJ_real2render/test_input/img3.png",
+      "/home/ds/llms/SkingDataset/DDJ_real2render/test_input/img14.png",
+      "/home/ds/llms/SkingDataset/DDJ_real2render/test_input/img17.png"
+    ],
+    "mode": "img2img",
+    "strength": 0.9,
+    "width": 512,
+    "height": 512,
+    "steps": 28,
+    "seed": 20260812
+  },
+  "training": {
+    "output_dir": "/home/ds/llms/SkingToolkit/krea_lora/runs/ddj_captioned_noise_white_lora",
+    "seed": 20260812,
+    "batch_size": 1,
+    "gradient_accumulation_steps": 4,
+    "num_workers": 1,
+    "max_train_steps": 3000,
+    "learning_rate": 0.00005,
+    "rank": 32,
+    "lora_alpha": 32,
+    "lora_dropout": 0.0,
+    "target_modules": ["to_q", "to_k", "to_v", "to_out.0", "up", "down", "gate"],
+    "gradient_checkpointing": true,
+    "layerwise_casting": false,
+    "mixed_precision": "bf16",
+    "weighting_scheme": "logit_normal",
+    "logit_mean": 0.0,
+    "logit_std": 1.0,
+    "mode_scale": 1.29,
+    "lr_scheduler": "cosine",
+    "lr_warmup_steps": 100,
+    "weight_decay": 0.01,
+    "adam_beta1": 0.9,
+    "adam_beta2": 0.999,
+    "adam_epsilon": 1e-8,
+    "max_grad_norm": 1.0,
+    "save_every": 250
+  },
+  "inference": {
+    "output_path": "/home/ds/llms/SkingToolkit/krea_lora/runs/ddj_captioned_noise_white_lora/generated.png",
+    "mode": "img2img",
+    "strength": 0.9,
+    "width": 512,
+    "height": 512,
+    "steps": 28,
+    "guidance_scale": 0.0,
+    "seed": 20260812,
+    "layerwise_casting": false,
+    "negative_prompt": ""
+  }
+}

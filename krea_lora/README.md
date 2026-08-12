@@ -1,9 +1,84 @@
 # Krea-2-Raw Minecraft Preview LoRA
 
-## Recommended: SKING_DDJ paired conditional LoRA
+## Recommended: Qwen-captioned standard noise-to-target LoRA
+
+`configs/ddj_captioned.json` is the production workflow. Qwen3.6-27B FP8 is a
+frozen offline caption teacher: it converts every DDJ source image into one
+short identity/clothing/color description. Each MC target therefore has its
+own prompt. Krea then trains with its native rectified-flow objective:
+
+```text
+x_sigma = (1 - sigma) * mc_target_latent + sigma * gaussian_noise
+velocity_target = gaussian_noise - mc_target_latent
+```
+
+Qwen is not loaded during LoRA optimization. Its text descriptions are encoded
+once by Krea's own text encoder. Prompt embeddings are stored as individual
+padding-trimmed safetensors files and loaded per sample; this avoids loading an
+approximately 70-100GB monolithic prompt cache into RAM.
+
+Run the complete remote workflow:
+
+```bash
+cd /home/ds/llms/SkingToolkit/krea_lora
+bash scripts/run_ddj_captioned.sh
+```
+
+Or run each resumable stage separately:
+
+```bash
+bash scripts/21_caption_ddj_sources.sh
+bash scripts/22_prepare_captioned_dataset.sh
+bash scripts/23_cache_captioned_prompts.sh
+bash scripts/24_cache_captioned_latents.sh
+bash scripts/25_train_captioned_lora.sh
+```
+
+Stages 21, 23, and 24 skip completed files. Qwen captions are appended and
+flushed after every image, so an interrupted caption run resumes without losing
+finished work. Stage 22 intentionally refuses to overwrite metadata; use
+`--force` only after changing captions or prompt construction.
+
+Generate from a new reference image after training:
+
+```bash
+bash scripts/26_generate_captioned.sh \
+  --source /path/to/reference.png \
+  --output /path/to/mc_preview.png
+```
+
+The default inference path matches the validated Web design: reference image
+to Qwen3.6 description, then Krea-2-Raw plus the trained LoRA in Img2Img mode
+with strength 0.9, 28 steps, and pipeline CFG 0 (equivalent to Comfy CFG 1).
+Use `--mode txt2img` to test description-only generation. The Qwen model is
+released before Krea loads, so the two large models do not coexist on CUDA.
+
+Checkpoint previews use the same precomputed Qwen descriptions and Img2Img
+schedule. `checkpoint-0/tests`, every configured checkpoint, and `final/tests`
+contain the reference, generated image, and metadata including the Qwen
+description. The default test images are img3, img14, and img17.
+
+The end-to-end test, including one real Qwen caption, sharded Krea prompt
+encoding, one optimizer step, and checkpoint Img2Img, is:
+
+```bash
+bash scripts/smoke_test_captioned.sh
+```
+
+Production outputs are isolated from all earlier attempts:
+
+```text
+data/ddj_captioned_noise_white_512
+runs/ddj_captioned_noise_white_lora
+```
+
+The local DDJ source currently contains 1,565 complete source/result/edited
+triples (1,490 train and 75 validation), not 8,087.
+
+## Legacy experiment: paired source-bridge LoRA
 
 `configs/ddj_conditional.json` is the real reference-image training path. It
-uses 8,087 matching `_source` and `_result` records from
+uses matching `_source` and `_result` records from
 `/home/ds/llms/SKING_DDJ_Dataset`. Existing historical `_edited` files are not
 used as ground truth because many contain gradients, smooth detail, or older
 camera layouts. Every target is regenerated from the valid 64x64 RGBA result
@@ -14,19 +89,19 @@ there are no handheld meshes, capes, lighting effects, or geometry outside the
 skin model. The target background is uniform pure white, matching the default
 professional preview prompt in `configs/ddj_conditional.json`.
 
-The paired v2 objective is a source-to-target rectified-flow bridge:
+The paired v2 objective was a source-to-target rectified-flow bridge:
 
 ```text
 x_sigma = (1 - sigma) * edited_target_latent + sigma * source_image_latent
 velocity_target = source_image_latent - edited_target_latent
 ```
 
-Both images are compressed by the frozen Qwen Image VAE. Training must explain
+Both images are compressed by the frozen Qwen Image VAE. This experiment asked
+an attention-only LoRA to explain
 the complete transport from the source image at `sigma=1` to the edited MC
-target at `sigma=0`; it cannot minimize loss by denoising a target while
-ignoring a separate reference-token branch. Inference starts from the source
-latent itself and integrates the learned velocity to the target. This is not
-ordinary prompt-only generation and does not depend on a generated caption.
+target at `sigma=0`. In practice it retained/faded the source silhouette and
+did not learn the two-view Minecraft geometry, including on a training-set
+sample. It is retained for reproducibility but should not be resumed.
 
 The earlier `target_reference_concat` experiment is retained as a compatibility
 mode in code, but it is not recommended: the model can reconstruct the noisy
