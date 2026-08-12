@@ -26,6 +26,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", default=None)
     parser.add_argument("--mode", choices=["txt2img", "img2img"], default=None)
     parser.add_argument("--strength", type=float, default=None)
+    parser.add_argument(
+        "--strengths",
+        default=None,
+        help="Comma-separated Img2Img strengths to compare while reusing one loaded pipeline.",
+    )
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--steps", type=int, default=None)
     parser.add_argument("--guidance-scale", type=float, default=None)
@@ -117,55 +122,69 @@ def main() -> None:
     height = int(inference.get("height", 512))
     steps = int(args.steps or inference.get("steps", 28))
     strength = float(args.strength if args.strength is not None else inference.get("strength", 0.9))
+    if args.strengths:
+        if mode != "img2img":
+            raise ValueError("--strengths is only supported with --mode img2img")
+        strengths = [float(value.strip()) for value in args.strengths.split(",") if value.strip()]
+        if not strengths:
+            raise ValueError("--strengths did not contain any values")
+    else:
+        strengths = [strength]
     guidance_scale = float(
         args.guidance_scale if args.guidance_scale is not None else inference.get("guidance_scale", 0.0)
     )
     seed = int(args.seed if args.seed is not None else inference.get("seed", 20260812))
-    generator = torch.Generator(device=args.device).manual_seed(seed)
-    call_kwargs: dict = {}
-    if mode == "img2img":
-        latents, sigmas = prepare_img2img_latents(
-            pipe,
-            source,
-            width,
-            height,
-            steps,
-            strength,
-            generator,
-        )
-        call_kwargs.update(latents=latents, sigmas=sigmas)
-    elif mode != "txt2img":
-        raise ValueError(f"Unsupported inference mode: {mode}")
+    for current_strength in strengths:
+        generator = torch.Generator(device=args.device).manual_seed(seed)
+        call_kwargs: dict = {}
+        if mode == "img2img":
+            latents, sigmas = prepare_img2img_latents(
+                pipe,
+                source,
+                width,
+                height,
+                steps,
+                current_strength,
+                generator,
+            )
+            call_kwargs.update(latents=latents, sigmas=sigmas)
+        elif mode != "txt2img":
+            raise ValueError(f"Unsupported inference mode: {mode}")
 
-    with torch.inference_mode():
-        image = pipe(
-            prompt=prompt,
-            negative_prompt=str(inference.get("negative_prompt", "")),
-            width=width,
-            height=height,
-            num_inference_steps=steps,
-            guidance_scale=guidance_scale,
-            generator=generator,
-            max_sequence_length=int(config["model"].get("max_sequence_length", 512)),
-            **call_kwargs,
-        ).images[0]
-    image.save(output_path)
-    write_json(
-        output_path.with_suffix(".json"),
-        {
-            "source_image": str(source_path),
-            "output_image": str(output_path),
-            "lora": str(lora_path),
-            "mode": mode,
-            "strength": strength if mode == "img2img" else None,
-            "steps": steps,
-            "guidance_scale": guidance_scale,
-            "seed": seed,
-            "qwen_description": description,
-            "prompt": prompt,
-        },
-    )
-    print(output_path)
+        with torch.inference_mode():
+            image = pipe(
+                prompt=prompt,
+                negative_prompt=str(inference.get("negative_prompt", "")),
+                width=width,
+                height=height,
+                num_inference_steps=steps,
+                guidance_scale=guidance_scale,
+                generator=generator,
+                max_sequence_length=int(config["model"].get("max_sequence_length", 512)),
+                **call_kwargs,
+            ).images[0]
+        if len(strengths) > 1:
+            suffix = f"_strength_{current_strength:.2f}".replace(".", "p")
+            current_output = output_path.with_name(f"{output_path.stem}{suffix}{output_path.suffix}")
+        else:
+            current_output = output_path
+        image.save(current_output)
+        write_json(
+            current_output.with_suffix(".json"),
+            {
+                "source_image": str(source_path),
+                "output_image": str(current_output),
+                "lora": str(lora_path),
+                "mode": mode,
+                "strength": current_strength if mode == "img2img" else None,
+                "steps": steps,
+                "guidance_scale": guidance_scale,
+                "seed": seed,
+                "qwen_description": description,
+                "prompt": prompt,
+            },
+        )
+        print(current_output)
     del pipe
     gc.collect()
     if torch.cuda.is_available():
