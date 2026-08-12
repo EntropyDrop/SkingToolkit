@@ -64,8 +64,30 @@ def build_head_outer_face_targets(target_uv, alpha_threshold=0.5):
     }
 
 
+def head_outer_face_values_to_uv(values):
+    """Scatter face-major Bx6x8x8 head values into a 64x64 atlas."""
+    if values.dim() != 4 or values.shape[1:] != (FACE_COUNT, 8, 8):
+        raise ValueError(
+            "Expected head face values shaped Bx6x8x8, got "
+            f"{tuple(values.shape)}."
+        )
+    atlas = values.new_zeros(values.shape[0], 1, 64, 64)
+    for face, (inner_x, inner_y, width, height, decor_dx, decor_dy) in enumerate(
+        minecraft_layer_rects()[:FACE_COUNT]
+    ):
+        if (width, height) != (8, 8):
+            raise ValueError("All head faces must be 8x8 texels.")
+        outer_x = inner_x + decor_dx
+        outer_y = inner_y + decor_dy
+        atlas[
+            :, :, outer_y : outer_y + height, outer_x : outer_x + width
+        ] = values[:, face : face + 1]
+    return atlas
+
+
 __all__ = [
     "build_part_layer_masks",
     "build_head_outer_face_targets",
+    "head_outer_face_values_to_uv",
     "build_semantic_attribute_targets",
 ]

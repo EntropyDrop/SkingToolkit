@@ -33,6 +33,7 @@ from SkingToolkit.dense_uv_parser.utils import (
     conditioning_to_pred_uv,
     estimate_solid_background_foreground,
     estimate_top_left_flood_foreground,
+    head_outer_topology_component_rescue,
     outer_uv_topology_hysteresis,
     _outer_silhouette_coverage,
     fill_geometry_grid_debug,
@@ -45,6 +46,7 @@ from SkingToolkit.dense_uv_parser.utils import (
     splat_to_uv_conditioning,
 )
 from SkingToolkit.dense_uv_parser.uv_topology import (
+    build_head_outer_face_indices,
     build_outer_uv_graph,
     build_simple_uv_topology,
 )
@@ -116,6 +118,50 @@ class GlobalAffineRoutingTest(unittest.TestCase):
                 outputs["head_outer_face_occupancy_logits"],
             )
         )
+
+    def test_head_topology_rescue_closes_band_but_rejects_wrong_color(self):
+        head_indices = build_head_outer_face_indices()
+        band = head_indices[3 * 8 : 4 * 8]
+        purple_fringe = head_indices[2 * 8]
+        strong = torch.zeros(1, 64 * 64, dtype=torch.bool)
+        candidate = torch.zeros_like(strong)
+        semantic = torch.zeros(1, 64 * 64)
+        candidate_rgb = torch.zeros(1, 3, 64 * 64)
+        strong_rgb = torch.zeros_like(candidate_rgb)
+        strong[0, band[[0, -1]]] = True
+        candidate[0, band] = True
+        candidate[0, purple_fringe] = True
+        semantic[0, band] = 0.75
+        semantic[0, purple_fringe] = 0.75
+        # Every adjacent grayscale step is close, but the middle of the band
+        # is farther than the tolerance from either endpoint seed. This
+        # specifically verifies graph propagation rather than direct
+        # seed-to-node color matching.
+        grayscale = torch.tensor(
+            [0.0, 0.15, 0.30, 0.45, 0.60, 0.45, 0.30, 0.15]
+        )
+        candidate_rgb[0, :, band] = grayscale.view(1, -1)
+        strong_rgb[0, :, band[0]] = grayscale[0]
+        strong_rgb[0, :, band[-1]] = grayscale[-1]
+        candidate_rgb[0, :, purple_fringe] = torch.tensor(
+            [0.8, 0.0, 0.8]
+        )
+
+        result = head_outer_topology_component_rescue(
+            strong,
+            candidate,
+            semantic,
+            candidate_rgb,
+            strong_rgb,
+            semantic_threshold=0.25,
+            min_seed_nodes=2,
+            color_tolerance=0.30,
+        )
+
+        self.assertTrue(result["rescued"][0, band[1:-1]].all())
+        self.assertFalse(result["rescued"][0, purple_fringe])
+        self.assertEqual(result["anchored_components"], 1)
+        self.assertGreater(result["color_rejected_texels"], 0)
 
     def test_outer_silhouette_coverage_uses_only_protruding_pixels(self):
         inner = torch.tensor([[False, True, True, False]])

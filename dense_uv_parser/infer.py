@@ -20,6 +20,9 @@ from SkingToolkit.dense_uv_parser.foreground import (  # noqa: E402
     save_flood_outputs,
 )
 from SkingToolkit.dense_uv_parser.semantic import attach_semantic_runtime  # noqa: E402
+from SkingToolkit.dense_uv_parser.semantic_targets import (  # noqa: E402
+    head_outer_face_values_to_uv,
+)
 from SkingToolkit.dense_uv_parser.runtime import get_device  # noqa: E402
 from SkingToolkit.dense_uv_parser.simple_inpainting import (  # noqa: E402
     simple_symmetry_nearest_inpaint,
@@ -800,6 +803,14 @@ def build_arg_parser():
             "routing masks (red=rejected, green=accepted, blue=seed)."
         ),
     )
+    parser.add_argument(
+        "--head_outer_structure_output",
+        default=None,
+        help=(
+            "Head-only semantic occupancy diagnostic. The left atlas shows "
+            "probability and the right atlas shows the 0.50 mask."
+        ),
+    )
     parser.add_argument("--front", default=None)
     parser.add_argument("--back", default=None)
     parser.add_argument("--combined", default=None)
@@ -866,6 +877,47 @@ def build_arg_parser():
     )
     parser.add_argument(
         "--outer_silhouette_min_pixels", type=int, default=4
+    )
+    parser.add_argument(
+        "--head_outer_topology_rescue",
+        dest="head_outer_topology_rescue",
+        action="store_true",
+        default=True,
+        help=(
+            "Restore relaxed head-outer candidates only when they connect "
+            "multiple strict seeds in the physical head-cube topology."
+        ),
+    )
+    parser.add_argument(
+        "--no_head_outer_topology_rescue",
+        dest="head_outer_topology_rescue",
+        action="store_false",
+    )
+    parser.add_argument(
+        "--head_outer_topology_semantic_threshold",
+        type=float,
+        default=0.25,
+    )
+    parser.add_argument(
+        "--head_outer_topology_relaxed_route_threshold",
+        type=float,
+        default=0.25,
+    )
+    parser.add_argument(
+        "--head_outer_topology_relaxed_semantic_threshold",
+        type=float,
+        default=0.65,
+    )
+    parser.add_argument(
+        "--head_outer_topology_semantic_only_threshold",
+        type=float,
+        default=0.85,
+    )
+    parser.add_argument(
+        "--head_outer_topology_min_seed_nodes", type=int, default=2
+    )
+    parser.add_argument(
+        "--head_outer_topology_color_tolerance", type=float, default=0.30
     )
     parser.add_argument(
         "--outer_geometry_rescue",
@@ -1096,6 +1148,30 @@ def main():
         raise ValueError("--outer_silhouette_dilation must be non-negative.")
     if args.outer_silhouette_min_pixels < 1:
         raise ValueError("--outer_silhouette_min_pixels must be positive.")
+    if not 0.0 <= args.head_outer_topology_semantic_threshold <= 1.0:
+        raise ValueError(
+            "--head_outer_topology_semantic_threshold must be in [0, 1]."
+        )
+    if not 0.0 <= args.head_outer_topology_relaxed_route_threshold <= 1.0:
+        raise ValueError(
+            "--head_outer_topology_relaxed_route_threshold must be in [0, 1]."
+        )
+    if not 0.0 <= args.head_outer_topology_relaxed_semantic_threshold <= 1.0:
+        raise ValueError(
+            "--head_outer_topology_relaxed_semantic_threshold must be in [0, 1]."
+        )
+    if not 0.0 <= args.head_outer_topology_semantic_only_threshold <= 1.0:
+        raise ValueError(
+            "--head_outer_topology_semantic_only_threshold must be in [0, 1]."
+        )
+    if args.head_outer_topology_min_seed_nodes < 2:
+        raise ValueError(
+            "--head_outer_topology_min_seed_nodes must be at least 2."
+        )
+    if args.head_outer_topology_color_tolerance < 0.0:
+        raise ValueError(
+            "--head_outer_topology_color_tolerance must be non-negative."
+        )
     if not 0.0 <= args.foreground_flood_tolerance <= 1.0:
         raise ValueError("--foreground_flood_tolerance must be in [0, 1].")
     if not 0.0 <= args.outer_uv_occupancy_min_precision <= 1.0:
@@ -1127,6 +1203,7 @@ def main():
             args.geometry_routed_overlay_output,
             args.geometry_fill_output,
             args.outer_uv_occupancy_output,
+            args.head_outer_structure_output,
             args.simple_inpaint_render_output,
         )
     ):
@@ -1480,6 +1557,25 @@ def main():
             occupancy_path.parent.mkdir(parents=True, exist_ok=True)
             save_image(occupancy_preview.detach().cpu(), occupancy_path)
             print(f"Saved outer_uv_occupancy={occupancy_path}")
+        if (
+            args.head_outer_structure_output
+            and "head_outer_face_occupancy_logits" in outputs
+        ):
+            head_probability = torch.sigmoid(
+                outputs["head_outer_face_occupancy_logits"].float()
+            )
+            head_atlas = head_outer_face_values_to_uv(head_probability)
+            head_preview = torch.cat(
+                (
+                    head_atlas.expand(-1, 3, -1, -1),
+                    (head_atlas >= 0.50).float().expand(-1, 3, -1, -1),
+                ),
+                dim=-1,
+            )
+            head_path = Path(args.head_outer_structure_output)
+            head_path.parent.mkdir(parents=True, exist_ok=True)
+            save_image(head_preview.detach().cpu(), head_path)
+            print(f"Saved head_outer_structure={head_path}")
         conditioning, routing_details = splat_parser_predictions_to_uv_conditioning(
             rendered,
             outputs,
@@ -1504,6 +1600,27 @@ def main():
             ),
             outer_silhouette_dilation=args.outer_silhouette_dilation,
             outer_silhouette_min_pixels=args.outer_silhouette_min_pixels,
+            head_outer_topology_rescue=(
+                args.head_outer_topology_rescue
+            ),
+            head_outer_topology_semantic_threshold=(
+                args.head_outer_topology_semantic_threshold
+            ),
+            head_outer_topology_relaxed_route_threshold=(
+                args.head_outer_topology_relaxed_route_threshold
+            ),
+            head_outer_topology_relaxed_semantic_threshold=(
+                args.head_outer_topology_relaxed_semantic_threshold
+            ),
+            head_outer_topology_semantic_only_threshold=(
+                args.head_outer_topology_semantic_only_threshold
+            ),
+            head_outer_topology_min_seed_nodes=(
+                args.head_outer_topology_min_seed_nodes
+            ),
+            head_outer_topology_color_tolerance=(
+                args.head_outer_topology_color_tolerance
+            ),
             outer_geometry_rescue=args.outer_geometry_rescue,
             outer_semantic_rescue=args.outer_semantic_rescue,
             outer_semantic_presence_threshold=args.outer_semantic_presence_threshold,
@@ -1795,6 +1912,9 @@ def main():
                 torch.zeros_like(raw_outer),
             ).sum().item()
         )
+        head_topology_details = routing.get(
+            "head_outer_topology_details"
+        ) or {}
         print(
             "routing_filter="
             + json.dumps(
@@ -1954,6 +2074,61 @@ def main():
                     ),
                     "outer_uv_component_grow_threshold": round(
                         float(outer_uv_component_grow_threshold), 6
+                    ),
+                    "head_outer_topology_rescue": bool(
+                        args.head_outer_topology_rescue
+                    ),
+                    "head_outer_topology_candidate_source_texels": int(
+                        head_topology_details.get(
+                            "candidate_source_texels", 0
+                        )
+                    ),
+                    "head_outer_topology_seed_texels": int(
+                        head_topology_details.get("seed_texels", 0)
+                    ),
+                    "head_outer_topology_rescued_texels": int(
+                        head_topology_details.get("rescued_texels", 0)
+                    ),
+                    "head_outer_topology_rescued_pixels": int(
+                        head_topology_details.get("rescued_pixels", 0)
+                    ),
+                    "head_outer_topology_anchored_components": int(
+                        head_topology_details.get(
+                            "anchored_components", 0
+                        )
+                    ),
+                    "head_outer_topology_color_rejected_texels": int(
+                        head_topology_details.get(
+                            "color_rejected_texels", 0
+                        )
+                    ),
+                    "head_outer_topology_semantic_threshold": round(
+                        float(
+                            args.head_outer_topology_semantic_threshold
+                        ),
+                        6,
+                    ),
+                    "head_outer_topology_color_tolerance": round(
+                        float(args.head_outer_topology_color_tolerance),
+                        6,
+                    ),
+                    "head_outer_topology_relaxed_route_threshold": round(
+                        float(
+                            args.head_outer_topology_relaxed_route_threshold
+                        ),
+                        6,
+                    ),
+                    "head_outer_topology_relaxed_semantic_threshold": round(
+                        float(
+                            args.head_outer_topology_relaxed_semantic_threshold
+                        ),
+                        6,
+                    ),
+                    "head_outer_topology_semantic_only_threshold": round(
+                        float(
+                            args.head_outer_topology_semantic_only_threshold
+                        ),
+                        6,
                     ),
                 },
                 sort_keys=True,

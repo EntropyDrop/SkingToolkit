@@ -11,7 +11,12 @@ if str(WORKSPACE_ROOT) not in sys.path:
     sys.path.insert(0, str(WORKSPACE_ROOT))
 
 from SkingToolkit.dense_uv_parser.uv_layout import minecraft_layer_rects  # noqa: E402
+from SkingToolkit.dense_uv_parser.semantic_targets import (  # noqa: E402
+    head_outer_face_values_to_uv,
+)
 from SkingToolkit.dense_uv_parser.uv_topology import (  # noqa: E402
+    build_head_outer_face_graph,
+    build_head_outer_face_indices,
     build_outer_uv_graph,
 )
 
@@ -1143,6 +1148,351 @@ def outer_uv_topology_hysteresis(
             dtype=torch.bool,
         ),
     }
+
+
+def head_outer_topology_component_rescue(
+    strong_atlas,
+    candidate_atlas,
+    semantic_probability,
+    candidate_rgb,
+    strong_rgb,
+    semantic_threshold=0.25,
+    min_seed_nodes=2,
+    color_tolerance=0.30,
+    max_steps=64,
+):
+    """Keep relaxed head-outer candidates only inside anchored components.
+
+    Strict routed texels are seeds. A relaxed raw-route candidate may be
+    restored only when it belongs to a physical head-cube component containing
+    multiple strict seeds, receives head-structure support, and has a color
+    compatible with at least one seed in that component. This closes holes in
+    thin bands such as glasses and hat brims without admitting unrelated
+    background-colored fringe pixels.
+    """
+    expected_mask_shape = (strong_atlas.shape[0], UV_SIZE * UV_SIZE)
+    for name, value in (
+        ("strong_atlas", strong_atlas),
+        ("candidate_atlas", candidate_atlas),
+        ("semantic_probability", semantic_probability),
+    ):
+        if value.shape != expected_mask_shape:
+            raise ValueError(
+                f"{name} must be shaped {expected_mask_shape}, got "
+                f"{tuple(value.shape)}."
+            )
+    expected_rgb_shape = (strong_atlas.shape[0], 3, UV_SIZE * UV_SIZE)
+    for name, value in (
+        ("candidate_rgb", candidate_rgb),
+        ("strong_rgb", strong_rgb),
+    ):
+        if value.shape != expected_rgb_shape:
+            raise ValueError(
+                f"{name} must be shaped {expected_rgb_shape}, got "
+                f"{tuple(value.shape)}."
+            )
+    if not 0.0 <= float(semantic_threshold) <= 1.0:
+        raise ValueError("semantic_threshold must be in [0, 1].")
+    if min_seed_nodes < 2:
+        raise ValueError("min_seed_nodes must be at least 2.")
+    if color_tolerance < 0.0:
+        raise ValueError("color_tolerance must be non-negative.")
+
+    head_indices = build_head_outer_face_indices().to(strong_atlas.device)
+    edge_index = build_head_outer_face_graph().to(strong_atlas.device)
+    seeds = strong_atlas.bool().index_select(1, head_indices)
+    candidates = (
+        candidate_atlas.bool().index_select(1, head_indices)
+        & (
+            semantic_probability.float().index_select(1, head_indices)
+            >= float(semantic_threshold)
+        )
+    )
+    candidates = candidates | seeds
+    labels = _outer_graph_component_labels(
+        candidates,
+        edge_index,
+        max_steps=max_steps,
+    )
+    candidate_node_rgb = candidate_rgb.float().index_select(2, head_indices)
+    strong_node_rgb = strong_rgb.float().index_select(2, head_indices)
+    accepted = seeds.clone()
+    anchored_components = 0
+    color_rejected = 0
+    source, destination = edge_index
+    for batch_index in range(seeds.shape[0]):
+        seed_labels = labels[batch_index, seeds[batch_index]].unique()
+        for label in seed_labels.tolist():
+            component = labels[batch_index] == int(label)
+            component_seeds = component & seeds[batch_index]
+            if int(component_seeds.sum().item()) < int(min_seed_nodes):
+                continue
+            anchored_components += 1
+            component_colors = torch.where(
+                component_seeds.unsqueeze(0),
+                strong_node_rgb[batch_index],
+                candidate_node_rgb[batch_index],
+            )
+            edge_in_component = (
+                component[source] & component[destination]
+            )
+            edge_color_distance = (
+                component_colors[:, source]
+                - component_colors[:, destination]
+            ).square().sum(dim=0).sqrt()
+            color_edge = edge_in_component & (
+                edge_color_distance <= float(color_tolerance)
+            )
+            component_accepted = component_seeds.clone()
+            for _ in range(int(max_steps)):
+                neighbour_accepted = (
+                    color_edge & component_accepted[source]
+                )
+                propagated = torch.zeros_like(
+                    component_accepted, dtype=torch.uint8
+                )
+                propagated.scatter_reduce_(
+                    0,
+                    destination,
+                    neighbour_accepted.to(torch.uint8),
+                    reduce="amax",
+                    include_self=False,
+                )
+                updated = component_accepted | (
+                    component & propagated.bool()
+                )
+                if torch.equal(updated, component_accepted):
+                    break
+                component_accepted = updated
+            accepted[batch_index] |= component_accepted
+            color_rejected += int(
+                (component & ~component_accepted).sum().item()
+            )
+
+    rescued_nodes = accepted & ~seeds
+    rescued_atlas = torch.zeros_like(strong_atlas, dtype=torch.bool)
+    rescued_atlas[:, head_indices] = rescued_nodes
+    candidate_head = torch.zeros_like(strong_atlas, dtype=torch.bool)
+    candidate_head[:, head_indices] = candidates
+    return {
+        "rescued": rescued_atlas,
+        "candidate": candidate_head,
+        "seed": strong_atlas.bool(),
+        "anchored_components": anchored_components,
+        "color_rejected_texels": color_rejected,
+    }
+
+
+def _rescue_head_outer_topology_pixels(
+    canonical_rendered,
+    canonical_outputs,
+    routing,
+    trusted,
+    color_valid,
+    renderer,
+    views,
+    min_source_pixels=15,
+    semantic_threshold=0.25,
+    relaxed_route_threshold=0.25,
+    relaxed_semantic_threshold=0.65,
+    semantic_only_threshold=0.85,
+    min_seed_nodes=2,
+    color_tolerance=0.30,
+):
+    """Project anchored head topology rescue decisions back to image pixels."""
+    logits = canonical_outputs.get("head_outer_face_occupancy_logits")
+    if logits is None:
+        return trusted, torch.zeros_like(trusted), None
+    views = parse_views(views)
+    views_per_group = len(views)
+    if trusted.shape[0] % views_per_group != 0:
+        raise ValueError("Head topology rescue requires complete view groups.")
+    group_count = trusted.shape[0] // views_per_group
+    if logits.shape[0] != group_count:
+        raise ValueError(
+            "Head structure batch must match grouped parser inputs, got "
+            f"{logits.shape[0]} and {group_count}."
+        )
+    if not 0.0 <= float(relaxed_route_threshold) <= 1.0:
+        raise ValueError("relaxed_route_threshold must be in [0, 1].")
+    if not 0.0 <= float(relaxed_semantic_threshold) <= 1.0:
+        raise ValueError("relaxed_semantic_threshold must be in [0, 1].")
+    if not 0.0 <= float(semantic_only_threshold) <= 1.0:
+        raise ValueError("semantic_only_threshold must be in [0, 1].")
+
+    role_probability = torch.softmax(
+        canonical_outputs["layer"].float(), dim=1
+    )
+    raw_role = role_probability.argmax(dim=1)
+    raw_outer_score = role_probability[:, ROUTE_OUTER_PRIMARY]
+    raw_outer_competitor = torch.maximum(
+        role_probability[:, ROUTE_INNER_PRIMARY],
+        role_probability[:, ROUTE_SECONDARY],
+    )
+    raw_outer_margin = (
+        (raw_outer_score - raw_outer_competitor).clamp_min(0.0)
+        / raw_outer_score.clamp_min(1e-8)
+    ).clamp(0.0, 1.0)
+    uv_count = UV_SIZE * UV_SIZE
+    candidate_count = torch.zeros(
+        group_count * uv_count,
+        dtype=torch.long,
+        device=trusted.device,
+    )
+    candidate_rgb_sum = canonical_rendered.new_zeros(
+        group_count * uv_count, 3
+    )
+    strong_count = torch.zeros_like(candidate_count)
+    strong_rgb_sum = canonical_rendered.new_zeros(
+        group_count * uv_count, 3
+    )
+    candidate_pixels = torch.zeros_like(trusted)
+    candidate_flat_uv = torch.zeros_like(routing["flat_uv"])
+    candidate_part = torch.full_like(routing["part"], IGNORE_INDEX)
+    candidate_face = torch.full_like(routing["face"], IGNORE_INDEX)
+    candidate_center_score = torch.zeros_like(routing["confidence"])
+    semantic_probability = head_outer_face_values_to_uv(
+        torch.sigmoid(logits.float())
+    ).flatten(2)[:, 0]
+
+    for item_index in range(trusted.shape[0]):
+        view = views[item_index % views_per_group]
+        group_index = item_index // views_per_group
+        static = build_static_surface_routing(
+            renderer, view, trusted.device
+        )
+        outer_valid = static["masks"][ROUTE_OUTER_PRIMARY]
+        outer_flat = static["flat_uv"][ROUTE_OUTER_PRIMARY]
+        projected_semantic = semantic_probability[group_index].gather(
+            0, outer_flat.reshape(-1)
+        ).reshape_as(outer_flat)
+        relaxed_candidate = (
+            (raw_outer_score[item_index] >= float(relaxed_route_threshold))
+            & (
+                projected_semantic
+                >= float(relaxed_semantic_threshold)
+            )
+        )
+        semantic_only_candidate = (
+            projected_semantic >= float(semantic_only_threshold)
+        )
+        raw_candidate = (
+            outer_valid
+            & color_valid[item_index]
+            & (
+                (raw_role[item_index] == ROUTE_OUTER_PRIMARY)
+                | relaxed_candidate
+                | semantic_only_candidate
+            )
+        )
+        candidate_pixels[item_index] = raw_candidate
+        candidate_flat_uv[item_index] = outer_flat
+        candidate_part[item_index] = static["part"][ROUTE_OUTER_PRIMARY]
+        candidate_face[item_index] = static["face"][ROUTE_OUTER_PRIMARY]
+        candidate_center_score[item_index] = static["texel_center_score"][
+            ROUTE_OUTER_PRIMARY
+        ]
+        candidate_indices = outer_flat[raw_candidate] + group_index * uv_count
+        candidate_count.scatter_add_(
+            0,
+            candidate_indices,
+            torch.ones_like(candidate_indices),
+        )
+        candidate_rgb_sum.scatter_add_(
+            0,
+            candidate_indices.unsqueeze(1).expand(-1, 3),
+            canonical_rendered[item_index, :3, raw_candidate].transpose(0, 1),
+        )
+
+        strong_pixel = (
+            trusted[item_index]
+            & (routing["layer"][item_index] == ROUTE_OUTER_PRIMARY)
+            & (routing["part"][item_index] == 0)
+        )
+        strong_indices = (
+            routing["flat_uv"][item_index, strong_pixel]
+            + group_index * uv_count
+        )
+        strong_count.scatter_add_(
+            0,
+            strong_indices,
+            torch.ones_like(strong_indices),
+        )
+        strong_rgb_sum.scatter_add_(
+            0,
+            strong_indices.unsqueeze(1).expand(-1, 3),
+            canonical_rendered[item_index, :3, strong_pixel].transpose(0, 1),
+        )
+
+    candidate_count = candidate_count.reshape(group_count, uv_count)
+    strong_count = strong_count.reshape(group_count, uv_count)
+    candidate_rgb = (
+        candidate_rgb_sum.reshape(group_count, uv_count, 3)
+        / candidate_count.clamp_min(1).unsqueeze(-1)
+    ).permute(0, 2, 1)
+    strong_rgb = (
+        strong_rgb_sum.reshape(group_count, uv_count, 3)
+        / strong_count.clamp_min(1).unsqueeze(-1)
+    ).permute(0, 2, 1)
+    component = head_outer_topology_component_rescue(
+        strong_count > 0,
+        candidate_count >= int(min_source_pixels),
+        semantic_probability,
+        candidate_rgb,
+        strong_rgb,
+        semantic_threshold=semantic_threshold,
+        min_seed_nodes=min_seed_nodes,
+        color_tolerance=color_tolerance,
+    )
+    rescued_pixels = torch.zeros_like(trusted)
+    rescued_atlas = component["rescued"]
+    for item_index in range(trusted.shape[0]):
+        group_index = item_index // views_per_group
+        projected_rescue = rescued_atlas[group_index].gather(
+            0, candidate_flat_uv[item_index].reshape(-1)
+        ).reshape_as(trusted[item_index])
+        rescue = candidate_pixels[item_index] & projected_rescue
+        rescued_pixels[item_index] = rescue
+        if not rescue.any():
+            continue
+        routing["layer"][item_index, rescue] = ROUTE_OUTER_PRIMARY
+        routing["flat_uv"][item_index, rescue] = candidate_flat_uv[
+            item_index, rescue
+        ]
+        routing["surface"][item_index, rescue] = ROUTE_OUTER_PRIMARY
+        routing["route_role"][item_index, rescue] = ROUTE_OUTER_PRIMARY
+        routing["part"][item_index, rescue] = candidate_part[
+            item_index, rescue
+        ]
+        routing["face"][item_index, rescue] = candidate_face[
+            item_index, rescue
+        ]
+        routing["texel_center_score"][item_index, rescue] = (
+            candidate_center_score[item_index, rescue]
+        )
+        routing["confidence"][item_index, rescue] = raw_outer_score[
+            item_index, rescue
+        ]
+        routing["confidence_margin_ratio"][item_index, rescue] = (
+            raw_outer_margin[item_index, rescue]
+        )
+    trusted = trusted | rescued_pixels
+    component["candidate_source_texels"] = int(
+        (candidate_count >= int(min_source_pixels)).sum().item()
+    )
+    component["seed_texels"] = int((strong_count > 0).sum().item())
+    component["rescued_texels"] = int(rescued_atlas.sum().item())
+    component["rescued_pixels"] = int(rescued_pixels.sum().item())
+    component["relaxed_route_threshold"] = float(
+        relaxed_route_threshold
+    )
+    component["relaxed_semantic_threshold"] = float(
+        relaxed_semantic_threshold
+    )
+    component["semantic_only_threshold"] = float(
+        semantic_only_threshold
+    )
+    return trusted, rescued_pixels, component
 
 
 def aggregate_direct_outer_values_by_view(
@@ -3111,6 +3461,13 @@ def splat_parser_predictions_to_uv_conditioning(
     outer_silhouette_min_coverage=0.50,
     outer_silhouette_dilation=0,
     outer_silhouette_min_pixels=4,
+    head_outer_topology_rescue=False,
+    head_outer_topology_semantic_threshold=0.25,
+    head_outer_topology_relaxed_route_threshold=0.25,
+    head_outer_topology_relaxed_semantic_threshold=0.65,
+    head_outer_topology_semantic_only_threshold=0.85,
+    head_outer_topology_min_seed_nodes=2,
+    head_outer_topology_color_tolerance=0.30,
     outer_geometry_rescue=False,
     outer_semantic_rescue=True,
     outer_semantic_presence_threshold=0.80,
@@ -3180,6 +3537,30 @@ def splat_parser_predictions_to_uv_conditioning(
         raise ValueError("outer_silhouette_dilation must be non-negative.")
     if outer_silhouette_min_pixels < 1:
         raise ValueError("outer_silhouette_min_pixels must be positive.")
+    if not 0.0 <= head_outer_topology_semantic_threshold <= 1.0:
+        raise ValueError(
+            "head_outer_topology_semantic_threshold must be in [0, 1]."
+        )
+    if not 0.0 <= head_outer_topology_relaxed_route_threshold <= 1.0:
+        raise ValueError(
+            "head_outer_topology_relaxed_route_threshold must be in [0, 1]."
+        )
+    if not 0.0 <= head_outer_topology_relaxed_semantic_threshold <= 1.0:
+        raise ValueError(
+            "head_outer_topology_relaxed_semantic_threshold must be in [0, 1]."
+        )
+    if not 0.0 <= head_outer_topology_semantic_only_threshold <= 1.0:
+        raise ValueError(
+            "head_outer_topology_semantic_only_threshold must be in [0, 1]."
+        )
+    if head_outer_topology_min_seed_nodes < 2:
+        raise ValueError(
+            "head_outer_topology_min_seed_nodes must be at least 2."
+        )
+    if head_outer_topology_color_tolerance < 0.0:
+        raise ValueError(
+            "head_outer_topology_color_tolerance must be non-negative."
+        )
     if not (
         0.0
         <= outer_uv_component_grow_threshold
@@ -3725,6 +4106,38 @@ def splat_parser_predictions_to_uv_conditioning(
             & (outer_source_support < int(outer_uv_min_source_pixels))
         )
         trusted = trusted & ~outer_source_rejected
+    head_outer_topology_rescued = torch.zeros_like(trusted)
+    head_outer_topology_details = None
+    if head_outer_topology_rescue:
+        (
+            trusted,
+            head_outer_topology_rescued,
+            head_outer_topology_details,
+        ) = _rescue_head_outer_topology_pixels(
+            canonical_rendered,
+            canonical_outputs,
+            routing,
+            trusted,
+            color_support["valid"],
+            renderer,
+            views,
+            min_source_pixels=outer_uv_min_source_pixels,
+            semantic_threshold=(
+                head_outer_topology_semantic_threshold
+            ),
+            relaxed_route_threshold=(
+                head_outer_topology_relaxed_route_threshold
+            ),
+            relaxed_semantic_threshold=(
+                head_outer_topology_relaxed_semantic_threshold
+            ),
+            semantic_only_threshold=(
+                head_outer_topology_semantic_only_threshold
+            ),
+            min_seed_nodes=head_outer_topology_min_seed_nodes,
+            color_tolerance=head_outer_topology_color_tolerance,
+        )
+        selected_outer = routing["layer"] == ROUTE_OUTER_PRIMARY
     routing["raw_foreground"] = raw_foreground
     routing["observed_foreground"] = canonical_observed_foreground
     routing["canonical_foreground_coverage_rescued"] = (
@@ -3744,6 +4157,13 @@ def splat_parser_predictions_to_uv_conditioning(
     routing["outer_silhouette_rejected"] = outer_silhouette_rejected
     routing["outer_source_support"] = outer_source_support
     routing["outer_source_rejected"] = outer_source_rejected
+    routing["head_outer_topology_rescued"] = (
+        head_outer_topology_rescued
+    )
+    if head_outer_topology_details is not None:
+        routing["head_outer_topology_details"] = (
+            head_outer_topology_details
+        )
     routing["foreground"] = trusted
     color_foreground = trusted & color_support["valid"]
     routing["color_foreground"] = color_foreground
