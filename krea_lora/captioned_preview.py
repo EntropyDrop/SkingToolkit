@@ -12,6 +12,7 @@ from safetensors.torch import load_file
 
 from checkpoint_preview import decoded_tensor_to_pil, safe_output_stem, unpack_latents
 from common import pack_latents
+from image_postprocess import snap_near_white_to_white
 from reference_conditioning import denormalize_qwen_vae_latents, image_to_normalized_tensor, normalize_qwen_vae_latents
 
 
@@ -47,6 +48,7 @@ class CaptionedCheckpointPreviewer:
         seed: int,
         mode: str,
         strength: float,
+        white_background_threshold: int,
     ) -> None:
         if mode not in {"txt2img", "img2img"}:
             raise ValueError(f"Unsupported checkpoint preview mode: {mode}")
@@ -63,6 +65,7 @@ class CaptionedCheckpointPreviewer:
         self.steps = steps
         self.mode = mode
         self.strength = strength
+        self.white_background_threshold = white_background_threshold
         self.scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
             model_path,
             subfolder="scheduler",
@@ -188,7 +191,11 @@ class CaptionedCheckpointPreviewer:
                 raw_latents = denormalize_qwen_vae_latents(self.vae, unpacked)
                 decoded = self.vae.decode(raw_latents, return_dict=False)[0][:, :, 0]
                 generated_path = output_dir / f"{item.output_stem}_generated.png"
-                decoded_tensor_to_pil(decoded).save(generated_path, optimize=True)
+                generated = snap_near_white_to_white(
+                    decoded_tensor_to_pil(decoded),
+                    self.white_background_threshold,
+                )
+                generated.save(generated_path, optimize=True)
                 results.append(
                     {
                         "source_image": str(item.source_path),

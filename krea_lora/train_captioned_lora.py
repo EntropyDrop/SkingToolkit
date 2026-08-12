@@ -271,6 +271,7 @@ def main() -> None:
             seed=int(preview_config.get("seed", train_config["seed"])),
             mode=str(preview_config.get("mode", "img2img")),
             strength=float(preview_config.get("strength", 0.9)),
+            white_background_threshold=int(preview_config.get("white_background_threshold", 250)),
         )
         print(
             f"checkpoint previews: {len(checkpoint_rows)} Qwen-captioned image(s), "

@@ -37,7 +37,8 @@
     "width": 512,
     "height": 512,
     "steps": 28,
-    "seed": 20260812
+    "seed": 20260812,
+    "white_background_threshold": 250
   },
   "training": {
     "output_dir": "/home/ds/llms/SkingToolkit/krea_lora/runs/ddj_captioned_noise_white_lora",
@@ -77,6 +78,7 @@
     "guidance_scale": 0.0,
     "seed": 20260812,
     "layerwise_casting": false,
+    "white_background_threshold": 250,
     "negative_prompt": ""
   }
 }

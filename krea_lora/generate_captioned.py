@@ -13,6 +13,7 @@ from PIL import Image, ImageOps
 
 from caption_prompt import build_captioned_prompt
 from common import load_config, resolve_dtype, write_json
+from image_postprocess import snap_near_white_to_white
 from qwen_captioner import QwenCaptioner
 from reference_conditioning import normalize_qwen_vae_latents
 
@@ -163,6 +164,8 @@ def main() -> None:
                 max_sequence_length=int(config["model"].get("max_sequence_length", 512)),
                 **call_kwargs,
             ).images[0]
+        white_background_threshold = int(inference.get("white_background_threshold", 250))
+        image = snap_near_white_to_white(image, white_background_threshold)
         if len(strengths) > 1:
             suffix = f"_strength_{current_strength:.2f}".replace(".", "p")
             current_output = output_path.with_name(f"{output_path.stem}{suffix}{output_path.suffix}")
@@ -182,6 +185,7 @@ def main() -> None:
                 "seed": seed,
                 "qwen_description": description,
                 "prompt": prompt,
+                "white_background_threshold": white_background_threshold,
             },
         )
         print(current_output)

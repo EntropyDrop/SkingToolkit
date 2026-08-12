@@ -47,19 +47,25 @@ bash scripts/26_generate_captioned.sh \
   --output /path/to/mc_preview.png
 ```
 
-The default inference path matches the validated Web design: reference image
-to Qwen3.6 description, then Krea-2-Raw plus the trained LoRA in Img2Img mode
-with strength 0.9, 28 steps, and pipeline CFG 0 (equivalent to Comfy CFG 1).
-Use `--mode txt2img` to test description-only generation. The Qwen model is
+The production inference path is reference image to Qwen3.6 description, then
+Krea-2-Raw plus the trained LoRA in text-to-image mode with 28 steps and
+pipeline CFG 0 (equivalent to Comfy CFG 1). The reference still controls the
+identity through its per-image Qwen caption; omitting the source VAE latent is
+intentional because it makes the learned white background, fixed camera, and
+two-character layout deterministic across seeds. Img2Img remains available as
+an optional experiment with `--mode img2img --strength 0.95`, but lower
+strengths can preserve the source background or silhouette. The Qwen model is
 released before Krea loads, so the two large models do not coexist on CUDA.
+Near-white VAE decode drift (RGB 250-255) is snapped to exact white only at the
+output boundary; this does not alter LoRA training or darker character pixels.
 
-Checkpoint previews use the same precomputed Qwen descriptions and Img2Img
-schedule. `checkpoint-0/tests`, every configured checkpoint, and `final/tests`
-contain the reference, generated image, and metadata including the Qwen
-description. The default test images are img3, img14, and img17.
+Checkpoint previews use the same formal Qwen-captioned text-to-image path.
+`checkpoint-0/tests`, every configured checkpoint, and `final/tests` contain
+the reference, generated image, and metadata including the Qwen description.
+The default test images are img3, img14, and img17.
 
 The end-to-end test, including one real Qwen caption, sharded Krea prompt
-encoding, one optimizer step, and checkpoint Img2Img, is:
+encoding, one optimizer step, and a formal-path checkpoint preview, is:
 
 ```bash
 bash scripts/smoke_test_captioned.sh
