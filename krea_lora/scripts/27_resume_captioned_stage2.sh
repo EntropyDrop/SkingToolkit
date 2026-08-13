@@ -6,8 +6,8 @@ cd "${KREA_LORA_DIR}"
 export KREA_CONFIG="${KREA_CONFIG:-${KREA_LORA_DIR}/configs/ddj_captioned.json}"
 source "$(dirname "$0")/_env.sh"
 
-KREA_RESUME_LORA="${KREA_RESUME_LORA:-runs/ddj_captioned_noise_white_lora/checkpoint-1000}"
-KREA_STAGE2_OUTPUT="${KREA_STAGE2_OUTPUT:-runs/ddj_captioned_noise_white_lora_stage2}"
+KREA_RESUME_LORA="${KREA_RESUME_LORA:-runs/ddj_captioned_front_left_back_left_lora/checkpoint-1000}"
+KREA_STAGE2_OUTPUT="${KREA_STAGE2_OUTPUT:-runs/ddj_captioned_front_left_back_left_lora_stage2}"
 KREA_STAGE2_STEPS="${KREA_STAGE2_STEPS:-2000}"
 KREA_STAGE2_LR="${KREA_STAGE2_LR:-0.00004}"
 

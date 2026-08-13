@@ -5,9 +5,9 @@ KREA_LORA_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "${KREA_LORA_DIR}"
 
 TARGET_CAPTIONS="${KREA_PILOT_CAPTIONS:-128}"
-CAPTION_FILE="data/ddj_captioned_noise_white_512/qwen_captions.jsonl"
+CAPTION_FILE="data/ddj_captioned_front_left_back_left_white_512/qwen_captions.jsonl"
 PIPELINE_PID_FILE="runs/ddj_captioned_pipeline.pid"
-PILOT_OUTPUT="${KREA_PILOT_OUTPUT:-runs/ddj_captioned_pilot_lora}"
+PILOT_OUTPUT="${KREA_PILOT_OUTPUT:-runs/ddj_captioned_front_left_back_left_pilot_lora}"
 
 if [[ ! -f "${PIPELINE_PID_FILE}" ]]; then
   echo "Missing pipeline PID file: ${PIPELINE_PID_FILE}"

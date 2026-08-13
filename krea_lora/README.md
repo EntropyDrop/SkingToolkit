@@ -39,6 +39,11 @@ flushed after every image, so an interrupted caption run resumes without losing
 finished work. Stage 22 intentionally refuses to overwrite metadata; use
 `--force` only after changing captions or prompt construction.
 
+When only the renderer views change, stage 21 copies the existing per-source
+Qwen caption file configured by `captioning.reuse_caption_files`; it generates
+only genuinely missing captions. This is safe because captions contain identity,
+clothing, and palette but deliberately exclude camera and layout.
+
 Generate from a new reference image after training:
 
 ```bash
@@ -71,18 +76,25 @@ encoding, one optimizer step, and a formal-path checkpoint preview, is:
 bash scripts/smoke_test_captioned.sh
 ```
 
-Production outputs are isolated from all earlier attempts:
+Production front-left/back-left outputs are isolated from all earlier attempts:
 
 ```text
-data/ddj_captioned_noise_white_512
-runs/ddj_captioned_noise_white_lora
+data/ddj_captioned_front_left_back_left_white_512
+runs/ddj_captioned_front_left_back_left_lora
 ```
+
+The reproducible schedule is two stages from the frozen Raw base: stage 1 uses
+1,000 steps at `5e-5` with warmup, then `scripts/27_resume_captioned_stage2.sh`
+starts a fresh optimizer/scheduler for up to 2,000 more steps at `4e-5`.
+Checkpoint images are reviewed every 250 stage-2 steps; `best` points to the
+visually selected checkpoint rather than blindly selecting `final`.
 
 ### FastAPI + plain HTML Web UI
 
 The production LAN UI lives in `web/`. It defaults to Krea-2-Raw, the selected
-stage-2 `checkpoint-750`, Qwen3.6 per-image captioning, and caption-conditioned
-text-to-image. Img2Img is retained in the advanced controls as an experiment.
+front-left/back-left `best` checkpoint, Qwen3.6 per-image captioning, and
+caption-conditioned text-to-image. Img2Img is retained in the advanced
+controls as an experiment.
 
 ```bash
 cd /home/ds/llms/SkingToolkit/krea_lora
@@ -111,7 +123,8 @@ uses matching `_source` and `_result` records from
 `/home/ds/llms/SKING_DDJ_Dataset`. Existing historical `_edited` files are not
 used as ground truth because many contain gradients, smooth detail, or older
 camera layouts. Every target is regenerated from the valid 64x64 RGBA result
-skin with the renderer's `front_right` and `back_left` mappings.
+skin with the renderer's `front_left` and `back_left` mappings. Both views show
+the same left side, so they are not described as an exact 180-degree pair.
 
 This makes all target pixels consequences of Minecraft's base/outer UV layers:
 there are no handheld meshes, capes, lighting effects, or geometry outside the
@@ -224,7 +237,8 @@ This subproject trains a LoRA on the Krea2 transformer to make the requested
 Minecraft preview layout more stable:
 
 - the left half is a fixed front-left orthographic view;
-- the right half is the matching back-right orthographic view;
+- the right half is a fixed back-left orthographic view;
+- both views expose the character's left side;
 - both views use the same neutral pose, scale, and camera elevation;
 - all targets are rendered from valid 64x64 RGBA Minecraft base/outer layers;
 - the background is pure white and no unsupported geometry is present.

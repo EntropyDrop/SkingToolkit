@@ -5,6 +5,7 @@ import argparse
 import gc
 import json
 import os
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -46,6 +47,15 @@ def main() -> None:
     if args.force:
         output_path.unlink(missing_ok=True)
         error_path.unlink(missing_ok=True)
+
+    if not output_path.exists() and not args.force:
+        for candidate in config["captioning"].get("reuse_caption_files", []):
+            reusable_path = Path(candidate).expanduser().resolve()
+            if reusable_path.is_file():
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(reusable_path, output_path)
+                print(f"reused Qwen captions: {reusable_path} -> {output_path}")
+                break
 
     paired_rows = read_jsonl(paired_dir / "metadata.jsonl")
     if args.limit:

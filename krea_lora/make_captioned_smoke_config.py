@@ -27,6 +27,7 @@ def main() -> None:
     config["data"]["dataset_dir"] = str(root / "data")
     config["data"]["max_images"] = 2
     config["data"]["validation_fraction"] = 0.5
+    config["captioning"]["reuse_caption_files"] = []
     config["checkpoint_preview"]["test_images"] = config["checkpoint_preview"]["test_images"][:1]
     config["checkpoint_preview"]["steps"] = 2
     config["training"]["output_dir"] = str(root / "run")

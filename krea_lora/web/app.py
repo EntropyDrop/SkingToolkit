@@ -29,7 +29,7 @@ CONFIG_PATH = Path(
 with CONFIG_PATH.open("r", encoding="utf-8") as handle:
     CONFIG = json.load(handle)
 
-DEFAULT_LORA = PROJECT_DIR / "runs" / "ddj_captioned_noise_white_lora_stage2" / "checkpoint-750"
+DEFAULT_LORA = PROJECT_DIR / "runs" / "ddj_captioned_front_left_back_left_lora" / "best"
 LORA_PATH = Path(os.getenv("KREA_LORA_PATH", DEFAULT_LORA)).expanduser().resolve()
 RUNTIME_DIR = Path(os.getenv("KREA_WEB_RUNTIME", PROJECT_DIR / "runs" / "captioned_web")).expanduser().resolve()
 INPUT_DIR = RUNTIME_DIR / "inputs"
