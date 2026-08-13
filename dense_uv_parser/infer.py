@@ -901,23 +901,32 @@ def build_arg_parser():
     parser.add_argument(
         "--head_outer_topology_relaxed_route_threshold",
         type=float,
-        default=0.25,
+        default=0.50,
     )
     parser.add_argument(
         "--head_outer_topology_relaxed_semantic_threshold",
         type=float,
-        default=0.65,
+        default=0.80,
     )
     parser.add_argument(
         "--head_outer_topology_semantic_only_threshold",
         type=float,
-        default=0.85,
+        default=0.92,
+    )
+    parser.add_argument(
+        "--head_outer_topology_ring_semantic_threshold",
+        type=float,
+        default=0.65,
+        help=(
+            "Minimum head-structure probability for filling gaps in an "
+            "established horizontal accessory ring."
+        ),
     )
     parser.add_argument(
         "--head_outer_topology_min_seed_nodes", type=int, default=2
     )
     parser.add_argument(
-        "--head_outer_topology_color_tolerance", type=float, default=0.30
+        "--head_outer_topology_color_tolerance", type=float, default=0.20
     )
     parser.add_argument(
         "--outer_geometry_rescue",
@@ -1163,6 +1172,10 @@ def main():
     if not 0.0 <= args.head_outer_topology_semantic_only_threshold <= 1.0:
         raise ValueError(
             "--head_outer_topology_semantic_only_threshold must be in [0, 1]."
+        )
+    if not 0.0 <= args.head_outer_topology_ring_semantic_threshold <= 1.0:
+        raise ValueError(
+            "--head_outer_topology_ring_semantic_threshold must be in [0, 1]."
         )
     if args.head_outer_topology_min_seed_nodes < 2:
         raise ValueError(
@@ -1614,6 +1627,9 @@ def main():
             ),
             head_outer_topology_semantic_only_threshold=(
                 args.head_outer_topology_semantic_only_threshold
+            ),
+            head_outer_topology_ring_semantic_threshold=(
+                args.head_outer_topology_ring_semantic_threshold
             ),
             head_outer_topology_min_seed_nodes=(
                 args.head_outer_topology_min_seed_nodes
@@ -2102,6 +2118,56 @@ def main():
                             "color_rejected_texels", 0
                         )
                     ),
+                    "head_outer_topology_ring_candidate_texels": int(
+                        head_topology_details.get(
+                            "ring_candidate_texels", 0
+                        )
+                    ),
+                    "head_outer_topology_ring_rescued_texels": int(
+                        head_topology_details.get(
+                            "ring_rescued_texels", 0
+                        )
+                    ),
+                    "head_outer_topology_pruned_isolated_texels": int(
+                        head_topology_details.get(
+                            "pruned_isolated_texels", 0
+                        )
+                    ),
+                    "head_outer_topology_pruned_isolated_pixels": int(
+                        head_topology_details.get(
+                            "pruned_isolated_pixels", 0
+                        )
+                    ),
+                    "head_outer_protrusion_color_assessed_pixels": int(
+                        head_topology_details.get(
+                            "protrusion_color_assessed_pixels", 0
+                        )
+                    ),
+                    "head_outer_protrusion_color_rejected_pixels": int(
+                        head_topology_details.get(
+                            "protrusion_color_rejected_pixels", 0
+                        )
+                    ),
+                    "head_outer_protrusion_color_rejected_texels": int(
+                        head_topology_details.get(
+                            "protrusion_color_rejected_texels", 0
+                        )
+                    ),
+                    "head_outer_visible_color_assessed_pixels": int(
+                        head_topology_details.get(
+                            "visible_color_assessed_pixels", 0
+                        )
+                    ),
+                    "head_outer_visible_color_rejected_pixels": int(
+                        head_topology_details.get(
+                            "visible_color_rejected_pixels", 0
+                        )
+                    ),
+                    "head_outer_visible_color_rejected_texels": int(
+                        head_topology_details.get(
+                            "visible_color_rejected_texels", 0
+                        )
+                    ),
                     "head_outer_topology_semantic_threshold": round(
                         float(
                             args.head_outer_topology_semantic_threshold
@@ -2127,6 +2193,12 @@ def main():
                     "head_outer_topology_semantic_only_threshold": round(
                         float(
                             args.head_outer_topology_semantic_only_threshold
+                        ),
+                        6,
+                    ),
+                    "head_outer_topology_ring_semantic_threshold": round(
+                        float(
+                            args.head_outer_topology_ring_semantic_threshold
                         ),
                         6,
                     ),
