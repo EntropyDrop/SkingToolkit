@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Krea MC LoRA</title>
+  <style>
+    :root{color-scheme:dark;--bg:#09100c;--panel:#101914;--line:#2a3b31;--text:#e5eee8;--muted:#91a096;--green:#75e88e;--red:#ff8a8a}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 25% 0,#16251b 0,#09100c 38%);color:var(--text);font:14px/1.5 system-ui,sans-serif}main{max-width:1320px;margin:auto;padding:24px;display:grid;grid-template-columns:minmax(340px,470px) 1fr;gap:20px}.panel{background:color-mix(in srgb,var(--panel) 94%,transparent);border:1px solid var(--line);border-radius:16px;padding:18px;box-shadow:0 18px 60px #0007}h1{font-size:21px;margin:0 0 4px}.sub,.hint{color:var(--muted);font-size:12px}.flow{display:flex;gap:6px;flex-wrap:wrap;margin:15px 0}.flow span{border:1px solid #35523e;border-radius:99px;padding:4px 8px;font-size:11px;color:#bfeaca}label{display:block;margin:14px 0 6px;font-weight:700}.drop{border:1px dashed #547461;border-radius:12px;min-height:116px;display:grid;place-items:center;cursor:pointer;background:#0a120d}.drop img{display:none;max-width:100%;max-height:210px;border-radius:9px}.drop.has img{display:block}.drop.has span{display:none}input[type=file]{display:none}textarea,input,select,button{width:100%;border:1px solid var(--line);border-radius:9px;background:#0a110d;color:var(--text);padding:10px;font:inherit}textarea{min-height:178px;resize:vertical}textarea.small{min-height:70px}.row{display:grid;grid-template-columns:1fr 1fr;gap:10px}.advanced{margin-top:12px}.advanced summary{cursor:pointer;color:var(--muted)}button{margin-top:16px;background:var(--green);color:#061209;font-weight:900;border:0;cursor:pointer}button:disabled{opacity:.45;cursor:wait}.stage{min-height:690px;display:flex;flex-direction:column}.stagehead{display:flex;justify-content:space-between;gap:12px}.canvas{flex:1;display:grid;place-items:center;margin-top:14px;border-radius:12px;background:repeating-conic-gradient(#111a15 0 25%,#0d1511 0 50%) 50%/24px 24px;overflow:hidden}.canvas img{display:none;width:100%;height:100%;object-fit:contain;background:white}.empty{text-align:center;color:var(--muted);max-width:360px}.barbox{display:none;width:min(520px,80%)}.track{height:8px;border-radius:9px;background:#233027;overflow:hidden}.bar{height:100%;width:0;background:var(--green);transition:width .35s}.phase{margin-bottom:8px}.meta{margin-top:12px;color:var(--muted);font-size:12px;white-space:pre-wrap}.error{color:var(--red);white-space:pre-wrap}.actions{display:none;gap:8px}.actions a{color:var(--green)}@media(max-width:850px){main{grid-template-columns:1fr}.stage{min-height:520px}}
+  </style>
+</head>
+<body>
+<main>
+  <form id="form" class="panel">
+    <h1>Krea MC Captioned LoRA</h1>
+    <div class="sub">参考图 → Qwen3.6-27B 描述 → Krea-2-Raw + MC LoRA</div>
+    <div class="flow"><span>Qwen caption</span><span>标准 noise→target LoRA</span><span>固定前后视角</span><span>纯白背景</span></div>
+    <label>角色参考图</label>
+    <div id="drop" class="drop"><input id="file" type="file" accept="image/png,image/jpeg,image/webp"><span>点击或拖入图片（最大 10MB）</span><img id="preview" alt="参考图"></div>
+    <label>MC 结构 Prompt（可编辑）</label>
+    <textarea id="prompt" required></textarea>
+    <label>角色补充描述 <span class="hint">可选，会追加在 Qwen caption 后</span></label>
+    <textarea id="extra" class="small" placeholder="例如：必须保留左腿黑色长袜，右腿裸露"></textarea>
+    <details class="advanced"><summary>推理参数</summary>
+      <div class="row"><div><label>模式</label><select id="mode"><option value="txt2img">正式：Caption → Txt2Img</option><option value="img2img">实验：Caption + Img2Img</option></select></div><div><label>Img2Img 强度</label><input id="strength" type="number" min="0.05" max="1" step="0.05" value="0.95"></div></div>
+      <div class="row"><div><label>Seed（-1 随机）</label><input id="seed" type="number" value="-1"></div><div><label>步数</label><input id="steps" type="number" min="8" max="40" value="28"></div></div>
+      <label>Guidance scale</label><input id="guidance" type="number" min="0" max="3" step="0.25" value="0">
+    </details>
+    <button id="submit">生成 MC 预览</button>
+    <div id="health" class="meta">正在检查后端…</div>
+  </form>
+  <section class="panel stage">
+    <div class="stagehead"><strong>512×512 正式预览</strong><span id="jobmeta" class="hint">等待生成</span></div>
+    <div class="canvas"><div id="empty" class="empty"><h2>上传角色参考图</h2><p>输出固定为左侧 front-right、右侧 back-left 的同一 Minecraft 角色，完整全身、等距留白、无场景和光影。</p></div><div id="barbox" class="barbox"><div id="phase" class="phase">准备中</div><div class="track"><div id="bar" class="bar"></div></div></div><img id="result" alt="MC 生成结果"></div>
+    <div id="error" class="meta error"></div><div id="caption" class="meta"></div><div id="actions" class="actions"><a id="download" download>下载 PNG</a></div>
+  </section>
+</main>
+<script>
+const $=id=>document.getElementById(id);let imageData=null,poller=null;
+async function api(path,options){const response=await fetch(path,options);const body=await response.json().catch(()=>({}));if(!response.ok)throw new Error(body.detail||`HTTP ${response.status}`);return body}
+async function boot(){const [config,health]=await Promise.all([api('/api/config'),api('/api/health')]);$('prompt').value=config.prompt;$('steps').value=config.steps;$('guidance').value=config.guidance_scale;$('health').textContent=health.ok?`就绪 · ${config.lora}`:`未就绪 · LoRA=${health.lora_exists}`}
+function useFile(file){if(!file)return;if(file.size>10*1024*1024)throw new Error('图片不能超过 10MB');const reader=new FileReader;reader.onload=()=>{imageData=reader.result;$('preview').src=imageData;$('drop').classList.add('has')};reader.readAsDataURL(file)}
+$('drop').onclick=()=>$('file').click();$('file').onchange=e=>{try{useFile(e.target.files[0])}catch(error){alert(error.message)}};['dragover','drop'].forEach(name=>$('drop').addEventListener(name,event=>event.preventDefault()));$('drop').addEventListener('drop',event=>{try{useFile(event.dataTransfer.files[0])}catch(error){alert(error.message)}});
+function render(job){$('jobmeta').textContent=`${job.mode} · seed ${job.seed}`;$('phase').textContent=job.phase;$('bar').style.width=`${Math.round(100*(job.progress||0))}%`;if(job.status==='completed'){clearInterval(poller);$('submit').disabled=false;$('barbox').style.display='none';$('result').src=job.image_url;$('result').style.display='block';$('download').href=job.image_url;$('actions').style.display='flex';$('caption').textContent=`Qwen3.6：${job.qwen_description||''}`}else if(job.status==='failed'){clearInterval(poller);$('submit').disabled=false;$('error').textContent=job.error||'生成失败'} }
+$('form').onsubmit=async event=>{event.preventDefault();if(!imageData){alert('请先上传参考图');return}$('submit').disabled=true;$('error').textContent='';$('caption').textContent='';$('empty').style.display='none';$('result').style.display='none';$('barbox').style.display='block';try{const job=await api('/api/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({reference_image:imageData,prompt:$('prompt').value,supplemental_description:$('extra').value,mode:$('mode').value,strength:+$('strength').value,seed:+$('seed').value,steps:+$('steps').value,guidance_scale:+$('guidance').value})});render(job);poller=setInterval(async()=>{try{render(await api(`/api/jobs/${job.id}`))}catch(error){$('error').textContent=error.message}},1000)}catch(error){$('submit').disabled=false;$('error').textContent=error.message}};
+boot().catch(error=>$('health').textContent=error.message);
+</script>
+</body>
+</html>

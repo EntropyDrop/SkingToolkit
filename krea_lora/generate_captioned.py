@@ -23,6 +23,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", default=None)
     parser.add_argument("--source", required=True)
     parser.add_argument("--description", default=None, help="Skip Qwen and use this precomputed identity caption.")
+    parser.add_argument("--description-suffix", default=None, help="Append user-supplied identity details to Qwen.")
+    parser.add_argument("--format-prompt", default=None, help="Override the editable MC format prompt.")
     parser.add_argument("--lora", default=None)
     parser.add_argument("--output", default=None)
     parser.add_argument("--mode", choices=["txt2img", "img2img"], default=None)
@@ -100,7 +102,15 @@ def main() -> None:
             description = captioner.describe(source)
         finally:
             captioner.close()
-    prompt = build_captioned_prompt(config, description)
+    if args.description_suffix:
+        description = f"{description} {' '.join(args.description_suffix.strip().split())}".strip()
+    if args.format_prompt:
+        format_prompt = " ".join(args.format_prompt.strip().split())
+        if not format_prompt:
+            raise ValueError("--format-prompt is empty")
+        prompt = f"{format_prompt} {str(config['prompt']['identity_prefix']).strip()} {description}"
+    else:
+        prompt = build_captioned_prompt(config, description)
     print(f"Qwen description: {description}")
 
     model_path = Path(config["model"]["path"]).expanduser().resolve()

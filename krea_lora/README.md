@@ -78,6 +78,29 @@ data/ddj_captioned_noise_white_512
 runs/ddj_captioned_noise_white_lora
 ```
 
+### FastAPI + plain HTML Web UI
+
+The production LAN UI lives in `web/`. It defaults to Krea-2-Raw, the selected
+stage-2 `checkpoint-750`, Qwen3.6 per-image captioning, and caption-conditioned
+text-to-image. Img2Img is retained in the advanced controls as an experiment.
+
+```bash
+cd /home/ds/llms/SkingToolkit/krea_lora
+bash web/start.sh
+# open http://192.168.0.111:7862/
+```
+
+Override the selected adapter without editing code:
+
+```bash
+KREA_LORA_PATH=/absolute/checkpoint/path bash web/start.sh
+```
+
+Stop only this Web process with `bash web/stop.sh`. The server does not load a
+GPU model at startup; GPU memory appears in `nvidia-smi` only while a generation
+job is running. The editable Prompt is the MC format part. Qwen's description
+and optional user details are appended behind it automatically.
+
 The local DDJ source currently contains 1,565 complete source/result/edited
 triples (1,490 train and 75 validation), not 8,087.
 
