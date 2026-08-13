@@ -19,6 +19,10 @@ from SkingToolkit.dense_uv_parser.foreground import (  # noqa: E402
     build_parser_input,
     save_flood_outputs,
 )
+from SkingToolkit.dense_uv_parser.inference_config import (  # noqa: E402
+    PRODUCTION_PREPROCESSING_DEFAULTS,
+    PRODUCTION_SPLAT_DEFAULTS,
+)
 from SkingToolkit.dense_uv_parser.semantic import attach_semantic_runtime  # noqa: E402
 from SkingToolkit.dense_uv_parser.semantic_targets import (  # noqa: E402
     head_outer_face_values_to_uv,
@@ -672,6 +676,8 @@ def save_debug_preview(
 
 
 def build_arg_parser():
+    preprocessing_defaults = PRODUCTION_PREPROCESSING_DEFAULTS
+    splat_defaults = PRODUCTION_SPLAT_DEFAULTS
     parser = argparse.ArgumentParser(description="Infer UV conditioning with a dense UV parser.")
     parser.add_argument("--parser_checkpoint", required=True)
     parser.add_argument(
@@ -687,13 +693,13 @@ def build_arg_parser():
     parser.add_argument(
         "--foreground_flood_tolerance",
         type=float,
-        default=0.03,
+        default=preprocessing_defaults["foreground_flood_tolerance"],
         help="Maximum per-channel RGB distance from the top-left flood seed.",
     )
     parser.add_argument(
         "--foreground_parser_background",
         choices=["adaptive", "neutral"],
-        default="adaptive",
+        default=preprocessing_defaults["foreground_parser_background"],
         help="Solid background used for the masked RGB passed to dense parser.",
     )
     parser.add_argument(
@@ -816,17 +822,21 @@ def build_arg_parser():
     parser.add_argument("--combined", default=None)
     parser.add_argument("--view_images", nargs="*", default=None)
     parser.add_argument("--mappings_dir", default=None)
-    parser.add_argument("--fg_threshold", type=float, default=0.5)
+    parser.add_argument(
+        "--fg_threshold",
+        type=float,
+        default=splat_defaults["fg_threshold"],
+    )
     parser.add_argument(
         "--background_color_tolerance",
         type=float,
-        default=48.0 / 255.0,
+        default=splat_defaults["background_color_tolerance"],
         help="RGB distance used to reject solid-background and antialiased edge pixels.",
     )
     parser.add_argument(
         "--color_background_tolerance",
         type=float,
-        default=8.0 / 255.0,
+        default=splat_defaults["color_background_tolerance"],
         help=(
             "Reject background-like RGB candidates only on the foreground "
             "boundary before inverse UV color sampling."
@@ -835,30 +845,46 @@ def build_arg_parser():
     parser.add_argument(
         "--color_foreground_inset",
         type=int,
-        default=1,
+        default=splat_defaults["color_foreground_inset"],
         help="Foreground boundary width demoted during texel-center color selection.",
     )
-    parser.add_argument("--route_confidence_threshold", type=float, default=0.0)
-    parser.add_argument("--route_margin_threshold", type=float, default=0.0)
-    parser.add_argument("--outer_route_confidence_threshold", type=float, default=0.55)
-    parser.add_argument("--outer_route_margin_threshold", type=float, default=0.35)
+    parser.add_argument(
+        "--route_confidence_threshold",
+        type=float,
+        default=splat_defaults["route_confidence_threshold"],
+    )
+    parser.add_argument(
+        "--route_margin_threshold",
+        type=float,
+        default=splat_defaults["route_margin_threshold"],
+    )
+    parser.add_argument(
+        "--outer_route_confidence_threshold",
+        type=float,
+        default=splat_defaults["outer_route_confidence_threshold"],
+    )
+    parser.add_argument(
+        "--outer_route_margin_threshold",
+        type=float,
+        default=splat_defaults["outer_route_margin_threshold"],
+    )
     parser.add_argument(
         "--outer_uv_min_coverage",
         type=float,
-        default=None,
+        default=splat_defaults["outer_uv_min_coverage"],
         help="Reject outer UV texels supported by less than this fraction of their projected footprint.",
     )
     parser.add_argument(
         "--outer_uv_min_source_pixels",
         type=int,
-        default=15,
+        default=splat_defaults["outer_uv_min_source_pixels"],
         help="Minimum routed source pixels required to keep an outer UV texel.",
     )
     parser.add_argument(
         "--outer_silhouette_consistency",
         dest="outer_silhouette_consistency",
         action="store_true",
-        default=True,
+        default=splat_defaults["outer_silhouette_consistency"],
         help=(
             "Reject an outer texel when its protruding projection is absent "
             "from the observed foreground silhouette."
@@ -870,19 +896,25 @@ def build_arg_parser():
         action="store_false",
     )
     parser.add_argument(
-        "--outer_silhouette_min_coverage", type=float, default=0.50
+        "--outer_silhouette_min_coverage",
+        type=float,
+        default=splat_defaults["outer_silhouette_min_coverage"],
     )
     parser.add_argument(
-        "--outer_silhouette_dilation", type=int, default=0
+        "--outer_silhouette_dilation",
+        type=int,
+        default=splat_defaults["outer_silhouette_dilation"],
     )
     parser.add_argument(
-        "--outer_silhouette_min_pixels", type=int, default=4
+        "--outer_silhouette_min_pixels",
+        type=int,
+        default=splat_defaults["outer_silhouette_min_pixels"],
     )
     parser.add_argument(
         "--head_outer_topology_rescue",
         dest="head_outer_topology_rescue",
         action="store_true",
-        default=True,
+        default=splat_defaults["head_outer_topology_rescue"],
         help=(
             "Restore relaxed head-outer candidates only when they connect "
             "multiple strict seeds in the physical head-cube topology."
@@ -896,43 +928,53 @@ def build_arg_parser():
     parser.add_argument(
         "--head_outer_topology_semantic_threshold",
         type=float,
-        default=0.25,
+        default=splat_defaults["head_outer_topology_semantic_threshold"],
     )
     parser.add_argument(
         "--head_outer_topology_relaxed_route_threshold",
         type=float,
-        default=0.50,
+        default=splat_defaults[
+            "head_outer_topology_relaxed_route_threshold"
+        ],
     )
     parser.add_argument(
         "--head_outer_topology_relaxed_semantic_threshold",
         type=float,
-        default=0.80,
+        default=splat_defaults[
+            "head_outer_topology_relaxed_semantic_threshold"
+        ],
     )
     parser.add_argument(
         "--head_outer_topology_semantic_only_threshold",
         type=float,
-        default=0.92,
+        default=splat_defaults[
+            "head_outer_topology_semantic_only_threshold"
+        ],
     )
     parser.add_argument(
         "--head_outer_topology_ring_semantic_threshold",
         type=float,
-        default=0.65,
+        default=splat_defaults["head_outer_topology_ring_semantic_threshold"],
         help=(
             "Minimum head-structure probability for filling gaps in an "
             "established horizontal accessory ring."
         ),
     )
     parser.add_argument(
-        "--head_outer_topology_min_seed_nodes", type=int, default=2
+        "--head_outer_topology_min_seed_nodes",
+        type=int,
+        default=splat_defaults["head_outer_topology_min_seed_nodes"],
     )
     parser.add_argument(
-        "--head_outer_topology_color_tolerance", type=float, default=0.20
+        "--head_outer_topology_color_tolerance",
+        type=float,
+        default=splat_defaults["head_outer_topology_color_tolerance"],
     )
     parser.add_argument(
         "--outer_geometry_rescue",
         dest="outer_geometry_rescue",
         action="store_true",
-        default=True,
+        default=splat_defaults["outer_geometry_rescue"],
         help="Relax outer gates only for UV texels proven by outer-only silhouette or an exact secondary slot.",
     )
     parser.add_argument(
@@ -944,7 +986,7 @@ def build_arg_parser():
         "--outer_semantic_rescue",
         dest="outer_semantic_rescue",
         action="store_true",
-        default=True,
+        default=splat_defaults["outer_semantic_rescue"],
         help="Relax outer gates only on parts whose global semantic heads predict a substantial outer layer.",
     )
     parser.add_argument(
@@ -952,16 +994,36 @@ def build_arg_parser():
         dest="outer_semantic_rescue",
         action="store_false",
     )
-    parser.add_argument("--outer_semantic_presence_threshold", type=float, default=0.80)
-    parser.add_argument("--outer_semantic_coverage_threshold", type=float, default=0.20)
-    parser.add_argument("--outer_rescue_confidence_threshold", type=float, default=0.60)
-    parser.add_argument("--outer_rescue_margin_threshold", type=float, default=0.25)
-    parser.add_argument("--outer_rescue_min_coverage", type=float, default=0.10)
+    parser.add_argument(
+        "--outer_semantic_presence_threshold",
+        type=float,
+        default=splat_defaults["outer_semantic_presence_threshold"],
+    )
+    parser.add_argument(
+        "--outer_semantic_coverage_threshold",
+        type=float,
+        default=splat_defaults["outer_semantic_coverage_threshold"],
+    )
+    parser.add_argument(
+        "--outer_rescue_confidence_threshold",
+        type=float,
+        default=splat_defaults["outer_rescue_confidence_threshold"],
+    )
+    parser.add_argument(
+        "--outer_rescue_margin_threshold",
+        type=float,
+        default=splat_defaults["outer_rescue_margin_threshold"],
+    )
+    parser.add_argument(
+        "--outer_rescue_min_coverage",
+        type=float,
+        default=splat_defaults["outer_rescue_min_coverage"],
+    )
     parser.add_argument(
         "--geometry_route_texel_consensus",
         dest="geometry_route_texel_consensus",
         action="store_true",
-        default=None,
+        default=splat_defaults["geometry_route_texel_consensus"],
         help="Use projected UV-cell voting instead of semantic-first per-pixel routing.",
     )
     parser.add_argument(
@@ -972,13 +1034,13 @@ def build_arg_parser():
     parser.add_argument(
         "--geometry_route_texel_consensus_weight",
         type=float,
-        default=None,
+        default=splat_defaults["geometry_route_texel_consensus_weight"],
         help="Blend weight for center-weighted texel consensus; 0 keeps local probabilities and 1 uses only the cell aggregate.",
     )
     parser.add_argument(
         "--geometry_route_preserve_outer_confidence",
         type=float,
-        default=None,
+        default=splat_defaults["geometry_route_preserve_outer_confidence"],
         help=(
             "Minimum local outer confidence required in addition to the fused "
             "texel gate when the raw route predicts outer."
@@ -987,7 +1049,7 @@ def build_arg_parser():
     parser.add_argument(
         "--geometry_route_preserve_outer_margin",
         type=float,
-        default=None,
+        default=splat_defaults["geometry_route_preserve_outer_margin"],
         help=(
             "Minimum local outer margin required in addition to the fused "
             "texel gate when the raw route predicts outer."
@@ -996,20 +1058,22 @@ def build_arg_parser():
     parser.add_argument(
         "--geometry_route_consensus_outer_confidence",
         type=float,
-        default=None,
+        default=splat_defaults[
+            "geometry_route_consensus_outer_confidence"
+        ],
         help="Minimum fused confidence required to promote a route to outer.",
     )
     parser.add_argument(
         "--geometry_route_consensus_outer_margin",
         type=float,
-        default=None,
+        default=splat_defaults["geometry_route_consensus_outer_margin"],
         help="Minimum fused margin ratio required to promote a route to outer.",
     )
     parser.add_argument(
         "--geometry_cross_view_outer_consistency",
         dest="geometry_cross_view_outer_consistency",
         action="store_true",
-        default=None,
+        default=splat_defaults["geometry_cross_view_outer_consistency"],
         help=(
             "Veto a strong outer route when another view gives strong "
             "background/inner evidence for the same outer UV texel."
@@ -1021,41 +1085,55 @@ def build_arg_parser():
         action="store_false",
     )
     parser.add_argument(
-        "--geometry_cross_view_outer_weight", type=float, default=None
+        "--geometry_cross_view_outer_weight",
+        type=float,
+        default=splat_defaults["geometry_cross_view_outer_weight"],
     )
     parser.add_argument(
         "--geometry_cross_view_outer_positive_confidence",
         type=float,
-        default=None,
+        default=splat_defaults[
+            "geometry_cross_view_outer_positive_confidence"
+        ],
     )
     parser.add_argument(
         "--geometry_cross_view_outer_positive_margin",
         type=float,
-        default=None,
+        default=splat_defaults[
+            "geometry_cross_view_outer_positive_margin"
+        ],
     )
     parser.add_argument(
         "--geometry_cross_view_outer_negative_confidence",
         type=float,
-        default=None,
+        default=splat_defaults[
+            "geometry_cross_view_outer_negative_confidence"
+        ],
     )
     parser.add_argument(
         "--geometry_cross_view_outer_negative_margin",
         type=float,
-        default=None,
+        default=splat_defaults[
+            "geometry_cross_view_outer_negative_margin"
+        ],
     )
     parser.add_argument(
         "--geometry_cross_view_outer_background_max_coverage",
         type=float,
-        default=None,
+        default=splat_defaults[
+            "geometry_cross_view_outer_background_max_coverage"
+        ],
     )
     parser.add_argument(
-        "--geometry_cross_view_outer_min_views", type=int, default=None
+        "--geometry_cross_view_outer_min_views",
+        type=int,
+        default=splat_defaults["geometry_cross_view_outer_min_views"],
     )
     parser.add_argument(
         "--outer_uv_occupancy",
         dest="outer_uv_occupancy",
         action="store_true",
-        default=None,
+        default=splat_defaults["outer_uv_occupancy"],
         help="Use the checkpoint's grouped 64x64 outer-layer occupancy prior.",
     )
     parser.add_argument(
@@ -1064,18 +1142,26 @@ def build_arg_parser():
         action="store_false",
     )
     parser.add_argument(
-        "--outer_uv_occupancy_blend_weight", type=float, default=None
+        "--outer_uv_occupancy_blend_weight",
+        type=float,
+        default=splat_defaults["outer_uv_occupancy_blend_weight"],
     )
     parser.add_argument(
-        "--outer_uv_occupancy_gate_threshold", type=float, default=None
+        "--outer_uv_occupancy_gate_threshold",
+        type=float,
+        default=splat_defaults["outer_uv_occupancy_gate_threshold"],
     )
     parser.add_argument(
-        "--outer_uv_occupancy_rescue_threshold", type=float, default=None
+        "--outer_uv_occupancy_rescue_threshold",
+        type=float,
+        default=splat_defaults["outer_uv_occupancy_rescue_threshold"],
     )
     parser.add_argument(
         "--outer_uv_occupancy_rescue_route_threshold",
         type=float,
-        default=None,
+        default=splat_defaults[
+            "outer_uv_occupancy_rescue_route_threshold"
+        ],
     )
     parser.add_argument(
         "--outer_uv_occupancy_auto_reliability",
@@ -1102,7 +1188,7 @@ def build_arg_parser():
         "--outer_uv_component_routing",
         dest="outer_uv_component_routing",
         action="store_true",
-        default=None,
+        default=splat_defaults["outer_uv_component_routing"],
     )
     parser.add_argument(
         "--no_outer_uv_component_routing",
@@ -1110,18 +1196,24 @@ def build_arg_parser():
         action="store_false",
     )
     parser.add_argument(
-        "--outer_uv_component_seed_threshold", type=float, default=None
+        "--outer_uv_component_seed_threshold",
+        type=float,
+        default=splat_defaults["outer_uv_component_seed_threshold"],
     )
     parser.add_argument(
-        "--outer_uv_component_grow_threshold", type=float, default=None
+        "--outer_uv_component_grow_threshold",
+        type=float,
+        default=splat_defaults["outer_uv_component_grow_threshold"],
     )
     parser.add_argument(
-        "--outer_uv_component_min_size", type=int, default=None
+        "--outer_uv_component_min_size",
+        type=int,
+        default=splat_defaults["outer_uv_component_min_size"],
     )
     parser.add_argument(
         "--color_aggregation",
         choices=SPLAT_COLOR_AGGREGATIONS,
-        default="grid_mode",
+        default=splat_defaults["color_aggregation"],
         help="How colors inside each fitted layer/UV grid cell are selected.",
     )
     parser.add_argument(
@@ -1129,12 +1221,12 @@ def build_arg_parser():
         action="store_true",
         help="Keep pixels whose strict semantic routing had no valid candidate.",
     )
-    parser.add_argument("--no_semantic_gate", dest="semantic_gate", action="store_false", default=None)
-    parser.add_argument("--affine_refine", dest="affine_refine", action="store_true", default=None)
+    parser.add_argument("--no_semantic_gate", dest="semantic_gate", action="store_false", default=splat_defaults["semantic_gate"])
+    parser.add_argument("--affine_refine", dest="affine_refine", action="store_true", default=splat_defaults["affine_refine"])
     parser.add_argument("--no_affine_refine", dest="affine_refine", action="store_false")
-    parser.add_argument("--affine_refine_translation_px", type=float, default=None)
-    parser.add_argument("--affine_refine_scale", type=float, default=None)
-    parser.add_argument("--alpha_threshold", type=float, default=0.5)
+    parser.add_argument("--affine_refine_translation_px", type=float, default=splat_defaults["affine_refine_translation_px"])
+    parser.add_argument("--affine_refine_scale", type=float, default=splat_defaults["affine_refine_scale"])
+    parser.add_argument("--alpha_threshold", type=float, default=preprocessing_defaults["alpha_threshold"])
     parser.add_argument("--device", default="auto")
     return parser
 

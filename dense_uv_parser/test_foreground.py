@@ -14,6 +14,10 @@ from SkingToolkit.dense_uv_parser.infer import (
     _raw_debug_foreground,
     build_arg_parser,
 )
+from SkingToolkit.dense_uv_parser.inference_config import (
+    PRODUCTION_PREPROCESSING_DEFAULTS,
+    PRODUCTION_SPLAT_DEFAULTS,
+)
 
 
 class DenseParserForegroundTest(unittest.TestCase):
@@ -21,9 +25,35 @@ class DenseParserForegroundTest(unittest.TestCase):
         args = build_arg_parser().parse_args(["--parser_checkpoint", "unused.pt"])
 
         self.assertEqual(args.foreground_method, "flood")
-        self.assertEqual(args.foreground_flood_tolerance, 0.03)
-        self.assertEqual(args.color_aggregation, "grid_mode")
-        self.assertEqual(args.outer_uv_min_source_pixels, 15)
+        self.assertEqual(
+            args.foreground_flood_tolerance,
+            PRODUCTION_PREPROCESSING_DEFAULTS[
+                "foreground_flood_tolerance"
+            ],
+        )
+        self.assertEqual(
+            args.color_aggregation,
+            PRODUCTION_SPLAT_DEFAULTS["color_aggregation"],
+        )
+        self.assertEqual(
+            args.outer_uv_min_source_pixels,
+            PRODUCTION_SPLAT_DEFAULTS["outer_uv_min_source_pixels"],
+        )
+        self.assertEqual(
+            args.outer_route_confidence_threshold,
+            PRODUCTION_SPLAT_DEFAULTS[
+                "outer_route_confidence_threshold"
+            ],
+        )
+        self.assertEqual(
+            args.outer_route_margin_threshold,
+            PRODUCTION_SPLAT_DEFAULTS["outer_route_margin_threshold"],
+        )
+        self.assertEqual(
+            args.outer_uv_min_coverage,
+            PRODUCTION_SPLAT_DEFAULTS["outer_uv_min_coverage"],
+        )
+        self.assertTrue(args.head_outer_topology_rescue)
         self.assertEqual(
             args.simple_inpaint_output,
             "outputs/parser_pred_uv_simple_inpainting.png",
