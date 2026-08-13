@@ -1156,9 +1156,10 @@ def head_outer_topology_component_rescue(
     semantic_probability,
     candidate_rgb,
     strong_rgb,
+    ring_candidate_atlas=None,
     semantic_threshold=0.25,
     min_seed_nodes=2,
-    color_tolerance=0.30,
+    color_tolerance=0.20,
     max_steps=64,
 ):
     """Keep relaxed head-outer candidates only inside anchored components.
@@ -1209,6 +1210,17 @@ def head_outer_topology_component_rescue(
         )
     )
     candidates = candidates | seeds
+    if ring_candidate_atlas is None:
+        ring_candidates = torch.zeros_like(candidates)
+    else:
+        if ring_candidate_atlas.shape != expected_mask_shape:
+            raise ValueError(
+                "ring_candidate_atlas must be shaped "
+                f"{expected_mask_shape}, got {tuple(ring_candidate_atlas.shape)}."
+            )
+        ring_candidates = ring_candidate_atlas.bool().index_select(
+            1, head_indices
+        )
     labels = _outer_graph_component_labels(
         candidates,
         edge_index,
@@ -1219,6 +1231,7 @@ def head_outer_topology_component_rescue(
     accepted = seeds.clone()
     anchored_components = 0
     color_rejected = 0
+    ring_rescued = 0
     source, destination = edge_index
     for batch_index in range(seeds.shape[0]):
         seed_labels = labels[batch_index, seeds[batch_index]].unique()
@@ -1269,6 +1282,104 @@ def head_outer_topology_component_rescue(
                 (component & ~component_accepted).sum().item()
             )
 
+        # A brim/headband is a horizontal cycle over the four side faces. A
+        # weakly observed face may fail the generic route gate, but a local
+        # decoration must not grow vertically. Close only same-row gaps after
+        # a coherent seed-color cluster is already present on three faces.
+        node_ids = torch.arange(384, device=seeds.device)
+        for row in range(8):
+            ring_mask = (node_ids < 256) & (
+                ((node_ids % 64) // 8) == row
+            )
+            anchor_nodes = node_ids[
+                ring_mask & accepted[batch_index]
+            ]
+            if anchor_nodes.numel() < 8:
+                continue
+            anchor_colors = torch.where(
+                seeds[batch_index, anchor_nodes].unsqueeze(0),
+                strong_node_rgb[batch_index, :, anchor_nodes],
+                candidate_node_rgb[batch_index, :, anchor_nodes],
+            ).transpose(0, 1)
+            color_neighbours = (
+                torch.cdist(anchor_colors, anchor_colors)
+                <= float(color_tolerance)
+            )
+            anchor_labels = torch.arange(
+                anchor_nodes.numel(), device=seeds.device
+            )
+            for _ in range(int(max_steps)):
+                propagated_labels = torch.where(
+                    color_neighbours,
+                    anchor_labels.view(1, -1),
+                    torch.full(
+                        (1, anchor_nodes.numel()),
+                        anchor_nodes.numel(),
+                        device=seeds.device,
+                        dtype=torch.long,
+                    ),
+                ).amin(dim=1)
+                updated_labels = torch.minimum(
+                    anchor_labels, propagated_labels
+                )
+                if torch.equal(updated_labels, anchor_labels):
+                    break
+                anchor_labels = updated_labels
+
+            edge_in_ring = ring_mask[source] & ring_mask[destination]
+            ring_source = source[edge_in_ring]
+            ring_destination = destination[edge_in_ring]
+            node_colors = torch.where(
+                seeds[batch_index].unsqueeze(0),
+                strong_node_rgb[batch_index],
+                candidate_node_rgb[batch_index],
+            )
+            for cluster_label in anchor_labels.unique().tolist():
+                cluster_nodes = anchor_nodes[
+                    anchor_labels == int(cluster_label)
+                ]
+                cluster_faces = torch.div(
+                    cluster_nodes, 64, rounding_mode="floor"
+                ).unique()
+                if cluster_nodes.numel() < 8 or cluster_faces.numel() < 3:
+                    continue
+                active = torch.zeros_like(accepted[batch_index])
+                active[cluster_nodes] = True
+                allowed = ring_mask & ring_candidates[batch_index]
+                allowed |= active
+                color_edge = (
+                    allowed[ring_source]
+                    & allowed[ring_destination]
+                    & (
+                        (
+                            node_colors[:, ring_source]
+                            - node_colors[:, ring_destination]
+                        )
+                        .square()
+                        .sum(dim=0)
+                        .sqrt()
+                        <= float(color_tolerance)
+                    )
+                )
+                for _ in range(32):
+                    propagated = torch.zeros_like(
+                        active, dtype=torch.uint8
+                    )
+                    propagated.scatter_reduce_(
+                        0,
+                        ring_destination,
+                        (color_edge & active[ring_source]).to(torch.uint8),
+                        reduce="amax",
+                        include_self=False,
+                    )
+                    updated = active | (allowed & propagated.bool())
+                    if torch.equal(updated, active):
+                        break
+                    active = updated
+                new_ring = active & ~accepted[batch_index]
+                ring_rescued += int(new_ring.sum().item())
+                accepted[batch_index] |= active
+
     rescued_nodes = accepted & ~seeds
     rescued_atlas = torch.zeros_like(strong_atlas, dtype=torch.bool)
     rescued_atlas[:, head_indices] = rescued_nodes
@@ -1280,6 +1391,8 @@ def head_outer_topology_component_rescue(
         "seed": strong_atlas.bool(),
         "anchored_components": anchored_components,
         "color_rejected_texels": color_rejected,
+        "ring_candidate_texels": int(ring_candidates.sum().item()),
+        "ring_rescued_texels": ring_rescued,
     }
 
 
@@ -1293,11 +1406,12 @@ def _rescue_head_outer_topology_pixels(
     views,
     min_source_pixels=15,
     semantic_threshold=0.25,
-    relaxed_route_threshold=0.25,
-    relaxed_semantic_threshold=0.65,
-    semantic_only_threshold=0.85,
+    relaxed_route_threshold=0.50,
+    relaxed_semantic_threshold=0.80,
+    semantic_only_threshold=0.92,
+    ring_semantic_threshold=0.65,
     min_seed_nodes=2,
-    color_tolerance=0.30,
+    color_tolerance=0.20,
 ):
     """Project anchored head topology rescue decisions back to image pixels."""
     logits = canonical_outputs.get("head_outer_face_occupancy_logits")
@@ -1319,6 +1433,8 @@ def _rescue_head_outer_topology_pixels(
         raise ValueError("relaxed_semantic_threshold must be in [0, 1].")
     if not 0.0 <= float(semantic_only_threshold) <= 1.0:
         raise ValueError("semantic_only_threshold must be in [0, 1].")
+    if not 0.0 <= float(ring_semantic_threshold) <= 1.0:
+        raise ValueError("ring_semantic_threshold must be in [0, 1].")
 
     role_probability = torch.softmax(
         canonical_outputs["layer"].float(), dim=1
@@ -1339,9 +1455,10 @@ def _rescue_head_outer_topology_pixels(
         dtype=torch.long,
         device=trusted.device,
     )
-    candidate_rgb_sum = canonical_rendered.new_zeros(
+    source_rgb_sum = canonical_rendered.new_zeros(
         group_count * uv_count, 3
     )
+    source_count = torch.zeros_like(candidate_count)
     strong_count = torch.zeros_like(candidate_count)
     strong_rgb_sum = canonical_rendered.new_zeros(
         group_count * uv_count, 3
@@ -1385,7 +1502,8 @@ def _rescue_head_outer_topology_pixels(
                 | semantic_only_candidate
             )
         )
-        candidate_pixels[item_index] = raw_candidate
+        source_pixel = outer_valid & color_valid[item_index]
+        candidate_pixels[item_index] = source_pixel
         candidate_flat_uv[item_index] = outer_flat
         candidate_part[item_index] = static["part"][ROUTE_OUTER_PRIMARY]
         candidate_face[item_index] = static["face"][ROUTE_OUTER_PRIMARY]
@@ -1398,10 +1516,16 @@ def _rescue_head_outer_topology_pixels(
             candidate_indices,
             torch.ones_like(candidate_indices),
         )
-        candidate_rgb_sum.scatter_add_(
+        source_indices = outer_flat[source_pixel] + group_index * uv_count
+        source_count.scatter_add_(
             0,
-            candidate_indices.unsqueeze(1).expand(-1, 3),
-            canonical_rendered[item_index, :3, raw_candidate].transpose(0, 1),
+            source_indices,
+            torch.ones_like(source_indices),
+        )
+        source_rgb_sum.scatter_add_(
+            0,
+            source_indices.unsqueeze(1).expand(-1, 3),
+            canonical_rendered[item_index, :3, source_pixel].transpose(0, 1),
         )
 
         strong_pixel = (
@@ -1425,10 +1549,11 @@ def _rescue_head_outer_topology_pixels(
         )
 
     candidate_count = candidate_count.reshape(group_count, uv_count)
+    source_count = source_count.reshape(group_count, uv_count)
     strong_count = strong_count.reshape(group_count, uv_count)
     candidate_rgb = (
-        candidate_rgb_sum.reshape(group_count, uv_count, 3)
-        / candidate_count.clamp_min(1).unsqueeze(-1)
+        source_rgb_sum.reshape(group_count, uv_count, 3)
+        / source_count.clamp_min(1).unsqueeze(-1)
     ).permute(0, 2, 1)
     strong_rgb = (
         strong_rgb_sum.reshape(group_count, uv_count, 3)
@@ -1440,6 +1565,10 @@ def _rescue_head_outer_topology_pixels(
         semantic_probability,
         candidate_rgb,
         strong_rgb,
+        ring_candidate_atlas=(
+            (source_count >= int(min_source_pixels))
+            & (semantic_probability >= float(ring_semantic_threshold))
+        ),
         semantic_threshold=semantic_threshold,
         min_seed_nodes=min_seed_nodes,
         color_tolerance=color_tolerance,
@@ -1493,6 +1622,654 @@ def _rescue_head_outer_topology_pixels(
         semantic_only_threshold
     )
     return trusted, rescued_pixels, component
+
+
+def _prune_isolated_head_outer_pixels(
+    trusted,
+    routing,
+    views,
+):
+    """Drop head-outer texels with no physical head-topology neighbour.
+
+    The decision is made after topology rescue so a completed brim ring is
+    never pruned. Only degree-zero texels are removed; endpoints of legitimate
+    glasses, hair, and brim fragments remain untouched.
+    """
+    views = parse_views(views)
+    if not views or trusted.shape[0] % len(views) != 0:
+        return trusted, torch.zeros_like(trusted), 0
+    group_count = trusted.shape[0] // len(views)
+    uv_count = UV_SIZE * UV_SIZE
+    head_indices = build_head_outer_face_indices().to(trusted.device)
+    edge_index = build_head_outer_face_graph().to(trusted.device)
+    grouped_uv = routing["flat_uv"] + (
+        torch.arange(trusted.shape[0], device=trusted.device)
+        // len(views)
+    ).view(-1, 1, 1) * uv_count
+    head_outer = (
+        trusted
+        & (routing["layer"] == ROUTE_OUTER_PRIMARY)
+        & (routing["part"] == 0)
+    )
+    atlas = torch.zeros(
+        group_count * uv_count,
+        dtype=torch.uint8,
+        device=trusted.device,
+    )
+    atlas.scatter_reduce_(
+        0,
+        grouped_uv[head_outer],
+        torch.ones_like(grouped_uv[head_outer], dtype=torch.uint8),
+        reduce="amax",
+        include_self=False,
+    )
+    atlas = atlas.reshape(group_count, uv_count).bool()
+    nodes = atlas.index_select(1, head_indices)
+    source, destination = edge_index
+    neighbour_count = torch.zeros_like(nodes, dtype=torch.long)
+    neighbour_count.scatter_add_(
+        1,
+        destination.view(1, -1).expand(group_count, -1),
+        (nodes[:, source] & nodes[:, destination]).long(),
+    )
+    isolated_nodes = nodes & (neighbour_count == 0)
+    isolated_atlas = torch.zeros_like(atlas)
+    isolated_atlas[:, head_indices] = isolated_nodes
+    item_groups = (
+        torch.arange(trusted.shape[0], device=trusted.device)
+        // len(views)
+    )
+    prune = head_outer & isolated_atlas[
+        item_groups.view(-1, 1, 1), routing["flat_uv"]
+    ]
+    return trusted & ~prune, prune, int(isolated_nodes.sum().item())
+
+
+def _head_outer_terminal_pixels(
+    trusted,
+    routing,
+    views,
+    rendered=None,
+    color_tolerance=None,
+    uv_rgb=None,
+):
+    """Return routed head-outer pixels at weak topology endpoints.
+
+    Degree-zero nodes and degree-one nodes are terminals. When routed RGB is
+    available, also include degree-one color discontinuities: a valid hair or
+    accessory endpoint normally continues its sole neighbour's material,
+    whereas a misrouted texel is often a one-node branch with a very different
+    source color.
+    """
+    views = parse_views(views)
+    if not views or trusted.shape[0] % len(views) != 0:
+        return torch.zeros_like(trusted)
+    group_count = trusted.shape[0] // len(views)
+    uv_count = UV_SIZE * UV_SIZE
+    item_groups = (
+        torch.arange(trusted.shape[0], device=trusted.device)
+        // len(views)
+    )
+    grouped_uv = routing["flat_uv"] + item_groups.view(-1, 1, 1) * uv_count
+    head_outer = (
+        trusted
+        & (routing["layer"] == ROUTE_OUTER_PRIMARY)
+        & (routing["part"] == 0)
+    )
+    atlas = torch.zeros(
+        group_count * uv_count, dtype=torch.uint8, device=trusted.device
+    )
+    atlas.scatter_reduce_(
+        0,
+        grouped_uv[head_outer],
+        torch.ones_like(grouped_uv[head_outer], dtype=torch.uint8),
+        reduce="amax",
+        include_self=False,
+    )
+    head_indices = build_head_outer_face_indices().to(trusted.device)
+    nodes = atlas.reshape(group_count, uv_count).bool().index_select(
+        1, head_indices
+    )
+    source, destination = build_head_outer_face_graph().to(
+        trusted.device
+    )
+    neighbour_count = torch.zeros_like(nodes, dtype=torch.long)
+    neighbour_count.scatter_add_(
+        1,
+        destination.view(1, -1).expand(group_count, -1),
+        (nodes[:, source] & nodes[:, destination]).long(),
+    )
+    terminal_nodes = nodes & (neighbour_count == 0)
+    if rendered is None or color_tolerance is None:
+        terminal_nodes |= nodes & (neighbour_count == 1)
+    else:
+        if rendered.dim() != 4 or rendered.shape[1] < 3:
+            raise ValueError("rendered must be shaped BxCxHxW with C >= 3.")
+        if rendered.shape[0] != trusted.shape[0]:
+            raise ValueError("rendered and trusted must share a batch size.")
+        if uv_rgb is not None:
+            if uv_rgb.shape != (group_count, 3, UV_SIZE, UV_SIZE):
+                raise ValueError(
+                    "uv_rgb must be shaped "
+                    f"{(group_count, 3, UV_SIZE, UV_SIZE)}, got "
+                    f"{tuple(uv_rgb.shape)}."
+                )
+            node_rgb = uv_rgb.flatten(2).transpose(1, 2).index_select(
+                1, head_indices
+            )
+        else:
+            source_quality = routing.get(
+                "texel_center_score", torch.ones_like(routing["confidence"])
+            ).float()
+            source_quality = source_quality + 1e-3 * routing[
+                "confidence"
+            ].float()
+            best_quality = source_quality.new_full(
+                (group_count * uv_count,), -1.0
+            )
+            best_quality.scatter_reduce_(
+                0,
+                grouped_uv[head_outer],
+                source_quality[head_outer],
+                reduce="amax",
+                include_self=True,
+            )
+            best_source = head_outer & (
+                source_quality >= best_quality[grouped_uv] - 1e-6
+            )
+            rgb_sum = rendered.new_zeros(group_count * uv_count, 3)
+            rgb_count = rendered.new_zeros(group_count * uv_count)
+            rgb_sum.scatter_add_(
+                0,
+                grouped_uv[best_source].unsqueeze(1).expand(-1, 3),
+                rendered[:, :3].permute(0, 2, 3, 1)[best_source],
+            )
+            rgb_count.scatter_add_(
+                0,
+                grouped_uv[best_source],
+                torch.ones_like(
+                    grouped_uv[best_source], dtype=rgb_count.dtype
+                ),
+            )
+            node_rgb = (
+                rgb_sum.reshape(group_count, uv_count, 3)
+                / rgb_count.reshape(
+                    group_count, uv_count, 1
+                ).clamp_min(1.0)
+            ).index_select(1, head_indices)
+        neighbor_rgb_sum = torch.zeros_like(node_rgb)
+        neighbor_rgb_sum.scatter_add_(
+            1,
+            destination.view(1, -1, 1).expand(group_count, -1, 3),
+            node_rgb[:, source]
+            * (nodes[:, source] & nodes[:, destination]).unsqueeze(-1),
+        )
+        neighbor_rgb = neighbor_rgb_sum / neighbour_count.clamp_min(
+            1
+        ).unsqueeze(-1)
+        color_distance = (
+            node_rgb - neighbor_rgb
+        ).square().sum(dim=-1).sqrt()
+        terminal_nodes |= (
+            nodes
+            & (neighbour_count == 1)
+            & (color_distance > float(color_tolerance))
+        )
+    terminal_atlas = torch.zeros(
+        group_count, uv_count, dtype=torch.bool, device=trusted.device
+    )
+    terminal_atlas[:, head_indices] = terminal_nodes
+    return head_outer & terminal_atlas[
+        item_groups.view(-1, 1, 1), routing["flat_uv"]
+    ]
+
+
+def _head_outer_protrusion_color_coverage(
+    rendered,
+    color_valid,
+    trusted,
+    routing,
+    renderer,
+    views,
+    color_tolerance=0.25,
+    min_pixels=4,
+):
+    """Validate head-outer protrusions against input color evidence.
+
+    A foreground-only silhouette test cannot distinguish two different outer
+    materials at the same projected position.  For example, a pink hair texel
+    can be routed onto the silhouette occupied by a dark headphone: alpha is
+    present in both cases, but the reconstructed color is visibly wrong.  Use
+    the best texel-center observations to estimate each routed UV color, then
+    require that color to occur on the texel's protruding projection in every
+    assessed input view.
+
+    Only outer pixels outside the inner cuboid are assessed. Interior pixels
+    remain untouched because the visible input color there may legitimately
+    come from another, nearer outer texel.
+    """
+    views = parse_views(views)
+    if not views:
+        raise ValueError("At least one renderer view is required.")
+    if rendered.dim() != 4 or rendered.shape[1] < 3:
+        raise ValueError("rendered must be shaped BxCxHxW with C >= 3.")
+    expected_shape = rendered.shape[:1] + rendered.shape[-2:]
+    for name, value in (
+        ("color_valid", color_valid),
+        ("trusted", trusted),
+        ("flat_uv", routing["flat_uv"]),
+    ):
+        if value.shape != expected_shape:
+            raise ValueError(
+                f"{name} must be shaped {expected_shape}, got "
+                f"{tuple(value.shape)}."
+            )
+    if rendered.shape[0] % len(views) != 0:
+        raise ValueError("The routed batch must contain complete view groups.")
+    if color_tolerance < 0.0:
+        raise ValueError("color_tolerance must be non-negative.")
+    if min_pixels < 1:
+        raise ValueError("min_pixels must be positive.")
+
+    views_per_group = len(views)
+    group_count = rendered.shape[0] // views_per_group
+    uv_count = UV_SIZE * UV_SIZE
+    item_groups = (
+        torch.arange(rendered.shape[0], device=rendered.device)
+        // views_per_group
+    )
+    grouped_uv = routing["flat_uv"] + item_groups.view(-1, 1, 1) * uv_count
+    head_outer = (
+        trusted
+        & (routing["layer"] == ROUTE_OUTER_PRIMARY)
+        & (routing["part"] == 0)
+    )
+
+    # Match grid-mode color extraction: prefer observations closest to the
+    # projected texel center, using route confidence only as a tie breaker.
+    source_quality = routing.get(
+        "texel_center_score", torch.ones_like(routing["confidence"])
+    ).float()
+    source_quality = source_quality + 1e-3 * routing["confidence"].float()
+    best_quality = source_quality.new_full(
+        (group_count * uv_count,), -1.0
+    )
+    best_quality.scatter_reduce_(
+        0,
+        grouped_uv[head_outer],
+        source_quality[head_outer],
+        reduce="amax",
+        include_self=True,
+    )
+    best_source = head_outer & (
+        source_quality >= best_quality[grouped_uv] - 1e-6
+    )
+    representative_sum = rendered.new_zeros(group_count * uv_count, 3)
+    representative_count = rendered.new_zeros(group_count * uv_count)
+    representative_sum.scatter_add_(
+        0,
+        grouped_uv[best_source].unsqueeze(1).expand(-1, 3),
+        rendered[:, :3].permute(0, 2, 3, 1)[best_source],
+    )
+    representative_count.scatter_add_(
+        0,
+        grouped_uv[best_source],
+        torch.ones_like(
+            grouped_uv[best_source], dtype=representative_count.dtype
+        ),
+    )
+    representative = representative_sum / representative_count.clamp_min(
+        1.0
+    ).unsqueeze(1)
+
+    expected = rendered.new_zeros(views_per_group, uv_count)
+    supported = rendered.new_zeros(
+        group_count, views_per_group, uv_count
+    )
+    for view_index, view in enumerate(views):
+        static = build_static_surface_routing(renderer, view, rendered.device)
+        inner_mask = static["masks"][ROUTE_INNER_PRIMARY]
+        outer_mask = static["masks"][ROUTE_OUTER_PRIMARY]
+        protruding = outer_mask & ~inner_mask
+        if not protruding.any():
+            continue
+        protruding_uv = static["flat_uv"][ROUTE_OUTER_PRIMARY][protruding]
+        expected[view_index].scatter_add_(
+            0,
+            protruding_uv,
+            torch.ones_like(protruding_uv, dtype=expected.dtype),
+        )
+        view_rgb = rendered[view_index::views_per_group, :3, protruding]
+        reference_rgb = representative.reshape(
+            group_count, uv_count, 3
+        )[:, protruding_uv].permute(0, 2, 1)
+        distance = (view_rgb - reference_rgb).square().sum(dim=1).sqrt()
+        view_valid = color_valid[view_index::views_per_group, protruding]
+        matching = view_valid & (distance <= float(color_tolerance))
+        supported[:, view_index].scatter_add_(
+            1,
+            protruding_uv.view(1, -1).expand(group_count, -1),
+            matching.to(dtype=supported.dtype),
+        )
+
+    assessed_by_view = expected >= float(min_pixels)
+    coverage_by_view = supported / expected.clamp_min(1.0).unsqueeze(0)
+    coverage_by_view = torch.where(
+        assessed_by_view.unsqueeze(0),
+        coverage_by_view,
+        torch.ones_like(coverage_by_view),
+    )
+    coverage_uv = coverage_by_view.amin(dim=1)
+    assessed_uv = assessed_by_view.any(dim=0)
+    pixel_coverage = coverage_uv[
+        item_groups.view(-1, 1, 1), routing["flat_uv"]
+    ]
+    pixel_assessed = assessed_uv[routing["flat_uv"]]
+    return pixel_coverage, pixel_assessed
+
+
+def _head_outer_visible_color_coverage(
+    rendered,
+    color_valid,
+    trusted,
+    routing,
+    renderer,
+    views,
+    color_tolerance=0.25,
+    min_pixels=4,
+    reference_uv=None,
+):
+    """Validate the color of head-outer texels where they finally render.
+
+    Protrusion-only validation misses wrong materials inside the inner-head
+    silhouette. A typical failure routes a pink hair observation to an outer
+    UV texel whose final composite position is occupied by a dark headphone.
+    Reconstruct the renderer's currently visible surface from the routed UV
+    alpha, then compare each visible head-outer texel with the input pixels at
+    that exact projected position.
+
+    The caller still decides which topology nodes may be removed. This helper
+    deliberately reports evidence for every visible head-outer texel so it is
+    also useful for diagnostics and future component-level policies.
+    """
+    views = parse_views(views)
+    if not views:
+        raise ValueError("At least one renderer view is required.")
+    if rendered.dim() != 4 or rendered.shape[1] < 3:
+        raise ValueError("rendered must be shaped BxCxHxW with C >= 3.")
+    expected_shape = rendered.shape[:1] + rendered.shape[-2:]
+    for name, value in (
+        ("color_valid", color_valid),
+        ("trusted", trusted),
+        ("flat_uv", routing["flat_uv"]),
+    ):
+        if value.shape != expected_shape:
+            raise ValueError(
+                f"{name} must be shaped {expected_shape}, got "
+                f"{tuple(value.shape)}."
+            )
+    if rendered.shape[0] % len(views) != 0:
+        raise ValueError("The routed batch must contain complete view groups.")
+    if color_tolerance < 0.0:
+        raise ValueError("color_tolerance must be non-negative.")
+    if min_pixels < 1:
+        raise ValueError("min_pixels must be positive.")
+
+    views_per_group = len(views)
+    group_count = rendered.shape[0] // views_per_group
+    uv_count = UV_SIZE * UV_SIZE
+    item_groups = (
+        torch.arange(rendered.shape[0], device=rendered.device)
+        // views_per_group
+    )
+    grouped_uv = routing["flat_uv"] + item_groups.view(-1, 1, 1) * uv_count
+    head_outer = (
+        trusted
+        & (routing["layer"] == ROUTE_OUTER_PRIMARY)
+        & (routing["part"] == 0)
+    )
+
+    if reference_uv is not None:
+        if reference_uv.shape != (group_count, 4, UV_SIZE, UV_SIZE):
+            raise ValueError(
+                "reference_uv must be shaped "
+                f"{(group_count, 4, UV_SIZE, UV_SIZE)}, got "
+                f"{tuple(reference_uv.shape)}."
+            )
+        representative = reference_uv[:, :3].flatten(2).transpose(1, 2)
+        occupied = reference_uv[:, 3].flatten(1) > 0.5
+    else:
+        source_quality = routing.get(
+            "texel_center_score", torch.ones_like(routing["confidence"])
+        ).float()
+        source_quality = source_quality + 1e-3 * routing[
+            "confidence"
+        ].float()
+        best_quality = source_quality.new_full(
+            (group_count * uv_count,), -1.0
+        )
+        best_quality.scatter_reduce_(
+            0,
+            grouped_uv[head_outer],
+            source_quality[head_outer],
+            reduce="amax",
+            include_self=True,
+        )
+        best_source = head_outer & (
+            source_quality >= best_quality[grouped_uv] - 1e-6
+        )
+        representative_sum = rendered.new_zeros(group_count * uv_count, 3)
+        representative_count = rendered.new_zeros(group_count * uv_count)
+        representative_sum.scatter_add_(
+            0,
+            grouped_uv[best_source].unsqueeze(1).expand(-1, 3),
+            rendered[:, :3].permute(0, 2, 3, 1)[best_source],
+        )
+        representative_count.scatter_add_(
+            0,
+            grouped_uv[best_source],
+            torch.ones_like(
+                grouped_uv[best_source], dtype=representative_count.dtype
+            ),
+        )
+        representative = representative_sum.reshape(
+            group_count, uv_count, 3
+        ) / representative_count.reshape(
+            group_count, uv_count, 1
+        ).clamp_min(1.0)
+
+        occupied = torch.zeros(
+            group_count * uv_count,
+            dtype=torch.uint8,
+            device=trusted.device,
+        )
+        occupied.scatter_reduce_(
+            0,
+            grouped_uv[trusted],
+            torch.ones_like(grouped_uv[trusted], dtype=torch.uint8),
+            reduce="amax",
+            include_self=False,
+        )
+        occupied = occupied.reshape(group_count, uv_count).bool()
+
+    expected = rendered.new_zeros(group_count, views_per_group, uv_count)
+    supported = torch.zeros_like(expected)
+    for view_index, view in enumerate(views):
+        static = build_static_surface_routing(renderer, view, rendered.device)
+        height, width = static["masks"].shape[-2:]
+        direct_flat = static["flat_uv"][:2]
+        direct_visible = (
+            static["masks"][:2].unsqueeze(0)
+            & occupied[:, direct_flat]
+        )
+        visible_flat = torch.where(
+            direct_visible[:, ROUTE_OUTER_PRIMARY],
+            direct_flat[ROUTE_OUTER_PRIMARY].view(1, height, width),
+            direct_flat[ROUTE_INNER_PRIMARY].view(1, height, width),
+        )
+        visible_layer = torch.where(
+            direct_visible[:, ROUTE_OUTER_PRIMARY],
+            torch.full_like(visible_flat, ROUTE_OUTER_PRIMARY),
+            torch.full_like(visible_flat, ROUTE_INNER_PRIMARY),
+        )
+        visible_valid = direct_visible.any(dim=1)
+
+        composite_start = static["direct_count"]
+        composite_count = static["composite_count"]
+        composite_visible = None
+        if composite_count > 0:
+            composite_end = composite_start + composite_count
+            composite_flat = static["flat_uv"][
+                composite_start:composite_end
+            ]
+            composite_visible = (
+                static["masks"][composite_start:composite_end].unsqueeze(0)
+                & occupied[:, composite_flat]
+            )
+            composite_indices = torch.arange(
+                composite_count, device=trusted.device
+            ).view(1, composite_count, 1, 1)
+            first_composite = torch.where(
+                composite_visible,
+                composite_indices,
+                torch.full_like(composite_indices, composite_count),
+            ).amin(dim=1)
+            has_composite = first_composite < composite_count
+            safe_composite = first_composite.clamp(
+                max=composite_count - 1
+            )
+            gather_index = safe_composite.unsqueeze(1)
+            composite_flat_batch = composite_flat.unsqueeze(0).expand(
+                group_count, -1, -1, -1
+            )
+            composite_layer_batch = static["layer"][
+                composite_start:composite_end
+            ].unsqueeze(0).expand(group_count, -1, -1, -1)
+            first_flat = composite_flat_batch.gather(
+                1, gather_index
+            ).squeeze(1)
+            first_layer = composite_layer_batch.gather(
+                1, gather_index
+            ).squeeze(1)
+            trust_composite = has_composite & (
+                (first_layer == ROUTE_OUTER_PRIMARY)
+                | (first_composite <= 1)
+            )
+            visible_flat = torch.where(
+                trust_composite, first_flat, visible_flat
+            )
+            visible_layer = torch.where(
+                trust_composite, first_layer, visible_layer
+            )
+            visible_valid |= trust_composite
+
+            geometry_count = static["geometry_count"]
+            if geometry_count > 0:
+                geometry_start = composite_end
+                geometry_end = geometry_start + geometry_count
+                geometry_flat = static["flat_uv"][
+                    geometry_start:geometry_end
+                ]
+                geometry_visible = (
+                    static["masks"][geometry_start:geometry_end].unsqueeze(0)
+                    & occupied[:, geometry_flat]
+                )
+                geometry_indices = torch.arange(
+                    geometry_count, device=trusted.device
+                ).view(1, geometry_count, 1, 1)
+                last_geometry = torch.where(
+                    geometry_visible,
+                    geometry_indices,
+                    torch.full_like(geometry_indices, -1),
+                ).amax(dim=1)
+                has_geometry = last_geometry >= 0
+                safe_geometry = last_geometry.clamp_min(0)
+                geometry_index = safe_geometry.unsqueeze(1)
+                geometry_flat_batch = geometry_flat.unsqueeze(0).expand(
+                    group_count, -1, -1, -1
+                )
+                geometry_layer_batch = static["layer"][
+                    geometry_start:geometry_end
+                ].unsqueeze(0).expand(group_count, -1, -1, -1)
+                last_flat = geometry_flat_batch.gather(
+                    1, geometry_index
+                ).squeeze(1)
+                last_layer = geometry_layer_batch.gather(
+                    1, geometry_index
+                ).squeeze(1)
+                front_decor = (
+                    static["masks"][composite_start]
+                    & (
+                        static["layer"][composite_start]
+                        == ROUTE_OUTER_PRIMARY
+                    )
+                )
+                geometry_fallback = (
+                    front_decor.unsqueeze(0)
+                    & ~composite_visible[:, 0]
+                    & has_geometry
+                )
+                visible_flat = torch.where(
+                    geometry_fallback, last_flat, visible_flat
+                )
+                visible_layer = torch.where(
+                    geometry_fallback, last_layer, visible_layer
+                )
+                visible_valid |= geometry_fallback
+
+        lookups = build_part_face_lookups(device=trusted.device)
+        visible_head_outer = (
+            visible_valid
+            & (visible_layer == ROUTE_OUTER_PRIMARY)
+            & (lookups["outer_part"].reshape(-1)[visible_flat] == 0)
+        )
+        if not visible_head_outer.any():
+            continue
+        expected[:, view_index].scatter_add_(
+            1,
+            visible_flat.reshape(group_count, -1),
+            visible_head_outer.reshape(group_count, -1).to(
+                dtype=expected.dtype
+            ),
+        )
+        view_rgb = rendered[
+            view_index::views_per_group, :3
+        ].permute(0, 2, 3, 1)
+        reference_rgb = representative[
+            torch.arange(group_count, device=trusted.device).view(
+                -1, 1, 1
+            ),
+            visible_flat,
+        ]
+        distance = (view_rgb - reference_rgb).square().sum(dim=-1).sqrt()
+        view_valid = color_valid[view_index::views_per_group]
+        matching = (
+            visible_head_outer
+            & view_valid
+            & (distance <= float(color_tolerance))
+        )
+        supported[:, view_index].scatter_add_(
+            1,
+            visible_flat.reshape(group_count, -1),
+            matching.reshape(group_count, -1).to(dtype=supported.dtype),
+        )
+
+    assessed_by_view = expected >= float(min_pixels)
+    coverage_by_view = supported / expected.clamp_min(1.0)
+    coverage_by_view = torch.where(
+        assessed_by_view,
+        coverage_by_view,
+        torch.ones_like(coverage_by_view),
+    )
+    coverage_uv = coverage_by_view.amin(dim=1)
+    assessed_uv = assessed_by_view.any(dim=1)
+    pixel_coverage = coverage_uv[
+        item_groups.view(-1, 1, 1), routing["flat_uv"]
+    ]
+    pixel_assessed = assessed_uv[
+        item_groups.view(-1, 1, 1), routing["flat_uv"]
+    ]
+    return pixel_coverage, pixel_assessed
 
 
 def aggregate_direct_outer_values_by_view(
@@ -3463,11 +4240,12 @@ def splat_parser_predictions_to_uv_conditioning(
     outer_silhouette_min_pixels=4,
     head_outer_topology_rescue=False,
     head_outer_topology_semantic_threshold=0.25,
-    head_outer_topology_relaxed_route_threshold=0.25,
-    head_outer_topology_relaxed_semantic_threshold=0.65,
-    head_outer_topology_semantic_only_threshold=0.85,
+    head_outer_topology_relaxed_route_threshold=0.50,
+    head_outer_topology_relaxed_semantic_threshold=0.80,
+    head_outer_topology_semantic_only_threshold=0.92,
+    head_outer_topology_ring_semantic_threshold=0.65,
     head_outer_topology_min_seed_nodes=2,
-    head_outer_topology_color_tolerance=0.30,
+    head_outer_topology_color_tolerance=0.20,
     outer_geometry_rescue=False,
     outer_semantic_rescue=True,
     outer_semantic_presence_threshold=0.80,
@@ -4134,10 +4912,184 @@ def splat_parser_predictions_to_uv_conditioning(
             semantic_only_threshold=(
                 head_outer_topology_semantic_only_threshold
             ),
+            ring_semantic_threshold=(
+                head_outer_topology_ring_semantic_threshold
+            ),
             min_seed_nodes=head_outer_topology_min_seed_nodes,
             color_tolerance=head_outer_topology_color_tolerance,
         )
         selected_outer = routing["layer"] == ROUTE_OUTER_PRIMARY
+    head_outer_topology_pruned = torch.zeros_like(trusted)
+    if head_outer_topology_details is not None:
+        (
+            trusted,
+            head_outer_topology_pruned,
+            head_outer_topology_pruned_texels,
+        ) = _prune_isolated_head_outer_pixels(
+            trusted,
+            routing,
+            views,
+        )
+        head_outer_topology_details["pruned_isolated_texels"] = (
+            head_outer_topology_pruned_texels
+        )
+        head_outer_topology_details["pruned_isolated_pixels"] = int(
+            head_outer_topology_pruned.sum().item()
+        )
+    head_outer_protrusion_color_coverage = torch.ones_like(
+        routing["confidence"]
+    )
+    head_outer_protrusion_color_assessed = torch.zeros_like(trusted)
+    head_outer_visible_color_coverage = torch.ones_like(
+        routing["confidence"]
+    )
+    head_outer_visible_color_assessed = torch.zeros_like(trusted)
+    head_outer_visible_color_rejected = torch.zeros_like(trusted)
+    head_outer_protrusion_color_rejected = torch.zeros_like(trusted)
+    if outer_silhouette_consistency and head_outer_topology_details is not None:
+        preliminary_color_foreground = trusted & color_support["valid"]
+        preliminary_conditioning = splat_to_uv_conditioning(
+            canonical_rendered,
+            preliminary_color_foreground,
+            routing["layer"],
+            routing["flat_uv"],
+            group_size=group_size,
+            bg_color=bg_color,
+            confidence=routing["confidence"],
+            sampling_quality=(
+                routing.get("texel_center_score")
+                + 0.05
+                * color_support["interior"].to(
+                    dtype=routing["confidence"].dtype
+                )
+            ),
+            color_aggregation=color_aggregation,
+            include_confidence=False,
+        )
+        preliminary_uv = conditioning_to_pred_uv(
+            preliminary_conditioning
+        )
+        (
+            head_outer_protrusion_color_coverage,
+            head_outer_protrusion_color_assessed,
+        ) = _head_outer_protrusion_color_coverage(
+            canonical_rendered,
+            color_support["valid"],
+            trusted,
+            routing,
+            renderer,
+            views,
+            color_tolerance=0.25,
+            min_pixels=outer_silhouette_min_pixels,
+        )
+        (
+            head_outer_visible_color_coverage,
+            head_outer_visible_color_assessed,
+        ) = _head_outer_visible_color_coverage(
+            canonical_rendered,
+            color_support["valid"],
+            trusted,
+            routing,
+            renderer,
+            views,
+            color_tolerance=0.25,
+            min_pixels=outer_silhouette_min_pixels,
+            reference_uv=preliminary_uv,
+        )
+        (
+            post_topology_silhouette_coverage,
+            post_topology_silhouette_assessed,
+        ) = _outer_silhouette_coverage(
+            color_support["valid"],
+            routing["flat_uv"],
+            renderer,
+            views,
+            dilation=outer_silhouette_dilation,
+            min_pixels=outer_silhouette_min_pixels,
+        )
+        terminal_head_outer = _head_outer_terminal_pixels(
+            trusted,
+            routing,
+            views,
+            rendered=canonical_rendered,
+            color_tolerance=0.25,
+            uv_rgb=preliminary_uv[:, :3],
+        )
+        head_outer_protrusion_color_rejected = (
+            terminal_head_outer
+            & head_outer_protrusion_color_assessed
+            & (head_outer_protrusion_color_coverage < 0.50)
+            & post_topology_silhouette_assessed
+            & (post_topology_silhouette_coverage < 0.80)
+        )
+        head_outer_visible_color_rejected = (
+            terminal_head_outer
+            & head_outer_visible_color_assessed
+            & (head_outer_visible_color_coverage < 0.50)
+        )
+        head_outer_color_rejected = (
+            head_outer_protrusion_color_rejected
+            | head_outer_visible_color_rejected
+        )
+        # Keep rejected texels unknown. Reclassifying a color-inconsistent
+        # headphone/hair observation as inner would contaminate the base UV.
+        trusted = trusted & ~head_outer_color_rejected
+        head_outer_topology_details[
+            "protrusion_color_assessed_pixels"
+        ] = int(
+            (
+                trusted
+                & (routing["layer"] == ROUTE_OUTER_PRIMARY)
+                & (routing["part"] == 0)
+                & head_outer_protrusion_color_assessed
+            ).sum().item()
+            + head_outer_protrusion_color_rejected.sum().item()
+        )
+        head_outer_topology_details[
+            "protrusion_color_rejected_pixels"
+        ] = int(head_outer_protrusion_color_rejected.sum().item())
+        head_outer_topology_details[
+            "protrusion_color_rejected_texels"
+        ] = int(
+            torch.unique(
+                routing["flat_uv"][head_outer_protrusion_color_rejected]
+                + (
+                    torch.arange(
+                        trusted.shape[0], device=trusted.device
+                    )
+                    // len(views)
+                )
+                .view(-1, 1, 1)
+                .expand_as(trusted)[head_outer_protrusion_color_rejected]
+                * (UV_SIZE * UV_SIZE)
+            ).numel()
+            if head_outer_protrusion_color_rejected.any()
+            else 0
+        )
+        head_outer_topology_details[
+            "visible_color_assessed_pixels"
+        ] = int(head_outer_visible_color_assessed.sum().item())
+        head_outer_topology_details[
+            "visible_color_rejected_pixels"
+        ] = int(head_outer_visible_color_rejected.sum().item())
+        head_outer_topology_details[
+            "visible_color_rejected_texels"
+        ] = int(
+            torch.unique(
+                routing["flat_uv"][head_outer_visible_color_rejected]
+                + (
+                    torch.arange(
+                        trusted.shape[0], device=trusted.device
+                    )
+                    // len(views)
+                )
+                .view(-1, 1, 1)
+                .expand_as(trusted)[head_outer_visible_color_rejected]
+                * (UV_SIZE * UV_SIZE)
+            ).numel()
+            if head_outer_visible_color_rejected.any()
+            else 0
+        )
     routing["raw_foreground"] = raw_foreground
     routing["observed_foreground"] = canonical_observed_foreground
     routing["canonical_foreground_coverage_rescued"] = (
@@ -4159,6 +5111,9 @@ def splat_parser_predictions_to_uv_conditioning(
     routing["outer_source_rejected"] = outer_source_rejected
     routing["head_outer_topology_rescued"] = (
         head_outer_topology_rescued
+    )
+    routing["head_outer_topology_pruned"] = (
+        head_outer_topology_pruned
     )
     if head_outer_topology_details is not None:
         routing["head_outer_topology_details"] = (

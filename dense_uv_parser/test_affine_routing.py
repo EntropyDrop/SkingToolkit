@@ -34,6 +34,10 @@ from SkingToolkit.dense_uv_parser.utils import (
     estimate_solid_background_foreground,
     estimate_top_left_flood_foreground,
     head_outer_topology_component_rescue,
+    _head_outer_protrusion_color_coverage,
+    _head_outer_terminal_pixels,
+    _head_outer_visible_color_coverage,
+    _prune_isolated_head_outer_pixels,
     outer_uv_topology_hysteresis,
     _outer_silhouette_coverage,
     fill_geometry_grid_debug,
@@ -162,6 +166,241 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         self.assertFalse(result["rescued"][0, purple_fringe])
         self.assertEqual(result["anchored_components"], 1)
         self.assertGreater(result["color_rejected_texels"], 0)
+
+    def test_head_topology_rescue_rejects_adjacent_color_drift(self):
+        """A near-color fringe must not grow beyond the stricter default."""
+        head_indices = build_head_outer_face_indices()
+        band = head_indices[3 * 8 : 4 * 8]
+        fringe = head_indices[2 * 8]
+        strong = torch.zeros(1, 64 * 64, dtype=torch.bool)
+        candidate = torch.zeros_like(strong)
+        semantic = torch.zeros(1, 64 * 64)
+        candidate_rgb = torch.zeros(1, 3, 64 * 64)
+        strong_rgb = torch.zeros_like(candidate_rgb)
+        strong[0, band[[0, -1]]] = True
+        candidate[0, band] = True
+        candidate[0, fringe] = True
+        semantic[0, band] = 0.90
+        semantic[0, fringe] = 0.90
+        candidate_rgb[0, :, band] = 0.10
+        strong_rgb[0, :, band[[0, -1]]] = 0.10
+        candidate_rgb[0, :, fringe] = torch.tensor([0.31, 0.10, 0.10])
+
+        result = head_outer_topology_component_rescue(
+            strong,
+            candidate,
+            semantic,
+            candidate_rgb,
+            strong_rgb,
+        )
+
+        self.assertTrue(result["rescued"][0, band[1:-1]].all())
+        self.assertFalse(result["rescued"][0, fringe])
+
+    def test_head_topology_rescue_closes_only_established_horizontal_ring(self):
+        head_indices = build_head_outer_face_indices()
+        strong = torch.zeros(1, 64 * 64, dtype=torch.bool)
+        candidate = torch.zeros_like(strong)
+        ring_candidate = torch.zeros_like(strong)
+        semantic = torch.zeros(1, 64 * 64)
+        candidate_rgb = torch.zeros(1, 3, 64 * 64)
+        strong_rgb = torch.zeros_like(candidate_rgb)
+        row = 3
+        face_rows = [
+            head_indices[face * 64 + row * 8 : face * 64 + (row + 1) * 8]
+            for face in range(4)
+        ]
+        ring = torch.cat(face_rows)
+        # Establish one coherent black band across three faces, leaving the
+        # fourth face entirely weak. A purple vertical branch has adequate
+        # semantic probability but must remain outside the horizontal ring.
+        seeded = torch.cat(face_rows[:3])
+        strong[0, seeded] = True
+        ring_candidate[0, ring] = True
+        semantic[0, ring] = 0.80
+        candidate_rgb[0, :, ring] = 0.10
+        strong_rgb[0, :, seeded] = 0.10
+        purple_branch = head_indices[4 * 64 + row * 8 + 2]
+        ring_candidate[0, purple_branch] = True
+        semantic[0, purple_branch] = 0.80
+        candidate_rgb[0, :, purple_branch] = torch.tensor([0.5, 0.0, 0.5])
+
+        result = head_outer_topology_component_rescue(
+            strong,
+            candidate,
+            semantic,
+            candidate_rgb,
+            strong_rgb,
+            ring_candidate_atlas=ring_candidate,
+        )
+
+        self.assertTrue(result["rescued"][0, face_rows[3]].all())
+        self.assertFalse(result["rescued"][0, purple_branch])
+        self.assertEqual(result["ring_rescued_texels"], 8)
+
+    def test_head_topology_prunes_only_degree_zero_texels(self):
+        head_indices = build_head_outer_face_indices()
+        trusted = torch.ones(1, 1, 3, dtype=torch.bool)
+        routing = {
+            "flat_uv": torch.tensor(
+                [[[head_indices[0], head_indices[1], head_indices[10]]]]
+            ),
+            "layer": torch.ones(1, 1, 3, dtype=torch.long),
+            "part": torch.zeros(1, 1, 3, dtype=torch.long),
+        }
+
+        kept, pruned, pruned_texels = _prune_isolated_head_outer_pixels(
+            trusted,
+            routing,
+            ["front"],
+        )
+
+        self.assertTrue(kept[0, 0, :2].all())
+        self.assertFalse(kept[0, 0, 2])
+        self.assertTrue(pruned[0, 0, 2])
+        self.assertEqual(pruned_texels, 1)
+
+    def test_head_outer_protrusion_color_rejects_wrong_material(self):
+        inner = torch.tensor([[False, True, True, False]])
+        renderer = FakeRenderer(mask=inner)
+        renderer.front_outer_mask.fill_(1.0)
+        renderer.front_outer_grid[..., 0] = (40.0 / 63.0) * 2.0 - 1.0
+        renderer.front_outer_grid[..., 1] = (8.0 / 63.0) * 2.0 - 1.0
+        dark = torch.tensor([0.1, 0.1, 0.1])
+        pink = torch.tensor([0.9, 0.3, 0.6])
+        rendered = torch.ones(1, 4, 1, 4)
+        rendered[:, :3] = dark.view(1, 3, 1, 1)
+        # The selected center observation is pink, but the two protruding
+        # input pixels are dark headphone pixels.
+        rendered[0, :3, 0, 1] = pink
+        routing = {
+            "flat_uv": torch.full((1, 1, 4), 8 * 64 + 40),
+            "layer": torch.ones(1, 1, 4, dtype=torch.long),
+            "part": torch.zeros(1, 1, 4, dtype=torch.long),
+            "confidence": torch.ones(1, 1, 4),
+            "texel_center_score": torch.tensor([[[0.0, 1.0, 0.0, 0.0]]]),
+        }
+        coverage, assessed = _head_outer_protrusion_color_coverage(
+            rendered,
+            torch.ones(1, 1, 4, dtype=torch.bool),
+            torch.ones(1, 1, 4, dtype=torch.bool),
+            routing,
+            renderer,
+            ["front"],
+            color_tolerance=0.25,
+            min_pixels=2,
+        )
+
+        self.assertTrue(assessed.all())
+        self.assertTrue(torch.equal(coverage, torch.zeros_like(coverage)))
+
+        rendered[:, :3] = pink.view(1, 3, 1, 1)
+        matching, _ = _head_outer_protrusion_color_coverage(
+            rendered,
+            torch.ones(1, 1, 4, dtype=torch.bool),
+            torch.ones(1, 1, 4, dtype=torch.bool),
+            routing,
+            renderer,
+            ["front"],
+            color_tolerance=0.25,
+            min_pixels=2,
+        )
+        self.assertTrue(torch.equal(matching, torch.ones_like(matching)))
+
+    def test_head_outer_visible_color_catches_interior_wrong_material(self):
+        renderer = FakeRenderer(height=1, width=4, valid_pixels=0)
+        target_uv = 8 * 64 + 40
+        composite_grid = torch.zeros(1, 1, 4, 2)
+        composite_grid[..., 0] = (40.0 / 63.0) * 2.0 - 1.0
+        composite_grid[..., 1] = (8.0 / 63.0) * 2.0 - 1.0
+        renderer.register_buffer("front_composite_grid_layers", composite_grid)
+        renderer.register_buffer(
+            "front_composite_mask_layers",
+            torch.ones(1, 1, 4),
+        )
+        renderer.register_buffer(
+            "front_composite_is_decor_layers",
+            torch.ones(1, 1, 4, dtype=torch.bool),
+        )
+        dark = torch.tensor([0.1, 0.1, 0.1])
+        pink = torch.tensor([0.9, 0.3, 0.6])
+        rendered = torch.ones(1, 4, 1, 4)
+        rendered[:, :3] = dark.view(1, 3, 1, 1)
+        rendered[0, :3, 0, 0] = pink
+        trusted = torch.zeros(1, 1, 4, dtype=torch.bool)
+        trusted[0, 0, 0] = True
+        routing = {
+            "flat_uv": torch.full((1, 1, 4), target_uv),
+            "layer": torch.ones(1, 1, 4, dtype=torch.long),
+            "part": torch.zeros(1, 1, 4, dtype=torch.long),
+            "confidence": torch.ones(1, 1, 4),
+            "texel_center_score": torch.tensor([[[1.0, 0.0, 0.0, 0.0]]]),
+        }
+
+        reference_uv = torch.zeros(1, 4, 64, 64)
+        reference_uv[0, :3, 8, 40] = pink
+        reference_uv[0, 3, 8, 40] = 1.0
+        coverage, assessed = _head_outer_visible_color_coverage(
+            rendered,
+            torch.ones(1, 1, 4, dtype=torch.bool),
+            trusted,
+            routing,
+            renderer,
+            ["front"],
+            color_tolerance=0.25,
+            min_pixels=2,
+            reference_uv=reference_uv,
+        )
+
+        self.assertTrue(assessed.all())
+        self.assertTrue(torch.allclose(coverage, torch.full_like(coverage, 0.25)))
+
+        rendered[:, :3] = pink.view(1, 3, 1, 1)
+        matching, _ = _head_outer_visible_color_coverage(
+            rendered,
+            torch.ones(1, 1, 4, dtype=torch.bool),
+            trusted,
+            routing,
+            renderer,
+            ["front"],
+            color_tolerance=0.25,
+            min_pixels=2,
+            reference_uv=reference_uv,
+        )
+        self.assertTrue(torch.equal(matching, torch.ones_like(matching)))
+
+    def test_head_outer_terminal_requires_color_break_for_degree_one(self):
+        head_indices = build_head_outer_face_indices()
+        first, second = head_indices[:2]
+        trusted = torch.ones(1, 1, 2, dtype=torch.bool)
+        routing = {
+            "flat_uv": torch.tensor([[[first, second]]]),
+            "layer": torch.ones(1, 1, 2, dtype=torch.long),
+            "part": torch.zeros(1, 1, 2, dtype=torch.long),
+            "confidence": torch.ones(1, 1, 2),
+            "texel_center_score": torch.ones(1, 1, 2),
+        }
+        rendered = torch.ones(1, 4, 1, 2)
+        rendered[:, :3] = 0.1
+
+        continuous = _head_outer_terminal_pixels(
+            trusted,
+            routing,
+            ["front"],
+            rendered=rendered,
+            color_tolerance=0.25,
+        )
+        self.assertFalse(continuous.any())
+
+        rendered[0, :3, 0, 1] = torch.tensor([0.9, 0.3, 0.6])
+        color_break = _head_outer_terminal_pixels(
+            trusted,
+            routing,
+            ["front"],
+            rendered=rendered,
+            color_tolerance=0.25,
+        )
+        self.assertTrue(color_break.all())
 
     def test_outer_silhouette_coverage_uses_only_protruding_pixels(self):
         inner = torch.tensor([[False, True, True, False]])
