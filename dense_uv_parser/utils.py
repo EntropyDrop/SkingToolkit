@@ -419,7 +419,12 @@ def estimate_solid_background_foreground(
     return ~connected_to_border
 
 
-def estimate_top_left_flood_foreground(rendered, color_tolerance=8.0 / 255.0):
+def estimate_top_left_flood_foreground(
+    rendered,
+    color_tolerance=8.0 / 255.0,
+    gradient_tolerance=0.0,
+    max_seed_tolerance=0.0,
+):
     """Remove only seed-colored pixels connected to the top-left image pixel.
 
     Each image in the batch owns its own RGB seed. Pixels with the same color
@@ -430,6 +435,10 @@ def estimate_top_left_flood_foreground(rendered, color_tolerance=8.0 / 255.0):
         raise ValueError(f"Expected NCHW RGB(A), got {tuple(rendered.shape)}.")
     if not 0.0 <= color_tolerance <= 1.0:
         raise ValueError("color_tolerance must be in [0, 1].")
+    if not 0.0 <= gradient_tolerance <= 1.0:
+        raise ValueError("gradient_tolerance must be in [0, 1].")
+    if not 0.0 <= max_seed_tolerance <= 1.0:
+        raise ValueError("max_seed_tolerance must be in [0, 1].")
 
     rgb = rendered[:, :3].float()
     seed_rgb = rgb[:, :, :1, :1]
@@ -447,7 +456,25 @@ def estimate_top_left_flood_foreground(rendered, color_tolerance=8.0 / 255.0):
         expanded[:, :-1, :] |= connected[:, 1:, :]
         expanded[:, :, 1:] |= connected[:, :, :-1]
         expanded[:, :, :-1] |= connected[:, :, 1:]
-        updated = connected | (background_candidate & expanded)
+        eligible = background_candidate
+        if gradient_tolerance > 0.0 and max_seed_tolerance > 0.0:
+            globally_background_like = (
+                (rgb - seed_rgb).abs().amax(dim=1)
+                <= float(max_seed_tolerance)
+            )
+            gradual = torch.zeros_like(connected)
+            vertical_difference = (
+                rgb[:, :, 1:, :] - rgb[:, :, :-1, :]
+            ).abs().amax(dim=1) <= float(gradient_tolerance)
+            horizontal_difference = (
+                rgb[:, :, :, 1:] - rgb[:, :, :, :-1]
+            ).abs().amax(dim=1) <= float(gradient_tolerance)
+            gradual[:, 1:, :] |= connected[:, :-1, :] & vertical_difference
+            gradual[:, :-1, :] |= connected[:, 1:, :] & vertical_difference
+            gradual[:, :, 1:] |= connected[:, :, :-1] & horizontal_difference
+            gradual[:, :, :-1] |= connected[:, :, 1:] & horizontal_difference
+            eligible = eligible | (globally_background_like & gradual)
+        updated = connected | (eligible & expanded)
         if torch.equal(updated, connected):
             break
         connected = updated
@@ -2533,6 +2560,7 @@ def attach_projected_head_outer_structure(
     renderer,
     views,
     observed_foreground=None,
+    source_images=None,
     center_power=2.0,
 ):
     """Project per-pixel parser features into head outer UV topology.
@@ -2553,12 +2581,31 @@ def attach_projected_head_outer_structure(
     views = parse_views(views)
     feature_map = outputs["head_outer_uv_features"]
     foreground = torch.sigmoid(outputs["foreground"].float())
+    projected_input_version = int(
+        getattr(model, "head_outer_projected_input_version", 1)
+    )
+    if projected_input_version >= 2:
+        if source_images is None:
+            raise ValueError(
+                "Projected head structure input v2 requires source_images."
+            )
+        if source_images.dim() != 4 or source_images.shape[0] != feature_map.shape[0]:
+            raise ValueError(
+                "source_images must be NCHW and match projected head features."
+            )
+        source_rgb = source_images[:, :3].float()
+    else:
+        source_rgb = None
     if "affine" in outputs:
         affine = outputs["affine"]
         feature_map = canonicalize_tensor(feature_map, affine, mode="bilinear")
         foreground = canonicalize_tensor(
             foreground, affine, mode="bilinear"
         )
+        if source_rgb is not None:
+            source_rgb = canonicalize_tensor(
+                source_rgb, affine, mode="bilinear"
+            )
         if observed_foreground is not None:
             if observed_foreground.dim() == 3:
                 observed_foreground = observed_foreground.unsqueeze(1)
@@ -2574,7 +2621,23 @@ def attach_projected_head_outer_structure(
         ).clamp(0.0, 1.0)
 
     feature_channels = feature_map.shape[1]
-    values = torch.cat([feature_map.float(), foreground], dim=1)
+    values = [feature_map.float(), foreground]
+    if projected_input_version >= 2:
+        protruding_foreground = torch.zeros_like(foreground)
+        for view_index, view in enumerate(views):
+            static = build_static_surface_routing(
+                renderer, view, feature_map.device
+            )
+            protruding = (
+                static["masks"][ROUTE_OUTER_PRIMARY]
+                & ~static["masks"][ROUTE_INNER_PRIMARY]
+            )
+            protruding_foreground[
+                view_index :: len(views), 0
+            ] = protruding.to(dtype=foreground.dtype)
+        protruding_foreground = protruding_foreground * foreground
+        values.extend([source_rgb, protruding_foreground])
+    values = torch.cat(values, dim=1)
     pooled, support = aggregate_direct_outer_values_by_role_group(
         renderer,
         views,
@@ -2588,11 +2651,33 @@ def attach_projected_head_outer_structure(
     mean_features = pooled_mean[:, :feature_channels]
     mean_foreground = pooled_mean[:, feature_channels : feature_channels + 1]
     support_fraction = support_count / max(float(model.view_classes), 1.0)
-    atlas_features = torch.cat(
-        [mean_features, mean_foreground, support_fraction], dim=1
-    ).reshape(
+    atlas_feature_values = [
+        mean_features,
+        mean_foreground,
+        support_fraction,
+    ]
+    if projected_input_version >= 2:
+        rgb_start = feature_channels + 1
+        rgb_end = rgb_start + 3
+        per_view_rgb = pooled[:, :, rgb_start:rgb_end]
+        mean_rgb = pooled_mean[:, rgb_start:rgb_end]
+        rgb_variance = (
+            (per_view_rgb - mean_rgb.unsqueeze(1)).square()
+            * support_weight
+        ).sum(dim=1) / support_count
+        # sqrt has an infinite derivative at exactly zero. Identical colours
+        # across fixed views are common in unlit renders, so keep the v2 head
+        # branch finite from its first training batch.
+        rgb_std = rgb_variance.clamp_min(0.0).add(1e-6).sqrt()
+        mean_protruding_foreground = pooled_mean[
+            :, rgb_end : rgb_end + 1
+        ]
+        atlas_feature_values.extend(
+            [mean_rgb, rgb_std, mean_protruding_foreground]
+        )
+    atlas_features = torch.cat(atlas_feature_values, dim=1).reshape(
         mean_features.shape[0],
-        feature_channels + 2,
+        feature_channels + (9 if projected_input_version >= 2 else 2),
         UV_SIZE,
         UV_SIZE,
     )

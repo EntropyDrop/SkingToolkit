@@ -1918,6 +1918,39 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         self.assertFalse(wide[0, 5, 0])
         self.assertTrue(wide[0, 10, 0])
 
+    def test_top_left_flood_follows_bounded_background_gradient(self):
+        rendered = torch.zeros(1, 4, 16, 16)
+        gradient = torch.linspace(0.20, 0.34, 16).view(1, 1, 1, 16)
+        rendered[:, :3] = gradient.expand(1, 3, 16, 16)
+        rendered[:, 3] = 1.0
+        rendered[:, :3, 4:12, 5:11] = 0.90
+
+        foreground = estimate_top_left_flood_foreground(
+            rendered,
+            color_tolerance=0.01,
+            gradient_tolerance=0.02,
+            max_seed_tolerance=0.20,
+        )
+
+        self.assertFalse(foreground[0, 2, 14])
+        self.assertTrue(foreground[0, 6, 7])
+
+    def test_top_left_gradient_flood_stops_at_seed_drift_limit(self):
+        rendered = torch.zeros(1, 4, 8, 16)
+        gradient = torch.linspace(0.20, 0.50, 16).view(1, 1, 1, 16)
+        rendered[:, :3] = gradient.expand(1, 3, 8, 16)
+        rendered[:, 3] = 1.0
+
+        foreground = estimate_top_left_flood_foreground(
+            rendered,
+            color_tolerance=0.01,
+            gradient_tolerance=0.03,
+            max_seed_tolerance=0.12,
+        )
+
+        self.assertFalse(foreground[0, 2, 4])
+        self.assertTrue(foreground[0, 2, 12])
+
     def test_color_sampling_rejects_only_background_like_boundary_pixels(self):
         rendered = torch.full((1, 4, 7, 7), 0.5)
         rendered[:, 3] = 1.0

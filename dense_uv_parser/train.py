@@ -77,11 +77,15 @@ from SkingToolkit.dense_uv_parser.semantic_targets import (  # noqa: E402
 )
 from SkingToolkit.dense_uv_parser.runtime import get_device  # noqa: E402
 from SkingToolkit.dense_uv_parser.skin_dataset import SkinUVDataset  # noqa: E402
-from SkingToolkit.dense_uv_parser.uv_layout import build_uv_masks  # noqa: E402
+from SkingToolkit.dense_uv_parser.uv_layout import (  # noqa: E402
+    UV_SIZE,
+    build_uv_masks,
+)
 from SkingToolkit.dense_uv_parser.uv_topology import (  # noqa: E402
     build_head_outer_face_graph,
     build_head_outer_face_indices,
     build_outer_uv_graph,
+    build_simple_uv_topology,
 )
 from SkingToolkit.renderer import DifferentiableRenderer  # noqa: E402
 
@@ -1451,6 +1455,38 @@ def head_outer_structure_losses(
         + loss_component_recall
     )
 
+    # Many accessories that are difficult from two left-biased views (hat
+    # brims, crowns, glasses and headphones) are symmetric in their actual UV
+    # target. Apply symmetry only where both mirrored target texels are
+    # positive, so asymmetric hair and one-sided decorations are never forced
+    # to become symmetric.
+    head_indices = build_head_outer_face_indices().to(logits.device)
+    topology = build_simple_uv_topology()
+    mirrored_flat = topology.mirrored_texel.reshape(-1).to(logits.device)
+    flat_to_head = torch.full(
+        (UV_SIZE * UV_SIZE,), -1, dtype=torch.long, device=logits.device
+    )
+    flat_to_head[head_indices] = torch.arange(
+        head_indices.numel(), device=logits.device
+    )
+    mirrored_nodes = flat_to_head[mirrored_flat[head_indices]]
+    valid_mirror = mirrored_nodes >= 0
+    safe_mirror = mirrored_nodes.clamp_min(0)
+    mirrored_positive = target_nodes.index_select(1, safe_mirror)
+    symmetric_positive = (
+        target_nodes
+        & mirrored_positive
+        & valid_mirror.unsqueeze(0)
+    )
+    mirrored_probability = probability_nodes.index_select(1, safe_mirror)
+    loss_symmetry = (
+        (
+            probability_nodes - mirrored_probability
+        ).square()[symmetric_positive].mean()
+        if symmetric_positive.any()
+        else zero
+    )
+
     predicted = probability >= 0.5
     true_positive = (predicted & positive).float().sum()
     false_positive = (predicted & negative).float().sum()
@@ -1463,6 +1499,7 @@ def head_outer_structure_losses(
         "loss_head_outer_presence": loss_presence,
         "loss_head_outer_coverage": loss_coverage,
         "loss_head_outer_topology": loss_topology,
+        "loss_head_outer_symmetry": loss_symmetry,
         "loss_head_outer_positive_continuity": positive_continuity,
         "loss_head_outer_negative_connectivity": negative_connectivity,
         "loss_head_outer_boundary_contrast": boundary_contrast,
@@ -2244,6 +2281,7 @@ def run_epoch(
                     renderer,
                     views,
                     observed_foreground=targets["foreground"][:, 0],
+                    source_images=rendered,
                     center_power=args.route_texel_center_power,
                 )
                 losses = criterion(outputs, targets)
@@ -2319,6 +2357,8 @@ def run_epoch(
                         * head_structure["loss_head_outer_coverage"]
                         + args.lambda_head_outer_topology
                         * head_structure["loss_head_outer_topology"]
+                        + args.lambda_head_outer_symmetry
+                        * head_structure["loss_head_outer_symmetry"]
                     )
                     losses.update(head_structure)
                     losses["loss_head_outer_occupancy"] = (
@@ -2343,6 +2383,7 @@ def run_epoch(
                         "loss_head_outer_presence",
                         "loss_head_outer_coverage",
                         "loss_head_outer_topology",
+                        "loss_head_outer_symmetry",
                         "loss_head_outer_positive_continuity",
                         "loss_head_outer_negative_connectivity",
                         "loss_head_outer_boundary_contrast",
@@ -2833,6 +2874,7 @@ def save_preview(
             renderer,
             views,
             observed_foreground=targets["foreground"][:, 0],
+            source_images=rendered,
             center_power=getattr(args, "route_texel_center_power", 2.0),
         )
         if "affine" in outputs:
@@ -3299,6 +3341,9 @@ def save_checkpoint(
                 model.predict_head_outer_structure
             ),
             "head_outer_structure_mode": model.head_outer_structure_mode,
+            "head_outer_projected_input_version": (
+                model.head_outer_projected_input_version
+            ),
             "outer_uv_feature_channels": model.outer_uv_feature_channels,
             "outer_uv_topology_channels": model.outer_uv_topology_channels,
             "outer_uv_topology_layers": model.outer_uv_topology_layers,
@@ -3422,6 +3467,16 @@ def build_arg_parser():
         help=(
             "Use legacy global semantic decoding or project per-pixel parser "
             "features into the physical head outer-UV graph."
+        ),
+    )
+    parser.add_argument(
+        "--head_outer_projected_input_version",
+        type=int,
+        choices=(1, 2),
+        default=1,
+        help=(
+            "Projected head feature schema. Version 2 adds projected RGB, "
+            "cross-view RGB variation, and protruding-silhouette evidence."
         ),
     )
     parser.add_argument(
@@ -3788,6 +3843,9 @@ def build_arg_parser():
         "--lambda_head_outer_topology", type=float, default=0.0
     )
     parser.add_argument(
+        "--lambda_head_outer_symmetry", type=float, default=0.0
+    )
+    parser.add_argument(
         "--lambda_head_outer_route_connectivity",
         type=float,
         default=0.0,
@@ -4030,6 +4088,7 @@ def main():
         args.head_outer_hard_negative_weight,
         args.head_outer_precision_weight,
         args.lambda_head_outer_topology,
+        args.lambda_head_outer_symmetry,
         args.lambda_head_outer_route_connectivity,
         args.lambda_outer_uv_occupancy,
         args.outer_uv_occupancy_dice_weight,
@@ -4135,6 +4194,7 @@ def main():
         args.lambda_head_outer_coverage,
         args.lambda_head_outer_occupancy,
         args.lambda_head_outer_topology,
+        args.lambda_head_outer_symmetry,
     )
     if any(weight > 0.0 for weight in head_structure_weights) and not (
         args.predict_head_outer_structure
@@ -4430,6 +4490,9 @@ def main():
         predict_outer_uv_occupancy=args.predict_outer_uv_occupancy,
         predict_head_outer_structure=args.predict_head_outer_structure,
         head_outer_structure_mode=args.head_outer_structure_mode,
+        head_outer_projected_input_version=(
+            args.head_outer_projected_input_version
+        ),
         outer_uv_feature_channels=args.outer_uv_feature_channels,
         outer_uv_topology_channels=args.outer_uv_topology_channels,
         outer_uv_topology_layers=args.outer_uv_topology_layers,
@@ -4659,6 +4722,18 @@ def main():
                 "Cannot change the head outer structure mode while resuming. "
                 "Start a new parser run."
             )
+        checkpoint_head_input_version = int(
+            checkpoint_config.get("head_outer_projected_input_version", 1)
+        )
+        if (
+            checkpoint_head_structure
+            and checkpoint_head_input_version
+            != model.head_outer_projected_input_version
+        ):
+            raise ValueError(
+                "Cannot change the projected head input version while "
+                "resuming. Start a new parser run."
+            )
         checkpoint_route_prior = checkpoint_config.get(
             "route_role_spatial_prior",
             "route_role_prior" in checkpoint["model"],
@@ -4796,6 +4871,9 @@ def main():
             model.predict_head_outer_structure
         ),
         "head_outer_structure_mode": model.head_outer_structure_mode,
+        "head_outer_projected_input_version": (
+            model.head_outer_projected_input_version
+        ),
         "outer_uv_occupancy_supervision": (
             "visible_projected_texels"
             if model.predict_outer_uv_occupancy
@@ -4913,6 +4991,7 @@ def main():
         ),
         "head_outer_precision_weight": args.head_outer_precision_weight,
         "lambda_head_outer_topology": args.lambda_head_outer_topology,
+        "lambda_head_outer_symmetry": args.lambda_head_outer_symmetry,
         "lambda_head_outer_route_connectivity": (
             args.lambda_head_outer_route_connectivity
         ),

@@ -11,6 +11,8 @@ from types import MappingProxyType
 PRODUCTION_PREPROCESSING_DEFAULTS = MappingProxyType(
     {
         "foreground_flood_tolerance": 0.03,
+        "foreground_flood_gradient_tolerance": 0.05,
+        "foreground_flood_max_seed_tolerance": 0.20,
         "foreground_parser_background": "adaptive",
         "alpha_threshold": 0.5,
         "head_outer_topology_auto_reliability": True,
@@ -45,6 +47,8 @@ PRODUCTION_SPLAT_DEFAULTS = MappingProxyType(
         "head_outer_topology_ring_semantic_threshold": 0.65,
         "head_outer_topology_min_seed_nodes": 2,
         "head_outer_topology_color_tolerance": 0.20,
+        "head_outer_completion_threshold": 0.65,
+        "head_outer_completion_min_component_seeds": 2,
         "outer_geometry_rescue": True,
         "outer_semantic_rescue": True,
         "outer_semantic_presence_threshold": 0.80,

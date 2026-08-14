@@ -26,6 +26,9 @@ from SkingToolkit.dense_uv_parser.semantic_targets import (
     build_head_outer_face_targets,
     build_part_layer_masks,
 )
+from SkingToolkit.dense_uv_parser.simple_inpainting import (
+    simple_symmetry_nearest_inpaint,
+)
 from SkingToolkit.dense_uv_parser.uv_topology import (
     build_head_outer_face_graph,
     build_outer_uv_graph,
@@ -318,6 +321,7 @@ class SemanticDenseUVParserTest(unittest.TestCase):
             + losses["loss_head_outer_presence"]
             + losses["loss_head_outer_coverage"]
             + losses["loss_head_outer_topology"]
+            + losses["loss_head_outer_symmetry"]
         )
         total.backward()
         self.assertTrue(torch.isfinite(total))
@@ -336,44 +340,99 @@ class SemanticDenseUVParserTest(unittest.TestCase):
         )
 
     def test_projected_head_outer_structure_uses_uv_features(self):
-        model = DenseUVParserNet(
-            base_channels=8,
-            view_classes=2,
-            predict_affine=True,
-            surface_classes=4,
-            geometry_only=True,
-            semantic_feature_dim=12,
-            semantic_channels=8,
-            semantic_attention_heads=2,
-            predict_head_outer_structure=True,
-            head_outer_structure_mode="projected",
-            outer_uv_feature_channels=4,
-            outer_uv_topology_channels=8,
-            outer_uv_topology_layers=1,
+        for input_version, extra_channels in ((1, 2), (2, 9)):
+            with self.subTest(input_version=input_version):
+                model = DenseUVParserNet(
+                    base_channels=8,
+                    view_classes=2,
+                    predict_affine=True,
+                    surface_classes=4,
+                    geometry_only=True,
+                    semantic_feature_dim=12,
+                    semantic_channels=8,
+                    semantic_attention_heads=2,
+                    predict_head_outer_structure=True,
+                    head_outer_structure_mode="projected",
+                    head_outer_projected_input_version=input_version,
+                    outer_uv_feature_channels=4,
+                    outer_uv_topology_channels=8,
+                    outer_uv_topology_layers=1,
+                )
+                outputs = model(
+                    torch.rand(4, 4, 16, 16),
+                    view_ids=torch.tensor([0, 1, 0, 1]),
+                    semantic_features=torch.rand(1, 4, 12),
+                )
+                features = F.interpolate(
+                    outputs["head_outer_uv_features"],
+                    size=(64, 64),
+                    mode="bilinear",
+                    align_corners=False,
+                ).reshape(2, 2, 4, 64, 64).mean(dim=1)
+                atlas_features = torch.cat(
+                    [
+                        features,
+                        features.new_zeros(
+                            2, extra_channels, 64, 64
+                        ),
+                    ],
+                    dim=1,
+                )
+                logits = model.predict_projected_head_outer_structure(
+                    atlas_features,
+                    outputs["head_outer_uv_global_context"],
+                )
+                self.assertEqual(tuple(logits.shape), (2, 6, 8, 8))
+                logits.mean().backward()
+                gradient = (
+                    model.head_outer_projected_head.output[-1].weight.grad
+                )
+                self.assertIsNotNone(gradient)
+                self.assertGreater(float(gradient.abs().sum()), 0.0)
+
+    def test_head_outer_symmetry_penalizes_mirrored_positive_gap(self):
+        target_uv = torch.zeros(1, 4, 64, 64)
+        target_uv[0, 3, 8, 40] = 1.0
+        target_uv[0, 3, 8, 47] = 1.0
+        logits = torch.zeros(1, 6, 8, 8, requires_grad=True)
+        with torch.no_grad():
+            logits[0, 0, 0, 0] = 4.0
+            logits[0, 0, 0, 7] = -4.0
+        losses = head_outer_structure_losses(
+            {
+                "head_outer_face_occupancy_logits": logits,
+                "head_outer_face_presence_logits": torch.zeros(1, 6),
+                "head_outer_face_coverage": torch.zeros(1, 6),
+            },
+            target_uv,
         )
-        outputs = model(
-            torch.rand(4, 4, 16, 16),
-            view_ids=torch.tensor([0, 1, 0, 1]),
-            semantic_features=torch.rand(1, 4, 12),
+        self.assertGreater(
+            float(losses["loss_head_outer_symmetry"].detach()), 0.0
         )
-        features = F.interpolate(
-            outputs["head_outer_uv_features"],
-            size=(64, 64),
-            mode="bilinear",
-            align_corners=False,
-        ).reshape(2, 2, 4, 64, 64).mean(dim=1)
-        atlas_features = torch.cat(
-            [features, features.new_zeros(2, 2, 64, 64)], dim=1
+
+    def test_v2_head_completion_fills_only_anchored_candidates(self):
+        uv = torch.zeros(4, 64, 64)
+        uv[:3, 8, 40:42] = torch.tensor([0.8, 0.1, 0.1]).view(3, 1)
+        uv[3, 8, 40:42] = 1.0
+        probability = torch.zeros(64, 64)
+        probability[8, 40:43] = 0.95
+        probability[9, 46] = 0.99
+
+        repaired, stats = simple_symmetry_nearest_inpaint(
+            uv,
+            head_outer_probability=probability,
+            head_outer_threshold=0.65,
+            head_outer_min_component_seeds=2,
         )
-        logits = model.predict_projected_head_outer_structure(
-            atlas_features,
-            outputs["head_outer_uv_global_context"],
+
+        self.assertEqual(float(repaired[3, 8, 42]), 1.0)
+        self.assertTrue(
+            torch.allclose(repaired[:3, 8, 42], uv[:3, 8, 41])
         )
-        self.assertEqual(tuple(logits.shape), (2, 6, 8, 8))
-        logits.mean().backward()
-        gradient = model.head_outer_projected_head.output[-1].weight.grad
-        self.assertIsNotNone(gradient)
-        self.assertGreater(float(gradient.abs().sum()), 0.0)
+        self.assertEqual(float(repaired[3, 9, 46]), 0.0)
+        self.assertGreaterEqual(
+            stats["head_outer_topology_filled_texels"], 1
+        )
 
     def test_head_outer_route_connectivity_penalizes_brim_gap(self):
         edge = build_head_outer_face_graph()[:, 0]

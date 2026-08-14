@@ -529,6 +529,7 @@ class DenseUVParserNet(nn.Module):
         predict_outer_uv_occupancy=False,
         predict_head_outer_structure=False,
         head_outer_structure_mode="global",
+        head_outer_projected_input_version=1,
         outer_uv_feature_channels=32,
         outer_uv_topology_channels=64,
         outer_uv_topology_layers=3,
@@ -575,6 +576,13 @@ class DenseUVParserNet(nn.Module):
         if self.head_outer_structure_mode not in ("global", "projected"):
             raise ValueError(
                 "head_outer_structure_mode must be 'global' or 'projected'."
+            )
+        self.head_outer_projected_input_version = int(
+            head_outer_projected_input_version
+        )
+        if self.head_outer_projected_input_version not in (1, 2):
+            raise ValueError(
+                "head_outer_projected_input_version must be 1 or 2."
             )
         self.outer_uv_feature_channels = int(outer_uv_feature_channels)
         self.outer_uv_topology_channels = int(outer_uv_topology_channels)
@@ -796,7 +804,12 @@ class DenseUVParserNet(nn.Module):
                 # the six head faces are supervised and returned.
                 self.head_outer_projected_head = (
                     ProjectedOuterUVTopologyHead(
-                        self.outer_uv_feature_channels + 2,
+                        self.outer_uv_feature_channels
+                        + (
+                            9
+                            if self.head_outer_projected_input_version >= 2
+                            else 2
+                        ),
                         head_context_channels,
                         hidden_channels=self.outer_uv_topology_channels,
                         layers=self.outer_uv_topology_layers,

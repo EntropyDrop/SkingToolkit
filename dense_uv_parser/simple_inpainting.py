@@ -3,7 +3,111 @@
 import torch
 
 from SkingToolkit.dense_uv_parser.uv_layout import UV_SIZE
-from SkingToolkit.dense_uv_parser.uv_topology import build_simple_uv_topology
+from SkingToolkit.dense_uv_parser.uv_topology import (
+    build_head_outer_face_graph,
+    build_head_outer_face_indices,
+    build_simple_uv_topology,
+)
+
+
+def _complete_head_outer_structure(
+    pixels,
+    defined,
+    valid,
+    layer,
+    part,
+    local_v,
+    positions,
+    mirrored,
+    probability,
+    threshold=0.65,
+    min_component_seeds=2,
+):
+    """Fill only model-backed head-outer texels anchored to observations."""
+    head_indices = build_head_outer_face_indices().to(pixels.device)
+    edge_index = build_head_outer_face_graph().to(pixels.device)
+    known_nodes = defined.index_select(0, head_indices)
+    probability_nodes = probability.reshape(-1).index_select(0, head_indices)
+    candidates = probability_nodes >= float(threshold)
+    active = candidates | known_nodes
+    node_count = head_indices.numel()
+    labels = torch.where(
+        active,
+        torch.arange(node_count, device=pixels.device),
+        torch.full((node_count,), node_count, device=pixels.device),
+    )
+    source, destination = edge_index
+    for _ in range(64):
+        propagated = torch.full_like(labels, node_count)
+        propagated.scatter_reduce_(
+            0,
+            destination,
+            labels[source],
+            reduce="amin",
+            include_self=False,
+        )
+        updated = torch.where(active, torch.minimum(labels, propagated), labels)
+        if torch.equal(updated, labels):
+            break
+        labels = updated
+    seed_count = torch.zeros(node_count + 1, dtype=torch.long, device=pixels.device)
+    seed_count.scatter_add_(
+        0,
+        labels[known_nodes],
+        torch.ones_like(labels[known_nodes]),
+    )
+    accepted = (
+        candidates
+        & (seed_count[labels.clamp_max(node_count)] >= int(min_component_seeds))
+    )
+
+    flat_to_node = torch.full(
+        (UV_SIZE * UV_SIZE,), -1, dtype=torch.long, device=pixels.device
+    )
+    flat_to_node[head_indices] = torch.arange(node_count, device=pixels.device)
+    mirrored_nodes = flat_to_node[mirrored.index_select(0, head_indices)]
+    symmetry_filled = 0
+    topology_filled = 0
+    for node_index in probability_nodes.argsort(descending=True).tolist():
+        if not bool(accepted[node_index]) or bool(known_nodes[node_index]):
+            continue
+        target_index = int(head_indices[node_index])
+        mirror_node = int(mirrored_nodes[node_index])
+        if mirror_node >= 0 and bool(known_nodes[mirror_node]):
+            source_index = int(head_indices[mirror_node])
+            pixels[target_index] = pixels[source_index]
+            defined[target_index] = True
+            known_nodes[node_index] = True
+            symmetry_filled += 1
+            continue
+
+        same_component = (
+            known_nodes
+            & (labels == labels[node_index])
+        )
+        source_nodes = same_component.nonzero(as_tuple=False).flatten()
+        if source_nodes.numel() == 0:
+            continue
+        target_face = node_index // 64
+        if target_face < 4:
+            same_row = torch.isclose(
+                local_v.index_select(0, head_indices[source_nodes]),
+                local_v[target_index],
+                rtol=0.0,
+                atol=1e-6,
+            )
+            if same_row.any():
+                source_nodes = source_nodes[same_row]
+        source_indices = head_indices[source_nodes]
+        distance = (
+            positions.index_select(0, source_indices) - positions[target_index]
+        ).square().sum(dim=1)
+        source_index = int(source_indices[distance.argmin()])
+        pixels[target_index] = pixels[source_index]
+        defined[target_index] = True
+        known_nodes[node_index] = True
+        topology_filled += 1
+    return symmetry_filled, topology_filled
 
 
 def _nearest_defined_source(
@@ -44,7 +148,13 @@ def _nearest_defined_source(
     return source_indices[squared_distance.argmin()], used_same_row
 
 
-def simple_symmetry_nearest_inpaint(uv, alpha_threshold=0.5):
+def simple_symmetry_nearest_inpaint(
+    uv,
+    alpha_threshold=0.5,
+    head_outer_probability=None,
+    head_outer_threshold=0.65,
+    head_outer_min_component_seeds=2,
+):
     """Fill unknown inner texels while preserving every outer-layer texel."""
     squeeze_batch = uv.dim() == 3
     if squeeze_batch:
@@ -74,6 +184,20 @@ def simple_symmetry_nearest_inpaint(uv, alpha_threshold=0.5):
         dtype=torch.float32,
     )
     result = uv.flatten(2).transpose(1, 2).clone()
+    if head_outer_probability is not None:
+        if head_outer_probability.dim() == 2:
+            head_outer_probability = head_outer_probability.unsqueeze(0)
+        if head_outer_probability.shape != (
+            result.shape[0],
+            UV_SIZE,
+            UV_SIZE,
+        ):
+            raise ValueError(
+                "head_outer_probability must be shaped 64x64 or Bx64x64."
+            )
+        head_outer_probability = head_outer_probability.to(
+            device=device, dtype=torch.float32
+        )
     stats = []
 
     for batch_index in range(result.shape[0]):
@@ -84,6 +208,25 @@ def simple_symmetry_nearest_inpaint(uv, alpha_threshold=0.5):
         symmetry_filled = 0
         nearest_filled = 0
         same_row_nearest_filled = 0
+        head_outer_symmetry_filled = 0
+        head_outer_topology_filled = 0
+        if head_outer_probability is not None:
+            (
+                head_outer_symmetry_filled,
+                head_outer_topology_filled,
+            ) = _complete_head_outer_structure(
+                result[batch_index],
+                defined,
+                valid,
+                layer,
+                part,
+                local_v,
+                positions,
+                mirrored,
+                head_outer_probability[batch_index],
+                threshold=head_outer_threshold,
+                min_component_seeds=head_outer_min_component_seeds,
+            )
         for target_index in topology.inner_fill_order.tolist():
             if bool(defined[target_index]):
                 continue
@@ -128,6 +271,12 @@ def simple_symmetry_nearest_inpaint(uv, alpha_threshold=0.5):
                 "symmetry_filled_texels": symmetry_filled,
                 "nearest_3d_filled_texels": nearest_filled,
                 "same_row_nearest_filled_texels": same_row_nearest_filled,
+                "head_outer_symmetry_filled_texels": (
+                    head_outer_symmetry_filled
+                ),
+                "head_outer_topology_filled_texels": (
+                    head_outer_topology_filled
+                ),
                 "preserved_outer_texels": int((valid & (layer == 1)).sum().item()),
                 "fill_order": "front_back_rings_side_edges_top_bottom_rings",
                 "color_sources": "currently_defined_only",

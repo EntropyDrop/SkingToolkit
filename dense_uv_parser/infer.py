@@ -224,6 +224,9 @@ def load_parser(checkpoint_path, device):
             "head_outer_structure_mode",
             "projected" if has_projected_head_outer_structure else "global",
         ),
+        head_outer_projected_input_version=model_config.get(
+            "head_outer_projected_input_version", 1
+        ),
         outer_uv_feature_channels=model_config.get(
             "outer_uv_feature_channels", 32
         ),
@@ -367,7 +370,13 @@ def save_parser_uv(
     print(f"Saved parser_partial_uv={output_path}")
 
 
-def simple_inpaint_uv(conditioning, alpha_threshold=0.5):
+def simple_inpaint_uv(
+    conditioning,
+    alpha_threshold=0.5,
+    head_outer_probability=None,
+    head_outer_threshold=0.65,
+    head_outer_min_component_seeds=2,
+):
     """Repair inner UV holes while preserving the parser's outer layer."""
     parser_uv = conditioning_to_pred_uv(conditioning)
     if parser_uv.dim() != 4 or parser_uv.shape[0] != 1:
@@ -376,7 +385,11 @@ def simple_inpaint_uv(conditioning, alpha_threshold=0.5):
             f"sample, got {tuple(parser_uv.shape)}."
         )
     repaired, stats = simple_symmetry_nearest_inpaint(
-        parser_uv[0], alpha_threshold=alpha_threshold
+        parser_uv[0],
+        alpha_threshold=alpha_threshold,
+        head_outer_probability=head_outer_probability,
+        head_outer_threshold=head_outer_threshold,
+        head_outer_min_component_seeds=head_outer_min_component_seeds,
     )
     repaired = finalize_minecraft_alpha(
         repaired,
@@ -711,6 +724,28 @@ def build_arg_parser():
         help="Maximum per-channel RGB distance from the top-left flood seed.",
     )
     parser.add_argument(
+        "--foreground_flood_gradient_tolerance",
+        type=float,
+        default=preprocessing_defaults[
+            "foreground_flood_gradient_tolerance"
+        ],
+        help=(
+            "Maximum colour step for following a smooth background gradient "
+            "away from the top-left seed."
+        ),
+    )
+    parser.add_argument(
+        "--foreground_flood_max_seed_tolerance",
+        type=float,
+        default=preprocessing_defaults[
+            "foreground_flood_max_seed_tolerance"
+        ],
+        help=(
+            "Maximum total drift from the top-left colour while following a "
+            "smooth background gradient."
+        ),
+    )
+    parser.add_argument(
         "--foreground_parser_background",
         choices=["adaptive", "neutral"],
         default=preprocessing_defaults["foreground_parser_background"],
@@ -1012,6 +1047,22 @@ def build_arg_parser():
         "--head_outer_topology_color_tolerance",
         type=float,
         default=splat_defaults["head_outer_topology_color_tolerance"],
+    )
+    parser.add_argument(
+        "--head_outer_completion_threshold",
+        type=float,
+        default=splat_defaults["head_outer_completion_threshold"],
+        help=(
+            "Minimum v2 head-occupancy probability for constrained, "
+            "component-anchored outer UV completion."
+        ),
+    )
+    parser.add_argument(
+        "--head_outer_completion_min_component_seeds",
+        type=int,
+        default=splat_defaults[
+            "head_outer_completion_min_component_seeds"
+        ],
     )
     parser.add_argument(
         "--outer_geometry_rescue",
@@ -1320,6 +1371,14 @@ def main():
         raise ValueError(
             "--head_outer_topology_color_tolerance must be non-negative."
         )
+    if not 0.0 <= args.head_outer_completion_threshold <= 1.0:
+        raise ValueError(
+            "--head_outer_completion_threshold must be in [0, 1]."
+        )
+    if args.head_outer_completion_min_component_seeds < 1:
+        raise ValueError(
+            "--head_outer_completion_min_component_seeds must be positive."
+        )
     if not 0.0 <= args.head_outer_topology_min_precision <= 1.0:
         raise ValueError(
             "--head_outer_topology_min_precision must be in [0, 1]."
@@ -1330,6 +1389,14 @@ def main():
         )
     if not 0.0 <= args.foreground_flood_tolerance <= 1.0:
         raise ValueError("--foreground_flood_tolerance must be in [0, 1].")
+    if not 0.0 <= args.foreground_flood_gradient_tolerance <= 1.0:
+        raise ValueError(
+            "--foreground_flood_gradient_tolerance must be in [0, 1]."
+        )
+    if not 0.0 <= args.foreground_flood_max_seed_tolerance <= 1.0:
+        raise ValueError(
+            "--foreground_flood_max_seed_tolerance must be in [0, 1]."
+        )
     if not 0.0 <= args.outer_uv_occupancy_min_precision <= 1.0:
         raise ValueError(
             "--outer_uv_occupancy_min_precision must be in [0, 1]."
@@ -1618,6 +1685,12 @@ def main():
             observed_foreground = estimate_top_left_flood_foreground(
                 rendered,
                 color_tolerance=args.foreground_flood_tolerance,
+                gradient_tolerance=(
+                    args.foreground_flood_gradient_tolerance
+                ),
+                max_seed_tolerance=(
+                    args.foreground_flood_max_seed_tolerance
+                ),
             )
             foreground_log = {
                 "method": "top_left_flood",
@@ -1626,6 +1699,12 @@ def main():
                     for color in rendered[:, :3, 0, 0].detach().cpu().tolist()
                 ],
                 "tolerance": round(float(args.foreground_flood_tolerance), 6),
+                "gradient_tolerance": round(
+                    float(args.foreground_flood_gradient_tolerance), 6
+                ),
+                "max_seed_tolerance": round(
+                    float(args.foreground_flood_max_seed_tolerance), 6
+                ),
             }
             observed_foreground = save_flood_outputs(
                 rendered,
@@ -1723,6 +1802,7 @@ def main():
             renderer,
             views,
             observed_foreground=observed_foreground,
+            source_images=parser_rendered,
             center_power=float(
                 parser_args.get("route_texel_center_power", 2.0)
             ),
@@ -2500,9 +2580,32 @@ def main():
     if args.output:
         repair_outputs.append(("completed_uv", Path(args.output)))
     if needs_repair:
+        head_outer_completion_probability = None
+        if (
+            int(
+                getattr(
+                    parser_model,
+                    "head_outer_projected_input_version",
+                    1,
+                )
+            )
+            >= 2
+            and head_outer_topology_rescue
+            and "head_outer_face_occupancy_logits" in outputs
+        ):
+            head_outer_completion_probability = head_outer_face_values_to_uv(
+                torch.sigmoid(
+                    outputs["head_outer_face_occupancy_logits"].float()
+                )
+            )[0, 0].detach().cpu()
         repaired, stats = simple_inpaint_uv(
             conditioning.detach().cpu(),
             alpha_threshold=args.alpha_threshold,
+            head_outer_probability=head_outer_completion_probability,
+            head_outer_threshold=args.head_outer_completion_threshold,
+            head_outer_min_component_seeds=(
+                args.head_outer_completion_min_component_seeds
+            ),
         )
         print("simple_inpaint_stats=" + json.dumps(stats, sort_keys=True))
         written_paths = set()
