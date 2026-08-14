@@ -53,7 +53,9 @@ class CaptionedCheckpointPreviewer:
         sharpen_radius: float = 0.6,
         sharpen_percent: int = 80,
         sharpen_threshold: int = 3,
-        posterize_bits: int = 5,
+        contrast: float = 1.16,
+        saturation: float = 1.10,
+        posterize_bits: int = 4,
         save_raw: bool = True,
     ) -> None:
         if mode not in {"txt2img", "img2img"}:
@@ -76,6 +78,8 @@ class CaptionedCheckpointPreviewer:
         self.sharpen_radius = sharpen_radius
         self.sharpen_percent = sharpen_percent
         self.sharpen_threshold = sharpen_threshold
+        self.contrast = contrast
+        self.saturation = saturation
         self.posterize_bits = posterize_bits
         self.save_raw = save_raw
         self.scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
@@ -214,6 +218,8 @@ class CaptionedCheckpointPreviewer:
                     sharpen_radius=self.sharpen_radius,
                     sharpen_percent=self.sharpen_percent,
                     sharpen_threshold=self.sharpen_threshold,
+                    contrast=self.contrast,
+                    saturation=self.saturation,
                     posterize_bits=self.posterize_bits,
                 )
                 generated.save(generated_path, optimize=True)

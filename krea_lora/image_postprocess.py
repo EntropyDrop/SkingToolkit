@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
-from PIL import Image, ImageFilter, ImageOps
+from PIL import Image, ImageEnhance, ImageFilter, ImageOps
 
 
 def snap_near_white_to_white(image: Image.Image, threshold: int = 250) -> Image.Image:
@@ -21,7 +21,9 @@ def minecraft_crisp_postprocess(
     sharpen_radius: float = 0.6,
     sharpen_percent: int = 80,
     sharpen_threshold: int = 3,
-    posterize_bits: int = 5,
+    contrast: float = 1.16,
+    saturation: float = 1.10,
+    posterize_bits: int = 4,
 ) -> Image.Image:
     """Recover hard Minecraft-like color blocks after diffusion/VAE decoding.
 
@@ -46,6 +48,10 @@ def minecraft_crisp_postprocess(
         raise ValueError("sharpen percent must be non-negative")
     if sharpen_threshold < 0:
         raise ValueError("sharpen threshold must be non-negative")
+    if contrast < 0:
+        raise ValueError("contrast must be non-negative")
+    if saturation < 0:
+        raise ValueError("saturation must be non-negative")
     if not 1 <= posterize_bits <= 8:
         raise ValueError("posterize bits must be between 1 and 8")
 
@@ -56,6 +62,8 @@ def minecraft_crisp_postprocess(
             threshold=sharpen_threshold,
         )
     )
+    crisp = ImageEnhance.Contrast(crisp).enhance(contrast)
+    crisp = ImageEnhance.Color(crisp).enhance(saturation)
     if posterize_bits < 8:
         crisp = ImageOps.posterize(crisp, posterize_bits)
     pixels = np.asarray(crisp, dtype=np.uint8).copy()

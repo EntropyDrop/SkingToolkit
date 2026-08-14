@@ -32,6 +32,12 @@ class MinecraftCrispPostprocessTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             minecraft_crisp_postprocess(Image.new("RGB", (2, 2)), posterize_bits=0)
 
+    def test_rejects_negative_contrast_or_saturation(self) -> None:
+        with self.assertRaises(ValueError):
+            minecraft_crisp_postprocess(Image.new("RGB", (2, 2)), contrast=-0.1)
+        with self.assertRaises(ValueError):
+            minecraft_crisp_postprocess(Image.new("RGB", (2, 2)), saturation=-0.1)
+
 
 if __name__ == "__main__":
     unittest.main()

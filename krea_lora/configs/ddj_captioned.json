@@ -46,7 +46,9 @@
     "sharpen_radius": 0.6,
     "sharpen_percent": 80,
     "sharpen_threshold": 3,
-    "posterize_bits": 5,
+    "contrast": 1.16,
+    "saturation": 1.1,
+    "posterize_bits": 4,
     "save_raw": true
   },
   "training": {
@@ -101,7 +103,9 @@
     "sharpen_radius": 0.6,
     "sharpen_percent": 80,
     "sharpen_threshold": 3,
-    "posterize_bits": 5,
+    "contrast": 1.16,
+    "saturation": 1.1,
+    "posterize_bits": 4,
     "negative_prompt": ""
   }
 }

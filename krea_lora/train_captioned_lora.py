@@ -107,6 +107,8 @@ def save_previews(
             "sharpen_radius": previewer.sharpen_radius,
             "sharpen_percent": previewer.sharpen_percent,
             "sharpen_threshold": previewer.sharpen_threshold,
+            "contrast": previewer.contrast,
+            "saturation": previewer.saturation,
             "posterize_bits": previewer.posterize_bits,
             "results": results,
         },
@@ -310,7 +312,9 @@ def main() -> None:
             sharpen_radius=float(preview_config.get("sharpen_radius", 0.6)),
             sharpen_percent=int(preview_config.get("sharpen_percent", 80)),
             sharpen_threshold=int(preview_config.get("sharpen_threshold", 3)),
-            posterize_bits=int(preview_config.get("posterize_bits", 5)),
+            contrast=float(preview_config.get("contrast", 1.16)),
+            saturation=float(preview_config.get("saturation", 1.10)),
+            posterize_bits=int(preview_config.get("posterize_bits", 4)),
             save_raw=bool(preview_config.get("save_raw", True)),
         )
         print(

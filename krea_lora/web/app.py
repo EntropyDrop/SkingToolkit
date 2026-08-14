@@ -61,7 +61,10 @@ def now() -> str:
 
 
 def public_job(job: dict[str, Any]) -> dict[str, Any]:
-    return {key: value for key, value in job.items() if key not in {"input_path", "output_path", "log_path"}}
+    public = {key: value for key, value in job.items() if key not in {"input_path", "output_path", "log_path"}}
+    if "seed" in public:
+        public["seed"] = str(public["seed"])
+    return public
 
 
 def decode_reference(data_url: str) -> Image.Image:

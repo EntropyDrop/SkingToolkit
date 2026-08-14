@@ -61,11 +61,13 @@ two-character layout deterministic across seeds. Img2Img remains available as
 an optional experiment with `--mode img2img --strength 0.95`, but lower
 strengths can preserve the source background or silhouette. The Qwen model is
 released before Krea loads, so the two large models do not coexist on CUDA.
-At the output boundary, a Minecraft crisp pass restores edge contrast, removes
-VAE-created intermediate colors with nondithered 5-bit posterization, and
-restores near-white canvas pixels to exact white. Its radius, amount, threshold,
-posterization depth, and on/off switch are all configured in the `inference`
-and `checkpoint_preview` sections. It does not alter LoRA training.
+At the output boundary, a Minecraft crisp pass restores edge contrast, applies
+moderate contrast/saturation correction, removes VAE-created intermediate
+colors with nondithered 4-bit posterization, and restores near-white canvas
+pixels to exact white. Its parameters and on/off switch are configured in the
+`inference` and `checkpoint_preview` sections. The Web UI displays the native
+512x512 PNG with nearest-neighbour pixel rendering instead of browser smoothing.
+These operations do not alter LoRA training.
 
 Checkpoint previews use the same formal Qwen-captioned text-to-image path and
 save both `*_generated_raw.png` and the production `*_generated.png` crisp

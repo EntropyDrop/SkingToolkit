@@ -179,7 +179,9 @@ def main() -> None:
         sharpen_radius = float(inference.get("sharpen_radius", 0.6))
         sharpen_percent = int(inference.get("sharpen_percent", 80))
         sharpen_threshold = int(inference.get("sharpen_threshold", 3))
-        posterize_bits = int(inference.get("posterize_bits", 5))
+        contrast = float(inference.get("contrast", 1.16))
+        saturation = float(inference.get("saturation", 1.10))
+        posterize_bits = int(inference.get("posterize_bits", 4))
         image = minecraft_crisp_postprocess(
             image,
             enabled=crisp_enabled,
@@ -187,6 +189,8 @@ def main() -> None:
             sharpen_radius=sharpen_radius,
             sharpen_percent=sharpen_percent,
             sharpen_threshold=sharpen_threshold,
+            contrast=contrast,
+            saturation=saturation,
             posterize_bits=posterize_bits,
         )
         if len(strengths) > 1:
@@ -213,6 +217,8 @@ def main() -> None:
                 "sharpen_radius": sharpen_radius,
                 "sharpen_percent": sharpen_percent,
                 "sharpen_threshold": sharpen_threshold,
+                "contrast": contrast,
+                "saturation": saturation,
                 "posterize_bits": posterize_bits,
             },
         )
