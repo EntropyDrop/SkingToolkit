@@ -41,7 +41,13 @@
     "height": 512,
     "steps": 28,
     "seed": 20260812,
-    "white_background_threshold": 250
+    "white_background_threshold": 250,
+    "crisp_postprocess": true,
+    "sharpen_radius": 0.6,
+    "sharpen_percent": 80,
+    "sharpen_threshold": 3,
+    "posterize_bits": 5,
+    "save_raw": true
   },
   "training": {
     "output_dir": "/home/ds/llms/SkingToolkit/krea_lora/runs/ddj_captioned_front_left_back_left_lora",
@@ -71,6 +77,15 @@
     "max_grad_norm": 1.0,
     "save_every": 250
   },
+  "detail_finetune": {
+    "resume_lora": "/home/ds/llms/SkingToolkit/krea_lora/runs/ddj_captioned_front_left_back_left_lora/checkpoint-1000",
+    "output_dir": "/home/ds/llms/SkingToolkit/krea_lora/runs/ddj_captioned_front_left_back_left_lora_detail",
+    "max_train_steps": 300,
+    "learning_rate": 0.000008,
+    "lr_warmup_steps": 0,
+    "timestep_min_fraction": 0.55,
+    "timestep_max_fraction": 0.95
+  },
   "inference": {
     "output_path": "/home/ds/llms/SkingToolkit/krea_lora/runs/ddj_captioned_front_left_back_left_lora/generated.png",
     "mode": "txt2img",
@@ -82,6 +97,11 @@
     "seed": 20260812,
     "layerwise_casting": false,
     "white_background_threshold": 250,
+    "crisp_postprocess": true,
+    "sharpen_radius": 0.6,
+    "sharpen_percent": 80,
+    "sharpen_threshold": 3,
+    "posterize_bits": 5,
     "negative_prompt": ""
   }
 }

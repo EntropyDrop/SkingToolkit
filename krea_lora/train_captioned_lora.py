@@ -58,6 +58,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--resume-lora", default=None)
     parser.add_argument("--learning-rate", type=float, default=None)
     parser.add_argument("--lr-warmup-steps", type=int, default=None)
+    parser.add_argument(
+        "--timestep-min-fraction",
+        type=float,
+        default=None,
+        help="Lowest scheduler index fraction to sample: 0 is highest noise, 1 is lowest noise.",
+    )
+    parser.add_argument(
+        "--timestep-max-fraction",
+        type=float,
+        default=None,
+        help="Highest scheduler index fraction to sample: use a late interval for detail fine-tuning.",
+    )
     return parser.parse_args()
 
 
@@ -90,6 +102,12 @@ def save_previews(
             "strength": previewer.strength if previewer.mode == "img2img" else None,
             "steps": previewer.steps,
             "guidance_scale": 0.0,
+            "raw_previews": previewer.save_raw,
+            "crisp_postprocess": previewer.crisp_postprocess,
+            "sharpen_radius": previewer.sharpen_radius,
+            "sharpen_percent": previewer.sharpen_percent,
+            "sharpen_threshold": previewer.sharpen_threshold,
+            "posterize_bits": previewer.posterize_bits,
             "results": results,
         },
     )
@@ -110,6 +128,17 @@ def main() -> None:
         if args.lr_warmup_steps < 0:
             raise ValueError("--lr-warmup-steps must be non-negative")
         train_config["lr_warmup_steps"] = args.lr_warmup_steps
+    if args.timestep_min_fraction is not None:
+        train_config["timestep_min_fraction"] = args.timestep_min_fraction
+    if args.timestep_max_fraction is not None:
+        train_config["timestep_max_fraction"] = args.timestep_max_fraction
+    timestep_min_fraction = float(train_config.get("timestep_min_fraction", 0.0))
+    timestep_max_fraction = float(train_config.get("timestep_max_fraction", 1.0))
+    if not 0.0 <= timestep_min_fraction < timestep_max_fraction <= 1.0:
+        raise ValueError(
+            "training timestep fractions must satisfy "
+            "0 <= timestep_min_fraction < timestep_max_fraction <= 1"
+        )
     if int(train_config["batch_size"]) != 1:
         raise ValueError("Captioned prompt embeddings have variable length; training.batch_size must be 1")
     model_path = Path(model_config["path"]).expanduser().resolve()
@@ -202,6 +231,11 @@ def main() -> None:
             f"({100 * trainable_count / total_count:.4f}%)"
         )
         print("conditioning: per-image Qwen caption, standard Gaussian noise -> MC target flow")
+        print(
+            "timestep index fraction: "
+            f"{timestep_min_fraction:.3f}..{timestep_max_fraction:.3f} "
+            "(0=highest noise, 1=lowest noise)"
+        )
 
     optimizer = torch.optim.AdamW(
         trainable_parameters,
@@ -272,6 +306,12 @@ def main() -> None:
             mode=str(preview_config.get("mode", "img2img")),
             strength=float(preview_config.get("strength", 0.9)),
             white_background_threshold=int(preview_config.get("white_background_threshold", 250)),
+            crisp_postprocess=bool(preview_config.get("crisp_postprocess", True)),
+            sharpen_radius=float(preview_config.get("sharpen_radius", 0.6)),
+            sharpen_percent=int(preview_config.get("sharpen_percent", 80)),
+            sharpen_threshold=int(preview_config.get("sharpen_threshold", 3)),
+            posterize_bits=int(preview_config.get("posterize_bits", 5)),
+            save_raw=bool(preview_config.get("save_raw", True)),
         )
         print(
             f"checkpoint previews: {len(checkpoint_rows)} Qwen-captioned image(s), "
@@ -287,6 +327,8 @@ def main() -> None:
         "resolution": f"{width}x{height}",
         "initial_prompt_tokens": str(first_embeds.shape[0]),
         "layerwise_casting": str(bool(train_config.get("layerwise_casting", False))),
+        "timestep_min_fraction": str(timestep_min_fraction),
+        "timestep_max_fraction": str(timestep_max_fraction),
     }
     global_step = 0
     progress = tqdm(range(max_train_steps), disable=not accelerator.is_local_main_process, desc="Krea2 captioned LoRA")
@@ -317,6 +359,7 @@ def main() -> None:
                     mode_scale=float(train_config.get("mode_scale", 1.29)),
                     device=accelerator.device,
                 )
+                u = timestep_min_fraction + u * (timestep_max_fraction - timestep_min_fraction)
                 indices = (u * noise_scheduler.config.num_train_timesteps).long().clamp_(
                     0, noise_scheduler.config.num_train_timesteps - 1
                 )
@@ -380,6 +423,8 @@ def main() -> None:
                 "trainable_parameters": trainable_count,
                 "dataset_items": len(dataset),
                 "conditioning_schema": "qwen_caption_text_to_image",
+                "timestep_min_fraction": timestep_min_fraction,
+                "timestep_max_fraction": timestep_max_fraction,
                 "final_lora": str(final_dir),
             },
         )

@@ -195,6 +195,7 @@ async def config() -> dict[str, Any]:
         "default_mode": "txt2img",
         "steps": int(CONFIG["inference"].get("steps", 28)),
         "guidance_scale": float(CONFIG["inference"].get("guidance_scale", 0.0)),
+        "crisp_postprocess": bool(CONFIG["inference"].get("crisp_postprocess", True)),
     }
 
 

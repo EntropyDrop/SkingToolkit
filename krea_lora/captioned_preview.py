@@ -12,7 +12,7 @@ from safetensors.torch import load_file
 
 from checkpoint_preview import decoded_tensor_to_pil, safe_output_stem, unpack_latents
 from common import pack_latents
-from image_postprocess import snap_near_white_to_white
+from image_postprocess import minecraft_crisp_postprocess
 from reference_conditioning import denormalize_qwen_vae_latents, image_to_normalized_tensor, normalize_qwen_vae_latents
 
 
@@ -49,6 +49,12 @@ class CaptionedCheckpointPreviewer:
         mode: str,
         strength: float,
         white_background_threshold: int,
+        crisp_postprocess: bool = True,
+        sharpen_radius: float = 0.6,
+        sharpen_percent: int = 80,
+        sharpen_threshold: int = 3,
+        posterize_bits: int = 5,
+        save_raw: bool = True,
     ) -> None:
         if mode not in {"txt2img", "img2img"}:
             raise ValueError(f"Unsupported checkpoint preview mode: {mode}")
@@ -66,6 +72,12 @@ class CaptionedCheckpointPreviewer:
         self.mode = mode
         self.strength = strength
         self.white_background_threshold = white_background_threshold
+        self.crisp_postprocess = crisp_postprocess
+        self.sharpen_radius = sharpen_radius
+        self.sharpen_percent = sharpen_percent
+        self.sharpen_threshold = sharpen_threshold
+        self.posterize_bits = posterize_bits
+        self.save_raw = save_raw
         self.scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
             model_path,
             subfolder="scheduler",
@@ -190,16 +202,26 @@ class CaptionedCheckpointPreviewer:
                 ).to(self.vae.dtype)
                 raw_latents = denormalize_qwen_vae_latents(self.vae, unpacked)
                 decoded = self.vae.decode(raw_latents, return_dict=False)[0][:, :, 0]
+                raw_generated = decoded_tensor_to_pil(decoded)
+                raw_generated_path = output_dir / f"{item.output_stem}_generated_raw.png"
+                if self.save_raw:
+                    raw_generated.save(raw_generated_path, optimize=True)
                 generated_path = output_dir / f"{item.output_stem}_generated.png"
-                generated = snap_near_white_to_white(
-                    decoded_tensor_to_pil(decoded),
-                    self.white_background_threshold,
+                generated = minecraft_crisp_postprocess(
+                    raw_generated,
+                    enabled=self.crisp_postprocess,
+                    white_threshold=self.white_background_threshold,
+                    sharpen_radius=self.sharpen_radius,
+                    sharpen_percent=self.sharpen_percent,
+                    sharpen_threshold=self.sharpen_threshold,
+                    posterize_bits=self.posterize_bits,
                 )
                 generated.save(generated_path, optimize=True)
                 results.append(
                     {
                         "source_image": str(item.source_path),
                         "generated_image": str(generated_path),
+                        "raw_generated_image": str(raw_generated_path) if self.save_raw else None,
                         "prompt_id": item.prompt_id,
                         "description": item.description,
                         "seed": item.seed,

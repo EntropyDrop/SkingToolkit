@@ -61,10 +61,15 @@ two-character layout deterministic across seeds. Img2Img remains available as
 an optional experiment with `--mode img2img --strength 0.95`, but lower
 strengths can preserve the source background or silhouette. The Qwen model is
 released before Krea loads, so the two large models do not coexist on CUDA.
-Near-white VAE decode drift (RGB 250-255) is snapped to exact white only at the
-output boundary; this does not alter LoRA training or darker character pixels.
+At the output boundary, a Minecraft crisp pass restores edge contrast, removes
+VAE-created intermediate colors with nondithered 5-bit posterization, and
+restores near-white canvas pixels to exact white. Its radius, amount, threshold,
+posterization depth, and on/off switch are all configured in the `inference`
+and `checkpoint_preview` sections. It does not alter LoRA training.
 
-Checkpoint previews use the same formal Qwen-captioned text-to-image path.
+Checkpoint previews use the same formal Qwen-captioned text-to-image path and
+save both `*_generated_raw.png` and the production `*_generated.png` crisp
+variant, so model sharpness can be judged independently from postprocessing.
 `checkpoint-0/tests`, every configured checkpoint, and `final/tests` contain
 the reference, generated image, and metadata including the Qwen description.
 The default test images are img3, img14, and img17.
@@ -83,11 +88,13 @@ data/ddj_captioned_front_left_back_left_white_512
 runs/ddj_captioned_front_left_back_left_lora
 ```
 
-The reproducible schedule is two stages from the frozen Raw base: stage 1 uses
-1,000 steps at `5e-5` with warmup, then `scripts/27_resume_captioned_stage2.sh`
-starts a fresh optimizer/scheduler for up to 2,000 more steps at `4e-5`.
-Checkpoint images are reviewed every 250 stage-2 steps; `best` points to the
-visually selected checkpoint rather than blindly selecting `final`.
+The reproducible schedule starts from the frozen Raw base with 1,000 steps at
+`5e-5`. If the layout and identity have converged but edges remain soft, run
+`scripts/28_resume_captioned_detail.sh`. It resumes checkpoint 1000 for 300
+steps at `8e-6` while sampling scheduler index fractions 0.55-0.95 (the
+lower-noise/detail portion of the rectified-flow trajectory). This is isolated
+under `runs/ddj_captioned_front_left_back_left_lora_detail`; it never overwrites
+stage 1. Review checkpoint 0, 250, and final before changing `best`.
 
 ### FastAPI + plain HTML Web UI
 
