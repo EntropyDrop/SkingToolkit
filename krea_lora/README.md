@@ -125,6 +125,16 @@ and optional user details are appended behind it automatically.
 The local DDJ source currently contains 1,565 complete source/result/edited
 triples (1,490 train and 75 validation), not 8,087.
 
+The Web result is intentionally stricter than the raw Krea image. Krea first
+creates a two-view appearance draft. The production Dense UV parser (v66,
+trained on `front_left,back_left`) then projects that draft into an actual
+64x64 RGBA Minecraft atlas, deterministically repairs missing base texels, and
+rejects output unless every base texel is opaque and every pixel outside the
+standard base/outer UV regions is transparent. The visible Web result is a new
+pure-white preview rendered from that validated atlas with nearest-neighbour
+texture sampling. The UI exposes the usable 64x64 skin, the fixed preview, and
+the intermediate Krea draft as separate downloads.
+
 ## Legacy experiment: paired source-bridge LoRA
 
 `configs/ddj_conditional.json` is the real reference-image training path. It

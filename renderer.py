@@ -4,15 +4,30 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class DifferentiableRenderer(nn.Module):
-    def __init__(self, mappings_dir=None, bg_color=(128/255, 128/255, 128/255)):
+    def __init__(
+        self,
+        mappings_dir=None,
+        bg_color=(128 / 255, 128 / 255, 128 / 255),
+        sampling_mode="bilinear",
+    ):
         """
         Differentiable Minecraft Skin Renderer in PyTorch.
         Args:
             mappings_dir: Path to directory containing '*.pt' view mapping files.
                           If None, it tries to find the default mappings directory.
             bg_color: RGB tuple for the render background.
+            sampling_mode: Texture sampling used for the 64x64 atlas. Training
+                keeps the historical ``bilinear`` default; strict exported
+                previews can select ``nearest`` to avoid invented colors and
+                antialiased texture transitions.
         """
         super().__init__()
+        if sampling_mode not in {"bilinear", "nearest"}:
+            raise ValueError(
+                "sampling_mode must be either 'bilinear' or 'nearest', "
+                f"found {sampling_mode!r}"
+            )
+        self.sampling_mode = sampling_mode
         if mappings_dir is None:
             env_mappings_dir = os.environ.get("RENDERER_MAPPINGS_DIR")
             if env_mappings_dir and os.path.exists(env_mappings_dir):
@@ -153,11 +168,23 @@ class DifferentiableRenderer(nn.Module):
         outer_mask = getattr(self, f"{view_name}_outer_mask").unsqueeze(0).unsqueeze(1).expand(B, -1, -1, -1).to(dtype=dtype) # (B, 1, H, W)
         
         # 1. Sample inner layer using bilinear interpolation
-        inner_sampled = F.grid_sample(skins, inner_grid, mode='bilinear', padding_mode='zeros', align_corners=True)
+        inner_sampled = F.grid_sample(
+            skins,
+            inner_grid,
+            mode=self.sampling_mode,
+            padding_mode="zeros",
+            align_corners=True,
+        )
         inner_sampled = inner_sampled * inner_mask
         
         # 2. Sample outer layer using bilinear interpolation
-        outer_sampled = F.grid_sample(skins, outer_grid, mode='bilinear', padding_mode='zeros', align_corners=True)
+        outer_sampled = F.grid_sample(
+            skins,
+            outer_grid,
+            mode=self.sampling_mode,
+            padding_mode="zeros",
+            align_corners=True,
+        )
         outer_sampled = outer_sampled * outer_mask
         
         # 3. Alpha blend outer over inner
@@ -195,7 +222,7 @@ class DifferentiableRenderer(nn.Module):
             composite_sampled = F.grid_sample(
                 skin_layers,
                 composite_grid,
-                mode='bilinear',
+                mode=self.sampling_mode,
                 padding_mode='zeros',
                 align_corners=True,
             )
@@ -242,7 +269,7 @@ class DifferentiableRenderer(nn.Module):
                     geometry_sampled = F.grid_sample(
                         geometry_skin_layers,
                         geometry_grid,
-                        mode='bilinear',
+                        mode=self.sampling_mode,
                         padding_mode='zeros',
                         align_corners=True,
                     )

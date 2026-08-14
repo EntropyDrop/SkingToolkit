@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field
 
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
+TOOLKIT_DIR = PROJECT_DIR.parent
 WEB_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = Path(
     os.getenv("KREA_CONFIG", PROJECT_DIR / "configs" / "ddj_captioned.json")
@@ -31,6 +32,22 @@ with CONFIG_PATH.open("r", encoding="utf-8") as handle:
 
 DEFAULT_LORA = PROJECT_DIR / "runs" / "ddj_captioned_front_left_back_left_lora" / "best"
 LORA_PATH = Path(os.getenv("KREA_LORA_PATH", DEFAULT_LORA)).expanduser().resolve()
+UV_PYTHON = Path(
+    os.getenv("KREA_UV_PYTHON", "/home/ds/miniconda3/envs/c130/bin/python")
+).expanduser().resolve()
+UV_PARSER_CHECKPOINT = Path(
+    os.getenv(
+        "KREA_UV_PARSER_CHECKPOINT",
+        TOOLKIT_DIR / "dense_uv_parser" / "runs" / "dense_uv_parser_v66" / "best.pt",
+    )
+).expanduser().resolve()
+RENDERER_MAPPINGS_DIR = Path(
+    os.getenv(
+        "KREA_RENDERER_MAPPINGS_DIR",
+        "/home/ds/llms/github/differentiable_minecraft_renderer/mappings_256x512",
+    )
+).expanduser().resolve()
+FINALIZER = PROJECT_DIR / "finalize_mc_skin.py"
 RUNTIME_DIR = Path(os.getenv("KREA_WEB_RUNTIME", PROJECT_DIR / "runs" / "captioned_web")).expanduser().resolve()
 INPUT_DIR = RUNTIME_DIR / "inputs"
 OUTPUT_DIR = RUNTIME_DIR / "outputs"
@@ -61,7 +78,15 @@ def now() -> str:
 
 
 def public_job(job: dict[str, Any]) -> dict[str, Any]:
-    public = {key: value for key, value in job.items() if key not in {"input_path", "output_path", "log_path"}}
+    private_keys = {
+        "input_path",
+        "draft_path",
+        "skin_path",
+        "output_path",
+        "report_path",
+        "log_path",
+    }
+    public = {key: value for key, value in job.items() if key not in private_keys}
     if "seed" in public:
         public["seed"] = str(public["seed"])
     return public
@@ -106,7 +131,7 @@ def run_generation(job_id: str, request: GenerateRequest) -> dict[str, Any]:
         "--lora",
         str(LORA_PATH),
         "--output",
-        str(job["output_path"]),
+        str(job["draft_path"]),
         "--mode",
         request.mode,
         "--strength",
@@ -151,15 +176,65 @@ def run_generation(job_id: str, request: GenerateRequest) -> dict[str, Any]:
     if return_code:
         tail = Path(job["log_path"]).read_text(encoding="utf-8", errors="replace")[-4000:]
         raise RuntimeError(f"生成进程退出码 {return_code}\n{tail}")
-    metadata_path = Path(job["output_path"]).with_suffix(".json")
-    if not Path(job["output_path"]).is_file() or not metadata_path.is_file():
+    metadata_path = Path(job["draft_path"]).with_suffix(".json")
+    if not Path(job["draft_path"]).is_file() or not metadata_path.is_file():
         raise RuntimeError("生成结束但没有输出 PNG/JSON")
     with metadata_path.open("r", encoding="utf-8") as handle:
         metadata = json.load(handle)
+
+    job.update(phase="正在提取合法 64×64 UV 并固定视角重渲染", progress=0.96)
+    finalizer_command = [
+        str(UV_PYTHON),
+        "-u",
+        str(FINALIZER),
+        "--draft",
+        str(job["draft_path"]),
+        "--skin",
+        str(job["skin_path"]),
+        "--preview",
+        str(job["output_path"]),
+        "--report",
+        str(job["report_path"]),
+        "--parser-checkpoint",
+        str(UV_PARSER_CHECKPOINT),
+        "--mappings-dir",
+        str(RENDERER_MAPPINGS_DIR),
+    ]
+    with Path(job["log_path"]).open("a", encoding="utf-8") as log:
+        log.write("\n=== strict Minecraft UV finalization ===\n")
+        log.flush()
+        process = subprocess.Popen(
+            finalizer_command,
+            cwd=PROJECT_DIR,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        assert process.stdout is not None
+        for line in process.stdout:
+            log.write(line)
+            log.flush()
+        return_code = process.wait()
+    if return_code:
+        tail = Path(job["log_path"]).read_text(encoding="utf-8", errors="replace")[-6000:]
+        raise RuntimeError(f"64×64 UV 约束阶段退出码 {return_code}\n{tail}")
+    required_outputs = (job["skin_path"], job["output_path"], job["report_path"])
+    if not all(Path(path).is_file() for path in required_outputs):
+        raise RuntimeError("UV 约束阶段结束但缺少 skin、预览或校验报告")
+    with Path(job["report_path"]).open("r", encoding="utf-8") as handle:
+        report = json.load(handle)
+    validation = {
+        "skin_validation": report.get("skin_validation", {}),
+        "preview_validation": report.get("preview_validation", {}),
+    }
     return {
         "image_url": f"/outputs/{Path(job['output_path']).name}",
+        "skin_url": f"/outputs/{Path(job['skin_path']).name}",
+        "draft_url": f"/outputs/{Path(job['draft_path']).name}",
         "qwen_description": metadata.get("qwen_description", ""),
         "effective_prompt": metadata.get("prompt", ""),
+        "validation": validation,
     }
 
 
@@ -170,7 +245,7 @@ async def execute(job_id: str, request: GenerateRequest) -> None:
         result = await asyncio.to_thread(run_generation, job_id, request)
         jobs[job_id].update(
             status="completed",
-            phase="生成完成",
+            phase="合法 64×64 皮肤与固定视角预览生成完成",
             progress=1.0,
             completed_at=now(),
             **result,
@@ -199,17 +274,31 @@ async def config() -> dict[str, Any]:
         "steps": int(CONFIG["inference"].get("steps", 28)),
         "guidance_scale": float(CONFIG["inference"].get("guidance_scale", 0.0)),
         "crisp_postprocess": bool(CONFIG["inference"].get("crisp_postprocess", True)),
+        "final_output": "validated_64x64_skin_and_fixed_renderer_preview",
+        "views": ["front_left", "back_left"],
     }
 
 
 @app.get("/api/health")
 async def health() -> dict[str, Any]:
     return {
-        "ok": CONFIG_PATH.is_file() and LORA_PATH.is_dir(),
+        "ok": all(
+            (
+                CONFIG_PATH.is_file(),
+                LORA_PATH.is_dir(),
+                UV_PYTHON.is_file(),
+                UV_PARSER_CHECKPOINT.is_file(),
+                RENDERER_MAPPINGS_DIR.is_dir(),
+                FINALIZER.is_file(),
+            )
+        ),
         "busy": active_job_id is not None,
         "config_exists": CONFIG_PATH.is_file(),
         "lora_exists": LORA_PATH.is_dir(),
         "lora": str(LORA_PATH),
+        "uv_python_exists": UV_PYTHON.is_file(),
+        "uv_parser_exists": UV_PARSER_CHECKPOINT.is_file(),
+        "renderer_mappings_exist": RENDERER_MAPPINGS_DIR.is_dir(),
     }
 
 
@@ -223,7 +312,10 @@ async def generate(request: GenerateRequest) -> dict[str, Any]:
         job_id = uuid.uuid4().hex[:12]
         seed = request.seed if request.seed is not None and request.seed >= 0 else int.from_bytes(os.urandom(8), "big")
         input_path = INPUT_DIR / f"{job_id}.png"
+        draft_path = OUTPUT_DIR / f"draft-{job_id}-{seed}.png"
+        skin_path = OUTPUT_DIR / f"skin-{job_id}-{seed}.png"
         output_path = OUTPUT_DIR / f"mc-{job_id}-{seed}.png"
+        report_path = OUTPUT_DIR / f"mc-{job_id}-{seed}.json"
         image.save(input_path, optimize=True)
         jobs[job_id] = {
             "id": job_id,
@@ -236,7 +328,10 @@ async def generate(request: GenerateRequest) -> dict[str, Any]:
             "steps": request.steps,
             "created_at": now(),
             "input_path": str(input_path),
+            "draft_path": str(draft_path),
+            "skin_path": str(skin_path),
             "output_path": str(output_path),
+            "report_path": str(report_path),
             "log_path": str(LOG_DIR / f"{job_id}.log"),
         }
         active_job_id = job_id

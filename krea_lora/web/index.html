@@ -12,8 +12,8 @@
 <main>
   <form id="form" class="panel">
     <h1>Krea MC Captioned LoRA</h1>
-    <div class="sub">参考图 → Qwen3.6-27B 描述 → Krea-2-Raw + MC LoRA</div>
-    <div class="flow"><span>Qwen caption</span><span>noise→target LoRA</span><span>低噪声细节优化</span><span>硬边限色</span><span>纯白背景</span></div>
+    <div class="sub">参考图 → Qwen3.6 描述 → Krea 外观草图 → 64×64 UV → 固定渲染器</div>
+    <div class="flow"><span>Qwen caption</span><span>Krea + MC LoRA</span><span>Dense UV</span><span>64×64 合法性校验</span><span>固定视角重渲染</span></div>
     <label>角色参考图</label>
     <div id="drop" class="drop"><input id="file" type="file" accept="image/png,image/jpeg,image/webp"><span>点击或拖入图片（最大 10MB）</span><img id="preview" alt="参考图"></div>
     <label>MC 结构 Prompt（可编辑）</label>
@@ -25,22 +25,22 @@
       <div class="row"><div><label>Seed（-1 随机）</label><input id="seed" type="number" value="-1"></div><div><label>步数</label><input id="steps" type="number" min="8" max="40" value="28"></div></div>
       <label>Guidance scale</label><input id="guidance" type="number" min="0" max="3" step="0.25" value="0">
     </details>
-    <button id="submit">生成 MC 预览</button>
+    <button id="submit">生成可用 MC 皮肤</button>
     <div id="health" class="meta">正在检查后端…</div>
   </form>
   <section class="panel stage">
-    <div class="stagehead"><strong>512×512 锐利 MC 预览</strong><span id="jobmeta" class="hint">等待生成</span></div>
-    <div class="canvas"><div id="empty" class="empty"><h2>上传角色参考图</h2><p>输出固定为左侧 front-left、右侧 back-left 的同一 Minecraft 角色，两张都展示角色左侧，完整全身、等距留白、无场景和光影。</p></div><div id="barbox" class="barbox"><div id="phase" class="phase">准备中</div><div class="track"><div id="bar" class="bar"></div></div></div><img id="result" alt="MC 生成结果"></div>
-    <div id="error" class="meta error"></div><div id="caption" class="meta"></div><div id="actions" class="actions"><a id="download" download>下载 PNG</a></div>
+    <div class="stagehead"><strong>64×64 皮肤确定性渲染预览</strong><span id="jobmeta" class="hint">等待生成</span></div>
+    <div class="canvas"><div id="empty" class="empty"><h2>上传角色参考图</h2><p>最终结果固定为标准 Steve 64×64 内外层皮肤。左侧 front-left、右侧 back-left；几何、视角、白底均由渲染器确定，不再由扩散模型自由绘制。</p></div><div id="barbox" class="barbox"><div id="phase" class="phase">准备中</div><div class="track"><div id="bar" class="bar"></div></div></div><img id="result" alt="MC 生成结果"></div>
+    <div id="error" class="meta error"></div><div id="caption" class="meta"></div><div id="actions" class="actions"><a id="skinDownload" download>下载 64×64 皮肤</a><a id="download" download>下载预览</a><a id="draftDownload" download>查看 Krea 草图</a></div>
   </section>
 </main>
 <script>
 const $=id=>document.getElementById(id);let imageData=null,poller=null;
 async function api(path,options){const response=await fetch(path,options);const body=await response.json().catch(()=>({}));if(!response.ok)throw new Error(body.detail||`HTTP ${response.status}`);return body}
-async function boot(){const [config,health]=await Promise.all([api('/api/config'),api('/api/health')]);$('prompt').value=config.prompt;$('steps').value=config.steps;$('guidance').value=config.guidance_scale;$('health').textContent=health.ok?`就绪 · ${config.lora}`:`未就绪 · LoRA=${health.lora_exists}`}
+async function boot(){const [config,health]=await Promise.all([api('/api/config'),api('/api/health')]);$('prompt').value=config.prompt;$('steps').value=config.steps;$('guidance').value=config.guidance_scale;$('health').textContent=health.ok?`就绪 · 64×64 UV 硬约束已启用 · ${config.lora}`:`未就绪 · LoRA=${health.lora_exists} · UV=${health.uv_parser_exists} · Renderer=${health.renderer_mappings_exist}`}
 function useFile(file){if(!file)return;if(file.size>10*1024*1024)throw new Error('图片不能超过 10MB');const reader=new FileReader;reader.onload=()=>{imageData=reader.result;$('preview').src=imageData;$('drop').classList.add('has')};reader.readAsDataURL(file)}
 $('drop').onclick=()=>$('file').click();$('file').onchange=e=>{try{useFile(e.target.files[0])}catch(error){alert(error.message)}};['dragover','drop'].forEach(name=>$('drop').addEventListener(name,event=>event.preventDefault()));$('drop').addEventListener('drop',event=>{try{useFile(event.dataTransfer.files[0])}catch(error){alert(error.message)}});
-function render(job){$('jobmeta').textContent=`${job.mode} · seed ${job.seed}`;$('phase').textContent=job.phase;$('bar').style.width=`${Math.round(100*(job.progress||0))}%`;if(job.status==='completed'){clearInterval(poller);$('submit').disabled=false;$('barbox').style.display='none';$('result').src=job.image_url;$('result').style.display='block';$('download').href=job.image_url;$('actions').style.display='flex';$('caption').textContent=`Qwen3.6：${job.qwen_description||''}`}else if(job.status==='failed'){clearInterval(poller);$('submit').disabled=false;$('error').textContent=job.error||'生成失败'} }
+function render(job){$('jobmeta').textContent=`${job.mode} · seed ${job.seed}`;$('phase').textContent=job.phase;$('bar').style.width=`${Math.round(100*(job.progress||0))}%`;if(job.status==='completed'){clearInterval(poller);$('submit').disabled=false;$('barbox').style.display='none';$('result').src=job.image_url;$('result').style.display='block';$('download').href=job.image_url;$('skinDownload').href=job.skin_url;$('draftDownload').href=job.draft_url;$('actions').style.display='flex';const valid=job.validation?.skin_validation||{};$('caption').textContent=`Qwen3.6：${job.qwen_description||''}\n\nUV 校验通过：64×64 · base 缺失 ${valid.missing_base_alpha_pixels??'-'} · 非法区域 ${valid.invalid_region_alpha_pixels??'-'} · 半透明 ${valid.partial_alpha_pixels??'-'}`}else if(job.status==='failed'){clearInterval(poller);$('submit').disabled=false;$('error').textContent=job.error||'生成失败'} }
 $('form').onsubmit=async event=>{event.preventDefault();if(!imageData){alert('请先上传参考图');return}$('submit').disabled=true;$('error').textContent='';$('caption').textContent='';$('empty').style.display='none';$('result').style.display='none';$('barbox').style.display='block';try{const job=await api('/api/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({reference_image:imageData,prompt:$('prompt').value,supplemental_description:$('extra').value,mode:$('mode').value,strength:+$('strength').value,seed:+$('seed').value,steps:+$('steps').value,guidance_scale:+$('guidance').value})});render(job);poller=setInterval(async()=>{try{render(await api(`/api/jobs/${job.id}`))}catch(error){$('error').textContent=error.message}},1000)}catch(error){$('submit').disabled=false;$('error').textContent=error.message}};
 boot().catch(error=>$('health').textContent=error.message);
 </script>
