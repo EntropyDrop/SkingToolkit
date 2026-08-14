@@ -487,7 +487,10 @@ if [[ "$SEMANTIC_BACKBONE" != "none" ]]; then
   )
 fi
 
-python train.py \
+# Replace the launcher shell with the trainer. Besides keeping the flock for
+# the trainer lifetime, this prevents a script update during a long run from
+# being read again after Python exits at a shifted file offset.
+exec python train.py \
   --data_dir "$DATA_DIR" \
   --output_dir "$OUTPUT_DIR" \
   --mappings_dir "$MAPPINGS_DIR" \
