@@ -6,6 +6,20 @@ cd "$(dirname "$0")"
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-16}"
 export MKL_NUM_THREADS="${MKL_NUM_THREADS:-16}"
 
+# A second full parser trainer easily exhausts even a large GPU and, more
+# importantly, can race while writing the same auto-selected run directory.
+# Keep the lock descriptor open for the lifetime of this shell. macOS does not
+# ship flock by default, so retain the previous behavior there.
+mkdir -p runs
+if command -v flock >/dev/null 2>&1; then
+  TRAINING_LOCK_FILE="${TRAINING_LOCK_FILE:-runs/.dense_uv_parser_training.lock}"
+  exec 9>"$TRAINING_LOCK_FILE"
+  if ! flock -n 9; then
+    echo "Another Dense UV parser training process already holds $TRAINING_LOCK_FILE." >&2
+    exit 1
+  fi
+fi
+
 find_latest_checkpoint() {
   local best_v=-1
   local best_checkpoint=""
