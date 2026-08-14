@@ -44,6 +44,7 @@ from SkingToolkit.dense_uv_parser.utils import (  # noqa: E402
     PART_PALETTE,
     ROUTE_ROLE_PALETTE,
     SPLAT_COLOR_AGGREGATIONS,
+    attach_projected_head_outer_structure,
     attach_projected_outer_uv_occupancy,
     combine_layer_face,
     build_geometry_grid_debug,
@@ -102,6 +103,8 @@ def load_parser(checkpoint_path, device):
     for metric_name in (
         "outer_uv_occupancy_precision",
         "outer_uv_occupancy_recall",
+        "head_outer_occupancy_precision",
+        "head_outer_occupancy_recall",
     ):
         if metric_name in checkpoint_metric_source:
             checkpoint_args[f"_checkpoint_{metric_name}"] = float(
@@ -117,9 +120,16 @@ def load_parser(checkpoint_path, device):
     has_outer_uv_occupancy = any(
         key.startswith("outer_uv_occupancy_head.") for key in state_dict
     )
-    has_head_outer_structure = any(
+    has_global_head_outer_structure = any(
         key.startswith("head_outer_face_occupancy_head.")
         for key in state_dict
+    )
+    has_projected_head_outer_structure = any(
+        key.startswith("head_outer_projected_head.") for key in state_dict
+    )
+    has_head_outer_structure = (
+        has_global_head_outer_structure
+        or has_projected_head_outer_structure
     )
     text_prompt_key = (
         "semantic_text_prompt_fusion.prompt_embeddings"
@@ -209,6 +219,10 @@ def load_parser(checkpoint_path, device):
         ),
         predict_head_outer_structure=model_config.get(
             "predict_head_outer_structure", has_head_outer_structure
+        ),
+        head_outer_structure_mode=model_config.get(
+            "head_outer_structure_mode",
+            "projected" if has_projected_head_outer_structure else "global",
         ),
         outer_uv_feature_channels=model_config.get(
             "outer_uv_feature_channels", 32
@@ -926,6 +940,35 @@ def build_arg_parser():
         action="store_false",
     )
     parser.add_argument(
+        "--head_outer_topology_auto_reliability",
+        dest="head_outer_topology_auto_reliability",
+        action="store_true",
+        default=preprocessing_defaults[
+            "head_outer_topology_auto_reliability"
+        ],
+        help=(
+            "Disable topology rescue automatically when checkpoint head "
+            "occupancy precision/recall is below the production floor."
+        ),
+    )
+    parser.add_argument(
+        "--no_head_outer_topology_auto_reliability",
+        dest="head_outer_topology_auto_reliability",
+        action="store_false",
+    )
+    parser.add_argument(
+        "--head_outer_topology_min_precision",
+        type=float,
+        default=preprocessing_defaults[
+            "head_outer_topology_min_precision"
+        ],
+    )
+    parser.add_argument(
+        "--head_outer_topology_min_recall",
+        type=float,
+        default=preprocessing_defaults["head_outer_topology_min_recall"],
+    )
+    parser.add_argument(
         "--head_outer_topology_semantic_threshold",
         type=float,
         default=splat_defaults["head_outer_topology_semantic_threshold"],
@@ -1277,6 +1320,14 @@ def main():
         raise ValueError(
             "--head_outer_topology_color_tolerance must be non-negative."
         )
+    if not 0.0 <= args.head_outer_topology_min_precision <= 1.0:
+        raise ValueError(
+            "--head_outer_topology_min_precision must be in [0, 1]."
+        )
+    if not 0.0 <= args.head_outer_topology_min_recall <= 1.0:
+        raise ValueError(
+            "--head_outer_topology_min_recall must be in [0, 1]."
+        )
     if not 0.0 <= args.foreground_flood_tolerance <= 1.0:
         raise ValueError("--foreground_flood_tolerance must be in [0, 1].")
     if not 0.0 <= args.outer_uv_occupancy_min_precision <= 1.0:
@@ -1430,6 +1481,43 @@ def main():
         parser_args.get("geometry_cross_view_outer_min_views", 2)
         if args.geometry_cross_view_outer_min_views is None
         else args.geometry_cross_view_outer_min_views
+    )
+    head_checkpoint_precision = parser_args.get(
+        "_checkpoint_head_outer_occupancy_precision"
+    )
+    head_checkpoint_recall = parser_args.get(
+        "_checkpoint_head_outer_occupancy_recall"
+    )
+    head_topology_reliable = (
+        head_checkpoint_precision is not None
+        and head_checkpoint_recall is not None
+        and head_checkpoint_precision
+        >= float(args.head_outer_topology_min_precision)
+        and head_checkpoint_recall
+        >= float(args.head_outer_topology_min_recall)
+    )
+    head_outer_topology_rescue = bool(
+        args.head_outer_topology_rescue
+    ) and (
+        head_topology_reliable
+        or not args.head_outer_topology_auto_reliability
+    )
+    print(
+        "head_outer_topology_reliability="
+        + json.dumps(
+            {
+                "auto": bool(args.head_outer_topology_auto_reliability),
+                "enabled": bool(head_outer_topology_rescue),
+                "requested": bool(args.head_outer_topology_rescue),
+                "checkpoint_precision": head_checkpoint_precision,
+                "checkpoint_recall": head_checkpoint_recall,
+                "min_precision": float(
+                    args.head_outer_topology_min_precision
+                ),
+                "min_recall": float(args.head_outer_topology_min_recall),
+            },
+            sort_keys=True,
+        )
     )
     outer_uv_occupancy_requested = (
         parser_args.get(
@@ -1629,6 +1717,16 @@ def main():
                 parser_args.get("route_texel_center_power", 2.0)
             ),
         )
+        outputs = attach_projected_head_outer_structure(
+            parser_model,
+            outputs,
+            renderer,
+            views,
+            observed_foreground=observed_foreground,
+            center_power=float(
+                parser_args.get("route_texel_center_power", 2.0)
+            ),
+        )
         if (
             args.outer_uv_occupancy_output
             and "outer_uv_occupancy_logits" in outputs
@@ -1705,9 +1803,7 @@ def main():
             ),
             outer_silhouette_dilation=args.outer_silhouette_dilation,
             outer_silhouette_min_pixels=args.outer_silhouette_min_pixels,
-            head_outer_topology_rescue=(
-                args.head_outer_topology_rescue
-            ),
+            head_outer_topology_rescue=head_outer_topology_rescue,
             head_outer_topology_semantic_threshold=(
                 args.head_outer_topology_semantic_threshold
             ),
@@ -2184,7 +2280,7 @@ def main():
                         float(outer_uv_component_grow_threshold), 6
                     ),
                     "head_outer_topology_rescue": bool(
-                        args.head_outer_topology_rescue
+                        head_outer_topology_rescue
                     ),
                     "head_outer_topology_candidate_source_texels": int(
                         head_topology_details.get(

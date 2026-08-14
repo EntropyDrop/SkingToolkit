@@ -40,6 +40,7 @@ from SkingToolkit.dense_uv_parser.utils import (  # noqa: E402
     SPLAT_COLOR_AGGREGATIONS,
     UV_SIZE,
     aggregate_direct_outer_values_by_view,
+    attach_projected_head_outer_structure,
     attach_projected_outer_uv_occupancy,
     build_dense_parser_batch,
     build_geometry_grid_debug,
@@ -1272,7 +1273,13 @@ def outer_uv_occupancy_losses(
     }
 
 
-def head_outer_structure_losses(outputs, target_uv, alpha_threshold=0.5):
+def head_outer_structure_losses(
+    outputs,
+    target_uv,
+    alpha_threshold=0.5,
+    positive_balance=0.50,
+    hard_negative_fraction=0.10,
+):
     """Supervise the six 8x8 head outer faces without gating parser routes."""
     logits = outputs["head_outer_face_occupancy_logits"].float()
     targets = build_head_outer_face_targets(
@@ -1302,13 +1309,20 @@ def head_outer_structure_losses(outputs, target_uv, alpha_threshold=0.5):
             "Expected head occupancy logits shaped "
             f"{tuple(occupancy.shape)}, got {tuple(logits.shape)}."
         )
+    if not 0.0 <= float(positive_balance) <= 1.0:
+        raise ValueError("positive_balance must be in [0, 1].")
+    if not 0.0 <= float(hard_negative_fraction) <= 1.0:
+        raise ValueError("hard_negative_fraction must be in [0, 1].")
 
     positive = occupancy > 0.5
     negative = ~positive
     positive_loss = F.softplus(-logits[positive])
     negative_loss = F.softplus(logits[negative])
     if positive_loss.numel() and negative_loss.numel():
-        loss_bce = 0.60 * positive_loss.mean() + 0.40 * negative_loss.mean()
+        loss_bce = (
+            float(positive_balance) * positive_loss.mean()
+            + (1.0 - float(positive_balance)) * negative_loss.mean()
+        )
     elif positive_loss.numel():
         loss_bce = positive_loss.mean()
     elif negative_loss.numel():
@@ -1317,6 +1331,28 @@ def head_outer_structure_losses(outputs, target_uv, alpha_threshold=0.5):
         loss_bce = logits.sum() * 0.0
 
     probability = torch.sigmoid(logits)
+    if negative_loss.numel() and hard_negative_fraction > 0.0:
+        hard_negative_count = max(
+            1,
+            int(
+                math.ceil(
+                    negative_loss.numel() * float(hard_negative_fraction)
+                )
+            ),
+        )
+        loss_hard_negative = negative_loss.topk(
+            min(hard_negative_count, negative_loss.numel())
+        ).values.mean()
+    else:
+        hard_negative_count = 0
+        loss_hard_negative = logits.sum() * 0.0
+    soft_true_positive = (probability * occupancy).sum(dim=(1, 2, 3))
+    soft_predicted_positive = probability.sum(dim=(1, 2, 3))
+    soft_precision = (
+        (soft_true_positive + 1.0)
+        / (soft_predicted_positive + 1.0)
+    )
+    loss_soft_precision = (1.0 - soft_precision).mean()
     face_intersection = (probability * occupancy).sum(dim=(-2, -1))
     per_face_dice = (
         1.0
@@ -1422,6 +1458,8 @@ def head_outer_structure_losses(outputs, target_uv, alpha_threshold=0.5):
     return {
         "loss_head_outer_occupancy_bce": loss_bce,
         "loss_head_outer_occupancy_dice": loss_dice,
+        "loss_head_outer_occupancy_hard_negative": loss_hard_negative,
+        "loss_head_outer_occupancy_soft_precision": loss_soft_precision,
         "loss_head_outer_presence": loss_presence,
         "loss_head_outer_coverage": loss_coverage,
         "loss_head_outer_topology": loss_topology,
@@ -1439,6 +1477,10 @@ def head_outer_structure_losses(outputs, target_uv, alpha_threshold=0.5):
             component_recall.mean() if component_recall.numel() else zero
         ),
         "count_head_outer_components": existing_components.float().sum(),
+        "count_head_outer_hard_negative_candidates": logits.new_tensor(
+            float(hard_negative_count)
+        ),
+        "head_outer_occupancy_soft_precision": soft_precision.mean(),
     }
 
 
@@ -2196,6 +2238,14 @@ def run_epoch(
                     observed_foreground=targets["foreground"][:, 0],
                     center_power=args.route_texel_center_power,
                 )
+                outputs = attach_projected_head_outer_structure(
+                    model,
+                    outputs,
+                    renderer,
+                    views,
+                    observed_foreground=targets["foreground"][:, 0],
+                    center_power=args.route_texel_center_power,
+                )
                 losses = criterion(outputs, targets)
                 zero = losses["loss_total"].new_zeros(())
                 if semantic_masks is not None and "outer_presence_logits" in outputs:
@@ -2240,11 +2290,25 @@ def run_epoch(
                         outputs,
                         batch["uv"],
                         alpha_threshold=args.target_alpha_threshold,
+                        positive_balance=(
+                            args.head_outer_occupancy_positive_balance
+                        ),
+                        hard_negative_fraction=(
+                            args.head_outer_hard_negative_fraction
+                        ),
                     )
                     loss_head_outer_occupancy = (
                         head_structure["loss_head_outer_occupancy_bce"]
                         + args.head_outer_occupancy_dice_weight
                         * head_structure["loss_head_outer_occupancy_dice"]
+                        + args.head_outer_hard_negative_weight
+                        * head_structure[
+                            "loss_head_outer_occupancy_hard_negative"
+                        ]
+                        + args.head_outer_precision_weight
+                        * head_structure[
+                            "loss_head_outer_occupancy_soft_precision"
+                        ]
                     )
                     weighted_head_structure = (
                         args.lambda_head_outer_occupancy
@@ -2273,6 +2337,8 @@ def run_epoch(
                     for name in (
                         "loss_head_outer_occupancy_bce",
                         "loss_head_outer_occupancy_dice",
+                        "loss_head_outer_occupancy_hard_negative",
+                        "loss_head_outer_occupancy_soft_precision",
                         "loss_head_outer_occupancy",
                         "loss_head_outer_presence",
                         "loss_head_outer_coverage",
@@ -2284,8 +2350,10 @@ def run_epoch(
                         "loss_head_outer_structure_weighted",
                         "head_outer_occupancy_precision",
                         "head_outer_occupancy_recall",
+                        "head_outer_occupancy_soft_precision",
                         "head_outer_component_recall",
                         "count_head_outer_components",
+                        "count_head_outer_hard_negative_candidates",
                     ):
                         losses[name] = zero
                 if args.lambda_head_outer_route_connectivity > 0.0:
@@ -2759,6 +2827,14 @@ def save_preview(
             observed_foreground=targets["foreground"][:, 0],
             center_power=getattr(args, "route_texel_center_power", 2.0),
         )
+        outputs = attach_projected_head_outer_structure(
+            model,
+            outputs,
+            renderer,
+            views,
+            observed_foreground=targets["foreground"][:, 0],
+            center_power=getattr(args, "route_texel_center_power", 2.0),
+        )
         if "affine" in outputs:
             pred_conditioning, routing_details = splat_parser_predictions_to_uv_conditioning(
                 rendered,
@@ -3222,6 +3298,7 @@ def save_checkpoint(
             "predict_head_outer_structure": (
                 model.predict_head_outer_structure
             ),
+            "head_outer_structure_mode": model.head_outer_structure_mode,
             "outer_uv_feature_channels": model.outer_uv_feature_channels,
             "outer_uv_topology_channels": model.outer_uv_topology_channels,
             "outer_uv_topology_layers": model.outer_uv_topology_layers,
@@ -3337,6 +3414,15 @@ def build_arg_parser():
         "--no_predict_head_outer_structure",
         dest="predict_head_outer_structure",
         action="store_false",
+    )
+    parser.add_argument(
+        "--head_outer_structure_mode",
+        choices=("global", "projected"),
+        default="global",
+        help=(
+            "Use legacy global semantic decoding or project per-pixel parser "
+            "features into the physical head outer-UV graph."
+        ),
     )
     parser.add_argument(
         "--predict_outer_uv_occupancy",
@@ -3685,6 +3771,20 @@ def build_arg_parser():
         "--head_outer_occupancy_dice_weight", type=float, default=0.50
     )
     parser.add_argument(
+        "--head_outer_occupancy_positive_balance",
+        type=float,
+        default=0.50,
+    )
+    parser.add_argument(
+        "--head_outer_hard_negative_fraction", type=float, default=0.10
+    )
+    parser.add_argument(
+        "--head_outer_hard_negative_weight", type=float, default=0.50
+    )
+    parser.add_argument(
+        "--head_outer_precision_weight", type=float, default=0.50
+    )
+    parser.add_argument(
         "--lambda_head_outer_topology", type=float, default=0.0
     )
     parser.add_argument(
@@ -3927,6 +4027,8 @@ def main():
         args.lambda_head_outer_coverage,
         args.lambda_head_outer_occupancy,
         args.head_outer_occupancy_dice_weight,
+        args.head_outer_hard_negative_weight,
+        args.head_outer_precision_weight,
         args.lambda_head_outer_topology,
         args.lambda_head_outer_route_connectivity,
         args.lambda_outer_uv_occupancy,
@@ -3967,6 +4069,14 @@ def main():
     if not 0.0 <= args.outer_uv_occupancy_positive_balance <= 1.0:
         raise ValueError(
             "--outer_uv_occupancy_positive_balance must be in [0, 1]."
+        )
+    if not 0.0 <= args.head_outer_occupancy_positive_balance <= 1.0:
+        raise ValueError(
+            "--head_outer_occupancy_positive_balance must be in [0, 1]."
+        )
+    if not 0.0 <= args.head_outer_hard_negative_fraction <= 1.0:
+        raise ValueError(
+            "--head_outer_hard_negative_fraction must be in [0, 1]."
         )
     if not 0.0 <= args.outer_hard_negative_fraction <= 1.0:
         raise ValueError("--outer_hard_negative_fraction must be in [0, 1].")
@@ -4319,6 +4429,7 @@ def main():
         route_prior_dropout=args.route_prior_dropout,
         predict_outer_uv_occupancy=args.predict_outer_uv_occupancy,
         predict_head_outer_structure=args.predict_head_outer_structure,
+        head_outer_structure_mode=args.head_outer_structure_mode,
         outer_uv_feature_channels=args.outer_uv_feature_channels,
         outer_uv_topology_channels=args.outer_uv_topology_channels,
         outer_uv_topology_layers=args.outer_uv_topology_layers,
@@ -4536,6 +4647,18 @@ def main():
                 "Cannot add or remove the head outer structure auxiliary head "
                 "while resuming. Start a new parser run."
             )
+        checkpoint_head_structure_mode = checkpoint_config.get(
+            "head_outer_structure_mode", "global"
+        )
+        if (
+            checkpoint_head_structure
+            and checkpoint_head_structure_mode
+            != model.head_outer_structure_mode
+        ):
+            raise ValueError(
+                "Cannot change the head outer structure mode while resuming. "
+                "Start a new parser run."
+            )
         checkpoint_route_prior = checkpoint_config.get(
             "route_role_spatial_prior",
             "route_role_prior" in checkpoint["model"],
@@ -4672,6 +4795,7 @@ def main():
         "predict_head_outer_structure": (
             model.predict_head_outer_structure
         ),
+        "head_outer_structure_mode": model.head_outer_structure_mode,
         "outer_uv_occupancy_supervision": (
             "visible_projected_texels"
             if model.predict_outer_uv_occupancy
@@ -4778,6 +4902,16 @@ def main():
         "head_outer_occupancy_dice_weight": (
             args.head_outer_occupancy_dice_weight
         ),
+        "head_outer_occupancy_positive_balance": (
+            args.head_outer_occupancy_positive_balance
+        ),
+        "head_outer_hard_negative_fraction": (
+            args.head_outer_hard_negative_fraction
+        ),
+        "head_outer_hard_negative_weight": (
+            args.head_outer_hard_negative_weight
+        ),
+        "head_outer_precision_weight": args.head_outer_precision_weight,
         "lambda_head_outer_topology": args.lambda_head_outer_topology,
         "lambda_head_outer_route_connectivity": (
             args.lambda_head_outer_route_connectivity

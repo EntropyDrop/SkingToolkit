@@ -2335,6 +2335,68 @@ def aggregate_direct_outer_values_by_view(
     )
 
 
+def aggregate_direct_outer_values_by_role_group(
+    renderer,
+    views,
+    values,
+    view_group_size,
+    center_power=2.0,
+):
+    """Pool physical views in repeated inference-role groups.
+
+    Privileged training uses ``front_left, back_left, front_right,
+    back_right`` while the parser owns two view roles. The primary pair and
+    privileged pair must therefore produce two independent UV predictions per
+    skin, matching MultiViewSemanticFusion's grouped global summaries. Treating
+    all four renders as one group silently mixes the teacher views and produces
+    a batch mismatch for projected UV heads.
+    """
+    views = parse_views(views)
+    view_group_size = int(view_group_size)
+    if view_group_size < 1:
+        raise ValueError("view_group_size must be positive.")
+    if len(views) % view_group_size != 0:
+        raise ValueError(
+            "The physical view count must be divisible by view_group_size."
+        )
+    if values.shape[0] % len(views) != 0:
+        raise ValueError("The value batch must contain complete physical views.")
+    skins = values.shape[0] // len(views)
+    groups_per_skin = len(views) // view_group_size
+    grouped_values = values.reshape(
+        skins, len(views), *values.shape[1:]
+    )
+    pooled_groups = []
+    supported_groups = []
+    for group_index in range(groups_per_skin):
+        start = group_index * view_group_size
+        end = start + view_group_size
+        selected = grouped_values[:, start:end].reshape(
+            skins * view_group_size, *values.shape[1:]
+        )
+        pooled, supported = aggregate_direct_outer_values_by_view(
+            renderer,
+            views[start:end],
+            selected,
+            center_power=center_power,
+        )
+        pooled_groups.append(pooled)
+        supported_groups.append(supported)
+    return (
+        torch.stack(pooled_groups, dim=1).reshape(
+            skins * groups_per_skin,
+            view_group_size,
+            values.shape[1],
+            UV_SIZE * UV_SIZE,
+        ),
+        torch.stack(supported_groups, dim=1).reshape(
+            skins * groups_per_skin,
+            view_group_size,
+            UV_SIZE * UV_SIZE,
+        ),
+    )
+
+
 def attach_projected_outer_uv_occupancy(
     model,
     outputs,
@@ -2390,10 +2452,11 @@ def attach_projected_outer_uv_occupancy(
         ],
         dim=1,
     )
-    pooled, support = aggregate_direct_outer_values_by_view(
+    pooled, support = aggregate_direct_outer_values_by_role_group(
         renderer,
         views,
         values,
+        view_group_size=model.view_classes,
         center_power=center_power,
     )
     support_weight = support.unsqueeze(2).to(dtype=pooled.dtype)
@@ -2437,7 +2500,7 @@ def attach_projected_outer_uv_occupancy(
             dtype=route_evidence.dtype
         )
     support_fraction = (
-        support_count / max(float(len(views)), 1.0)
+        support_count / max(float(model.view_classes), 1.0)
     )
     atlas_features = torch.cat(
         [
@@ -2460,6 +2523,88 @@ def attach_projected_outer_uv_occupancy(
     outputs["outer_uv_occupancy_logits"] = logits
     outputs["outer_uv_occupancy_support"] = (
         support.any(dim=1).reshape(-1, 1, UV_SIZE, UV_SIZE)
+    )
+    return outputs
+
+
+def attach_projected_head_outer_structure(
+    model,
+    outputs,
+    renderer,
+    views,
+    observed_foreground=None,
+    center_power=2.0,
+):
+    """Project per-pixel parser features into head outer UV topology.
+
+    Unlike the legacy global-vector head, this branch receives evidence at the
+    exact candidate UV texel. It can distinguish flat white base hair from a
+    genuinely raised white accessory even when their global appearance is
+    nearly identical.
+    """
+    if not getattr(model, "predict_head_outer_structure", False):
+        return outputs
+    if getattr(model, "head_outer_structure_mode", "global") != "projected":
+        return outputs
+    if "head_outer_uv_features" not in outputs:
+        raise ValueError(
+            "Projected head parser did not return head_outer_uv_features."
+        )
+    views = parse_views(views)
+    feature_map = outputs["head_outer_uv_features"]
+    foreground = torch.sigmoid(outputs["foreground"].float())
+    if "affine" in outputs:
+        affine = outputs["affine"]
+        feature_map = canonicalize_tensor(feature_map, affine, mode="bilinear")
+        foreground = canonicalize_tensor(
+            foreground, affine, mode="bilinear"
+        )
+        if observed_foreground is not None:
+            if observed_foreground.dim() == 3:
+                observed_foreground = observed_foreground.unsqueeze(1)
+            observed_foreground = canonicalize_tensor(
+                observed_foreground.float(), affine, mode="bilinear"
+            )
+    elif observed_foreground is not None and observed_foreground.dim() == 3:
+        observed_foreground = observed_foreground.unsqueeze(1)
+    if observed_foreground is not None:
+        foreground = observed_foreground.to(
+            device=foreground.device,
+            dtype=foreground.dtype,
+        ).clamp(0.0, 1.0)
+
+    feature_channels = feature_map.shape[1]
+    values = torch.cat([feature_map.float(), foreground], dim=1)
+    pooled, support = aggregate_direct_outer_values_by_role_group(
+        renderer,
+        views,
+        values,
+        view_group_size=model.view_classes,
+        center_power=center_power,
+    )
+    support_weight = support.unsqueeze(2).to(dtype=pooled.dtype)
+    support_count = support_weight.sum(dim=1).clamp_min(1.0)
+    pooled_mean = (pooled * support_weight).sum(dim=1) / support_count
+    mean_features = pooled_mean[:, :feature_channels]
+    mean_foreground = pooled_mean[:, feature_channels : feature_channels + 1]
+    support_fraction = support_count / max(float(model.view_classes), 1.0)
+    atlas_features = torch.cat(
+        [mean_features, mean_foreground, support_fraction], dim=1
+    ).reshape(
+        mean_features.shape[0],
+        feature_channels + 2,
+        UV_SIZE,
+        UV_SIZE,
+    )
+    outputs["head_outer_face_occupancy_logits"] = (
+        model.predict_projected_head_outer_structure(
+            atlas_features,
+            outputs["head_outer_uv_global_context"],
+        )
+    )
+    head_indices = build_head_outer_face_indices().to(feature_map.device)
+    outputs["head_outer_structure_support"] = (
+        support.any(dim=1).index_select(1, head_indices).reshape(-1, 6, 8, 8)
     )
     return outputs
 

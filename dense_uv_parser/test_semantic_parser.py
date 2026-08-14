@@ -335,6 +335,46 @@ class SemanticDenseUVParserTest(unittest.TestCase):
             model.semantic_fusion.input_projection[1].weight.grad
         )
 
+    def test_projected_head_outer_structure_uses_uv_features(self):
+        model = DenseUVParserNet(
+            base_channels=8,
+            view_classes=2,
+            predict_affine=True,
+            surface_classes=4,
+            geometry_only=True,
+            semantic_feature_dim=12,
+            semantic_channels=8,
+            semantic_attention_heads=2,
+            predict_head_outer_structure=True,
+            head_outer_structure_mode="projected",
+            outer_uv_feature_channels=4,
+            outer_uv_topology_channels=8,
+            outer_uv_topology_layers=1,
+        )
+        outputs = model(
+            torch.rand(4, 4, 16, 16),
+            view_ids=torch.tensor([0, 1, 0, 1]),
+            semantic_features=torch.rand(1, 4, 12),
+        )
+        features = F.interpolate(
+            outputs["head_outer_uv_features"],
+            size=(64, 64),
+            mode="bilinear",
+            align_corners=False,
+        ).reshape(2, 2, 4, 64, 64).mean(dim=1)
+        atlas_features = torch.cat(
+            [features, features.new_zeros(2, 2, 64, 64)], dim=1
+        )
+        logits = model.predict_projected_head_outer_structure(
+            atlas_features,
+            outputs["head_outer_uv_global_context"],
+        )
+        self.assertEqual(tuple(logits.shape), (2, 6, 8, 8))
+        logits.mean().backward()
+        gradient = model.head_outer_projected_head.output[-1].weight.grad
+        self.assertIsNotNone(gradient)
+        self.assertGreater(float(gradient.abs().sum()), 0.0)
+
     def test_head_outer_route_connectivity_penalizes_brim_gap(self):
         edge = build_head_outer_face_graph()[:, 0]
         target = torch.zeros(1, 6 * 8 * 8, dtype=torch.bool)

@@ -54,6 +54,17 @@ class DenseParserForegroundTest(unittest.TestCase):
             PRODUCTION_SPLAT_DEFAULTS["outer_uv_min_coverage"],
         )
         self.assertTrue(args.head_outer_topology_rescue)
+        self.assertTrue(args.head_outer_topology_auto_reliability)
+        self.assertEqual(
+            args.head_outer_topology_min_precision,
+            PRODUCTION_PREPROCESSING_DEFAULTS[
+                "head_outer_topology_min_precision"
+            ],
+        )
+        self.assertEqual(
+            args.color_background_tolerance,
+            PRODUCTION_SPLAT_DEFAULTS["color_background_tolerance"],
+        )
         self.assertEqual(
             args.simple_inpaint_output,
             "outputs/parser_pred_uv_simple_inpainting.png",

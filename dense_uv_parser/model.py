@@ -5,6 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from SkingToolkit.dense_uv_parser.uv_topology import (
+    build_head_outer_face_indices,
     build_outer_uv_graph,
     build_simple_uv_topology,
 )
@@ -527,6 +528,7 @@ class DenseUVParserNet(nn.Module):
         route_prior_dropout=0.10,
         predict_outer_uv_occupancy=False,
         predict_head_outer_structure=False,
+        head_outer_structure_mode="global",
         outer_uv_feature_channels=32,
         outer_uv_topology_channels=64,
         outer_uv_topology_layers=3,
@@ -569,6 +571,11 @@ class DenseUVParserNet(nn.Module):
         self.predict_head_outer_structure = bool(
             predict_head_outer_structure
         )
+        self.head_outer_structure_mode = str(head_outer_structure_mode)
+        if self.head_outer_structure_mode not in ("global", "projected"):
+            raise ValueError(
+                "head_outer_structure_mode must be 'global' or 'projected'."
+            )
         self.outer_uv_feature_channels = int(outer_uv_feature_channels)
         self.outer_uv_topology_channels = int(outer_uv_topology_channels)
         self.outer_uv_topology_layers = int(outer_uv_topology_layers)
@@ -754,14 +761,49 @@ class DenseUVParserNet(nn.Module):
             self.head_outer_face_coverage_head = nn.Linear(
                 self.semantic_channels, 6
             )
-            self.head_outer_face_occupancy_head = nn.Sequential(
-                nn.LayerNorm(self.semantic_channels),
-                nn.Linear(self.semantic_channels, self.semantic_channels * 2),
-                nn.GELU(),
-                nn.Linear(self.semantic_channels * 2, 6 * 8 * 8),
-            )
-            nn.init.zeros_(self.head_outer_face_occupancy_head[-1].weight)
-            nn.init.zeros_(self.head_outer_face_occupancy_head[-1].bias)
+            if self.head_outer_structure_mode == "global":
+                self.head_outer_face_occupancy_head = nn.Sequential(
+                    nn.LayerNorm(self.semantic_channels),
+                    nn.Linear(
+                        self.semantic_channels, self.semantic_channels * 2
+                    ),
+                    nn.GELU(),
+                    nn.Linear(self.semantic_channels * 2, 6 * 8 * 8),
+                )
+                nn.init.zeros_(
+                    self.head_outer_face_occupancy_head[-1].weight
+                )
+                nn.init.zeros_(
+                    self.head_outer_face_occupancy_head[-1].bias
+                )
+            else:
+                if self.view_classes < 1:
+                    raise ValueError(
+                        "Projected head structure prediction requires grouped "
+                        "fixed-view inputs."
+                    )
+                self.head_outer_uv_feature_projection = nn.Sequential(
+                    nn.Conv2d(
+                        c,
+                        self.outer_uv_feature_channels,
+                        kernel_size=1,
+                    ),
+                    nn.GELU(),
+                )
+                head_context_channels = c * 8 + self.semantic_channels
+                # Projected image features, foreground coverage, and view
+                # support are decoded on the physical outer-UV graph. Only
+                # the six head faces are supervised and returned.
+                self.head_outer_projected_head = (
+                    ProjectedOuterUVTopologyHead(
+                        self.outer_uv_feature_channels + 2,
+                        head_context_channels,
+                        hidden_channels=self.outer_uv_topology_channels,
+                        layers=self.outer_uv_topology_layers,
+                        dropout=self.outer_uv_topology_dropout,
+                        uv_size=uv_size,
+                    )
+                )
 
     def _runtime_semantic_features(self, images, foreground=None):
         backbone = getattr(self, "_runtime_semantic_backbone", None)
@@ -864,12 +906,17 @@ class DenseUVParserNet(nn.Module):
                 x.shape[-2:],
             ).to(dtype=x.dtype)
         visual_summary = x.mean(dim=(2, 3))
-        if self.predict_outer_uv_occupancy:
+        grouped_visual_summary = visual_summary
+        if self.predict_outer_uv_occupancy or (
+            self.predict_head_outer_structure
+            and self.head_outer_structure_mode == "projected"
+        ):
             if visual_summary.shape[0] % self.view_classes != 0:
                 raise ValueError(
-                    "Outer UV occupancy prediction requires complete fixed-view groups."
+                    "Projected UV prediction requires complete fixed-view "
+                    "groups."
                 )
-            visual_summary = visual_summary.reshape(
+            grouped_visual_summary = visual_summary.reshape(
                 -1, self.view_classes, visual_summary.shape[-1]
             ).mean(dim=1)
         semantic_summary = None
@@ -978,15 +1025,16 @@ class DenseUVParserNet(nn.Module):
                 outputs["head_outer_face_coverage"] = torch.sigmoid(
                     self.head_outer_face_coverage_head(semantic_summary)
                 )
-                outputs["head_outer_face_occupancy_logits"] = (
-                    self.head_outer_face_occupancy_head(semantic_summary)
-                    .reshape(-1, 6, 8, 8)
-                )
+                if self.head_outer_structure_mode == "global":
+                    outputs["head_outer_face_occupancy_logits"] = (
+                        self.head_outer_face_occupancy_head(semantic_summary)
+                        .reshape(-1, 6, 8, 8)
+                    )
         if self.predict_outer_uv_occupancy:
             occupancy_summary = (
-                torch.cat([visual_summary, semantic_summary], dim=1)
+                torch.cat([grouped_visual_summary, semantic_summary], dim=1)
                 if semantic_summary is not None
-                else visual_summary
+                else grouped_visual_summary
             )
             # Occupancy learns from the parser representation without allowing
             # its sparse atlas loss to destabilize the proven image-space route
@@ -996,6 +1044,18 @@ class DenseUVParserNet(nn.Module):
                 occupancy_feature_source.detach()
             )
             outputs["outer_uv_global_context"] = occupancy_summary.detach()
+        if (
+            self.predict_head_outer_structure
+            and self.head_outer_structure_mode == "projected"
+        ):
+            outputs["head_outer_uv_features"] = (
+                self.head_outer_uv_feature_projection(
+                    occupancy_feature_source.detach()
+                )
+            )
+            outputs["head_outer_uv_global_context"] = torch.cat(
+                [grouped_visual_summary, semantic_summary], dim=1
+            ).detach()
         if not self.geometry_only:
             outputs["part"] = self.part(x)
             outputs["face"] = self.face(x)
@@ -1022,6 +1082,31 @@ class DenseUVParserNet(nn.Module):
         return self.outer_uv_occupancy_head(
             atlas_features,
             global_context,
+        )
+
+    def predict_projected_head_outer_structure(
+        self,
+        atlas_features,
+        global_context,
+    ):
+        if (
+            not self.predict_head_outer_structure
+            or self.head_outer_structure_mode != "projected"
+        ):
+            raise ValueError(
+                "This parser has no projected head outer structure head."
+            )
+        atlas_logits = self.head_outer_projected_head(
+            atlas_features,
+            global_context,
+        )
+        head_indices = build_head_outer_face_indices().to(
+            atlas_logits.device
+        )
+        return (
+            atlas_logits.flatten(2)[:, 0]
+            .index_select(1, head_indices)
+            .reshape(-1, 6, 8, 8)
         )
 
 

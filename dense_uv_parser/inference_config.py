@@ -13,6 +13,9 @@ PRODUCTION_PREPROCESSING_DEFAULTS = MappingProxyType(
         "foreground_flood_tolerance": 0.03,
         "foreground_parser_background": "adaptive",
         "alpha_threshold": 0.5,
+        "head_outer_topology_auto_reliability": True,
+        "head_outer_topology_min_precision": 0.75,
+        "head_outer_topology_min_recall": 0.55,
     }
 )
 
@@ -74,7 +77,10 @@ PRODUCTION_SPLAT_DEFAULTS = MappingProxyType(
         "outer_uv_component_grow_threshold": 0.50,
         "outer_uv_component_min_size": 2,
         "background_color_tolerance": 0.25,
-        "color_background_tolerance": 8.0 / 255.0,
+        # This is only applied to silhouette-boundary color pickup. A wider
+        # threshold removes antialiased solid-background fringes without
+        # deleting matching colors enclosed inside the character.
+        "color_background_tolerance": 0.20,
         "color_foreground_inset": 1,
         "reject_semantic_fallback": True,
         "include_rejected_context": False,
