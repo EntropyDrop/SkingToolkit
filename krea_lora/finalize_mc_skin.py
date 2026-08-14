@@ -60,7 +60,8 @@ def run_dense_uv_parser(
             raise FileNotFoundError(required)
     skin.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="krea-uv-") as temporary_dir:
-        temporary_render = Path(temporary_dir) / "parser-render.png"
+        temporary_root = Path(temporary_dir)
+        temporary_render = temporary_root / "parser-render.png"
         command = [
             sys.executable,
             "-u",
@@ -76,27 +77,29 @@ def run_dense_uv_parser(
             "--simple_inpaint_render_output",
             str(temporary_render),
             "--conditioning_output",
-            "",
+            str(temporary_root / "conditioning.png"),
             "--parser_uv_output",
-            "",
+            str(temporary_root / "parser-uv.png"),
             "--simple_inpaint_output",
-            "",
+            str(temporary_root / "simple-inpaint.png"),
             "--foreground_probability_output",
-            "",
+            str(temporary_root / "foreground-probability.png"),
             "--foreground_mask_output",
-            "",
+            str(temporary_root / "foreground-mask.png"),
             "--foreground_raw_mask_output",
-            "",
+            str(temporary_root / "foreground-mask-raw.png"),
             "--foreground_cutout_output",
-            "",
+            str(temporary_root / "foreground-cutout.png"),
             "--foreground_parser_input_output",
-            "",
+            str(temporary_root / "foreground-parser-input.png"),
             "--device",
             device,
         ]
         environment = os.environ.copy()
         environment["HF_HUB_OFFLINE"] = "1"
+        environment["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
         environment["TRANSFORMERS_OFFLINE"] = "1"
+        environment["TRANSFORMERS_VERBOSITY"] = "error"
         subprocess.run(
             command,
             cwd=TOOLKIT_DIR / "dense_uv_parser",
