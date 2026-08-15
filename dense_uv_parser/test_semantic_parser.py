@@ -340,7 +340,12 @@ class SemanticDenseUVParserTest(unittest.TestCase):
         )
 
     def test_projected_head_outer_structure_uses_uv_features(self):
-        for input_version, extra_channels in ((1, 2), (2, 9), (3, 9)):
+        for input_version, extra_channels in (
+            (1, 2),
+            (2, 9),
+            (3, 9),
+            (4, 9),
+        ):
             with self.subTest(input_version=input_version):
                 model = DenseUVParserNet(
                     base_channels=8,
@@ -386,6 +391,10 @@ class SemanticDenseUVParserTest(unittest.TestCase):
                 self.assertEqual(
                     "head_outer_symmetry_logit" in outputs,
                     input_version >= 3,
+                )
+                self.assertEqual(
+                    "head_outer_accessory_logits" in outputs,
+                    input_version >= 4,
                 )
                 logits.mean().backward()
                 gradient = (
@@ -444,6 +453,51 @@ class SemanticDenseUVParserTest(unittest.TestCase):
             float(losses["head_outer_symmetry_target"].detach()), 1.0
         )
 
+    def test_v4_ring_and_open_top_losses_focus_rare_structure(self):
+        target_uv = torch.zeros(1, 4, 64, 64)
+        # Near-closed side ring: six occupied columns on every side face.
+        for x in (40, 56, 48, 32):
+            target_uv[0, 3, 8, x : x + 6] = 1.0
+        # Open top rim on face 5 (outer atlas rectangle 48:56, 0:8).
+        target_uv[0, 3, 0, 48:56] = 1.0
+        target_uv[0, 3, 7, 48:56] = 1.0
+        target_uv[0, 3, 0:8, 48] = 1.0
+        target_uv[0, 3, 0:8, 55] = 1.0
+        targets = build_head_outer_face_targets(target_uv)
+        self.assertEqual(float(targets["closed_side_ring"][0]), 1.0)
+        self.assertEqual(float(targets["open_top_rim"][0]), 1.0)
+
+        occupancy_logits = torch.zeros(
+            1, 6, 8, 8, requires_grad=True
+        )
+        accessory_logits = torch.zeros(1, 2, requires_grad=True)
+        losses = head_outer_structure_losses(
+            {
+                "head_outer_face_occupancy_logits": occupancy_logits,
+                "head_outer_face_presence_logits": torch.zeros(1, 6),
+                "head_outer_face_coverage": torch.zeros(1, 6),
+                "head_outer_accessory_logits": accessory_logits,
+            },
+            target_uv,
+        )
+        total = (
+            losses["loss_head_outer_ring_worst_face_recall"]
+            + losses["loss_head_outer_open_top_shape"]
+            + losses["loss_head_outer_accessory_classification"]
+        )
+        total.backward()
+        self.assertGreater(float(total.detach()), 0.0)
+        self.assertGreater(
+            float(occupancy_logits.grad.abs().sum()), 0.0
+        )
+        self.assertGreater(float(accessory_logits.grad.abs().sum()), 0.0)
+        self.assertEqual(
+            float(losses["count_head_outer_closed_ring_rows"]), 1.0
+        )
+        self.assertEqual(
+            float(losses["count_head_outer_open_top_samples"]), 1.0
+        )
+
     def test_v2_head_completion_fills_only_anchored_candidates(self):
         uv = torch.zeros(4, 64, 64)
         uv[:3, 8, 40:42] = torch.tensor([0.8, 0.1, 0.1]).view(3, 1)
@@ -499,6 +553,30 @@ class SemanticDenseUVParserTest(unittest.TestCase):
         self.assertEqual(float(rejected[3, 8, 46:48].sum()), 0.0)
         self.assertEqual(
             rejected_stats["head_outer_symmetry_filled_texels"], 0
+        )
+
+    def test_v4_closed_ring_completion_repairs_missing_fourth_face(self):
+        uv = torch.zeros(4, 64, 64)
+        color = torch.tensor([0.9, 0.1, 0.1]).view(3, 1)
+        # Three observed side faces anchor the same physical row. The back face
+        # at x=56 is intentionally absent.
+        for x, columns in (
+            (40, (0, 3, 4, 5, 6, 7)),
+            (48, (0, 1, 2, 3, 4, 5, 6)),
+            (32, (0, 3, 4, 5, 6, 7)),
+        ):
+            indices = torch.tensor(columns) + x
+            uv[:3, 11, indices] = color
+            uv[3, 11, indices] = 1.0
+        repaired, stats = simple_symmetry_nearest_inpaint(
+            uv,
+            head_outer_probability=torch.zeros(64, 64),
+            head_outer_closed_ring_probability=0.95,
+            head_outer_closed_ring_threshold=0.70,
+        )
+        self.assertGreater(float(repaired[3, 11, 56:64].sum()), 0.0)
+        self.assertGreater(
+            stats["head_outer_closed_ring_filled_texels"], 0
         )
 
     def test_head_outer_route_connectivity_penalizes_brim_gap(self):

@@ -1512,6 +1512,85 @@ def head_outer_structure_losses(
         + loss_component_recall
     )
 
+    # A component average barely notices an entire missing cube face because
+    # only a few seam edges connect that face to the other three. For rows
+    # whose ground truth forms a near-closed four-face ring, optimize the
+    # worst face explicitly. This turns a broken hat brim into a first-order
+    # error instead of letting three correct faces hide the fourth one.
+    closed_ring_rows = targets["closed_ring_rows"].to(
+        device=logits.device, dtype=torch.bool
+    )
+    side_positive = positive[:, :4]
+    side_positive_count = side_positive.float().sum(dim=-1)
+    side_positive_probability = (
+        (probability[:, :4] * side_positive).sum(dim=-1)
+        / side_positive_count.clamp_min(1.0)
+    )
+    ring_worst_face_recall = side_positive_probability.amin(dim=1)
+    loss_ring_worst_face_recall = (
+        (1.0 - ring_worst_face_recall[closed_ring_rows]).mean()
+        if closed_ring_rows.any()
+        else zero
+    )
+
+    # Open crown-like tops are only about four percent of the dataset. Balance
+    # positive and negative top-face texels within those samples so both a
+    # missing tip and a tip invented at the wrong UV coordinate remain visible
+    # to the optimizer.
+    open_top_rim = targets["open_top_rim"].to(
+        device=logits.device, dtype=torch.bool
+    )
+    if open_top_rim.any():
+        open_top_logits = logits[open_top_rim, 5]
+        open_top_positive = positive[open_top_rim, 5]
+        open_top_negative = ~open_top_positive
+        open_positive_loss = (
+            F.softplus(-open_top_logits) * open_top_positive
+        ).sum(dim=(1, 2)) / open_top_positive.float().sum(
+            dim=(1, 2)
+        ).clamp_min(1.0)
+        open_negative_loss = (
+            F.softplus(open_top_logits) * open_top_negative
+        ).sum(dim=(1, 2)) / open_top_negative.float().sum(
+            dim=(1, 2)
+        ).clamp_min(1.0)
+        loss_open_top_shape = 0.5 * (
+            open_positive_loss + open_negative_loss
+        ).mean()
+    else:
+        loss_open_top_shape = zero
+
+    accessory_targets = torch.stack(
+        [targets["closed_side_ring"], targets["open_top_rim"]], dim=1
+    ).to(device=logits.device, dtype=logits.dtype)
+    if "head_outer_accessory_logits" in outputs:
+        accessory_logits = outputs["head_outer_accessory_logits"].float()
+        if accessory_logits.shape != accessory_targets.shape:
+            raise ValueError(
+                "Head accessory logits must be shaped "
+                f"{tuple(accessory_targets.shape)}, got "
+                f"{tuple(accessory_logits.shape)}."
+            )
+        loss_accessory_classification = (
+            F.binary_cross_entropy_with_logits(
+                accessory_logits[:, 0],
+                accessory_targets[:, 0],
+            )
+            + F.binary_cross_entropy_with_logits(
+                accessory_logits[:, 1],
+                accessory_targets[:, 1],
+                pos_weight=accessory_logits.new_tensor(4.0),
+            )
+        )
+        accessory_probability = torch.sigmoid(accessory_logits)
+        accessory_accuracy = (
+            (accessory_probability >= 0.5)
+            == (accessory_targets >= 0.5)
+        ).float().mean(dim=0)
+    else:
+        loss_accessory_classification = zero
+        accessory_accuracy = zero.expand(2)
+
     # Many accessories that are difficult from two left-biased views (hat
     # brims, crowns, glasses and headphones) are symmetric in their actual UV
     # target. Apply symmetry only where both mirrored target texels are
@@ -1576,6 +1655,22 @@ def head_outer_structure_losses(
     true_positive = (predicted & positive).float().sum()
     false_positive = (predicted & negative).float().sum()
     false_negative = (~predicted & positive).float().sum()
+    side_predicted_positive = predicted[:, :4] & side_positive
+    side_hard_recall = (
+        side_predicted_positive.float().sum(dim=-1)
+        / side_positive_count.clamp_min(1.0)
+    ).amin(dim=1)
+    open_top_prediction = predicted[open_top_rim, 5]
+    open_top_expected = positive[open_top_rim, 5]
+    open_top_true_positive = (
+        open_top_prediction & open_top_expected
+    ).float().sum()
+    open_top_false_positive = (
+        open_top_prediction & ~open_top_expected
+    ).float().sum()
+    open_top_false_negative = (
+        ~open_top_prediction & open_top_expected
+    ).float().sum()
     return {
         "loss_head_outer_occupancy_bce": loss_bce,
         "loss_head_outer_occupancy_dice": loss_dice,
@@ -1594,6 +1689,13 @@ def head_outer_structure_losses(
         ),
         "loss_head_outer_sparse_recall": loss_sparse_recall,
         "loss_head_outer_symmetry_score": loss_symmetry_score,
+        "loss_head_outer_ring_worst_face_recall": (
+            loss_ring_worst_face_recall
+        ),
+        "loss_head_outer_open_top_shape": loss_open_top_shape,
+        "loss_head_outer_accessory_classification": (
+            loss_accessory_classification
+        ),
         "head_outer_occupancy_precision": (
             true_positive / (true_positive + false_positive).clamp_min(1.0)
         ),
@@ -1610,6 +1712,23 @@ def head_outer_structure_losses(
         ),
         "head_outer_occupancy_soft_precision": soft_precision.mean(),
         "head_outer_symmetry_mae": symmetry_mae,
+        "head_outer_closed_ring_worst_face_recall": (
+            side_hard_recall[closed_ring_rows].mean()
+            if closed_ring_rows.any()
+            else zero
+        ),
+        "head_outer_open_top_precision": (
+            open_top_true_positive
+            / (open_top_true_positive + open_top_false_positive).clamp_min(1.0)
+        ),
+        "head_outer_open_top_recall": (
+            open_top_true_positive
+            / (open_top_true_positive + open_top_false_negative).clamp_min(1.0)
+        ),
+        "head_outer_closed_ring_accuracy": accessory_accuracy[0],
+        "head_outer_open_top_accuracy": accessory_accuracy[1],
+        "count_head_outer_closed_ring_rows": closed_ring_rows.float().sum(),
+        "count_head_outer_open_top_samples": open_top_rim.float().sum(),
         "head_outer_symmetry_target": (
             symmetry_target[symmetry_valid].mean()
             if symmetry_valid.any()
@@ -2464,6 +2583,16 @@ def run_epoch(
                         * head_structure["loss_head_outer_sparse_recall"]
                         + args.lambda_head_outer_symmetry_score
                         * head_structure["loss_head_outer_symmetry_score"]
+                        + args.lambda_head_outer_ring_worst_face_recall
+                        * head_structure[
+                            "loss_head_outer_ring_worst_face_recall"
+                        ]
+                        + args.lambda_head_outer_open_top_shape
+                        * head_structure["loss_head_outer_open_top_shape"]
+                        + args.lambda_head_outer_accessory_classification
+                        * head_structure[
+                            "loss_head_outer_accessory_classification"
+                        ]
                     )
                     losses.update(head_structure)
                     losses["loss_head_outer_occupancy"] = (
@@ -2496,6 +2625,9 @@ def run_epoch(
                         "loss_head_outer_component_hard_recall",
                         "loss_head_outer_sparse_recall",
                         "loss_head_outer_symmetry_score",
+                        "loss_head_outer_ring_worst_face_recall",
+                        "loss_head_outer_open_top_shape",
+                        "loss_head_outer_accessory_classification",
                         "loss_head_outer_structure_weighted",
                         "head_outer_occupancy_precision",
                         "head_outer_occupancy_recall",
@@ -2506,6 +2638,13 @@ def run_epoch(
                         "count_head_outer_hard_negative_candidates",
                         "head_outer_symmetry_mae",
                         "head_outer_symmetry_target",
+                        "head_outer_closed_ring_worst_face_recall",
+                        "head_outer_open_top_precision",
+                        "head_outer_open_top_recall",
+                        "head_outer_closed_ring_accuracy",
+                        "head_outer_open_top_accuracy",
+                        "count_head_outer_closed_ring_rows",
+                        "count_head_outer_open_top_samples",
                     ):
                         losses[name] = zero
                 if args.lambda_head_outer_route_connectivity > 0.0:
@@ -3583,12 +3722,13 @@ def build_arg_parser():
     parser.add_argument(
         "--head_outer_projected_input_version",
         type=int,
-        choices=(1, 2, 3),
+        choices=(1, 2, 3, 4),
         default=1,
         help=(
             "Projected head feature schema. Version 2 adds projected RGB, "
             "cross-view RGB variation, and protruding-silhouette evidence; "
-            "version 3 adds calibrated accessory-symmetry prediction."
+            "version 3 adds calibrated accessory-symmetry prediction; "
+            "version 4 adds explicit closed-ring and open-top semantics."
         ),
     )
     parser.add_argument(
@@ -3973,6 +4113,21 @@ def build_arg_parser():
         default=0.0,
     )
     parser.add_argument(
+        "--lambda_head_outer_ring_worst_face_recall",
+        type=float,
+        default=0.0,
+    )
+    parser.add_argument(
+        "--lambda_head_outer_open_top_shape",
+        type=float,
+        default=0.0,
+    )
+    parser.add_argument(
+        "--lambda_head_outer_accessory_classification",
+        type=float,
+        default=0.0,
+    )
+    parser.add_argument(
         "--lambda_head_outer_route_connectivity",
         type=float,
         default=0.0,
@@ -4219,6 +4374,9 @@ def main():
         args.lambda_head_outer_component_hard_recall,
         args.lambda_head_outer_sparse_recall,
         args.lambda_head_outer_symmetry_score,
+        args.lambda_head_outer_ring_worst_face_recall,
+        args.lambda_head_outer_open_top_shape,
+        args.lambda_head_outer_accessory_classification,
         args.lambda_head_outer_route_connectivity,
         args.lambda_outer_uv_occupancy,
         args.outer_uv_occupancy_dice_weight,
@@ -4325,6 +4483,12 @@ def main():
         args.lambda_head_outer_occupancy,
         args.lambda_head_outer_topology,
         args.lambda_head_outer_symmetry,
+        args.lambda_head_outer_component_hard_recall,
+        args.lambda_head_outer_sparse_recall,
+        args.lambda_head_outer_symmetry_score,
+        args.lambda_head_outer_ring_worst_face_recall,
+        args.lambda_head_outer_open_top_shape,
+        args.lambda_head_outer_accessory_classification,
     )
     if any(weight > 0.0 for weight in head_structure_weights) and not (
         args.predict_head_outer_structure
@@ -4336,6 +4500,14 @@ def main():
     if args.predict_head_outer_structure and args.semantic_backbone == "none":
         raise ValueError(
             "--predict_head_outer_structure requires a semantic backbone."
+        )
+    if (
+        args.lambda_head_outer_accessory_classification > 0.0
+        and args.head_outer_projected_input_version < 4
+    ):
+        raise ValueError(
+            "--lambda_head_outer_accessory_classification requires "
+            "--head_outer_projected_input_version 4."
         )
     if not 0.0 < args.head_outer_route_hard_fraction <= 1.0:
         raise ValueError(
@@ -5130,6 +5302,15 @@ def main():
         ),
         "lambda_head_outer_symmetry_score": (
             args.lambda_head_outer_symmetry_score
+        ),
+        "lambda_head_outer_ring_worst_face_recall": (
+            args.lambda_head_outer_ring_worst_face_recall
+        ),
+        "lambda_head_outer_open_top_shape": (
+            args.lambda_head_outer_open_top_shape
+        ),
+        "lambda_head_outer_accessory_classification": (
+            args.lambda_head_outer_accessory_classification
         ),
         "lambda_head_outer_route_connectivity": (
             args.lambda_head_outer_route_connectivity

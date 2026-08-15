@@ -25,6 +25,11 @@ def _complete_head_outer_structure(
     symmetry_probability=None,
     symmetry_threshold=0.80,
     symmetry_candidate_threshold=0.20,
+    closed_ring_probability=None,
+    closed_ring_threshold=0.70,
+    open_top_probability=None,
+    open_top_threshold=0.70,
+    open_top_max_gap=3,
 ):
     """Fill only model-backed head-outer texels anchored to observations."""
     head_indices = build_head_outer_face_indices().to(pixels.device)
@@ -133,7 +138,141 @@ def _complete_head_outer_structure(
         defined[target_index] = True
         known_nodes[node_index] = True
         topology_filled += 1
-    return symmetry_filled, topology_filled
+
+    closed_ring_filled = 0
+    use_closed_ring = (
+        closed_ring_probability is not None
+        and float(closed_ring_probability) >= float(closed_ring_threshold)
+    )
+    if use_closed_ring:
+        # Side nodes are face-major 4x8x8. A genuine brim may be invisible on
+        # one face because its colour exactly matches the base layer there.
+        # Close only rows already anchored on three physical faces, and only
+        # on a missing/near-empty fourth face. Column voting prevents a single
+        # stray routed texel from growing into a full band.
+        for row in range(8):
+            side_known = known_nodes[: 4 * 64].reshape(4, 8, 8)
+            face_counts = side_known[:, row].sum(dim=1)
+            present_faces = face_counts >= 2
+            if int(present_faces.sum().item()) < 3:
+                continue
+            if int(face_counts.sum().item()) < 8:
+                continue
+            column_votes = side_known[present_faces, row].sum(dim=0)
+            voted_columns = column_votes >= 2
+            if not voted_columns.any():
+                continue
+            source_nodes = (
+                side_known[:, row]
+                & present_faces.unsqueeze(1)
+            ).nonzero(as_tuple=False)
+            source_nodes = (
+                source_nodes[:, 0] * 64
+                + row * 8
+                + source_nodes[:, 1]
+            )
+            source_indices = head_indices[source_nodes]
+            for face_index in (face_counts <= 1).nonzero(
+                as_tuple=False
+            ).flatten().tolist():
+                for column in voted_columns.nonzero(
+                    as_tuple=False
+                ).flatten().tolist():
+                    node_index = face_index * 64 + row * 8 + column
+                    if bool(known_nodes[node_index]):
+                        continue
+                    target_index = int(head_indices[node_index])
+                    distance = (
+                        positions.index_select(0, source_indices)
+                        - positions[target_index]
+                    ).square().sum(dim=1)
+                    source_index = int(source_indices[distance.argmin()])
+                    pixels[target_index] = pixels[source_index]
+                    defined[target_index] = True
+                    known_nodes[node_index] = True
+                    closed_ring_filled += 1
+
+    open_top_filled = 0
+    use_open_top = (
+        open_top_probability is not None
+        and float(open_top_probability) >= float(open_top_threshold)
+    )
+    if use_open_top:
+        top_face_offset = 5 * 64
+        perimeter_nodes = []
+        perimeter_nodes.extend(top_face_offset + column for column in range(8))
+        perimeter_nodes.extend(
+            top_face_offset + row * 8 + 7 for row in range(1, 8)
+        )
+        perimeter_nodes.extend(
+            top_face_offset + 7 * 8 + column
+            for column in range(6, -1, -1)
+        )
+        perimeter_nodes.extend(
+            top_face_offset + row * 8 for row in range(6, 0, -1)
+        )
+        perimeter_nodes = torch.tensor(
+            perimeter_nodes, dtype=torch.long, device=pixels.device
+        )
+        perimeter_known = known_nodes.index_select(0, perimeter_nodes)
+        if int(perimeter_known.sum().item()) >= 6:
+            # First use exact left/right correspondence on the top face.
+            for node_index in perimeter_nodes.tolist():
+                if bool(known_nodes[node_index]):
+                    continue
+                mirror_node = int(mirrored_nodes[node_index])
+                if mirror_node < 0 or not bool(known_nodes[mirror_node]):
+                    continue
+                target_index = int(head_indices[node_index])
+                source_index = int(head_indices[mirror_node])
+                pixels[target_index] = pixels[source_index]
+                defined[target_index] = True
+                known_nodes[node_index] = True
+                open_top_filled += 1
+
+            # Close only short holes bounded on both sides of the physical top
+            # perimeter. This repairs a broken crown rim without turning a few
+            # unrelated top pixels into a solid 8x8 cap.
+            perimeter_count = int(perimeter_nodes.numel())
+            fill_nodes = []
+            for start in range(perimeter_count):
+                if not bool(known_nodes[int(perimeter_nodes[start])]):
+                    continue
+                gap = []
+                for offset in range(1, int(open_top_max_gap) + 2):
+                    candidate = (start + offset) % perimeter_count
+                    candidate_node = int(perimeter_nodes[candidate])
+                    if bool(known_nodes[candidate_node]):
+                        if gap:
+                            fill_nodes.extend(gap)
+                        break
+                    gap.append(candidate_node)
+            for node_index in dict.fromkeys(fill_nodes):
+                if bool(known_nodes[node_index]):
+                    continue
+                source_nodes = perimeter_nodes[
+                    known_nodes.index_select(0, perimeter_nodes)
+                ]
+                if source_nodes.numel() == 0:
+                    break
+                target_index = int(head_indices[node_index])
+                source_indices = head_indices[source_nodes]
+                distance = (
+                    positions.index_select(0, source_indices)
+                    - positions[target_index]
+                ).square().sum(dim=1)
+                source_index = int(source_indices[distance.argmin()])
+                pixels[target_index] = pixels[source_index]
+                defined[target_index] = True
+                known_nodes[node_index] = True
+                open_top_filled += 1
+
+    return (
+        symmetry_filled,
+        topology_filled,
+        closed_ring_filled,
+        open_top_filled,
+    )
 
 
 def _nearest_defined_source(
@@ -183,6 +322,11 @@ def simple_symmetry_nearest_inpaint(
     head_outer_symmetry_probability=None,
     head_outer_symmetry_threshold=0.80,
     head_outer_symmetry_candidate_threshold=0.20,
+    head_outer_closed_ring_probability=None,
+    head_outer_closed_ring_threshold=0.70,
+    head_outer_open_top_probability=None,
+    head_outer_open_top_threshold=0.70,
+    head_outer_open_top_max_gap=3,
 ):
     """Fill unknown inner texels while preserving every outer-layer texel."""
     squeeze_batch = uv.dim() == 3
@@ -239,10 +383,14 @@ def simple_symmetry_nearest_inpaint(
         same_row_nearest_filled = 0
         head_outer_symmetry_filled = 0
         head_outer_topology_filled = 0
+        head_outer_closed_ring_filled = 0
+        head_outer_open_top_filled = 0
         if head_outer_probability is not None:
             (
                 head_outer_symmetry_filled,
                 head_outer_topology_filled,
+                head_outer_closed_ring_filled,
+                head_outer_open_top_filled,
             ) = _complete_head_outer_structure(
                 result[batch_index],
                 defined,
@@ -265,6 +413,21 @@ def simple_symmetry_nearest_inpaint(
                 symmetry_candidate_threshold=(
                     head_outer_symmetry_candidate_threshold
                 ),
+                closed_ring_probability=(
+                    head_outer_closed_ring_probability[batch_index]
+                    if torch.is_tensor(head_outer_closed_ring_probability)
+                    and head_outer_closed_ring_probability.ndim > 0
+                    else head_outer_closed_ring_probability
+                ),
+                closed_ring_threshold=head_outer_closed_ring_threshold,
+                open_top_probability=(
+                    head_outer_open_top_probability[batch_index]
+                    if torch.is_tensor(head_outer_open_top_probability)
+                    and head_outer_open_top_probability.ndim > 0
+                    else head_outer_open_top_probability
+                ),
+                open_top_threshold=head_outer_open_top_threshold,
+                open_top_max_gap=head_outer_open_top_max_gap,
             )
         for target_index in topology.inner_fill_order.tolist():
             if bool(defined[target_index]):
@@ -316,6 +479,12 @@ def simple_symmetry_nearest_inpaint(
                 "head_outer_topology_filled_texels": (
                     head_outer_topology_filled
                 ),
+                "head_outer_closed_ring_filled_texels": (
+                    head_outer_closed_ring_filled
+                ),
+                "head_outer_open_top_filled_texels": (
+                    head_outer_open_top_filled
+                ),
                 "head_outer_symmetry_probability": (
                     round(
                         float(
@@ -329,6 +498,34 @@ def simple_symmetry_nearest_inpaint(
                         6,
                     )
                     if head_outer_symmetry_probability is not None
+                    else None
+                ),
+                "head_outer_closed_ring_probability": (
+                    round(
+                        float(
+                            head_outer_closed_ring_probability[batch_index]
+                            if torch.is_tensor(
+                                head_outer_closed_ring_probability
+                            )
+                            and head_outer_closed_ring_probability.ndim > 0
+                            else head_outer_closed_ring_probability
+                        ),
+                        6,
+                    )
+                    if head_outer_closed_ring_probability is not None
+                    else None
+                ),
+                "head_outer_open_top_probability": (
+                    round(
+                        float(
+                            head_outer_open_top_probability[batch_index]
+                            if torch.is_tensor(head_outer_open_top_probability)
+                            and head_outer_open_top_probability.ndim > 0
+                            else head_outer_open_top_probability
+                        ),
+                        6,
+                    )
+                    if head_outer_open_top_probability is not None
                     else None
                 ),
                 "preserved_outer_texels": int((valid & (layer == 1)).sum().item()),

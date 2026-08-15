@@ -580,9 +580,9 @@ class DenseUVParserNet(nn.Module):
         self.head_outer_projected_input_version = int(
             head_outer_projected_input_version
         )
-        if self.head_outer_projected_input_version not in (1, 2, 3):
+        if self.head_outer_projected_input_version not in (1, 2, 3, 4):
             raise ValueError(
-                "head_outer_projected_input_version must be 1, 2, or 3."
+                "head_outer_projected_input_version must be 1, 2, 3, or 4."
             )
         self.outer_uv_feature_channels = int(outer_uv_feature_channels)
         self.outer_uv_topology_channels = int(outer_uv_topology_channels)
@@ -780,6 +780,19 @@ class DenseUVParserNet(nn.Module):
                     nn.Linear(self.semantic_channels, 1),
                 )
                 if self.head_outer_projected_input_version >= 3
+                else None
+            )
+            self.head_outer_accessory_head = (
+                nn.Sequential(
+                    nn.LayerNorm(self.semantic_channels),
+                    nn.Linear(
+                        self.semantic_channels,
+                        self.semantic_channels,
+                    ),
+                    nn.GELU(),
+                    nn.Linear(self.semantic_channels, 2),
+                )
+                if self.head_outer_projected_input_version >= 4
                 else None
             )
             if self.head_outer_structure_mode == "global":
@@ -1059,6 +1072,16 @@ class DenseUVParserNet(nn.Module):
                         self.head_outer_symmetry_head(
                             semantic_summary.detach()
                         ).squeeze(-1)
+                    )
+                if self.head_outer_accessory_head is not None:
+                    # Explicit structural labels are more selective than the
+                    # nearly universal left/right alpha-symmetry score. They
+                    # decide whether deterministic completion may close a
+                    # four-face brim or an open top rim.
+                    outputs["head_outer_accessory_logits"] = (
+                        self.head_outer_accessory_head(
+                            semantic_summary.detach()
+                        )
                     )
                 if self.head_outer_structure_mode == "global":
                     outputs["head_outer_face_occupancy_logits"] = (

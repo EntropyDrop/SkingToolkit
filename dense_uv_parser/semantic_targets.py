@@ -57,10 +57,32 @@ def build_head_outer_face_targets(target_uv, alpha_threshold=0.5):
         )
     occupancy = torch.stack(occupancy, dim=1).float()
     coverage = occupancy.mean(dim=(-2, -1))
+    side_face_counts = occupancy[:, :4].sum(dim=-1)
+    closed_ring_rows = (
+        (side_face_counts >= 4.0).all(dim=1)
+        & (side_face_counts.sum(dim=1) >= 24.0)
+    )
+    top_face = occupancy[:, 5]
+    top_perimeter_mask = torch.zeros(
+        8, 8, dtype=torch.bool, device=occupancy.device
+    )
+    top_perimeter_mask[[0, -1], :] = True
+    top_perimeter_mask[:, [0, -1]] = True
+    top_perimeter_count = top_face[:, top_perimeter_mask].sum(dim=1)
+    top_interior_count = top_face[:, ~top_perimeter_mask].sum(dim=1)
+    closed_side_ring = closed_ring_rows.any(dim=1)
+    open_top_rim = (
+        closed_side_ring
+        & (top_perimeter_count >= 12.0)
+        & (top_interior_count <= 12.0)
+    )
     return {
         "occupancy": occupancy,
         "presence": (coverage > 0.0).float(),
         "coverage": coverage,
+        "closed_ring_rows": closed_ring_rows.float(),
+        "closed_side_ring": closed_side_ring.float(),
+        "open_top_rim": open_top_rim.float(),
     }
 
 

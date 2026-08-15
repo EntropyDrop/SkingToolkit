@@ -379,6 +379,11 @@ def simple_inpaint_uv(
     head_outer_symmetry_probability=None,
     head_outer_symmetry_threshold=0.80,
     head_outer_symmetry_candidate_threshold=0.20,
+    head_outer_closed_ring_probability=None,
+    head_outer_closed_ring_threshold=0.70,
+    head_outer_open_top_probability=None,
+    head_outer_open_top_threshold=0.70,
+    head_outer_open_top_max_gap=3,
 ):
     """Repair inner UV holes while preserving the parser's outer layer."""
     parser_uv = conditioning_to_pred_uv(conditioning)
@@ -398,6 +403,13 @@ def simple_inpaint_uv(
         head_outer_symmetry_candidate_threshold=(
             head_outer_symmetry_candidate_threshold
         ),
+        head_outer_closed_ring_probability=(
+            head_outer_closed_ring_probability
+        ),
+        head_outer_closed_ring_threshold=head_outer_closed_ring_threshold,
+        head_outer_open_top_probability=head_outer_open_top_probability,
+        head_outer_open_top_threshold=head_outer_open_top_threshold,
+        head_outer_open_top_max_gap=head_outer_open_top_max_gap,
     )
     repaired = finalize_minecraft_alpha(
         repaired,
@@ -1095,6 +1107,34 @@ def build_arg_parser():
         ),
     )
     parser.add_argument(
+        "--head_outer_closed_ring_completion_threshold",
+        type=float,
+        default=splat_defaults[
+            "head_outer_closed_ring_completion_threshold"
+        ],
+        help=(
+            "Minimum v4 closed-side-ring confidence before completing a "
+            "missing hat-brim face."
+        ),
+    )
+    parser.add_argument(
+        "--head_outer_open_top_completion_threshold",
+        type=float,
+        default=splat_defaults[
+            "head_outer_open_top_completion_threshold"
+        ],
+        help=(
+            "Minimum v4 open-top confidence before closing short crown-rim "
+            "gaps."
+        ),
+    )
+    parser.add_argument(
+        "--head_outer_open_top_max_gap",
+        type=int,
+        default=splat_defaults["head_outer_open_top_max_gap"],
+        help="Largest bounded top-perimeter gap repaired by v4 completion.",
+    )
+    parser.add_argument(
         "--outer_geometry_rescue",
         dest="outer_geometry_rescue",
         action="store_true",
@@ -1417,6 +1457,16 @@ def main():
         raise ValueError(
             "--head_outer_symmetry_candidate_threshold must be in [0, 1]."
         )
+    if not 0.0 <= args.head_outer_closed_ring_completion_threshold <= 1.0:
+        raise ValueError(
+            "--head_outer_closed_ring_completion_threshold must be in [0, 1]."
+        )
+    if not 0.0 <= args.head_outer_open_top_completion_threshold <= 1.0:
+        raise ValueError(
+            "--head_outer_open_top_completion_threshold must be in [0, 1]."
+        )
+    if args.head_outer_open_top_max_gap < 0:
+        raise ValueError("--head_outer_open_top_max_gap must be non-negative.")
     if not 0.0 <= args.head_outer_topology_min_precision <= 1.0:
         raise ValueError(
             "--head_outer_topology_min_precision must be in [0, 1]."
@@ -2620,6 +2670,8 @@ def main():
     if needs_repair:
         head_outer_completion_probability = None
         head_outer_symmetry_probability = None
+        head_outer_closed_ring_probability = None
+        head_outer_open_top_probability = None
         if (
             int(
                 getattr(
@@ -2641,6 +2693,12 @@ def main():
                 head_outer_symmetry_probability = torch.sigmoid(
                     outputs["head_outer_symmetry_logit"].float()
                 )[0].detach().cpu()
+            if "head_outer_accessory_logits" in outputs:
+                accessory_probability = torch.sigmoid(
+                    outputs["head_outer_accessory_logits"].float()
+                )[0].detach().cpu()
+                head_outer_closed_ring_probability = accessory_probability[0]
+                head_outer_open_top_probability = accessory_probability[1]
         repaired, stats = simple_inpaint_uv(
             conditioning.detach().cpu(),
             alpha_threshold=args.alpha_threshold,
@@ -2658,6 +2716,19 @@ def main():
             head_outer_symmetry_candidate_threshold=(
                 args.head_outer_symmetry_candidate_threshold
             ),
+            head_outer_closed_ring_probability=(
+                head_outer_closed_ring_probability
+            ),
+            head_outer_closed_ring_threshold=(
+                args.head_outer_closed_ring_completion_threshold
+            ),
+            head_outer_open_top_probability=(
+                head_outer_open_top_probability
+            ),
+            head_outer_open_top_threshold=(
+                args.head_outer_open_top_completion_threshold
+            ),
+            head_outer_open_top_max_gap=args.head_outer_open_top_max_gap,
         )
         print("simple_inpaint_stats=" + json.dumps(stats, sort_keys=True))
         written_paths = set()
