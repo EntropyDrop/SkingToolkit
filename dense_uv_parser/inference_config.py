@@ -68,7 +68,7 @@ PRODUCTION_SPLAT_DEFAULTS = MappingProxyType(
         "geometry_route_preserve_outer_margin": 0.35,
         "geometry_route_consensus_outer_confidence": 0.70,
         "geometry_route_consensus_outer_margin": 0.20,
-        "geometry_cross_view_outer_consistency": False,
+        "geometry_cross_view_outer_consistency": True,
         "geometry_cross_view_outer_weight": 0.50,
         "geometry_cross_view_outer_positive_confidence": 0.70,
         "geometry_cross_view_outer_positive_margin": 0.20,
