@@ -1320,8 +1320,22 @@ def head_outer_structure_losses(
 
     positive = occupancy > 0.5
     negative = ~positive
-    positive_loss = F.softplus(-logits[positive])
-    negative_loss = F.softplus(logits[negative])
+    positive_loss_map = F.softplus(-logits).flatten(1)
+    negative_loss_map = F.softplus(logits).flatten(1)
+    positive_nodes = positive.flatten(1)
+    negative_nodes = negative.flatten(1)
+    positive_count = positive_nodes.float().sum(dim=1)
+    negative_count = negative_nodes.float().sum(dim=1)
+    positive_per_sample = (
+        (positive_loss_map * positive_nodes).sum(dim=1)
+        / positive_count.clamp_min(1.0)
+    )
+    negative_per_sample = (
+        (negative_loss_map * negative_nodes).sum(dim=1)
+        / negative_count.clamp_min(1.0)
+    )
+    positive_loss = positive_per_sample[positive_count > 0]
+    negative_loss = negative_per_sample[negative_count > 0]
     if positive_loss.numel() and negative_loss.numel():
         loss_bce = (
             float(positive_balance) * positive_loss.mean()
@@ -1335,17 +1349,19 @@ def head_outer_structure_losses(
         loss_bce = logits.sum() * 0.0
 
     probability = torch.sigmoid(logits)
-    if negative_loss.numel() and hard_negative_fraction > 0.0:
+    flattened_negative_loss = F.softplus(logits[negative])
+    if flattened_negative_loss.numel() and hard_negative_fraction > 0.0:
         hard_negative_count = max(
             1,
             int(
                 math.ceil(
-                    negative_loss.numel() * float(hard_negative_fraction)
+                    flattened_negative_loss.numel()
+                    * float(hard_negative_fraction)
                 )
             ),
         )
-        loss_hard_negative = negative_loss.topk(
-            min(hard_negative_count, negative_loss.numel())
+        loss_hard_negative = flattened_negative_loss.topk(
+            min(hard_negative_count, flattened_negative_loss.numel())
         ).values.mean()
     else:
         hard_negative_count = 0
@@ -1448,6 +1464,47 @@ def head_outer_structure_losses(
         if component_recall.numel()
         else zero
     )
+    component_hard_penalty = probability_nodes.new_zeros(
+        target_nodes.shape[0] * (node_count + 1)
+    )
+    component_hard_penalty.scatter_add_(
+        0,
+        component_index[target_nodes],
+        (1.0 - probability_nodes[target_nodes]).square(),
+    )
+    component_hard_recall = (
+        component_hard_penalty[existing_components]
+        / component_size[existing_components].clamp_min(1.0)
+    )
+    loss_component_hard_recall = (
+        component_hard_recall.mean()
+        if component_hard_recall.numel()
+        else zero
+    )
+
+    # Thin bands, crown tips, glasses arms, and headphone bridges account for
+    # very few texels compared with solid hair shells. Give their low-degree
+    # positive nodes a dedicated recall term so a one-texel break cannot hide
+    # inside an otherwise good component average.
+    positive_neighbour_count = probability_nodes.new_zeros(
+        target_nodes.shape
+    )
+    positive_neighbour_count.index_add_(
+        1,
+        destination,
+        target_nodes[:, source].to(probability_nodes.dtype),
+    )
+    sparse_positive = target_nodes & (positive_neighbour_count <= 2.0)
+    sparse_count = sparse_positive.float().sum(dim=1)
+    sparse_per_sample = (
+        (F.softplus(-logits.flatten(1)) * sparse_positive).sum(dim=1)
+        / sparse_count.clamp_min(1.0)
+    )
+    loss_sparse_recall = (
+        sparse_per_sample[sparse_count > 0].mean()
+        if (sparse_count > 0).any()
+        else zero
+    )
     loss_topology = (
         positive_continuity
         + 0.25 * negative_connectivity
@@ -1486,6 +1543,34 @@ def head_outer_structure_losses(
         if symmetric_positive.any()
         else zero
     )
+    mirrored_target = target_nodes.index_select(1, safe_mirror)
+    symmetry_target = (
+        (target_nodes & mirrored_target & valid_mirror.unsqueeze(0))
+        .float()
+        .sum(dim=1)
+        / target_nodes.float().sum(dim=1).clamp_min(1.0)
+    )
+    symmetry_valid = target_nodes.any(dim=1)
+    if "head_outer_symmetry_logit" in outputs and symmetry_valid.any():
+        symmetry_logit = outputs["head_outer_symmetry_logit"].float()
+        if symmetry_logit.shape != symmetry_target.shape:
+            raise ValueError(
+                "Head symmetry logits must be shaped "
+                f"{tuple(symmetry_target.shape)}, got "
+                f"{tuple(symmetry_logit.shape)}."
+            )
+        loss_symmetry_score = F.binary_cross_entropy_with_logits(
+            symmetry_logit[symmetry_valid],
+            symmetry_target[symmetry_valid],
+        )
+        symmetry_probability = torch.sigmoid(symmetry_logit)
+        symmetry_mae = (
+            symmetry_probability[symmetry_valid]
+            - symmetry_target[symmetry_valid]
+        ).abs().mean()
+    else:
+        loss_symmetry_score = zero
+        symmetry_mae = zero
 
     predicted = probability >= 0.5
     true_positive = (predicted & positive).float().sum()
@@ -1504,6 +1589,11 @@ def head_outer_structure_losses(
         "loss_head_outer_negative_connectivity": negative_connectivity,
         "loss_head_outer_boundary_contrast": boundary_contrast,
         "loss_head_outer_component_recall": loss_component_recall,
+        "loss_head_outer_component_hard_recall": (
+            loss_component_hard_recall
+        ),
+        "loss_head_outer_sparse_recall": loss_sparse_recall,
+        "loss_head_outer_symmetry_score": loss_symmetry_score,
         "head_outer_occupancy_precision": (
             true_positive / (true_positive + false_positive).clamp_min(1.0)
         ),
@@ -1514,10 +1604,17 @@ def head_outer_structure_losses(
             component_recall.mean() if component_recall.numel() else zero
         ),
         "count_head_outer_components": existing_components.float().sum(),
+        "count_head_outer_sparse_positive": sparse_positive.float().sum(),
         "count_head_outer_hard_negative_candidates": logits.new_tensor(
             float(hard_negative_count)
         ),
         "head_outer_occupancy_soft_precision": soft_precision.mean(),
+        "head_outer_symmetry_mae": symmetry_mae,
+        "head_outer_symmetry_target": (
+            symmetry_target[symmetry_valid].mean()
+            if symmetry_valid.any()
+            else zero
+        ),
     }
 
 
@@ -2359,6 +2456,14 @@ def run_epoch(
                         * head_structure["loss_head_outer_topology"]
                         + args.lambda_head_outer_symmetry
                         * head_structure["loss_head_outer_symmetry"]
+                        + args.lambda_head_outer_component_hard_recall
+                        * head_structure[
+                            "loss_head_outer_component_hard_recall"
+                        ]
+                        + args.lambda_head_outer_sparse_recall
+                        * head_structure["loss_head_outer_sparse_recall"]
+                        + args.lambda_head_outer_symmetry_score
+                        * head_structure["loss_head_outer_symmetry_score"]
                     )
                     losses.update(head_structure)
                     losses["loss_head_outer_occupancy"] = (
@@ -2388,13 +2493,19 @@ def run_epoch(
                         "loss_head_outer_negative_connectivity",
                         "loss_head_outer_boundary_contrast",
                         "loss_head_outer_component_recall",
+                        "loss_head_outer_component_hard_recall",
+                        "loss_head_outer_sparse_recall",
+                        "loss_head_outer_symmetry_score",
                         "loss_head_outer_structure_weighted",
                         "head_outer_occupancy_precision",
                         "head_outer_occupancy_recall",
                         "head_outer_occupancy_soft_precision",
                         "head_outer_component_recall",
                         "count_head_outer_components",
+                        "count_head_outer_sparse_positive",
                         "count_head_outer_hard_negative_candidates",
+                        "head_outer_symmetry_mae",
+                        "head_outer_symmetry_target",
                     ):
                         losses[name] = zero
                 if args.lambda_head_outer_route_connectivity > 0.0:
@@ -3472,11 +3583,12 @@ def build_arg_parser():
     parser.add_argument(
         "--head_outer_projected_input_version",
         type=int,
-        choices=(1, 2),
+        choices=(1, 2, 3),
         default=1,
         help=(
             "Projected head feature schema. Version 2 adds projected RGB, "
-            "cross-view RGB variation, and protruding-silhouette evidence."
+            "cross-view RGB variation, and protruding-silhouette evidence; "
+            "version 3 adds calibrated accessory-symmetry prediction."
         ),
     )
     parser.add_argument(
@@ -3846,6 +3958,21 @@ def build_arg_parser():
         "--lambda_head_outer_symmetry", type=float, default=0.0
     )
     parser.add_argument(
+        "--lambda_head_outer_component_hard_recall",
+        type=float,
+        default=0.0,
+    )
+    parser.add_argument(
+        "--lambda_head_outer_sparse_recall",
+        type=float,
+        default=0.0,
+    )
+    parser.add_argument(
+        "--lambda_head_outer_symmetry_score",
+        type=float,
+        default=0.0,
+    )
+    parser.add_argument(
         "--lambda_head_outer_route_connectivity",
         type=float,
         default=0.0,
@@ -4089,6 +4216,9 @@ def main():
         args.head_outer_precision_weight,
         args.lambda_head_outer_topology,
         args.lambda_head_outer_symmetry,
+        args.lambda_head_outer_component_hard_recall,
+        args.lambda_head_outer_sparse_recall,
+        args.lambda_head_outer_symmetry_score,
         args.lambda_head_outer_route_connectivity,
         args.lambda_outer_uv_occupancy,
         args.outer_uv_occupancy_dice_weight,
@@ -4992,6 +5122,15 @@ def main():
         "head_outer_precision_weight": args.head_outer_precision_weight,
         "lambda_head_outer_topology": args.lambda_head_outer_topology,
         "lambda_head_outer_symmetry": args.lambda_head_outer_symmetry,
+        "lambda_head_outer_component_hard_recall": (
+            args.lambda_head_outer_component_hard_recall
+        ),
+        "lambda_head_outer_sparse_recall": (
+            args.lambda_head_outer_sparse_recall
+        ),
+        "lambda_head_outer_symmetry_score": (
+            args.lambda_head_outer_symmetry_score
+        ),
         "lambda_head_outer_route_connectivity": (
             args.lambda_head_outer_route_connectivity
         ),

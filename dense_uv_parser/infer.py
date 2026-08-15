@@ -376,6 +376,9 @@ def simple_inpaint_uv(
     head_outer_probability=None,
     head_outer_threshold=0.65,
     head_outer_min_component_seeds=2,
+    head_outer_symmetry_probability=None,
+    head_outer_symmetry_threshold=0.80,
+    head_outer_symmetry_candidate_threshold=0.20,
 ):
     """Repair inner UV holes while preserving the parser's outer layer."""
     parser_uv = conditioning_to_pred_uv(conditioning)
@@ -390,6 +393,11 @@ def simple_inpaint_uv(
         head_outer_probability=head_outer_probability,
         head_outer_threshold=head_outer_threshold,
         head_outer_min_component_seeds=head_outer_min_component_seeds,
+        head_outer_symmetry_probability=head_outer_symmetry_probability,
+        head_outer_symmetry_threshold=head_outer_symmetry_threshold,
+        head_outer_symmetry_candidate_threshold=(
+            head_outer_symmetry_candidate_threshold
+        ),
     )
     repaired = finalize_minecraft_alpha(
         repaired,
@@ -1053,7 +1061,7 @@ def build_arg_parser():
         type=float,
         default=splat_defaults["head_outer_completion_threshold"],
         help=(
-            "Minimum v2 head-occupancy probability for constrained, "
+            "Minimum projected head-occupancy probability for constrained, "
             "component-anchored outer UV completion."
         ),
     )
@@ -1063,6 +1071,28 @@ def build_arg_parser():
         default=splat_defaults[
             "head_outer_completion_min_component_seeds"
         ],
+    )
+    parser.add_argument(
+        "--head_outer_symmetry_completion_threshold",
+        type=float,
+        default=splat_defaults[
+            "head_outer_symmetry_completion_threshold"
+        ],
+        help=(
+            "Minimum v3 predicted accessory symmetry before isolated "
+            "mirrored head-outer texels may be completed."
+        ),
+    )
+    parser.add_argument(
+        "--head_outer_symmetry_candidate_threshold",
+        type=float,
+        default=splat_defaults[
+            "head_outer_symmetry_candidate_threshold"
+        ],
+        help=(
+            "Minimum v3 head-occupancy support for a directly mirrored "
+            "completion candidate."
+        ),
     )
     parser.add_argument(
         "--outer_geometry_rescue",
@@ -1378,6 +1408,14 @@ def main():
     if args.head_outer_completion_min_component_seeds < 1:
         raise ValueError(
             "--head_outer_completion_min_component_seeds must be positive."
+        )
+    if not 0.0 <= args.head_outer_symmetry_completion_threshold <= 1.0:
+        raise ValueError(
+            "--head_outer_symmetry_completion_threshold must be in [0, 1]."
+        )
+    if not 0.0 <= args.head_outer_symmetry_candidate_threshold <= 1.0:
+        raise ValueError(
+            "--head_outer_symmetry_candidate_threshold must be in [0, 1]."
         )
     if not 0.0 <= args.head_outer_topology_min_precision <= 1.0:
         raise ValueError(
@@ -2581,6 +2619,7 @@ def main():
         repair_outputs.append(("completed_uv", Path(args.output)))
     if needs_repair:
         head_outer_completion_probability = None
+        head_outer_symmetry_probability = None
         if (
             int(
                 getattr(
@@ -2598,6 +2637,10 @@ def main():
                     outputs["head_outer_face_occupancy_logits"].float()
                 )
             )[0, 0].detach().cpu()
+            if "head_outer_symmetry_logit" in outputs:
+                head_outer_symmetry_probability = torch.sigmoid(
+                    outputs["head_outer_symmetry_logit"].float()
+                )[0].detach().cpu()
         repaired, stats = simple_inpaint_uv(
             conditioning.detach().cpu(),
             alpha_threshold=args.alpha_threshold,
@@ -2605,6 +2648,15 @@ def main():
             head_outer_threshold=args.head_outer_completion_threshold,
             head_outer_min_component_seeds=(
                 args.head_outer_completion_min_component_seeds
+            ),
+            head_outer_symmetry_probability=(
+                head_outer_symmetry_probability
+            ),
+            head_outer_symmetry_threshold=(
+                args.head_outer_symmetry_completion_threshold
+            ),
+            head_outer_symmetry_candidate_threshold=(
+                args.head_outer_symmetry_candidate_threshold
             ),
         )
         print("simple_inpaint_stats=" + json.dumps(stats, sort_keys=True))

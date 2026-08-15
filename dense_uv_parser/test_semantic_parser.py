@@ -340,7 +340,7 @@ class SemanticDenseUVParserTest(unittest.TestCase):
         )
 
     def test_projected_head_outer_structure_uses_uv_features(self):
-        for input_version, extra_channels in ((1, 2), (2, 9)):
+        for input_version, extra_channels in ((1, 2), (2, 9), (3, 9)):
             with self.subTest(input_version=input_version):
                 model = DenseUVParserNet(
                     base_channels=8,
@@ -383,6 +383,10 @@ class SemanticDenseUVParserTest(unittest.TestCase):
                     outputs["head_outer_uv_global_context"],
                 )
                 self.assertEqual(tuple(logits.shape), (2, 6, 8, 8))
+                self.assertEqual(
+                    "head_outer_symmetry_logit" in outputs,
+                    input_version >= 3,
+                )
                 logits.mean().backward()
                 gradient = (
                     model.head_outer_projected_head.output[-1].weight.grad
@@ -410,6 +414,36 @@ class SemanticDenseUVParserTest(unittest.TestCase):
             float(losses["loss_head_outer_symmetry"].detach()), 0.0
         )
 
+    def test_head_outer_symmetry_score_and_sparse_recall_are_supervised(self):
+        target_uv = torch.zeros(1, 4, 64, 64)
+        target_uv[0, 3, 8, 40] = 1.0
+        target_uv[0, 3, 8, 47] = 1.0
+        occupancy_logits = torch.full(
+            (1, 6, 8, 8), -2.0, requires_grad=True
+        )
+        symmetry_logit = torch.zeros(1, requires_grad=True)
+        losses = head_outer_structure_losses(
+            {
+                "head_outer_face_occupancy_logits": occupancy_logits,
+                "head_outer_face_presence_logits": torch.zeros(1, 6),
+                "head_outer_face_coverage": torch.zeros(1, 6),
+                "head_outer_symmetry_logit": symmetry_logit,
+            },
+            target_uv,
+        )
+        total = (
+            losses["loss_head_outer_component_hard_recall"]
+            + losses["loss_head_outer_sparse_recall"]
+            + losses["loss_head_outer_symmetry_score"]
+        )
+        total.backward()
+        self.assertGreater(float(total.detach()), 0.0)
+        self.assertIsNotNone(occupancy_logits.grad)
+        self.assertIsNotNone(symmetry_logit.grad)
+        self.assertEqual(
+            float(losses["head_outer_symmetry_target"].detach()), 1.0
+        )
+
     def test_v2_head_completion_fills_only_anchored_candidates(self):
         uv = torch.zeros(4, 64, 64)
         uv[:3, 8, 40:42] = torch.tensor([0.8, 0.1, 0.1]).view(3, 1)
@@ -432,6 +466,39 @@ class SemanticDenseUVParserTest(unittest.TestCase):
         self.assertEqual(float(repaired[3, 9, 46]), 0.0)
         self.assertGreaterEqual(
             stats["head_outer_topology_filled_texels"], 1
+        )
+
+    def test_v3_symmetric_head_completion_requires_global_confidence(self):
+        uv = torch.zeros(4, 64, 64)
+        uv[:3, 8, 40:42] = torch.tensor([0.8, 0.1, 0.1]).view(3, 1)
+        uv[3, 8, 40:42] = 1.0
+        probability = torch.zeros(64, 64)
+        probability[8, 46:48] = 0.25
+
+        repaired, stats = simple_symmetry_nearest_inpaint(
+            uv,
+            head_outer_probability=probability,
+            head_outer_threshold=0.65,
+            head_outer_min_component_seeds=2,
+            head_outer_symmetry_probability=0.95,
+            head_outer_symmetry_threshold=0.80,
+            head_outer_symmetry_candidate_threshold=0.20,
+        )
+        self.assertEqual(float(repaired[3, 8, 46:48].sum()), 2.0)
+        self.assertEqual(stats["head_outer_symmetry_filled_texels"], 2)
+
+        rejected, rejected_stats = simple_symmetry_nearest_inpaint(
+            uv,
+            head_outer_probability=probability,
+            head_outer_threshold=0.65,
+            head_outer_min_component_seeds=2,
+            head_outer_symmetry_probability=0.50,
+            head_outer_symmetry_threshold=0.80,
+            head_outer_symmetry_candidate_threshold=0.20,
+        )
+        self.assertEqual(float(rejected[3, 8, 46:48].sum()), 0.0)
+        self.assertEqual(
+            rejected_stats["head_outer_symmetry_filled_texels"], 0
         )
 
     def test_head_outer_route_connectivity_penalizes_brim_gap(self):

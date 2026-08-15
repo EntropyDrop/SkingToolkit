@@ -49,6 +49,8 @@ PRODUCTION_SPLAT_DEFAULTS = MappingProxyType(
         "head_outer_topology_color_tolerance": 0.20,
         "head_outer_completion_threshold": 0.65,
         "head_outer_completion_min_component_seeds": 2,
+        "head_outer_symmetry_completion_threshold": 0.80,
+        "head_outer_symmetry_candidate_threshold": 0.20,
         "outer_geometry_rescue": True,
         "outer_semantic_rescue": True,
         "outer_semantic_presence_threshold": 0.80,

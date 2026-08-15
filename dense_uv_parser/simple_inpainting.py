@@ -22,13 +22,40 @@ def _complete_head_outer_structure(
     probability,
     threshold=0.65,
     min_component_seeds=2,
+    symmetry_probability=None,
+    symmetry_threshold=0.80,
+    symmetry_candidate_threshold=0.20,
 ):
     """Fill only model-backed head-outer texels anchored to observations."""
     head_indices = build_head_outer_face_indices().to(pixels.device)
     edge_index = build_head_outer_face_graph().to(pixels.device)
     known_nodes = defined.index_select(0, head_indices)
     probability_nodes = probability.reshape(-1).index_select(0, head_indices)
+    flat_to_node = torch.full(
+        (UV_SIZE * UV_SIZE,), -1, dtype=torch.long, device=pixels.device
+    )
+    flat_to_node[head_indices] = torch.arange(
+        head_indices.numel(), device=pixels.device
+    )
+    mirrored_nodes = flat_to_node[mirrored.index_select(0, head_indices)]
+    safe_mirrored_nodes = mirrored_nodes.clamp_min(0)
+    mirrored_known = (
+        (mirrored_nodes >= 0)
+        & known_nodes.index_select(0, safe_mirrored_nodes)
+    )
+    use_symmetric_completion = (
+        symmetry_probability is not None
+        and float(symmetry_probability) >= float(symmetry_threshold)
+        and int(known_nodes.sum().item()) >= int(min_component_seeds)
+    )
+    symmetric_candidates = (
+        mirrored_known
+        & (probability_nodes >= float(symmetry_candidate_threshold))
+        if use_symmetric_completion
+        else torch.zeros_like(known_nodes)
+    )
     candidates = probability_nodes >= float(threshold)
+    candidates = candidates | symmetric_candidates
     active = candidates | known_nodes
     node_count = head_indices.numel()
     labels = torch.where(
@@ -60,12 +87,11 @@ def _complete_head_outer_structure(
         candidates
         & (seed_count[labels.clamp_max(node_count)] >= int(min_component_seeds))
     )
-
-    flat_to_node = torch.full(
-        (UV_SIZE * UV_SIZE,), -1, dtype=torch.long, device=pixels.device
-    )
-    flat_to_node[head_indices] = torch.arange(node_count, device=pixels.device)
-    mirrored_nodes = flat_to_node[mirrored.index_select(0, head_indices)]
+    # A confidently symmetric accessory may contain isolated crown tips or an
+    # unseen hat-brim face. They cannot satisfy the ordinary anchored-component
+    # rule, but a directly observed mirrored texel supplies both a geometric
+    # anchor and an exact color source.
+    accepted = accepted | symmetric_candidates
     symmetry_filled = 0
     topology_filled = 0
     for node_index in probability_nodes.argsort(descending=True).tolist():
@@ -154,6 +180,9 @@ def simple_symmetry_nearest_inpaint(
     head_outer_probability=None,
     head_outer_threshold=0.65,
     head_outer_min_component_seeds=2,
+    head_outer_symmetry_probability=None,
+    head_outer_symmetry_threshold=0.80,
+    head_outer_symmetry_candidate_threshold=0.20,
 ):
     """Fill unknown inner texels while preserving every outer-layer texel."""
     squeeze_batch = uv.dim() == 3
@@ -226,6 +255,16 @@ def simple_symmetry_nearest_inpaint(
                 head_outer_probability[batch_index],
                 threshold=head_outer_threshold,
                 min_component_seeds=head_outer_min_component_seeds,
+                symmetry_probability=(
+                    head_outer_symmetry_probability[batch_index]
+                    if torch.is_tensor(head_outer_symmetry_probability)
+                    and head_outer_symmetry_probability.ndim > 0
+                    else head_outer_symmetry_probability
+                ),
+                symmetry_threshold=head_outer_symmetry_threshold,
+                symmetry_candidate_threshold=(
+                    head_outer_symmetry_candidate_threshold
+                ),
             )
         for target_index in topology.inner_fill_order.tolist():
             if bool(defined[target_index]):
@@ -276,6 +315,21 @@ def simple_symmetry_nearest_inpaint(
                 ),
                 "head_outer_topology_filled_texels": (
                     head_outer_topology_filled
+                ),
+                "head_outer_symmetry_probability": (
+                    round(
+                        float(
+                            head_outer_symmetry_probability[batch_index]
+                            if torch.is_tensor(
+                                head_outer_symmetry_probability
+                            )
+                            and head_outer_symmetry_probability.ndim > 0
+                            else head_outer_symmetry_probability
+                        ),
+                        6,
+                    )
+                    if head_outer_symmetry_probability is not None
+                    else None
                 ),
                 "preserved_outer_texels": int((valid & (layer == 1)).sum().item()),
                 "fill_order": "front_back_rings_side_edges_top_bottom_rings",
