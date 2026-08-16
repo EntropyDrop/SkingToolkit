@@ -3754,6 +3754,18 @@ def build_arg_parser():
     parser.add_argument(
         "--outer_uv_route_evidence_dropout", type=float, default=1.0
     )
+    parser.add_argument(
+        "--cross_view_spatial_fusion",
+        dest="cross_view_spatial_fusion",
+        action="store_true",
+        default=False,
+        help="Fuse front/back dense features before route classification.",
+    )
+    parser.add_argument(
+        "--no_cross_view_spatial_fusion",
+        dest="cross_view_spatial_fusion",
+        action="store_false",
+    )
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument(
         "--gradient_accumulation_steps", type=int, default=1
@@ -4803,6 +4815,7 @@ def main():
         outer_uv_route_evidence_dropout=(
             args.outer_uv_route_evidence_dropout
         ),
+        cross_view_spatial_fusion=args.cross_view_spatial_fusion,
     ).to(device)
     if text_prompt_bundle is not None:
         object.__setattr__(
