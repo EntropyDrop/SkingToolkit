@@ -4127,6 +4127,93 @@ def _grouped_uv_support(mask, flat_uv, group_size):
     return support_count[grouped_uv] > 0
 
 
+def _rescue_outer_only_silhouette_pixels(
+    trusted,
+    routing,
+    color_valid,
+    renderer,
+    views,
+    part=None,
+):
+    """Directly trust foreground pixels outside the inner cuboid as outer.
+
+    A pixel covered by an outer-only projection cannot belong to the opaque
+    inner skin.  If it is also valid foreground, it must be an outer-layer
+    detail (hat, crown, hair, armour, etc.).  This is a strong geometric prior
+    that recovers thin outer structures even when the learned route confidence
+    is low, which is the main failure mode for crowns and hat brims.
+    """
+    views = parse_views(views)
+    if not views:
+        return trusted, torch.zeros_like(trusted), torch.zeros_like(trusted)
+    if trusted.shape[0] % len(views) != 0:
+        raise ValueError(
+            "Silhouette outer rescue requires complete fixed-view groups."
+        )
+    rescue = torch.zeros_like(trusted)
+    outer_only_mask = torch.zeros_like(trusted)
+    for view_index, view in enumerate(views):
+        selection = slice(view_index, trusted.shape[0], len(views))
+        static = build_static_surface_routing(
+            renderer, view, trusted.device
+        )
+        view_outer_only = static["masks"][1] & ~static["masks"][0]
+        if part is not None:
+            view_outer_only = view_outer_only & (
+                static["part"][1] == int(part)
+            )
+        view_outer_only = view_outer_only.unsqueeze(0).expand(
+            trusted[selection].shape[0], -1, -1
+        )
+        outer_only_mask[selection] = view_outer_only
+        view_rescue = (
+            trusted[selection]
+            & color_valid[selection]
+            & view_outer_only
+        )
+        if not view_rescue.any():
+            continue
+        static_outer = {
+            key: static[key][1].unsqueeze(0).expand(
+                trusted[selection].shape[0], -1, -1
+            )
+            for key in ("flat_uv", "part", "face", "texel_center_score")
+        }
+        routing["layer"][selection][view_rescue] = ROUTE_OUTER_PRIMARY
+        routing["flat_uv"][selection][view_rescue] = static_outer["flat_uv"][
+            view_rescue
+        ]
+        routing["surface"][selection][view_rescue] = ROUTE_OUTER_PRIMARY
+        routing["route_role"][selection][view_rescue] = ROUTE_OUTER_PRIMARY
+        routing["part"][selection][view_rescue] = static_outer["part"][
+            view_rescue
+        ]
+        routing["face"][selection][view_rescue] = static_outer["face"][
+            view_rescue
+        ]
+        routing["texel_center_score"][selection][view_rescue] = (
+            static_outer["texel_center_score"][view_rescue]
+        )
+        # Silhouette evidence is at least as strong as a medium-confidence
+        # route, so give it a high floor for downstream splat weighting.
+        routing["confidence"][selection][view_rescue] = (
+            routing["confidence"][selection][view_rescue].clamp_min(0.50)
+        )
+        routing["confidence_margin"][selection][view_rescue] = (
+            routing["confidence_margin"][selection][view_rescue].clamp_min(
+                0.20
+            )
+        )
+        routing["confidence_margin_ratio"][selection][view_rescue] = (
+            routing["confidence_margin_ratio"][selection][view_rescue].clamp_min(
+                0.20
+            )
+        )
+        rescue[selection] |= view_rescue
+    trusted = trusted | rescue
+    return trusted, rescue, outer_only_mask
+
+
 def _geometry_supported_outer_texels(routing, renderer, views):
     """Find outer texels proven by outer-only silhouette or an exact secondary slot.
 
@@ -5320,6 +5407,23 @@ def splat_parser_predictions_to_uv_conditioning(
             if head_outer_visible_color_rejected.any()
             else 0
         )
+    # Aggressive silhouette rescue: any valid foreground pixel that falls in
+    # an outer-only projection (outside the opaque inner cuboid) cannot be
+    # inner skin. Trust it as outer even if the learned route confidence was
+    # low. This is the main geometric prior that recovers crowns and hats.
+    _, silhouette_rescued, silhouette_outer_only = (
+        _rescue_outer_only_silhouette_pixels(
+            trusted,
+            routing,
+            color_support["valid"],
+            renderer,
+            views,
+        )
+    )
+    routing["silhouette_outer_rescued"] = silhouette_rescued
+    routing["silhouette_outer_only"] = silhouette_outer_only
+    selected_outer = routing["layer"] == 1
+
     routing["raw_foreground"] = raw_foreground
     routing["observed_foreground"] = canonical_observed_foreground
     routing["canonical_foreground_coverage_rescued"] = (

@@ -2244,6 +2244,16 @@ def main():
                 "cross_view_outer_vetoed", torch.zeros_like(raw_outer)
             ).sum().item()
         )
+        silhouette_outer_rescued_count = int(
+            routing.get(
+                "silhouette_outer_rescued", torch.zeros_like(raw_outer)
+            ).sum().item()
+        )
+        silhouette_outer_only_count = int(
+            routing.get(
+                "silhouette_outer_only", torch.zeros_like(raw_outer)
+            ).sum().item()
+        )
         occupancy_promoted_outer_count = int(
             routing.get(
                 "occupancy_rescued_outer", torch.zeros_like(raw_outer)
@@ -2405,6 +2415,10 @@ def main():
                     "cross_view_outer_weight": round(
                         float(geometry_cross_view_outer_weight), 6
                     ),
+                    "silhouette_outer_rescued_pixels": (
+                        silhouette_outer_rescued_count
+                    ),
+                    "silhouette_outer_only_pixels": silhouette_outer_only_count,
                     "consensus_weight": round(
                         float(geometry_route_texel_consensus_weight), 6
                     ),

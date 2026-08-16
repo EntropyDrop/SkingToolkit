@@ -1065,22 +1065,23 @@ class DenseUVParserNet(nn.Module):
                     self.head_outer_face_coverage_head(semantic_summary)
                 )
                 if self.head_outer_symmetry_head is not None:
-                    # The classifier learns on top of the established semantic
-                    # representation without allowing its auxiliary objective
-                    # to move the proven parser trunk.
+                    # The head-outer structure heads are allowed to backprop
+                    # into the semantic/parser trunk so that crown, brim, and
+                    # accessory evidence can improve the shared representation.
                     outputs["head_outer_symmetry_logit"] = (
                         self.head_outer_symmetry_head(
-                            semantic_summary.detach()
+                            semantic_summary
                         ).squeeze(-1)
                     )
                 if self.head_outer_accessory_head is not None:
                     # Explicit structural labels are more selective than the
                     # nearly universal left/right alpha-symmetry score. They
                     # decide whether deterministic completion may close a
-                    # four-face brim or an open top rim.
+                    # four-face brim or an open top rim, and their gradients
+                    # now also improve the trunk for these rare structures.
                     outputs["head_outer_accessory_logits"] = (
                         self.head_outer_accessory_head(
-                            semantic_summary.detach()
+                            semantic_summary
                         )
                     )
                 if self.head_outer_structure_mode == "global":
@@ -1094,10 +1095,8 @@ class DenseUVParserNet(nn.Module):
                 if semantic_summary is not None
                 else grouped_visual_summary
             )
-            # Occupancy learns from the parser representation without allowing
-            # its sparse atlas loss to destabilize the proven image-space route
-            # trunk. A separate agreement loss later transfers calibrated UV
-            # structure back into the route head after warm-up.
+            # The outer-UV occupancy head is still detached to keep the sparse
+            # atlas objective from destabilizing the primary image-space route.
             outputs["outer_uv_features"] = self.outer_uv_feature_projection(
                 occupancy_feature_source.detach()
             )
@@ -1106,14 +1105,17 @@ class DenseUVParserNet(nn.Module):
             self.predict_head_outer_structure
             and self.head_outer_structure_mode == "projected"
         ):
+            # Unlike the optional full-atlas occupancy head, the head-outer
+            # branch is intentionally not detached: crown/hat/brim errors are
+            # allowed to improve the shared parser trunk directly.
             outputs["head_outer_uv_features"] = (
                 self.head_outer_uv_feature_projection(
-                    occupancy_feature_source.detach()
+                    occupancy_feature_source
                 )
             )
             outputs["head_outer_uv_global_context"] = torch.cat(
                 [grouped_visual_summary, semantic_summary], dim=1
-            ).detach()
+            )
         if not self.geometry_only:
             outputs["part"] = self.part(x)
             outputs["face"] = self.face(x)
