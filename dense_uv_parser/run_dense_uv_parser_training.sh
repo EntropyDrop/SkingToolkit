@@ -309,6 +309,7 @@ LAMBDA_HEAD_OUTER_OPEN_TOP_SHAPE="${LAMBDA_HEAD_OUTER_OPEN_TOP_SHAPE:-$DEFAULT_H
 LAMBDA_HEAD_OUTER_ACCESSORY_CLASSIFICATION="${LAMBDA_HEAD_OUTER_ACCESSORY_CLASSIFICATION:-$DEFAULT_HEAD_OUTER_ACCESSORY_CLASSIFICATION_WEIGHT}"
 LAMBDA_HEAD_OUTER_ROUTE_CONNECTIVITY="${LAMBDA_HEAD_OUTER_ROUTE_CONNECTIVITY:-$DEFAULT_HEAD_OUTER_ROUTE_CONNECTIVITY_WEIGHT}"
 HEAD_OUTER_ROUTE_HARD_FRACTION="${HEAD_OUTER_ROUTE_HARD_FRACTION:-0.25}"
+CROSS_VIEW_SPATIAL_FUSION="${CROSS_VIEW_SPATIAL_FUSION:-true}"
 LAMBDA_OUTER_UV_OCCUPANCY="${LAMBDA_OUTER_UV_OCCUPANCY:-0.0}"
 OUTER_UV_OCCUPANCY_DICE_WEIGHT="${OUTER_UV_OCCUPANCY_DICE_WEIGHT:-0.50}"
 OUTER_UV_OCCUPANCY_POSITIVE_BALANCE="${OUTER_UV_OCCUPANCY_POSITIVE_BALANCE:-0.60}"
@@ -509,7 +510,15 @@ if [[ "$SEMANTIC_BACKBONE" != "none" ]]; then
   )
 fi
 
-# Replace the launcher shell with the trainer. Besides keeping the flock for
+cross_view_args=()
+if [[ "$CROSS_VIEW_SPATIAL_FUSION" == "true" ]]; then
+  cross_view_args=(--cross_view_spatial_fusion)
+else
+  cross_view_args=(--no_cross_view_spatial_fusion)
+fi
+
+# Replace the launcher shell with the trainer.
+# Besides keeping the flock for
 # the trainer lifetime, this prevents a script update during a long run from
 # being read again after Python exits at a shifted file offset.
 exec python train.py \
@@ -531,6 +540,7 @@ exec python train.py \
   --outer_uv_topology_layers "$OUTER_UV_TOPOLOGY_LAYERS" \
   --outer_uv_topology_dropout "$OUTER_UV_TOPOLOGY_DROPOUT" \
   --outer_uv_route_evidence_dropout "$OUTER_UV_ROUTE_EVIDENCE_DROPOUT" \
+  "${cross_view_args[@]}" \
   --head_outer_structure_mode "$HEAD_OUTER_STRUCTURE_MODE" \
   --head_outer_projected_input_version "$HEAD_OUTER_PROJECTED_INPUT_VERSION" \
   "${semantic_args[@]}" \

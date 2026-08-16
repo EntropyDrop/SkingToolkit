@@ -5407,21 +5407,10 @@ def splat_parser_predictions_to_uv_conditioning(
             if head_outer_visible_color_rejected.any()
             else 0
         )
-    # Aggressive silhouette rescue: any valid foreground pixel that falls in
-    # an outer-only projection (outside the opaque inner cuboid) cannot be
-    # inner skin. Trust it as outer even if the learned route confidence was
-    # low. This is the main geometric prior that recovers crowns and hats.
-    _, silhouette_rescued, silhouette_outer_only = (
-        _rescue_outer_only_silhouette_pixels(
-            trusted,
-            routing,
-            color_support["valid"],
-            renderer,
-            views,
-        )
-    )
-    routing["silhouette_outer_rescued"] = silhouette_rescued
-    routing["silhouette_outer_only"] = silhouette_outer_only
+    # NOTE: A pure silhouette outer rescue was tried but it accepted too many
+    # non-skin colors as outer.  Inner/outer decisions are therefore left to
+    # the learned route head, cross-view consistency, and the projected head
+    # outer structure branch.
     selected_outer = routing["layer"] == 1
 
     routing["raw_foreground"] = raw_foreground

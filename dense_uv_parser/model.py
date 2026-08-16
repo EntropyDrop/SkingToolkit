@@ -220,6 +220,54 @@ class SpatialSemanticFusion(nn.Module):
         )
 
 
+class CrossViewSpatialFusion(nn.Module):
+    """Exchange per-pixel features between fixed front/back views.
+
+    Each view's dense feature map is augmented with the mean feature map of
+    the other views in the same group.  This gives the per-pixel route head
+    direct access to both front and back evidence when deciding whether a
+    pixel is inner skin or an outer accessory.
+    """
+
+    def __init__(self, channels, view_classes):
+        super().__init__()
+        if channels < 1 or view_classes < 2:
+            raise ValueError(
+                "Cross-view spatial fusion requires channels >= 1 and "
+                "view_classes >= 2."
+            )
+        self.channels = int(channels)
+        self.view_classes = int(view_classes)
+        self.fusion = nn.Conv2d(channels * 2, channels, kernel_size=1)
+        # Initialize as identity on the per-view path and zero on the cross-view
+        # mean path, so a fresh model starts exactly like the previous parser.
+        with torch.no_grad():
+            self.fusion.weight.zero_()
+            for i in range(self.channels):
+                self.fusion.weight[i, i, 0, 0] = 1.0
+            self.fusion.bias.zero_()
+
+    def forward(self, x, view_ids):
+        if x.shape[0] % self.view_classes != 0:
+            raise ValueError(
+                "Cross-view spatial fusion requires complete view groups."
+            )
+        batch = x.shape[0] // self.view_classes
+        channels, height, width = x.shape[1:]
+        grouped = x.reshape(
+            batch, self.view_classes, channels, height, width
+        )
+        cross = grouped.mean(dim=1, keepdim=True).expand(
+            -1, self.view_classes, -1, -1, -1
+        )
+        fused = self.fusion(
+            torch.cat(
+                [grouped, cross], dim=2
+            ).reshape(batch * self.view_classes, channels * 2, height, width)
+        )
+        return fused
+
+
 class TextPromptRouteFusion(nn.Module):
     """Turn frozen SigLIP2 text/image similarities into route-logit evidence.
 
@@ -535,6 +583,7 @@ class DenseUVParserNet(nn.Module):
         outer_uv_topology_layers=3,
         outer_uv_topology_dropout=0.05,
         outer_uv_route_evidence_dropout=1.0,
+        cross_view_spatial_fusion=False,
     ):
         super().__init__()
         self.geometry_only = bool(geometry_only)
@@ -591,6 +640,7 @@ class DenseUVParserNet(nn.Module):
         self.outer_uv_route_evidence_dropout = float(
             outer_uv_route_evidence_dropout
         )
+        self.cross_view_spatial_fusion = bool(cross_view_spatial_fusion)
         if self.route_prior_height < 1 or self.route_prior_width < 1:
             raise ValueError("Route-prior dimensions must be positive.")
         if self.route_prior_logit_cap <= 0.0:
@@ -644,6 +694,11 @@ class DenseUVParserNet(nn.Module):
         self.features = nn.Sequential(
             nn.Conv2d(c, c, kernel_size=3, padding=1),
             nn.SiLU(inplace=True),
+        )
+        self.cross_view_spatial = (
+            CrossViewSpatialFusion(c, self.view_classes)
+            if self.cross_view_spatial_fusion and self.view_classes > 1
+            else None
         )
         self.feature_dropout = nn.Dropout2d(self.feature_dropout_probability)
         self.foreground = nn.Conv2d(c, 1, kernel_size=1)
@@ -987,6 +1042,8 @@ class DenseUVParserNet(nn.Module):
         x = self.up1(x, s1)
         x = self.up0(x, s0)
         x = self.features(x)
+        if self.cross_view_spatial is not None:
+            x = self.cross_view_spatial(x, view_ids)
         occupancy_feature_source = x
         x = self.feature_dropout(x)
         layer_evidence = self.layer(x)

@@ -242,6 +242,9 @@ def load_parser(checkpoint_path, device):
         outer_uv_route_evidence_dropout=model_config.get(
             "outer_uv_route_evidence_dropout", 1.0
         ),
+        cross_view_spatial_fusion=model_config.get(
+            "cross_view_spatial_fusion", False
+        ),
     ).to(device)
     model.load_state_dict(state_dict)
     object.__setattr__(

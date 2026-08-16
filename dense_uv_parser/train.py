@@ -3601,6 +3601,7 @@ def save_checkpoint(
             "outer_uv_route_evidence_dropout": (
                 model.outer_uv_route_evidence_dropout
             ),
+            "cross_view_spatial_fusion": model.cross_view_spatial_fusion,
             "arm_model": "steve",
         },
     }
@@ -5187,6 +5188,7 @@ def main():
         "outer_uv_route_evidence_dropout": (
             model.outer_uv_route_evidence_dropout
         ),
+        "cross_view_spatial_fusion": model.cross_view_spatial_fusion,
         "outer_uv_occupancy_routing": args.outer_uv_occupancy_routing,
         "outer_uv_component_routing": args.outer_uv_component_routing,
         "outer_uv_component_seed_threshold": (
