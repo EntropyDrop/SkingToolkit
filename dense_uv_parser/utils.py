@@ -5701,7 +5701,7 @@ def _select_exact_mode_candidates(
     combined_key = target_uv.long() * color_count + color_code
     unique_keys, inverse = torch.unique(combined_key, sorted=False, return_inverse=True)
     votes = scores.new_zeros(unique_keys.shape[0])
-    votes.index_add_(0, inverse, torch.ones_like(scores))
+    votes.index_add_(0, inverse, scores.float().clamp_min(0.01))
     tie_break_votes = None
     if color_tie_break is not None:
         tie_break_votes = scores.new_zeros(unique_keys.shape[0])
