@@ -4603,11 +4603,6 @@ def main():
         raise ValueError(
             "Primary and privileged renderer views must be unique."
         )
-    if privileged_views and args.predict_outer_uv_occupancy:
-        raise ValueError(
-            "The experimental occupancy head does not support training-only "
-            "view groups. Keep PREDICT_OUTER_UV_OCCUPANCY=false."
-        )
 
     dataset = SkinUVDataset(
         data_dir=args.data_dir,
