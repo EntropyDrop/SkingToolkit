@@ -46,6 +46,7 @@ from SkingToolkit.dense_uv_parser.utils import (  # noqa: E402
     SPLAT_COLOR_AGGREGATIONS,
     attach_projected_head_outer_structure,
     attach_projected_outer_uv_occupancy,
+    build_static_surface_routing,
     combine_layer_face,
     build_geometry_grid_debug,
     fill_geometry_grid_debug,
