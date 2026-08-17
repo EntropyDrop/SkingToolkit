@@ -357,11 +357,13 @@ class UVMultiViewSpatialFusion(nn.Module):
             total_groups, 1, self.uv_size, self.uv_size
         )
 
-        uv_in = torch.cat([uv_features, uv_support, uv_coverage], dim=1)
-        uv_out = self.uv_net(uv_in)
-        occupancy_logits = self.occupancy_head(uv_out)
+        uv_in = torch.cat([uv_features, uv_support, uv_coverage], dim=1).to(
+            dtype=dtype
+        )
+        uv_out = self.uv_net(uv_in).to(dtype=dtype)
+        occupancy_logits = self.occupancy_head(uv_out).to(dtype=dtype)
 
-        uv_context = self.from_uv_proj(uv_out).reshape(
+        uv_context = self.from_uv_proj(uv_out).to(dtype=dtype).reshape(
             total_groups, channels, uv_count
         )
 
@@ -387,10 +389,12 @@ class UVMultiViewSpatialFusion(nn.Module):
                     uv_s = flat_uv[s][mask_s]
                     gathered = group_uv_context.gather(
                         2, uv_s.view(1, 1, -1).expand(skins, channels, -1)
-                    )
+                    ).to(dtype=dtype)
                     screen_context[:, :, mask_s] = gathered
 
-                fused_v = self.fusion(torch.cat([view_x, screen_context], dim=1))
+                fused_v = self.fusion(
+                    torch.cat([view_x, screen_context], dim=1).to(dtype=dtype)
+                ).to(dtype=dtype)
                 fused_pairs[group_indices, v] = fused_v
 
         fused_x = fused_pairs.reshape(
