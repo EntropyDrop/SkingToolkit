@@ -276,93 +276,127 @@ class UVMultiViewSpatialFusion(nn.Module):
             self.fusion.bias.zero_()
 
     def forward(self, x, view_ids, static_mappings=None):
-        if x.shape[0] % self.view_classes != 0:
-            raise ValueError(
-                "UV multi-view spatial fusion requires complete view groups."
-            )
-        batch = x.shape[0] // self.view_classes
-        channels, height, width = x.shape[1:]
-
         if static_mappings is None or len(static_mappings) < self.view_classes:
             return x, None
 
+        view_count = len(static_mappings)
+        if x.shape[0] % view_count != 0 or view_count % self.view_classes != 0:
+            return x, None
+
+        skins = x.shape[0] // view_count
+        groups_per_skin = view_count // self.view_classes
+        total_groups = skins * groups_per_skin
+        channels, height, width = x.shape[1:]
+        dtype = x.dtype
+        device = x.device
+
+        x_grouped = x.reshape(
+            skins, groups_per_skin, self.view_classes, channels, height, width
+        )
+        x_pairs = x_grouped.reshape(
+            total_groups, self.view_classes, channels, height, width
+        )
+
+        proj_x = self.to_uv_proj(
+            x_pairs.reshape(total_groups * self.view_classes, channels, height, width)
+        )
+        proj_x_pairs = proj_x.reshape(
+            total_groups, self.view_classes, self.hidden_channels, height, width
+        )
+
         uv_count = self.uv_size * self.uv_size
-        uv_accum = x.new_zeros((batch, self.hidden_channels, uv_count))
-        weight_accum = x.new_zeros((batch, 1, uv_count))
+        uv_accum = x.new_zeros((total_groups, self.hidden_channels, uv_count))
+        weight_accum = x.new_zeros((total_groups, 1, uv_count))
 
-        proj_x = self.to_uv_proj(x)
-
-        for v in range(self.view_classes):
-            view_features = proj_x[v::self.view_classes]
-            mapping = static_mappings[v]
-            masks = mapping["masks"]
-            flat_uv = mapping["flat_uv"]
-            center_score = mapping.get(
-                "texel_center_score",
-                torch.ones_like(masks, dtype=torch.float32),
+        for g in range(groups_per_skin):
+            group_indices = torch.arange(
+                g, total_groups, groups_per_skin, device=device
             )
-            for s in range(min(2, masks.shape[0])):
-                mask_s = masks[s]
-                if not mask_s.any():
-                    continue
-                uv_s = flat_uv[s][mask_s]
-                w_s = (mask_s.float() * center_score[s].float())[mask_s]
-                feat_s = view_features[:, :, mask_s]
-                weighted_feat_s = feat_s * w_s.view(1, 1, -1)
+            for v in range(self.view_classes):
+                mapping_idx = g * self.view_classes + v
+                mapping = static_mappings[mapping_idx]
+                masks = mapping["masks"]
+                flat_uv = mapping["flat_uv"]
+                center_score = mapping.get(
+                    "texel_center_score",
+                    torch.ones_like(masks, dtype=torch.float32),
+                )
+                feat_v = proj_x_pairs[group_indices, v]
 
-                uv_accum.scatter_add_(
-                    2,
-                    uv_s.view(1, 1, -1).expand(batch, self.hidden_channels, -1),
-                    weighted_feat_s,
-                )
-                weight_accum.scatter_add_(
-                    2,
-                    uv_s.view(1, 1, -1).expand(batch, 1, -1),
-                    w_s.view(1, 1, -1).expand(batch, 1, -1),
-                )
+                for s in range(min(2, masks.shape[0])):
+                    mask_s = masks[s]
+                    if not mask_s.any():
+                        continue
+                    uv_s = flat_uv[s][mask_s]
+                    w_s = (mask_s.float() * center_score[s].float())[mask_s].to(
+                        dtype=dtype
+                    )
+                    feat_s = feat_v[:, :, mask_s]
+                    weighted_feat_s = (feat_s * w_s.view(1, 1, -1)).to(dtype=dtype)
+
+                    uv_accum[group_indices] = uv_accum[group_indices].scatter_add(
+                        2,
+                        uv_s.view(1, 1, -1).expand(skins, self.hidden_channels, -1),
+                        weighted_feat_s,
+                    )
+                    weight_accum[group_indices] = weight_accum[group_indices].scatter_add(
+                        2,
+                        uv_s.view(1, 1, -1).expand(skins, 1, -1),
+                        w_s.view(1, 1, -1).expand(skins, 1, -1),
+                    )
 
         uv_features = (uv_accum / weight_accum.clamp_min(1e-6)).reshape(
-            batch, self.hidden_channels, self.uv_size, self.uv_size
-        )
-        uv_support = (weight_accum > 1e-6).float().reshape(
-            batch, 1, self.uv_size, self.uv_size
+            total_groups, self.hidden_channels, self.uv_size, self.uv_size
+        ).to(dtype=dtype)
+        uv_support = (weight_accum > 1e-6).to(dtype=dtype).reshape(
+            total_groups, 1, self.uv_size, self.uv_size
         )
         uv_coverage = (
             weight_accum / float(self.view_classes)
-        ).clamp(0.0, 1.0).reshape(batch, 1, self.uv_size, self.uv_size)
+        ).clamp(0.0, 1.0).to(dtype=dtype).reshape(
+            total_groups, 1, self.uv_size, self.uv_size
+        )
 
         uv_in = torch.cat([uv_features, uv_support, uv_coverage], dim=1)
         uv_out = self.uv_net(uv_in)
         occupancy_logits = self.occupancy_head(uv_out)
 
         uv_context = self.from_uv_proj(uv_out).reshape(
-            batch, channels, uv_count
+            total_groups, channels, uv_count
         )
 
-        fused_views = []
-        for v in range(self.view_classes):
-            view_x = x[v::self.view_classes]
-            mapping = static_mappings[v]
-            masks = mapping["masks"]
-            flat_uv = mapping["flat_uv"]
-            screen_context = view_x.new_zeros(view_x.shape)
+        fused_pairs = torch.empty_like(x_pairs)
+        for g in range(groups_per_skin):
+            group_indices = torch.arange(
+                g, total_groups, groups_per_skin, device=device
+            )
+            group_uv_context = uv_context[group_indices]
 
-            for s in range(min(2, masks.shape[0])):
-                mask_s = masks[s]
-                if not mask_s.any():
-                    continue
-                uv_s = flat_uv[s][mask_s]
-                gathered = uv_context.gather(
-                    2, uv_s.view(1, 1, -1).expand(batch, channels, -1)
-                )
-                screen_context[:, :, mask_s] = gathered
+            for v in range(self.view_classes):
+                mapping_idx = g * self.view_classes + v
+                mapping = static_mappings[mapping_idx]
+                masks = mapping["masks"]
+                flat_uv = mapping["flat_uv"]
+                view_x = x_pairs[group_indices, v]
+                screen_context = view_x.new_zeros(view_x.shape)
 
-            fused_v = self.fusion(torch.cat([view_x, screen_context], dim=1))
-            fused_views.append(fused_v)
+                for s in range(min(2, masks.shape[0])):
+                    mask_s = masks[s]
+                    if not mask_s.any():
+                        continue
+                    uv_s = flat_uv[s][mask_s]
+                    gathered = group_uv_context.gather(
+                        2, uv_s.view(1, 1, -1).expand(skins, channels, -1)
+                    )
+                    screen_context[:, :, mask_s] = gathered
 
-        fused_all = torch.empty_like(x)
-        for v in range(self.view_classes):
-            fused_all[v::self.view_classes] = fused_views[v]
+                fused_v = self.fusion(torch.cat([view_x, screen_context], dim=1))
+                fused_pairs[group_indices, v] = fused_v
+
+        fused_x = fused_pairs.reshape(
+            skins, groups_per_skin, self.view_classes, channels, height, width
+        )
+        fused_all = fused_x.reshape(x.shape)
 
         return fused_all, occupancy_logits
 
