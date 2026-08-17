@@ -1032,6 +1032,10 @@ def outer_uv_occupancy_losses(
     topology_max_steps=64,
 ):
     """Train projected outer occupancy with component and topology structure."""
+    if target_uv.shape[0] > 0 and logits.shape[0] % target_uv.shape[0] == 0:
+        repeats = logits.shape[0] // target_uv.shape[0]
+        if repeats > 1:
+            target_uv = target_uv.repeat_interleave(repeats, dim=0)
     if logits.shape != (target_uv.shape[0], 1, UV_SIZE, UV_SIZE):
         raise ValueError(
             "Expected grouped outer occupancy logits shaped "
@@ -1953,6 +1957,12 @@ def route_occupancy_agreement_loss(
     target_outer = (
         target_uv[:, 3].float() > 0.5
     ).flatten(1).to(device=occupancy.device)
+    if target_outer.shape[0] > 0 and occupancy.shape[0] % target_outer.shape[0] == 0:
+        repeats = occupancy.shape[0] // target_outer.shape[0]
+        if repeats > 1:
+            target_outer = target_outer.repeat_interleave(repeats, dim=0)
+            visible_route_outer = visible_route_outer.repeat_interleave(repeats, dim=0)
+            support = support.repeat_interleave(repeats, dim=0)
     _, outer_mask = build_uv_masks()
     valid_outer = outer_mask[0].to(
         device=occupancy.device,
