@@ -220,52 +220,151 @@ class SpatialSemanticFusion(nn.Module):
         )
 
 
-class CrossViewSpatialFusion(nn.Module):
-    """Exchange per-pixel features between fixed front/back views.
+class UVMultiViewSpatialFusion(nn.Module):
+    """3D Geometry-aware UV cross-view fusion between front and back views.
 
-    Each view's dense feature map is augmented with the mean feature map of
-    the other views in the same group.  This gives the per-pixel route head
-    direct access to both front and back evidence when deciding whether a
-    pixel is inner skin or an outer accessory.
+    Instead of mixing 2D screen coordinates, this module projects intermediate
+    dense features from all views (Front, Back) into the shared 64x64 Minecraft
+    UV atlas using the renderer's static UV mappings.
+
+    In 64x64 UV space, multi-view features are combined at their physical surfaces
+    (Head, Torso, Arms, Legs). A 2D UV residual block reasons over whole-character
+    outer-layer accessories (e.g. hats, 3D hair, jackets) across all 360 degrees.
+
+    The fused UV representation predicts the 64x64 outer occupancy logits and is
+    unprojected back to each view's screen coordinates, providing true 3D
+    cross-view context to the 2D route head.
     """
 
-    def __init__(self, channels, view_classes):
+    def __init__(self, channels, view_classes, uv_size=64, hidden_channels=64):
         super().__init__()
         if channels < 1 or view_classes < 2:
             raise ValueError(
-                "Cross-view spatial fusion requires channels >= 1 and "
+                "UV multi-view spatial fusion requires channels >= 1 and "
                 "view_classes >= 2."
             )
         self.channels = int(channels)
         self.view_classes = int(view_classes)
+        self.uv_size = int(uv_size)
+        self.hidden_channels = int(hidden_channels)
+
+        self.to_uv_proj = nn.Conv2d(channels, hidden_channels, kernel_size=1)
+        self.uv_net = nn.Sequential(
+            nn.Conv2d(hidden_channels + 2, hidden_channels, kernel_size=3, padding=1),
+            nn.GroupNorm(norm_groups(hidden_channels), hidden_channels),
+            nn.SiLU(inplace=True),
+            nn.Conv2d(hidden_channels, hidden_channels, kernel_size=3, padding=1),
+            nn.GroupNorm(norm_groups(hidden_channels), hidden_channels),
+            nn.SiLU(inplace=True),
+            nn.Conv2d(hidden_channels, hidden_channels, kernel_size=3, padding=1),
+            nn.GroupNorm(norm_groups(hidden_channels), hidden_channels),
+            nn.SiLU(inplace=True),
+        )
+        self.occupancy_head = nn.Conv2d(hidden_channels, 1, kernel_size=1)
+        nn.init.constant_(self.occupancy_head.bias, -1.0)
+
+        self.from_uv_proj = nn.Sequential(
+            nn.Conv2d(hidden_channels, channels, kernel_size=1),
+            nn.GroupNorm(norm_groups(channels), channels),
+            nn.SiLU(inplace=True),
+        )
         self.fusion = nn.Conv2d(channels * 2, channels, kernel_size=1)
-        # Initialize as identity on the per-view path and zero on the cross-view
-        # mean path, so a fresh model starts exactly like the previous parser.
         with torch.no_grad():
             self.fusion.weight.zero_()
             for i in range(self.channels):
                 self.fusion.weight[i, i, 0, 0] = 1.0
             self.fusion.bias.zero_()
 
-    def forward(self, x, view_ids):
+    def forward(self, x, view_ids, static_mappings=None):
         if x.shape[0] % self.view_classes != 0:
             raise ValueError(
-                "Cross-view spatial fusion requires complete view groups."
+                "UV multi-view spatial fusion requires complete view groups."
             )
         batch = x.shape[0] // self.view_classes
         channels, height, width = x.shape[1:]
-        grouped = x.reshape(
-            batch, self.view_classes, channels, height, width
+
+        if static_mappings is None or len(static_mappings) < self.view_classes:
+            return x, None
+
+        uv_count = self.uv_size * self.uv_size
+        uv_accum = x.new_zeros((batch, self.hidden_channels, uv_count))
+        weight_accum = x.new_zeros((batch, 1, uv_count))
+
+        proj_x = self.to_uv_proj(x)
+
+        for v in range(self.view_classes):
+            view_features = proj_x[v::self.view_classes]
+            mapping = static_mappings[v]
+            masks = mapping["masks"]
+            flat_uv = mapping["flat_uv"]
+            center_score = mapping.get(
+                "texel_center_score",
+                torch.ones_like(masks, dtype=torch.float32),
+            )
+            for s in range(min(2, masks.shape[0])):
+                mask_s = masks[s]
+                if not mask_s.any():
+                    continue
+                uv_s = flat_uv[s][mask_s]
+                w_s = (mask_s.float() * center_score[s].float())[mask_s]
+                feat_s = view_features[:, :, mask_s]
+                weighted_feat_s = feat_s * w_s.view(1, 1, -1)
+
+                uv_accum.scatter_add_(
+                    2,
+                    uv_s.view(1, 1, -1).expand(batch, self.hidden_channels, -1),
+                    weighted_feat_s,
+                )
+                weight_accum.scatter_add_(
+                    2,
+                    uv_s.view(1, 1, -1).expand(batch, 1, -1),
+                    w_s.view(1, 1, -1).expand(batch, 1, -1),
+                )
+
+        uv_features = (uv_accum / weight_accum.clamp_min(1e-6)).reshape(
+            batch, self.hidden_channels, self.uv_size, self.uv_size
         )
-        cross = grouped.mean(dim=1, keepdim=True).expand(
-            -1, self.view_classes, -1, -1, -1
+        uv_support = (weight_accum > 1e-6).float().reshape(
+            batch, 1, self.uv_size, self.uv_size
         )
-        fused = self.fusion(
-            torch.cat(
-                [grouped, cross], dim=2
-            ).reshape(batch * self.view_classes, channels * 2, height, width)
+        uv_coverage = (
+            weight_accum / float(self.view_classes)
+        ).clamp(0.0, 1.0).reshape(batch, 1, self.uv_size, self.uv_size)
+
+        uv_in = torch.cat([uv_features, uv_support, uv_coverage], dim=1)
+        uv_out = self.uv_net(uv_in)
+        occupancy_logits = self.occupancy_head(uv_out)
+
+        uv_context = self.from_uv_proj(uv_out).reshape(
+            batch, channels, uv_count
         )
-        return fused
+
+        fused_views = []
+        for v in range(self.view_classes):
+            view_x = x[v::self.view_classes]
+            mapping = static_mappings[v]
+            masks = mapping["masks"]
+            flat_uv = mapping["flat_uv"]
+            screen_context = view_x.new_zeros(view_x.shape)
+
+            for s in range(min(2, masks.shape[0])):
+                mask_s = masks[s]
+                if not mask_s.any():
+                    continue
+                uv_s = flat_uv[s][mask_s]
+                gathered = uv_context.gather(
+                    2, uv_s.view(1, 1, -1).expand(batch, channels, -1)
+                )
+                screen_context[:, :, mask_s] = gathered
+
+            fused_v = self.fusion(torch.cat([view_x, screen_context], dim=1))
+            fused_views.append(fused_v)
+
+        fused_all = torch.empty_like(x)
+        for v in range(self.view_classes):
+            fused_all[v::self.view_classes] = fused_views[v]
+
+        return fused_all, occupancy_logits
 
 
 class TextPromptRouteFusion(nn.Module):
@@ -696,7 +795,7 @@ class DenseUVParserNet(nn.Module):
             nn.SiLU(inplace=True),
         )
         self.cross_view_spatial = (
-            CrossViewSpatialFusion(c, self.view_classes)
+            UVMultiViewSpatialFusion(c, self.view_classes, uv_size=uv_size)
             if self.cross_view_spatial_fusion and self.view_classes > 1
             else None
         )
@@ -954,6 +1053,7 @@ class DenseUVParserNet(nn.Module):
         view_ids=None,
         semantic_features=None,
         semantic_foreground=None,
+        static_mappings=None,
     ):
         source_images = x
         if self.view_classes > 0:
@@ -1042,8 +1142,11 @@ class DenseUVParserNet(nn.Module):
         x = self.up1(x, s1)
         x = self.up0(x, s0)
         x = self.features(x)
+        cross_view_occupancy = None
         if self.cross_view_spatial is not None:
-            x = self.cross_view_spatial(x, view_ids)
+            x, cross_view_occupancy = self.cross_view_spatial(
+                x, view_ids, static_mappings=static_mappings
+            )
         occupancy_feature_source = x
         x = self.feature_dropout(x)
         layer_evidence = self.layer(x)
@@ -1071,6 +1174,8 @@ class DenseUVParserNet(nn.Module):
             "foreground": self.foreground(x),
             "layer": layer_evidence,
         }
+        if cross_view_occupancy is not None:
+            outputs["outer_uv_occupancy_logits"] = cross_view_occupancy
         if text_prompt_route_logits is not None:
             outputs["text_prompt_route_logits"] = text_prompt_route_logits
             outputs["text_prompt_scores"] = text_prompt_scores

@@ -1843,12 +1843,19 @@ def main():
                 "foreground_filter="
                 + json.dumps(foreground_log, sort_keys=True)
             )
-        # Background removal affects parser features, while routing/splatting
-        # below still reads exact foreground colors from the original input.
+        static_mappings = (
+            [
+                build_static_surface_routing(renderer, view, device)
+                for view in views
+            ]
+            if renderer is not None
+            else None
+        )
         outputs = parser_model(
             parser_rendered,
             view_ids=view_ids,
             semantic_foreground=observed_foreground,
+            static_mappings=static_mappings,
         )
         if "text_prompt_scores" in outputs:
             prompts = getattr(parser_model, "semantic_text_prompts", ())

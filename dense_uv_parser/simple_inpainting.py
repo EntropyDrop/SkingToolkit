@@ -283,9 +283,12 @@ def _nearest_defined_source(
     face,
     local_v,
     positions,
+    layer=None,
     prefer_same_row=False,
 ):
     source_mask = defined & valid & (part == part[target_index])
+    if layer is not None:
+        source_mask = source_mask & (layer == layer[target_index])
     used_same_row = False
     if prefer_same_row:
         same_row_mask = (
@@ -433,7 +436,7 @@ def simple_symmetry_nearest_inpaint(
             if bool(defined[target_index]):
                 continue
             mirror_index = int(mirrored[target_index])
-            if bool(defined[mirror_index]):
+            if bool(defined[mirror_index]) and bool(layer[mirror_index] == 0):
                 result[batch_index, target_index] = result[
                     batch_index, mirror_index
                 ]
@@ -449,6 +452,7 @@ def simple_symmetry_nearest_inpaint(
                 face,
                 local_v,
                 positions,
+                layer=layer,
                 prefer_same_row=int(topology_face[target_index]) in (2, 3),
             )
             if source_index is None:
@@ -536,6 +540,9 @@ def simple_symmetry_nearest_inpaint(
             }
         )
 
+    # Ensure undefined outer texels are strictly transparent with zero RGB
+    outer_unobserved = valid & (layer == 1) & ~defined
+    result[:, outer_unobserved] = 0.0
     result[:, ~valid] = 0.0
     result = result.transpose(1, 2).reshape_as(uv).clamp(0.0, 1.0)
     if squeeze_batch:

@@ -1529,7 +1529,14 @@ def _rescue_head_outer_topology_pixels(
                 | semantic_only_candidate
             )
         )
-        source_pixel = outer_valid & color_valid[item_index]
+        source_pixel = (
+            outer_valid
+            & color_valid[item_index]
+            & (
+                (raw_role[item_index] == ROUTE_OUTER_PRIMARY)
+                | (raw_outer_score[item_index] >= float(relaxed_route_threshold))
+            )
+        )
         candidate_pixels[item_index] = source_pixel
         candidate_flat_uv[item_index] = outer_flat
         candidate_part[item_index] = static["part"][ROUTE_OUTER_PRIMARY]

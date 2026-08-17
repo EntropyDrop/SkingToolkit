@@ -2478,9 +2478,18 @@ def run_epoch(
                     semantic_kwargs["semantic_features"] = semantic_features
                 elif getattr(args, "semantic_backbone", "none") != "none":
                     semantic_kwargs["semantic_foreground"] = targets["foreground"]
+                static_mappings = (
+                    [
+                        build_static_surface_routing(renderer, view, device)
+                        for view in views
+                    ]
+                    if renderer is not None
+                    else None
+                )
                 outputs = model(
                     rendered,
                     view_ids=view_ids,
+                    static_mappings=static_mappings,
                     **semantic_kwargs,
                 )
                 outputs = attach_projected_outer_uv_occupancy(
@@ -3105,9 +3114,18 @@ def save_preview(
             semantic_kwargs["semantic_features"] = semantic_features
         elif getattr(args, "semantic_backbone", "none") != "none":
             semantic_kwargs["semantic_foreground"] = targets["foreground"]
+        static_mappings = (
+            [
+                build_static_surface_routing(renderer, view, device)
+                for view in views
+            ]
+            if renderer is not None
+            else None
+        )
         outputs = model(
             rendered,
             view_ids=view_ids,
+            static_mappings=static_mappings,
             **semantic_kwargs,
         )
         outputs = attach_projected_outer_uv_occupancy(
