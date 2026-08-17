@@ -1,550 +1,210 @@
-"""Deterministic, topology-aware repair of missing inner-layer texels."""
+"""Deterministic, minimal inpainting of missing inner-layer Minecraft texels.
 
+Only inner-layer blind spots (e.g. armpits, between legs, bottom of head) are
+repaired using body symmetry and same-part nearest neighbors.
+Outer-layer texels are NEVER filled or expanded: unobserved outer texels remain
+100% transparent (alpha = 0.0, RGB = 0.0).
+"""
+
+from functools import lru_cache
+from typing import Dict, Tuple
 import torch
 
-from SkingToolkit.dense_uv_parser.uv_layout import UV_SIZE
-from SkingToolkit.dense_uv_parser.uv_topology import (
-    build_head_outer_face_graph,
-    build_head_outer_face_indices,
-    build_simple_uv_topology,
+from SkingToolkit.dense_uv_parser.uv_layout import (
+    FACE_COUNT,
+    PART_COUNT,
+    UV_SIZE,
+    finalize_minecraft_alpha,
+    minecraft_layer_rects,
 )
 
 
-def _complete_head_outer_structure(
-    pixels,
-    defined,
-    valid,
-    layer,
-    part,
-    local_v,
-    positions,
-    mirrored,
-    probability,
-    threshold=0.65,
-    min_component_seeds=2,
-    symmetry_probability=None,
-    symmetry_threshold=0.80,
-    symmetry_candidate_threshold=0.20,
-    closed_ring_probability=None,
-    closed_ring_threshold=0.70,
-    open_top_probability=None,
-    open_top_threshold=0.70,
-    open_top_max_gap=3,
-):
-    """Fill only model-backed head-outer texels anchored to observations."""
-    head_indices = build_head_outer_face_indices().to(pixels.device)
-    edge_index = build_head_outer_face_graph().to(pixels.device)
-    known_nodes = defined.index_select(0, head_indices)
-    probability_nodes = probability.reshape(-1).index_select(0, head_indices)
-    flat_to_node = torch.full(
-        (UV_SIZE * UV_SIZE,), -1, dtype=torch.long, device=pixels.device
-    )
-    flat_to_node[head_indices] = torch.arange(
-        head_indices.numel(), device=pixels.device
-    )
-    mirrored_nodes = flat_to_node[mirrored.index_select(0, head_indices)]
-    safe_mirrored_nodes = mirrored_nodes.clamp_min(0)
-    mirrored_known = (
-        (mirrored_nodes >= 0)
-        & known_nodes.index_select(0, safe_mirrored_nodes)
-    )
-    use_symmetric_completion = (
-        symmetry_probability is not None
-        and float(symmetry_probability) >= float(symmetry_threshold)
-        and int(known_nodes.sum().item()) >= int(min_component_seeds)
-    )
-    symmetric_candidates = (
-        mirrored_known
-        & (probability_nodes >= float(symmetry_candidate_threshold))
-        if use_symmetric_completion
-        else torch.zeros_like(known_nodes)
-    )
-    candidates = probability_nodes >= float(threshold)
-    candidates = candidates | symmetric_candidates
-    active = candidates | known_nodes
-    node_count = head_indices.numel()
-    labels = torch.where(
-        active,
-        torch.arange(node_count, device=pixels.device),
-        torch.full((node_count,), node_count, device=pixels.device),
-    )
-    source, destination = edge_index
-    for _ in range(64):
-        propagated = torch.full_like(labels, node_count)
-        propagated.scatter_reduce_(
-            0,
-            destination,
-            labels[source],
-            reduce="amin",
-            include_self=False,
-        )
-        updated = torch.where(active, torch.minimum(labels, propagated), labels)
-        if torch.equal(updated, labels):
-            break
-        labels = updated
-    seed_count = torch.zeros(node_count + 1, dtype=torch.long, device=pixels.device)
-    seed_count.scatter_add_(
-        0,
-        labels[known_nodes],
-        torch.ones_like(labels[known_nodes]),
-    )
-    accepted = (
-        candidates
-        & (seed_count[labels.clamp_max(node_count)] >= int(min_component_seeds))
-    )
-    # A confidently symmetric accessory may contain isolated crown tips or an
-    # unseen hat-brim face. They cannot satisfy the ordinary anchored-component
-    # rule, but a directly observed mirrored texel supplies both a geometric
-    # anchor and an exact color source.
-    accepted = accepted | symmetric_candidates
-    symmetry_filled = 0
-    topology_filled = 0
-    for node_index in probability_nodes.argsort(descending=True).tolist():
-        if not bool(accepted[node_index]) or bool(known_nodes[node_index]):
-            continue
-        target_index = int(head_indices[node_index])
-        mirror_node = int(mirrored_nodes[node_index])
-        if mirror_node >= 0 and bool(known_nodes[mirror_node]):
-            source_index = int(head_indices[mirror_node])
-            pixels[target_index] = pixels[source_index]
-            defined[target_index] = True
-            known_nodes[node_index] = True
-            symmetry_filled += 1
-            continue
+@lru_cache(maxsize=1)
+def build_basic_minecraft_metadata(device=None):
+    """Build atlas metadata tensors directly from Minecraft cuboid rectangles."""
+    valid = torch.zeros(UV_SIZE * UV_SIZE, dtype=torch.bool)
+    layer = torch.zeros(UV_SIZE * UV_SIZE, dtype=torch.long)
+    part = torch.full((UV_SIZE * UV_SIZE,), -1, dtype=torch.long)
+    face = torch.full((UV_SIZE * UV_SIZE,), -1, dtype=torch.long)
+    grid_x = torch.zeros(UV_SIZE * UV_SIZE, dtype=torch.long)
+    grid_y = torch.zeros(UV_SIZE * UV_SIZE, dtype=torch.long)
+    mirrored_texel = torch.full((UV_SIZE * UV_SIZE,), -1, dtype=torch.long)
 
-        same_component = (
-            known_nodes
-            & (labels == labels[node_index])
-        )
-        source_nodes = same_component.nonzero(as_tuple=False).flatten()
-        if source_nodes.numel() == 0:
-            continue
-        target_face = node_index // 64
-        if target_face < 4:
-            same_row = torch.isclose(
-                local_v.index_select(0, head_indices[source_nodes]),
-                local_v[target_index],
-                rtol=0.0,
-                atol=1e-6,
-            )
-            if same_row.any():
-                source_nodes = source_nodes[same_row]
-        source_indices = head_indices[source_nodes]
-        distance = (
-            positions.index_select(0, source_indices) - positions[target_index]
-        ).square().sum(dim=1)
-        source_index = int(source_indices[distance.argmin()])
-        pixels[target_index] = pixels[source_index]
-        defined[target_index] = True
-        known_nodes[node_index] = True
-        topology_filled += 1
+    # Face layout: 0:Front, 1:Back, 2:Right, 3:Left, 4:Bottom, 5:Top
+    # Symmetric face mapping:
+    # Front(0) <-> Front(0) mirrored horizontally
+    # Back(1) <-> Back(1) mirrored horizontally
+    # Right(2) <-> Left(3)
+    # Bottom(4) <-> Bottom(4) mirrored horizontally
+    # Top(5) <-> Top(5) mirrored horizontally
+    face_mirror_map = {0: 0, 1: 1, 2: 3, 3: 2, 4: 4, 5: 5}
 
-    closed_ring_filled = 0
-    use_closed_ring = (
-        closed_ring_probability is not None
-        and float(closed_ring_probability) >= float(closed_ring_threshold)
-    )
-    if use_closed_ring:
-        # Side nodes are face-major 4x8x8. A genuine brim may be invisible on
-        # one face because its colour exactly matches the base layer there.
-        # Close only rows already anchored on three physical faces, and only
-        # on a missing/near-empty fourth face. Column voting prevents a single
-        # stray routed texel from growing into a full band.
-        for row in range(8):
-            side_known = known_nodes[: 4 * 64].reshape(4, 8, 8)
-            face_counts = side_known[:, row].sum(dim=1)
-            present_faces = face_counts >= 2
-            if int(present_faces.sum().item()) < 3:
-                continue
-            if int(face_counts.sum().item()) < 8:
-                continue
-            column_votes = side_known[present_faces, row].sum(dim=0)
-            voted_columns = column_votes >= 2
-            if not voted_columns.any():
-                continue
-            source_nodes = (
-                side_known[:, row]
-                & present_faces.unsqueeze(1)
-            ).nonzero(as_tuple=False)
-            source_nodes = (
-                source_nodes[:, 0] * 64
-                + row * 8
-                + source_nodes[:, 1]
-            )
-            source_indices = head_indices[source_nodes]
-            for face_index in (face_counts <= 1).nonzero(
-                as_tuple=False
-            ).flatten().tolist():
-                for column in voted_columns.nonzero(
-                    as_tuple=False
-                ).flatten().tolist():
-                    node_index = face_index * 64 + row * 8 + column
-                    if bool(known_nodes[node_index]):
-                        continue
-                    target_index = int(head_indices[node_index])
-                    distance = (
-                        positions.index_select(0, source_indices)
-                        - positions[target_index]
-                    ).square().sum(dim=1)
-                    source_index = int(source_indices[distance.argmin()])
-                    pixels[target_index] = pixels[source_index]
-                    defined[target_index] = True
-                    known_nodes[node_index] = True
-                    closed_ring_filled += 1
+    part_face_rects = {}
+    for rect_idx, (ix, iy, w, h, dx, dy) in enumerate(minecraft_layer_rects()):
+        p = rect_idx // FACE_COUNT
+        f = rect_idx % FACE_COUNT
 
-    open_top_filled = 0
-    use_open_top = (
-        open_top_probability is not None
-        and float(open_top_probability) >= float(open_top_threshold)
-    )
-    if use_open_top:
-        top_face_offset = 5 * 64
-        perimeter_nodes = []
-        perimeter_nodes.extend(top_face_offset + column for column in range(8))
-        perimeter_nodes.extend(
-            top_face_offset + row * 8 + 7 for row in range(1, 8)
-        )
-        perimeter_nodes.extend(
-            top_face_offset + 7 * 8 + column
-            for column in range(6, -1, -1)
-        )
-        perimeter_nodes.extend(
-            top_face_offset + row * 8 for row in range(6, 0, -1)
-        )
-        perimeter_nodes = torch.tensor(
-            perimeter_nodes, dtype=torch.long, device=pixels.device
-        )
-        perimeter_known = known_nodes.index_select(0, perimeter_nodes)
-        if int(perimeter_known.sum().item()) >= 6:
-            # First use exact left/right correspondence on the top face.
-            for node_index in perimeter_nodes.tolist():
-                if bool(known_nodes[node_index]):
-                    continue
-                mirror_node = int(mirrored_nodes[node_index])
-                if mirror_node < 0 or not bool(known_nodes[mirror_node]):
-                    continue
-                target_index = int(head_indices[node_index])
-                source_index = int(head_indices[mirror_node])
-                pixels[target_index] = pixels[source_index]
-                defined[target_index] = True
-                known_nodes[node_index] = True
-                open_top_filled += 1
+        # Inner Layer (base)
+        for row in range(h):
+            for col in range(w):
+                x = ix + col
+                y = iy + row
+                flat = y * UV_SIZE + x
+                valid[flat] = True
+                layer[flat] = 0
+                part[flat] = p
+                face[flat] = f
+                grid_x[flat] = x
+                grid_y[flat] = y
+                part_face_rects[(p, 0, f, row, col)] = flat
 
-            # Close only short holes bounded on both sides of the physical top
-            # perimeter. This repairs a broken crown rim without turning a few
-            # unrelated top pixels into a solid 8x8 cap.
-            perimeter_count = int(perimeter_nodes.numel())
-            fill_nodes = []
-            for start in range(perimeter_count):
-                if not bool(known_nodes[int(perimeter_nodes[start])]):
-                    continue
-                gap = []
-                for offset in range(1, int(open_top_max_gap) + 2):
-                    candidate = (start + offset) % perimeter_count
-                    candidate_node = int(perimeter_nodes[candidate])
-                    if bool(known_nodes[candidate_node]):
-                        if gap:
-                            fill_nodes.extend(gap)
-                        break
-                    gap.append(candidate_node)
-            for node_index in dict.fromkeys(fill_nodes):
-                if bool(known_nodes[node_index]):
-                    continue
-                source_nodes = perimeter_nodes[
-                    known_nodes.index_select(0, perimeter_nodes)
-                ]
-                if source_nodes.numel() == 0:
-                    break
-                target_index = int(head_indices[node_index])
-                source_indices = head_indices[source_nodes]
-                distance = (
-                    positions.index_select(0, source_indices)
-                    - positions[target_index]
-                ).square().sum(dim=1)
-                source_index = int(source_indices[distance.argmin()])
-                pixels[target_index] = pixels[source_index]
-                defined[target_index] = True
-                known_nodes[node_index] = True
-                open_top_filled += 1
+        # Outer Layer (decor)
+        ox = ix + dx
+        oy = iy + dy
+        for row in range(h):
+            for col in range(w):
+                x = ox + col
+                y = oy + row
+                flat = y * UV_SIZE + x
+                valid[flat] = True
+                layer[flat] = 1
+                part[flat] = p
+                face[flat] = f
+                grid_x[flat] = x
+                grid_y[flat] = y
+                part_face_rects[(p, 1, f, row, col)] = flat
 
-    return (
-        symmetry_filled,
-        topology_filled,
-        closed_ring_filled,
-        open_top_filled,
-    )
+    # Build exact bilateral mirrored_texel pointers within each part
+    for rect_idx, (ix, iy, w, h, dx, dy) in enumerate(minecraft_layer_rects()):
+        p = rect_idx // FACE_COUNT
+        f = rect_idx % FACE_COUNT
+        m_face = face_mirror_map[f]
 
+        for lay in (0, 1):
+            for row in range(h):
+                for col in range(w):
+                    src_flat = part_face_rects.get((p, lay, f, row, col))
+                    # Horizontal mirroring across the face
+                    m_col = (w - 1) - col
+                    m_flat = part_face_rects.get((p, lay, m_face, row, m_col))
+                    if src_flat is not None and m_flat is not None:
+                        mirrored_texel[src_flat] = m_flat
 
-def _nearest_defined_source(
-    target_index,
-    defined,
-    valid,
-    part,
-    face,
-    local_v,
-    positions,
-    layer=None,
-    prefer_same_row=False,
-):
-    source_mask = defined & valid & (part == part[target_index])
-    if layer is not None:
-        source_mask = source_mask & (layer == layer[target_index])
-    used_same_row = False
-    if prefer_same_row:
-        same_row_mask = (
-            source_mask
-            & (face < 4)
-            & torch.isclose(
-                local_v,
-                local_v[target_index],
-                rtol=0.0,
-                atol=1e-6,
-            )
-        )
-        source_indices = same_row_mask.nonzero(as_tuple=False).flatten()
-        if source_indices.numel() > 0:
-            used_same_row = True
-        else:
-            source_indices = source_mask.nonzero(as_tuple=False).flatten()
-    else:
-        source_indices = source_mask.nonzero(as_tuple=False).flatten()
-    if source_indices.numel() == 0:
-        return None, False
-    squared_distance = (
-        positions[source_indices] - positions[target_index]
-    ).square().sum(dim=1)
-    return source_indices[squared_distance.argmin()], used_same_row
+    metadata = {
+        "valid": valid,
+        "layer": layer,
+        "part": part,
+        "face": face,
+        "grid_x": grid_x,
+        "grid_y": grid_y,
+        "mirrored_texel": mirrored_texel,
+    }
+    if device is not None:
+        metadata = {k: v.to(device) for k, v in metadata.items()}
+    return metadata
 
 
 def simple_symmetry_nearest_inpaint(
-    uv,
-    alpha_threshold=0.5,
-    head_outer_probability=None,
-    head_outer_threshold=0.65,
-    head_outer_min_component_seeds=2,
-    head_outer_symmetry_probability=None,
-    head_outer_symmetry_threshold=0.80,
-    head_outer_symmetry_candidate_threshold=0.20,
-    head_outer_closed_ring_probability=None,
-    head_outer_closed_ring_threshold=0.70,
-    head_outer_open_top_probability=None,
-    head_outer_open_top_threshold=0.70,
-    head_outer_open_top_max_gap=3,
-):
-    """Fill unknown inner texels while preserving every outer-layer texel."""
-    squeeze_batch = uv.dim() == 3
-    if squeeze_batch:
-        uv = uv.unsqueeze(0)
-    if uv.dim() != 4 or uv.shape[1:] != (4, UV_SIZE, UV_SIZE):
-        raise ValueError(
-            f"Expected 4x{UV_SIZE}x{UV_SIZE} or Bx4x{UV_SIZE}x{UV_SIZE} UV, "
-            f"got {tuple(uv.shape)}."
-        )
-    if not 0.0 <= alpha_threshold <= 1.0:
-        raise ValueError("alpha_threshold must be in [0, 1].")
+    skin_uv: torch.Tensor,
+    alpha_threshold: float = 0.5,
+    **kwargs,
+) -> Tuple[torch.Tensor, Dict[str, int]]:
+    """Clean, deterministic repair of missing inner-layer texels only.
 
-    topology = build_simple_uv_topology()
-    topology_face = topology.face.reshape(-1)
-    device = uv.device
-    valid = topology.valid.reshape(-1).to(device=device)
-    layer = topology.layer.reshape(-1).to(device=device)
-    part = topology.part.reshape(-1).to(device=device)
-    face = topology.face.reshape(-1).to(device=device)
-    local_v = topology.local_uv.reshape(-1, 2)[:, 1].to(
-        device=device,
-        dtype=torch.float32,
-    )
-    mirrored = topology.mirrored_texel.reshape(-1).to(device=device)
-    positions = topology.world_position.reshape(-1, 3).to(
-        device=device,
-        dtype=torch.float32,
-    )
-    result = uv.flatten(2).transpose(1, 2).clone()
-    if head_outer_probability is not None:
-        if head_outer_probability.dim() == 2:
-            head_outer_probability = head_outer_probability.unsqueeze(0)
-        if head_outer_probability.shape != (
-            result.shape[0],
-            UV_SIZE,
-            UV_SIZE,
-        ):
-            raise ValueError(
-                "head_outer_probability must be shaped 64x64 or Bx64x64."
-            )
-        head_outer_probability = head_outer_probability.to(
-            device=device, dtype=torch.float32
-        )
-    stats = []
+    Args:
+        skin_uv: (4, 64, 64) tensor with RGB and Alpha in [0, 1].
+        alpha_threshold: Alpha threshold to consider a texel defined.
+    Returns:
+        repaired: (4, 64, 64) skin tensor with complete inner layer.
+        stats: Dictionary of inpainting operations.
+    """
+    device = skin_uv.device
+    dtype = skin_uv.dtype
+    meta = build_basic_minecraft_metadata(device=device)
 
-    for batch_index in range(result.shape[0]):
-        original_defined = valid & (
-            result[batch_index, :, 3] > float(alpha_threshold)
-        )
-        defined = original_defined.clone()
-        symmetry_filled = 0
-        nearest_filled = 0
-        same_row_nearest_filled = 0
-        head_outer_symmetry_filled = 0
-        head_outer_topology_filled = 0
-        head_outer_closed_ring_filled = 0
-        head_outer_open_top_filled = 0
-        if head_outer_probability is not None:
-            (
-                head_outer_symmetry_filled,
-                head_outer_topology_filled,
-                head_outer_closed_ring_filled,
-                head_outer_open_top_filled,
-            ) = _complete_head_outer_structure(
-                result[batch_index],
-                defined,
-                valid,
-                layer,
-                part,
-                local_v,
-                positions,
-                mirrored,
-                head_outer_probability[batch_index],
-                threshold=head_outer_threshold,
-                min_component_seeds=head_outer_min_component_seeds,
-                symmetry_probability=(
-                    head_outer_symmetry_probability[batch_index]
-                    if torch.is_tensor(head_outer_symmetry_probability)
-                    and head_outer_symmetry_probability.ndim > 0
-                    else head_outer_symmetry_probability
-                ),
-                symmetry_threshold=head_outer_symmetry_threshold,
-                symmetry_candidate_threshold=(
-                    head_outer_symmetry_candidate_threshold
-                ),
-                closed_ring_probability=(
-                    head_outer_closed_ring_probability[batch_index]
-                    if torch.is_tensor(head_outer_closed_ring_probability)
-                    and head_outer_closed_ring_probability.ndim > 0
-                    else head_outer_closed_ring_probability
-                ),
-                closed_ring_threshold=head_outer_closed_ring_threshold,
-                open_top_probability=(
-                    head_outer_open_top_probability[batch_index]
-                    if torch.is_tensor(head_outer_open_top_probability)
-                    and head_outer_open_top_probability.ndim > 0
-                    else head_outer_open_top_probability
-                ),
-                open_top_threshold=head_outer_open_top_threshold,
-                open_top_max_gap=head_outer_open_top_max_gap,
-            )
-        for target_index in topology.inner_fill_order.tolist():
-            if bool(defined[target_index]):
-                continue
-            mirror_index = int(mirrored[target_index])
-            if bool(defined[mirror_index]) and bool(layer[mirror_index] == 0):
-                result[batch_index, target_index] = result[
-                    batch_index, mirror_index
-                ]
-                defined[target_index] = True
-                symmetry_filled += 1
-                continue
+    valid = meta["valid"]
+    layer = meta["layer"]
+    part = meta["part"]
+    grid_x = meta["grid_x"]
+    grid_y = meta["grid_y"]
+    mirrored_texel = meta["mirrored_texel"]
 
-            source_index, used_same_row = _nearest_defined_source(
-                target_index,
-                defined,
-                valid,
-                part,
-                face,
-                local_v,
-                positions,
-                layer=layer,
-                prefer_same_row=int(topology_face[target_index]) in (2, 3),
-            )
-            if source_index is None:
-                continue
-            result[batch_index, target_index] = result[
-                batch_index, source_index
-            ]
-            defined[target_index] = True
-            nearest_filled += 1
-            same_row_nearest_filled += int(used_same_row)
+    flat = skin_uv.clone().reshape(4, UV_SIZE * UV_SIZE)
+    rgb = flat[:3]
+    alpha = flat[3]
 
-        unresolved_inner = valid & (layer == 0) & ~defined
-        stats.append(
-            {
-                "known_texels": int(original_defined.sum().item()),
-                "known_inner_texels": int(
-                    (original_defined & (layer == 0)).sum().item()
-                ),
-                "known_outer_texels": int(
-                    (original_defined & (layer == 1)).sum().item()
-                ),
-                "symmetry_filled_texels": symmetry_filled,
-                "nearest_3d_filled_texels": nearest_filled,
-                "same_row_nearest_filled_texels": same_row_nearest_filled,
-                "head_outer_symmetry_filled_texels": (
-                    head_outer_symmetry_filled
-                ),
-                "head_outer_topology_filled_texels": (
-                    head_outer_topology_filled
-                ),
-                "head_outer_closed_ring_filled_texels": (
-                    head_outer_closed_ring_filled
-                ),
-                "head_outer_open_top_filled_texels": (
-                    head_outer_open_top_filled
-                ),
-                "head_outer_symmetry_probability": (
-                    round(
-                        float(
-                            head_outer_symmetry_probability[batch_index]
-                            if torch.is_tensor(
-                                head_outer_symmetry_probability
-                            )
-                            and head_outer_symmetry_probability.ndim > 0
-                            else head_outer_symmetry_probability
-                        ),
-                        6,
-                    )
-                    if head_outer_symmetry_probability is not None
-                    else None
-                ),
-                "head_outer_closed_ring_probability": (
-                    round(
-                        float(
-                            head_outer_closed_ring_probability[batch_index]
-                            if torch.is_tensor(
-                                head_outer_closed_ring_probability
-                            )
-                            and head_outer_closed_ring_probability.ndim > 0
-                            else head_outer_closed_ring_probability
-                        ),
-                        6,
-                    )
-                    if head_outer_closed_ring_probability is not None
-                    else None
-                ),
-                "head_outer_open_top_probability": (
-                    round(
-                        float(
-                            head_outer_open_top_probability[batch_index]
-                            if torch.is_tensor(head_outer_open_top_probability)
-                            and head_outer_open_top_probability.ndim > 0
-                            else head_outer_open_top_probability
-                        ),
-                        6,
-                    )
-                    if head_outer_open_top_probability is not None
-                    else None
-                ),
-                "preserved_outer_texels": int((valid & (layer == 1)).sum().item()),
-                "fill_order": "front_back_rings_side_edges_top_bottom_rings",
-                "color_sources": "currently_defined_only",
-                "side_nearest_policy": "same_vertical_row_then_same_part_3d",
-                "unresolved_texels": int(unresolved_inner.sum().item()),
-            }
-        )
+    # Inner layer masks
+    is_inner = (layer == 0) & valid
+    is_outer = (layer == 1) & valid
 
-    # Ensure undefined outer texels are strictly transparent with zero RGB
-    outer_unobserved = valid & (layer == 1) & ~defined
-    result[:, outer_unobserved] = 0.0
-    result[:, ~valid] = 0.0
-    result = result.transpose(1, 2).reshape_as(uv).clamp(0.0, 1.0)
-    if squeeze_batch:
-        return result[0], stats[0]
-    return result, stats
+    defined_inner = is_inner & (alpha > alpha_threshold)
+    missing_inner = is_inner & ~defined_inner
+
+    stats = {
+        "missing_inner_texels": int(missing_inner.sum().item()),
+        "symmetry_filled": 0,
+        "nearest_filled": 0,
+    }
+
+    if not missing_inner.any():
+        # Outer layer transparent pixels are zeroed
+        outer_transparent = is_outer & (alpha <= alpha_threshold)
+        flat[:, outer_transparent] = 0.0
+        # Inner layer always 1.0 alpha
+        flat[3, is_inner] = 1.0
+        flat[:, ~valid] = 0.0
+        return flat.reshape(4, UV_SIZE, UV_SIZE), stats
+
+    # 1. Symmetry Fill on Inner Layer
+    missing_indices = missing_inner.nonzero(as_tuple=False).flatten()
+    for idx in missing_indices.tolist():
+        m_idx = int(mirrored_texel[idx].item())
+        if m_idx >= 0 and bool(defined_inner[m_idx]):
+            rgb[:, idx] = rgb[:, m_idx]
+            defined_inner[idx] = True
+            missing_inner[idx] = False
+            stats["symmetry_filled"] += 1
+
+    # 2. Same-Part 2D Nearest Neighbor Fill for Remaining Missing Inner Texels
+    missing_indices = missing_inner.nonzero(as_tuple=False).flatten()
+    for idx in missing_indices.tolist():
+        p = int(part[idx].item())
+        # Candidate defined inner texels on the same body part
+        cand_mask = defined_inner & (part == p)
+        if not cand_mask.any():
+            # Fallback to any defined inner texel on the whole body
+            cand_mask = defined_inner
+        if not cand_mask.any():
+            # Solid default if absolutely nothing is defined
+            rgb[:, idx] = torch.tensor([0.75, 0.60, 0.50], device=device, dtype=dtype)
+            defined_inner[idx] = True
+            missing_inner[idx] = False
+            stats["nearest_filled"] += 1
+            continue
+
+        cand_indices = cand_mask.nonzero(as_tuple=False).flatten()
+        gx = grid_x[idx].float()
+        gy = grid_y[idx].float()
+        cand_x = grid_x[cand_indices].float()
+        cand_y = grid_y[cand_indices].float()
+
+        dist_sq = (cand_x - gx) ** 2 + (cand_y - gy) ** 2
+        best_cand = cand_indices[torch.argmin(dist_sq)]
+
+        rgb[:, idx] = rgb[:, best_cand]
+        defined_inner[idx] = True
+        missing_inner[idx] = False
+        stats["nearest_filled"] += 1
+
+    # 3. Outer Layer Policy:
+    # Defined outer texels keep their predicted colors.
+    # Unobserved / undefined outer texels are 100% transparent.
+    outer_transparent = is_outer & (alpha <= alpha_threshold)
+    flat[:, outer_transparent] = 0.0
+
+    # 4. Final Alpha Enforcement
+    flat[3, is_inner] = 1.0
+    flat[:, ~valid] = 0.0
+
+    repaired = flat.reshape(4, UV_SIZE, UV_SIZE)
+    return repaired, stats
