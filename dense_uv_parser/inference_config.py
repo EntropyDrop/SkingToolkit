@@ -94,6 +94,8 @@ PRODUCTION_SPLAT_DEFAULTS = MappingProxyType(
         "reject_semantic_fallback": True,
         "include_rejected_context": False,
         "include_confidence": False,
+        "hypothesis_render_refine": True,
+        "protect_chin_occlusion": True,
     }
 )
 

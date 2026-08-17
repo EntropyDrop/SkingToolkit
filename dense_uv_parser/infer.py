@@ -27,6 +27,9 @@ from SkingToolkit.dense_uv_parser.semantic import attach_semantic_runtime  # noq
 from SkingToolkit.dense_uv_parser.semantic_targets import (  # noqa: E402
     head_outer_face_values_to_uv,
 )
+from SkingToolkit.dense_uv_parser.differentiable_hypothesis_refiner import (  # noqa: E402
+    refine_uv_by_analysis_by_synthesis,
+)
 from SkingToolkit.dense_uv_parser.runtime import get_device  # noqa: E402
 from SkingToolkit.dense_uv_parser.simple_inpainting import (  # noqa: E402
     simple_symmetry_nearest_inpaint,
@@ -1393,8 +1396,31 @@ def build_arg_parser():
     parser.add_argument("--affine_refine", dest="affine_refine", action="store_true", default=splat_defaults["affine_refine"])
     parser.add_argument("--no_affine_refine", dest="affine_refine", action="store_false")
     parser.add_argument("--affine_refine_translation_px", type=float, default=splat_defaults["affine_refine_translation_px"])
-    parser.add_argument("--affine_refine_scale", type=float, default=splat_defaults["affine_refine_scale"])
     parser.add_argument("--alpha_threshold", type=float, default=preprocessing_defaults["alpha_threshold"])
+    parser.add_argument(
+        "--hypothesis_render_refine",
+        dest="hypothesis_render_refine",
+        action="store_true",
+        default=splat_defaults.get("hypothesis_render_refine", True),
+        help="Arbitrate outer vs inner skin hypotheses via multi-view differentiable re-rendering.",
+    )
+    parser.add_argument(
+        "--no_hypothesis_render_refine",
+        dest="hypothesis_render_refine",
+        action="store_false",
+    )
+    parser.add_argument(
+        "--protect_chin_occlusion",
+        dest="protect_chin_occlusion",
+        action="store_true",
+        default=splat_defaults.get("protect_chin_occlusion", True),
+        help="Veto outer head patches that occlude the face/chin unless confirmed by 3D render loss.",
+    )
+    parser.add_argument(
+        "--no_protect_chin_occlusion",
+        dest="protect_chin_occlusion",
+        action="store_false",
+    )
     parser.add_argument("--device", default="auto")
     return parser
 
@@ -2753,8 +2779,22 @@ def main():
             head_outer_open_top_threshold=(
                 args.head_outer_open_top_completion_threshold
             ),
-            head_outer_open_top_max_gap=args.head_outer_open_top_max_gap,
         )
+        if getattr(args, "hypothesis_render_refine", True):
+            repaired, refiner_stats = refine_uv_by_analysis_by_synthesis(
+                repaired.to(device),
+                rendered.to(device),
+                renderer,
+                views,
+                alpha_threshold=args.alpha_threshold,
+                protect_chin_occlusion=getattr(args, "protect_chin_occlusion", True),
+            )
+            repaired = repaired.detach().cpu()
+            stats["hypothesis_refiner"] = refiner_stats
+            print(
+                "hypothesis_refiner_stats="
+                + json.dumps(refiner_stats, sort_keys=True)
+            )
         print("simple_inpaint_stats=" + json.dumps(stats, sort_keys=True))
         written_paths = set()
         for output_label, output_path in repair_outputs:
