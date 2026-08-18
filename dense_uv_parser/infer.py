@@ -444,6 +444,154 @@ def save_simple_inpaint_uv(conditioning, output_path, alpha_threshold=0.5):
     return repaired, stats
 
 
+def log_and_save_semantic_diagnostics(
+    outputs,
+    views,
+    parser_model,
+    output_json_path=None,
+):
+    """Format, display, and optionally save comprehensive semantic diagnostics."""
+    semantic_report = {}
+
+    # 1. SigLIP2 Text Prompt Semantics
+    if "text_prompt_scores" in outputs:
+        prompts = getattr(parser_model, "semantic_text_prompts", ())
+        prompt_results = []
+        for view, scores in zip(views, outputs["text_prompt_scores"]):
+            scores_f = scores.float().cpu()
+            sorted_indices = torch.argsort(scores_f, descending=True)
+            view_prompts = []
+            for rank, idx in enumerate(sorted_indices[:5]):
+                idx_val = int(idx.item())
+                p_text = (
+                    prompts[idx_val]
+                    if idx_val < len(prompts)
+                    else f"prompt_{idx_val}"
+                )
+                p_score = float(scores_f[idx_val].item())
+                view_prompts.append({
+                    "rank": rank + 1,
+                    "index": idx_val,
+                    "prompt": p_text,
+                    "score": round(p_score, 4),
+                })
+            prompt_results.append({"view": view, "top_prompts": view_prompts})
+        semantic_report["text_prompts"] = prompt_results
+
+    # 2. Part-wise Outer Presence & Coverage
+    part_names = ["head", "body", "left_arm", "right_arm", "left_leg", "right_leg"]
+    if "outer_presence" in outputs:
+        presence = torch.sigmoid(outputs["outer_presence"].float()).cpu()[0]
+        coverage = (
+            torch.sigmoid(outputs["outer_coverage"].float()).cpu()[0]
+            if "outer_coverage" in outputs
+            else None
+        )
+        part_stats = {}
+        for p_idx, p_name in enumerate(part_names):
+            part_stats[p_name] = {
+                "outer_presence_prob": round(float(presence[p_idx].item()), 4),
+                "outer_coverage": (
+                    round(float(coverage[p_idx].item()), 4)
+                    if coverage is not None
+                    else None
+                ),
+            }
+        semantic_report["part_outer_prediction"] = part_stats
+
+    # 3. Head Outer Accessory Classification
+    if "head_outer_accessory_logits" in outputs:
+        acc_probs = torch.sigmoid(outputs["head_outer_accessory_logits"].float()).cpu()[0]
+        symm_prob = (
+            torch.sigmoid(outputs["head_outer_symmetry_logit"].float()).cpu()[0].item()
+            if "head_outer_symmetry_logit" in outputs
+            else None
+        )
+        semantic_report["head_accessory"] = {
+            "closed_ring_prob": (
+                round(float(acc_probs[0].item()), 4)
+                if acc_probs.numel() > 0
+                else None
+            ),
+            "open_top_prob": (
+                round(float(acc_probs[1].item()), 4)
+                if acc_probs.numel() > 1
+                else None
+            ),
+            "symmetry_prob": (
+                round(float(symm_prob), 4)
+                if symm_prob is not None
+                else None
+            ),
+        }
+
+    # 4. 3D Outer UV Occupancy Stats
+    if "outer_uv_occupancy_logits" in outputs:
+        occ_prob = torch.sigmoid(outputs["outer_uv_occupancy_logits"].float()).cpu()[0, 0]
+        active_texels = int((occ_prob > 0.5).sum().item())
+        mean_prob = float(occ_prob.mean().item())
+        semantic_report["outer_uv_occupancy"] = {
+            "predicted_active_texels": active_texels,
+            "mean_occupancy_prob": round(mean_prob, 4),
+        }
+
+    # Human-Readable Console Output
+    print("\n" + "━" * 68)
+    print(" 🧠 [Dense UV Parser 语义诊断报告 / Semantic Diagnostics]")
+    print("━" * 68)
+
+    if "text_prompts" in semantic_report:
+        print(" 📌 视觉-语言语义特征识别 (SigLIP2 Text Prompts):")
+        for v_item in semantic_report["text_prompts"]:
+            print(f"   • 视角 [{v_item['view']}]:")
+            for p in v_item["top_prompts"]:
+                bar_len = max(0, min(15, int((p["score"] + 1.0) * 7.5)))
+                bar = "■" * bar_len + "□" * (15 - bar_len)
+                print(f"     - #{p['rank']} [{bar}] {p['score']:+.4f} : {p['prompt']}")
+
+    if "part_outer_prediction" in semantic_report:
+        print("\n 📌 各部位外层存在性预测 (Part Outer Presence):")
+        for p_name, p_stat in semantic_report["part_outer_prediction"].items():
+            cov_str = (
+                f", 覆盖率: {p_stat['outer_coverage']*100:5.1f}%"
+                if p_stat["outer_coverage"] is not None
+                else ""
+            )
+            prob_pct = p_stat["outer_presence_prob"] * 100
+            flag = "✅ [有外层]" if prob_pct >= 50 else "⬜ [无外层]"
+            print(f"   • {p_name:10s}: {flag} 存在概率: {prob_pct:5.1f}%{cov_str}")
+
+    if "head_accessory" in semantic_report:
+        ha = semantic_report["head_accessory"]
+        print("\n 📌 头部饰品几何属性 (Head Accessory Attributes):")
+        if ha["open_top_prob"] is not None:
+            print(f"   • 镂空顶面/皇冠特征 (Open Top Crown):   {ha['open_top_prob']*100:5.1f}%")
+        if ha["closed_ring_prob"] is not None:
+            print(f"   • 闭合环/发带特征 (Closed Ring Decor): {ha['closed_ring_prob']*100:5.1f}%")
+        if ha["symmetry_prob"] is not None:
+            print(f"   • 头部左右对称置信度 (Symmetry):       {ha['symmetry_prob']*100:5.1f}%")
+
+    if "outer_uv_occupancy" in semantic_report:
+        occ = semantic_report["outer_uv_occupancy"]
+        print(
+            f"\n 📌 3D UV 外层占有率: 预测活跃外层纹素 = {occ['predicted_active_texels']} / 2048 (均值: {occ['mean_occupancy_prob']*100:.1f}%)"
+        )
+
+    print("━" * 68 + "\n")
+
+    if output_json_path is not None:
+        try:
+            output_json_path = Path(output_json_path)
+            output_json_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(output_json_path, "w", encoding="utf-8") as f:
+                json.dump(semantic_report, f, ensure_ascii=False, indent=2)
+            print(f"Saved semantic_output={output_json_path}")
+        except Exception as e:
+            print(f"Warning: Failed to save semantic summary to {output_json_path}: {e}")
+
+    return semantic_report
+
+
 def _raw_debug_foreground(
     outputs,
     routing,
@@ -838,6 +986,7 @@ def build_arg_parser():
         ),
     )
     parser.add_argument("--debug_output", default=None, help="Optional path to write a debug preview grid of predictions.")
+    parser.add_argument("--semantic_output", default=None, help="Optional path to write a JSON summary of semantic predictions.")
     parser.add_argument("--overlay_output", default=None, help="Optional path for segmentation overlays on canonicalized input views.")
     parser.add_argument("--overlay_alpha", type=float, default=0.45)
     parser.add_argument("--inner_cutout_output", default=None, help="Original-color cutout for routed inner-layer pixels.")
@@ -1885,33 +2034,12 @@ def main():
             semantic_foreground=observed_foreground,
             static_mappings=static_mappings,
         )
-        if "text_prompt_scores" in outputs:
-            prompts = getattr(parser_model, "semantic_text_prompts", ())
-            score_rows = []
-            for view, scores in zip(views, outputs["text_prompt_scores"]):
-                top_count = min(3, scores.numel())
-                top_scores, top_indices = scores.float().topk(top_count)
-                score_rows.append(
-                    {
-                        "view": view,
-                        "top_prompts": [
-                            {
-                                "index": int(index),
-                                "prompt": (
-                                    prompts[int(index)]
-                                    if int(index) < len(prompts)
-                                    else f"prompt_{int(index)}"
-                                ),
-                                "score": round(float(score), 6),
-                            }
-                            for score, index in zip(top_scores, top_indices)
-                        ],
-                    }
-                )
-            print(
-                "siglip_text_prompt_scores="
-                + json.dumps(score_rows, ensure_ascii=False, sort_keys=True)
-            )
+        log_and_save_semantic_diagnostics(
+            outputs,
+            views,
+            parser_model,
+            output_json_path=args.semantic_output,
+        )
         outputs = attach_projected_outer_uv_occupancy(
             parser_model,
             outputs,

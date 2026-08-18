@@ -135,6 +135,7 @@ GEOMETRY_ROUTED_OVERLAY_OUTPUT="${GEOMETRY_ROUTED_OVERLAY_OUTPUT-outputs/parser_
 GEOMETRY_FILL_OUTPUT="${GEOMETRY_FILL_OUTPUT-outputs/parser_debug_geometry_fill.png}"
 OUTER_UV_OCCUPANCY_OUTPUT="${OUTER_UV_OCCUPANCY_OUTPUT-outputs/parser_debug_outer_uv_occupancy.png}"
 HEAD_OUTER_STRUCTURE_OUTPUT="${HEAD_OUTER_STRUCTURE_OUTPUT-outputs/parser_debug_head_outer_structure.png}"
+SEMANTIC_OUTPUT="${SEMANTIC_OUTPUT-outputs/parser_semantic_summary.json}"
 FOREGROUND_PROBABILITY_OUTPUT="${FOREGROUND_PROBABILITY_OUTPUT-outputs/foreground_probability.png}"
 FOREGROUND_MASK_OUTPUT="${FOREGROUND_MASK_OUTPUT-outputs/foreground_mask.png}"
 FOREGROUND_RAW_MASK_OUTPUT="${FOREGROUND_RAW_MASK_OUTPUT-outputs/foreground_mask_raw.png}"
@@ -512,6 +513,9 @@ if [[ -n "$OUTER_UV_OCCUPANCY_OUTPUT" ]]; then
 fi
 if [[ -n "$HEAD_OUTER_STRUCTURE_OUTPUT" ]]; then
   args+=(--head_outer_structure_output "$HEAD_OUTER_STRUCTURE_OUTPUT")
+fi
+if [[ -n "$SEMANTIC_OUTPUT" ]]; then
+  args+=(--semantic_output "$SEMANTIC_OUTPUT")
 fi
 
 if [[ -n "$OUTPUT" ]]; then
