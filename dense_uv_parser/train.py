@@ -2518,6 +2518,8 @@ def run_epoch(
                     views,
                     observed_foreground=targets["foreground"][:, 0],
                     source_images=rendered,
+                    center_power=args.route_texel_center_power,
+                )
                 if "dense_semantic_logits" in outputs:
                     targets["dense_semantics"] = (
                         build_dense_view_semantic_targets(
