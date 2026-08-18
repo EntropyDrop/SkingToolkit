@@ -1396,6 +1396,7 @@ def build_arg_parser():
     parser.add_argument("--affine_refine", dest="affine_refine", action="store_true", default=splat_defaults["affine_refine"])
     parser.add_argument("--no_affine_refine", dest="affine_refine", action="store_false")
     parser.add_argument("--affine_refine_translation_px", type=float, default=splat_defaults["affine_refine_translation_px"])
+    parser.add_argument("--affine_refine_scale", type=float, default=splat_defaults["affine_refine_scale"])
     parser.add_argument("--alpha_threshold", type=float, default=preprocessing_defaults["alpha_threshold"])
     parser.add_argument(
         "--hypothesis_render_refine",
