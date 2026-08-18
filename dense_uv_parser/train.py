@@ -2527,7 +2527,9 @@ def run_epoch(
                             renderer,
                             views,
                             device=device,
-                            alpha_threshold=args.alpha_threshold,
+                            alpha_threshold=getattr(
+                                args, "target_alpha_threshold", 0.5
+                            ),
                         )
                     )
                 losses = criterion(outputs, targets)
