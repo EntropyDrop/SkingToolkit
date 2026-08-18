@@ -107,9 +107,79 @@ def head_outer_face_values_to_uv(values):
     return atlas
 
 
+def build_dense_view_semantic_targets(
+    target_uv,
+    renderer,
+    views,
+    device=None,
+    alpha_threshold=0.5,
+):
+    """Build exact 2D pixel-level multi-class semantic ground truth (0..14).
+
+    Returns:
+        semantic_targets: (B * V, H, W) long tensor with class indices 0..14.
+    """
+    from SkingToolkit.dense_uv_parser.utils import (
+        build_static_surface_routing,
+        parse_views,
+    )
+
+    B = target_uv.shape[0]
+    parsed_views = parse_views(views)
+    if device is None:
+        device = target_uv.device
+
+    targets = []
+    for b in range(B):
+        uv_b = target_uv[b : b + 1]
+        flat_alpha = uv_b[0, 3].flatten()
+        for v_name in parsed_views:
+            static = build_static_surface_routing(renderer, v_name, device)
+            H, W = static["masks"].shape[-2:]
+            sem = torch.full((H, W), 14, dtype=torch.long, device=device)
+
+            # 1. Inner Layer Base Classification
+            inner_mask = static["masks"][0]
+            inner_part = static["part"][0]
+            inner_face = static["face"][0]
+
+            is_inner_head_face = inner_mask & (inner_part == 0) & (inner_face == 0)
+            is_inner_head_other = inner_mask & (inner_part == 0) & (inner_face != 0)
+            is_inner_torso = inner_mask & (inner_part == 1)
+            is_inner_limbs = inner_mask & (inner_part >= 2)
+
+            sem[is_inner_head_face] = 8   # inner_face (eyes, mouth, facial skin)
+            sem[is_inner_head_other] = 9  # inner_hair (scalp)
+            sem[is_inner_torso] = 11      # inner_clothes
+            sem[is_inner_limbs] = 10      # inner_skin / limbs
+
+            # 2. Outer Layer 3D Decor Classification (only where alpha > alpha_threshold)
+            outer_mask = static["masks"][1]
+            outer_part = static["part"][1]
+            outer_face = static["face"][1]
+            outer_flat_uv = static["flat_uv"][1]
+
+            outer_active = outer_mask & (flat_alpha[outer_flat_uv] > float(alpha_threshold))
+
+            is_outer_head_front = outer_active & (outer_part == 0) & (outer_face == 0)
+            is_outer_head_other = outer_active & (outer_part == 0) & (outer_face != 0)
+            is_outer_torso = outer_active & (outer_part == 1)
+            is_outer_limbs = outer_active & (outer_part >= 2)
+
+            sem[is_outer_head_front] = 0  # outer_glasses / visor
+            sem[is_outer_head_other] = 1  # outer_crown_hat / ears
+            sem[is_outer_torso] = 3       # outer_jacket / hoodie
+            sem[is_outer_limbs] = 4       # outer_limbs
+
+            targets.append(sem)
+
+    return torch.stack(targets, dim=0)
+
+
 __all__ = [
     "build_part_layer_masks",
     "build_head_outer_face_targets",
     "head_outer_face_values_to_uv",
     "build_semantic_attribute_targets",
+    "build_dense_view_semantic_targets",
 ]

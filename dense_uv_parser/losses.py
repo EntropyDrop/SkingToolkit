@@ -228,6 +228,48 @@ def route_prior_regularization(outputs, tv_weight=1.0):
     return l2 + float(tv_weight) * tv
 
 
+def dense_semantic_supervision_loss(
+    dense_semantic_logits,
+    semantic_targets,
+    focal_gamma=1.5,
+    ignore_index=IGNORE_INDEX,
+):
+    """Compute dense multi-class semantic segmentation loss with Focal weighting.
+
+    Args:
+        dense_semantic_logits: (N, P, H, W) float tensor
+        semantic_targets: (N, H, W) long tensor
+        focal_gamma: Focus factor for hard examples (e.g. thin glasses/crowns)
+    """
+    if dense_semantic_logits is None or semantic_targets is None:
+        return torch.tensor(
+            0.0,
+            device=dense_semantic_logits.device
+            if dense_semantic_logits is not None
+            else "cpu",
+        )
+
+    N, P, H, W = dense_semantic_logits.shape
+    logits = dense_semantic_logits.float()
+    targets = semantic_targets.to(device=logits.device, dtype=torch.long)
+
+    valid = (targets >= 0) & (targets < P) & (targets != int(ignore_index))
+    if not valid.any():
+        return logits.sum() * 0.0
+
+    safe_targets = targets.clamp(0, P - 1)
+    log_probs = F.log_softmax(logits, dim=1)
+    probs = torch.exp(log_probs)
+
+    target_log_p = log_probs.gather(1, safe_targets.unsqueeze(1)).squeeze(1)
+    target_p = probs.gather(1, safe_targets.unsqueeze(1)).squeeze(1)
+
+    focal_weight = (1.0 - target_p).clamp_min(0.0) ** float(focal_gamma)
+    loss = -focal_weight * target_log_p
+
+    return loss[valid].mean()
+
+
 class DenseUVParserLoss(nn.Module):
     def __init__(
         self,
@@ -246,6 +288,7 @@ class DenseUVParserLoss(nn.Module):
         lambda_primary_route_swap=1.0,
         lambda_route_texel_consistency=0.25,
         lambda_text_prompt_route=0.0,
+        lambda_dense_semantics=0.30,
         lambda_route_prior_regularization=0.001,
         outer_false_positive_gamma=2.0,
         outer_false_negative_gamma=2.0,
@@ -271,12 +314,11 @@ class DenseUVParserLoss(nn.Module):
         self.lambda_surface = lambda_surface
         self.lambda_outer_false_positive = lambda_outer_false_positive
         self.lambda_outer_false_negative = lambda_outer_false_negative
-        self.lambda_route_confidence = float(lambda_route_confidence)
-        self.lambda_primary_route_swap = float(lambda_primary_route_swap)
-        self.lambda_route_texel_consistency = float(
-            lambda_route_texel_consistency
-        )
-        self.lambda_text_prompt_route = float(lambda_text_prompt_route)
+        self.lambda_route_confidence = lambda_route_confidence
+        self.lambda_primary_route_swap = lambda_primary_route_swap
+        self.lambda_route_texel_consistency = lambda_route_texel_consistency
+        self.lambda_text_prompt_route = lambda_text_prompt_route
+        self.lambda_dense_semantics = lambda_dense_semantics
         self.lambda_route_prior_regularization = float(
             lambda_route_prior_regularization
         )
@@ -558,6 +600,22 @@ class DenseUVParserLoss(nn.Module):
             else zero
         )
 
+        if "dense_semantic_logits" in outputs and "dense_semantics" in targets:
+            loss_dense_semantics = dense_semantic_supervision_loss(
+                outputs["dense_semantic_logits"],
+                targets["dense_semantics"],
+            )
+            acc_dense_semantics = _masked_accuracy(
+                outputs["dense_semantic_logits"],
+                targets["dense_semantics"],
+            )
+        else:
+            loss_dense_semantics = zero
+            acc_dense_semantics = zero
+        weighted_dense_semantics = (
+            self.lambda_dense_semantics * loss_dense_semantics
+        )
+
         loss_total = (
             self.lambda_foreground * loss_foreground
             + self.lambda_layer * loss_layer
@@ -575,6 +633,7 @@ class DenseUVParserLoss(nn.Module):
             + self.lambda_route_texel_consistency
             * loss_route_texel_consistency
             + weighted_text_prompt_route
+            + weighted_dense_semantics
             + self.lambda_route_prior_regularization
             * loss_route_prior_regularization
         )
@@ -610,6 +669,9 @@ class DenseUVParserLoss(nn.Module):
             "loss_text_prompt_route_ce": loss_text_prompt_route_ce,
             "loss_text_prompt_route_swap": loss_text_prompt_route_swap,
             "loss_text_prompt_route_weighted": weighted_text_prompt_route,
+            "loss_dense_semantics": loss_dense_semantics,
+            "loss_dense_semantics_weighted": weighted_dense_semantics,
+            "acc_dense_semantics": acc_dense_semantics,
             "acc_text_prompt_route": acc_text_prompt_route,
             "loss_route_prior_regularization": loss_route_prior_regularization,
             "confidence_mae": confidence_mae,

@@ -74,6 +74,7 @@ from SkingToolkit.dense_uv_parser.semantic_targets import (  # noqa: E402
     build_head_outer_face_targets,
     build_part_layer_masks,
     build_semantic_attribute_targets,
+    build_dense_view_semantic_targets,
 )
 from SkingToolkit.dense_uv_parser.runtime import get_device  # noqa: E402
 from SkingToolkit.dense_uv_parser.skin_dataset import SkinUVDataset  # noqa: E402
@@ -2517,8 +2518,16 @@ def run_epoch(
                     views,
                     observed_foreground=targets["foreground"][:, 0],
                     source_images=rendered,
-                    center_power=args.route_texel_center_power,
-                )
+                if "dense_semantic_logits" in outputs:
+                    targets["dense_semantics"] = (
+                        build_dense_view_semantic_targets(
+                            batch["uv"],
+                            renderer,
+                            views,
+                            device=device,
+                            alpha_threshold=args.alpha_threshold,
+                        )
+                    )
                 losses = criterion(outputs, targets)
                 zero = losses["loss_total"].new_zeros(())
                 if semantic_masks is not None and "outer_presence_logits" in outputs:
@@ -4107,6 +4116,9 @@ def build_arg_parser():
     parser.add_argument("--lambda_semantic_coverage", type=float, default=0.25)
     parser.add_argument("--lambda_text_prompt_route", type=float, default=0.0)
     parser.add_argument(
+        "--lambda_dense_semantics", type=float, default=0.30
+    )
+    parser.add_argument(
         "--lambda_head_outer_presence", type=float, default=0.0
     )
     parser.add_argument(
@@ -4877,6 +4889,7 @@ def main():
         lambda_primary_route_swap=args.lambda_primary_route_swap,
         lambda_route_texel_consistency=args.lambda_route_texel_consistency,
         lambda_text_prompt_route=args.lambda_text_prompt_route,
+        lambda_dense_semantics=args.lambda_dense_semantics,
         lambda_route_prior_regularization=(
             args.lambda_route_prior_regularization
         ),

@@ -12,24 +12,31 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+# Semantic prompt concept vocabulary:
+# Indices 0..7: Outer Layer 3D Decor Concepts
+# Indices 8..13: Inner Layer Base Skin & Clothing Concepts
+# Index 14: Background
 DEFAULT_SIGLIP_ROUTE_PROMPTS = (
+    "a rendered Minecraft character wearing raised glasses, sunglasses, or goggles",
+    "a rendered Minecraft character wearing a raised hat, crown, helmet, or headband",
+    "a rendered Minecraft character with raised animal ears, horns, or headphones",
+    "a rendered Minecraft character wearing a raised jacket, coat, hoodie, high collar, or scarf",
+    "a rendered Minecraft character with raised 3D decoration on sleeves, gloves, belt, or boots",
     "a rendered Minecraft character with raised outer hair protruding from the head",
-    "a rendered Minecraft character wearing a raised hat or crown",
-    "a rendered Minecraft character wearing a raised hood helmet or headband",
-    "a rendered Minecraft character wearing raised glasses or goggles",
     "a rendered Minecraft character wearing a raised visor or face mask",
-    "a rendered Minecraft character wearing raised headphones",
-    "a rendered Minecraft character with raised animal ears horns or side accessories",
-    "a rendered Minecraft character wearing a raised scarf or high collar",
-    "a rendered Minecraft character wearing a raised jacket coat or outer sleeves",
-    "a rendered Minecraft character with raised decoration on the arms or legs",
-    "a rendered Minecraft character with flat hair painted on the base head surface",
-    "a rendered Minecraft character with flat eyes eyebrows mouth and facial texture",
-    "a rendered Minecraft character with exposed base skin on the face arms or legs",
-    "a rendered Minecraft character with flat shirt pants and clothing texture",
-    "a rendered Minecraft character with a flat logo symbol or picture printed on clothing",
-    "a rendered Minecraft character with flat stripes checks or trim painted on clothing",
+    "a rendered Minecraft character with raised 3D accessories on the torso or back",
+    "a rendered Minecraft character with flat eyes, eyebrows, mouth, teeth, and human facial features",
+    "a rendered Minecraft character with flat hair painted on the base head scalp",
+    "a rendered Minecraft character with exposed bare base skin on the face, arms, or legs",
+    "a rendered Minecraft character with flat shirt, pants, and base clothing texture",
+    "a rendered Minecraft character with a flat logo, symbol, or picture printed on clothing",
+    "a rendered Minecraft character with flat stripes, checks, or trim painted on clothing",
+    "a plain solid uniform background without any character",
 )
+
+SEMANTIC_OUTER_INDICES = (0, 1, 2, 3, 4, 5, 6, 7)
+SEMANTIC_INNER_INDICES = (8, 9, 10, 11, 12, 13)
+SEMANTIC_BACKGROUND_INDICES = (14,)
 
 
 def encode_siglip2_text_prompts(

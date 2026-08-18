@@ -453,6 +453,11 @@ class TextPromptRouteFusion(nn.Module):
         self.prompt_projection = nn.Linear(
             raw_feature_dim, hidden_channels, bias=False
         )
+        self.semantic_head = nn.Sequential(
+            nn.Conv2d(hidden_channels, hidden_channels, kernel_size=3, padding=1),
+            nn.GELU(),
+            nn.Conv2d(hidden_channels, prompt_count, kernel_size=1),
+        )
         self.route_projection = nn.Sequential(
             nn.Conv2d(prompt_count, hidden_channels, kernel_size=1),
             nn.GELU(),
@@ -536,8 +541,9 @@ class TextPromptRouteFusion(nn.Module):
         global_logits = global_logits * self.logit_scale.clamp(0.01, 100.0)
         global_logits = global_logits + self.logit_bias
 
+        proj_spatial = self.spatial_projection(raw_features.float())
         local_image_features = F.normalize(
-            self.spatial_projection(raw_features.float()), dim=1
+            proj_spatial, dim=1
         )
         local_prompt_features = F.normalize(
             self.prompt_projection(prompt_embeddings), dim=-1
@@ -567,7 +573,26 @@ class TextPromptRouteFusion(nn.Module):
             mode="bilinear",
             align_corners=False,
         )
-        return route_logits, global_logits
+
+        dense_semantic_logits = self.semantic_head(proj_spatial)
+        dense_semantic_logits = F.interpolate(
+            dense_semantic_logits,
+            size=output_size,
+            mode="bilinear",
+            align_corners=False,
+        )
+        spatial_prompt_similarity = F.interpolate(
+            local_similarity,
+            size=output_size,
+            mode="bilinear",
+            align_corners=False,
+        )
+        return (
+            route_logits,
+            global_logits,
+            dense_semantic_logits,
+            spatial_prompt_similarity,
+        )
 
 
 class OuterUVGraphBlock(nn.Module):
@@ -1190,6 +1215,8 @@ class DenseUVParserNet(nn.Module):
         layer_evidence = self.layer(x)
         text_prompt_route_logits = None
         text_prompt_scores = None
+        dense_semantic_logits = None
+        spatial_prompt_similarity = None
         if self.semantic_text_prompt_fusion is not None:
             if semantic_spatial is None:
                 raise ValueError(
@@ -1199,6 +1226,8 @@ class DenseUVParserNet(nn.Module):
             (
                 text_prompt_route_logits,
                 text_prompt_scores,
+                dense_semantic_logits,
+                spatial_prompt_similarity,
             ) = self.semantic_text_prompt_fusion(
                 semantic_spatial,
                 semantic_global,
@@ -1217,6 +1246,8 @@ class DenseUVParserNet(nn.Module):
         if text_prompt_route_logits is not None:
             outputs["text_prompt_route_logits"] = text_prompt_route_logits
             outputs["text_prompt_scores"] = text_prompt_scores
+            outputs["dense_semantic_logits"] = dense_semantic_logits
+            outputs["spatial_prompt_similarity"] = spatial_prompt_similarity
         if self.route_role_prior is not None:
             selected_prior_raw = self.route_role_prior.index_select(
                 0, view_ids.long()

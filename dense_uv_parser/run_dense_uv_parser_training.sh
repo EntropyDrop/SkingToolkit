@@ -264,6 +264,7 @@ else
   DEFAULT_TEXT_PROMPT_ROUTE_WEIGHT=0.0
 fi
 LAMBDA_TEXT_PROMPT_ROUTE="${LAMBDA_TEXT_PROMPT_ROUTE:-$DEFAULT_TEXT_PROMPT_ROUTE_WEIGHT}"
+LAMBDA_DENSE_SEMANTICS="${LAMBDA_DENSE_SEMANTICS:-0.30}"
 if [[ "$PREDICT_HEAD_OUTER_STRUCTURE" == "true" ]]; then
   DEFAULT_HEAD_OUTER_PRESENCE_WEIGHT=0.10
   DEFAULT_HEAD_OUTER_COVERAGE_WEIGHT=0.10
@@ -583,6 +584,7 @@ exec python train.py \
   --lambda_semantic_presence "$LAMBDA_SEMANTIC_PRESENCE" \
   --lambda_semantic_coverage "$LAMBDA_SEMANTIC_COVERAGE" \
   --lambda_text_prompt_route "$LAMBDA_TEXT_PROMPT_ROUTE" \
+  --lambda_dense_semantics "$LAMBDA_DENSE_SEMANTICS" \
   --lambda_head_outer_presence "$LAMBDA_HEAD_OUTER_PRESENCE" \
   --lambda_head_outer_coverage "$LAMBDA_HEAD_OUTER_COVERAGE" \
   --lambda_head_outer_occupancy "$LAMBDA_HEAD_OUTER_OCCUPANCY" \

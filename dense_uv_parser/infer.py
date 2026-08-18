@@ -592,6 +592,67 @@ def log_and_save_semantic_diagnostics(
     return semantic_report
 
 
+def save_semantic_pixel_labels(
+    outputs,
+    rendered,
+    observed_foreground=None,
+    output_path=None,
+):
+    """Save 2D pixel-level semantic concept prediction map."""
+    if output_path is None:
+        return
+    sim = outputs.get("spatial_prompt_similarity")
+    dense_logits = outputs.get("dense_semantic_logits")
+    if sim is None and dense_logits is None:
+        return
+
+    evidence = dense_logits if dense_logits is not None else sim
+    N, P, H, W = evidence.shape
+    predicted_classes = evidence.argmax(dim=1)
+
+    palette = torch.tensor(
+        [
+            [0, 255, 200],    # 0: outer_glasses (bright cyan)
+            [255, 215, 0],    # 1: outer_crown_hat (gold)
+            [255, 105, 180],  # 2: outer_ears (hot pink)
+            [147, 112, 219],  # 3: outer_jacket (medium purple)
+            [220, 20, 60],    # 4: outer_limbs (crimson)
+            [255, 140, 0],    # 5: outer_hair (dark orange)
+            [0, 191, 255],    # 6: outer_mask (deep sky blue)
+            [178, 34, 34],    # 7: outer_back (firebrick)
+            [255, 200, 160],  # 8: inner_face (peach / flesh)
+            [139, 69, 19],    # 9: inner_hair (saddle brown)
+            [245, 222, 179],  # 10: inner_skin (wheat)
+            [30, 144, 255],   # 11: inner_clothes (dodger blue)
+            [50, 205, 50],    # 12: inner_logo (lime green)
+            [255, 255, 255],  # 13: inner_pattern (white)
+            [30, 30, 30],     # 14: background (dark gray)
+        ],
+        dtype=torch.float32,
+        device=evidence.device,
+    ) / 255.0
+
+    color_map = palette[predicted_classes.clamp(0, palette.shape[0] - 1)]
+    color_map = color_map.permute(0, 3, 1, 2)
+
+    if observed_foreground is not None:
+        fg = observed_foreground.unsqueeze(1) if observed_foreground.dim() == 3 else observed_foreground
+        bg = palette[14].view(1, 3, 1, 1)
+        color_map = torch.where(fg.bool(), color_map, bg)
+
+    raw_rgb = rendered[:, :3].to(device=evidence.device, dtype=torch.float32)
+    blended = raw_rgb * 0.50 + color_map * 0.50
+    grid = torch.cat([raw_rgb, color_map, blended], dim=0)
+
+    try:
+        out_p = Path(output_path)
+        out_p.parent.mkdir(parents=True, exist_ok=True)
+        save_image(grid.clamp(0.0, 1.0).detach().cpu(), str(out_p), nrow=N)
+        print(f"Saved semantic_pixel_output={out_p}")
+    except Exception as e:
+        print(f"Warning: Failed to save semantic pixel map to {output_path}: {e}")
+
+
 def _raw_debug_foreground(
     outputs,
     routing,
@@ -987,6 +1048,11 @@ def build_arg_parser():
     )
     parser.add_argument("--debug_output", default=None, help="Optional path to write a debug preview grid of predictions.")
     parser.add_argument("--semantic_output", default=None, help="Optional path to write a JSON summary of semantic predictions.")
+    parser.add_argument(
+        "--semantic_pixel_output",
+        default="outputs/parser_debug_semantic_pixel_labels.png",
+        help="Optional path to write a 2D pixel-level semantic concept map.",
+    )
     parser.add_argument("--overlay_output", default=None, help="Optional path for segmentation overlays on canonicalized input views.")
     parser.add_argument("--overlay_alpha", type=float, default=0.45)
     parser.add_argument("--inner_cutout_output", default=None, help="Original-color cutout for routed inner-layer pixels.")
@@ -2040,6 +2106,13 @@ def main():
             parser_model,
             output_json_path=args.semantic_output,
         )
+        if args.semantic_pixel_output:
+            save_semantic_pixel_labels(
+                outputs,
+                parser_rendered,
+                observed_foreground=observed_foreground,
+                output_path=args.semantic_pixel_output,
+            )
         outputs = attach_projected_outer_uv_occupancy(
             parser_model,
             outputs,
