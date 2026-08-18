@@ -2910,13 +2910,23 @@ def main():
             ),
         )
         if getattr(args, "hypothesis_render_refine", True):
+            refiner_target = rendered.to(device)
+            if observed_foreground is not None and refiner_target.shape[1] == 3:
+                fg_alpha = observed_foreground.to(
+                    device=device, dtype=refiner_target.dtype
+                )
+                if fg_alpha.dim() == 3:
+                    fg_alpha = fg_alpha.unsqueeze(1)
+                refiner_target = torch.cat([refiner_target, fg_alpha], dim=1)
             repaired, refiner_stats = refine_uv_by_analysis_by_synthesis(
                 repaired.to(device),
-                rendered.to(device),
+                refiner_target,
                 renderer,
                 views,
                 alpha_threshold=args.alpha_threshold,
-                protect_chin_occlusion=getattr(args, "protect_chin_occlusion", True),
+                protect_chin_occlusion=getattr(
+                    args, "protect_chin_occlusion", True
+                ),
             )
             repaired = repaired.detach().cpu()
             stats["hypothesis_refiner"] = refiner_stats

@@ -90,6 +90,18 @@ def build_basic_minecraft_metadata(device=None):
                     if src_flat is not None and m_flat is not None:
                         mirrored_texel[src_flat] = m_flat
 
+    counterpart_texel = torch.full((UV_SIZE * UV_SIZE,), -1, dtype=torch.long)
+    for rect_idx, (ix, iy, w, h, dx, dy) in enumerate(minecraft_layer_rects()):
+        p = rect_idx // FACE_COUNT
+        f = rect_idx % FACE_COUNT
+        for row in range(h):
+            for col in range(w):
+                in_flat = part_face_rects.get((p, 0, f, row, col))
+                out_flat = part_face_rects.get((p, 1, f, row, col))
+                if in_flat is not None and out_flat is not None:
+                    counterpart_texel[in_flat] = out_flat
+                    counterpart_texel[out_flat] = in_flat
+
     metadata = {
         "valid": valid,
         "layer": layer,
@@ -98,6 +110,7 @@ def build_basic_minecraft_metadata(device=None):
         "grid_x": grid_x,
         "grid_y": grid_y,
         "mirrored_texel": mirrored_texel,
+        "counterpart_texel": counterpart_texel,
     }
     if device is not None:
         metadata = {k: v.to(device) for k, v in metadata.items()}
