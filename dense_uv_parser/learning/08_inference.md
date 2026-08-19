@@ -15,12 +15,14 @@ COMBINED=/path/to/front_back.png ./run_infer.sh
 3. **自适应背景替换（Adaptive Background）**：
    - 自动选择与前景边缘色差最大的背景基底输入网络，防止背景色渗入边界。
 
-## 8.2 网络前向与 3D UV 空间特征对齐
+## 8.2 网络前向与 2D 逐像素开集语义诊断
 
 1. `DenseUVParserNet` 接收各视角图像与 one-hot 视图条件。
-2. `UVMultiViewSpatialFusion` 将各视角 2D 卷积特征投影至 64×64 3D UV 空间，执行 360° 环绕跨视角交互，输出：
-   - 逐像素路由角色（Inner / Outer / Secondary）及置信度；
-   - 64×64 全局 3D UV 外层占有率先验。
+2. `UVMultiViewSpatialFusion` 将各视角 2D 卷积特征投影至 64×64 3D UV 空间，执行 360° 环绕跨视角交互。
+3. **2D 逐像素开集语义诊断输出（`outputs/parser_debug_semantic_pixel_labels.png`）**：
+   - 自动将 15 类语义概率图（`dense_semantic_logits`）进行 argmax 着色（青色=眼镜/护目镜、金色=皇冠/帽子、粉色=兽耳、紫色=外套/连帽衫、肤色=面部五官、深蓝=内层衣服等）；
+   - 输出原图、纯语义色块与 50% 半透明叠加图，直观定位内外层判断依据，彻底排查同色穿透误判。
+4. 输出逐像素路由角色（Inner / Outer / Secondary）及置信度，以及 64×64 全局 3D UV 外层占有率先验。
 
 ## 8.3 中心加权众数取色（Center-Weighted Mode Splatting）
 
@@ -45,38 +47,41 @@ COMBINED=/path/to/front_back.png ./run_infer.sh
 
 ## 8.5 可微渲染假说检验与裁决（differentiable_hypothesis_refiner.py）
 
-为了彻底解决 2D 空间难以分辨的内外层物理歧义，系统在后处理最后阶段引入 **Analysis-by-Synthesis 假说裁决**：
+为了彻底解决 2D 空间难以分辨的内外层物理歧义（尤其是同色穿透幻觉），系统在后处理最后阶段引入 **基于连通分量 Analysis-by-Synthesis 假说裁决器**：
 
 ```mermaid
 graph TD
-    A[修复后的候选皮肤 UV] --> B[1. 下巴与面部防遮挡检验]
-    B -->|若下巴外层导致重渲染面部误差增大| C[强制剔除下巴外层色块, 露脸]
-    B -->|通过| D[2. 部件级 3D 轮廓假说重渲染]
-    D --> E[调用 DifferentiableRenderer 多视角渲染 I_pred]
-    E --> F{比对输入原图 I_ref: 外层是否显著改善残差?}
-    F -- 是 (如真实皇冠/立体饰品) --> G[确认写入外层 UV]
-    F -- 否 (如误判的身体衣物) --> H[剔除外层, 恢复透明]
+    A[修复后的候选皮肤 UV] --> B[1. 四连通分量级假说切分 (Connected Components)]
+    B --> C[2. 下巴与面部防遮挡检验 (protect_chin_occlusion)]
+    C -->|若下巴外层导致重渲染面部误差增大| D[强制剔除下巴外层色块, 露脸]
+    C -->|通过| E[3. 假说重渲染对比 (with outer vs without outer)]
+    E --> F{比对输入原图 I_ref: 外层是否显著降低残差 & 无轮廓外溢?}
+    F -- 是 (真实立体饰品, 收益 > min_benefit) --> G[确认写入外层 UV]
+    F -- 否 (同色穿透伪影 / 轮廓外溢) --> H[剔除外层, 恢复透明]
 ```
 
-1. **下巴防遮挡（`protect_chin_occlusion`）**：
-   - 自动检测头部正面下方的外层色块。若移除该外层色块能降低重渲染面部误差，系统直接判定该色块为衣物穿透伪影，并置为完全透明，完美露出内层五官与下巴。
-2. **多视角 3D 轮廓残差裁决**：
-   - 逐部件进行“有/无外层”的可微渲染对比。
-   - 只有能在 3D 物理投影与视差轮廓上真正提升重渲染匹配度的外层结构（如皇冠锯齿尖角），才会被保留。
+1. **四连通分量级独立检验（Connected Component Testing）**：
+   - 将外层 UV 饰品切分为独立的 4-连通色块实体，逐个进行“保留 vs 剔除”的可微渲染对比。
+2. **严格正向收益门控（`min_required_benefit > 0.0003`）**：
+   - 任何外层假说只有在多视角 3D 渲染残差上有明确改善时才能保留，杜绝模棱两可的同色假外层。
+3. **轮廓外溢重罚（`overflow_penalty_weight = 5.0`）**：
+   - 若外层色块在 3D 投影中溢出真实角色的 2D 轮廓边缘，施加 5 倍重罚，物理抹除非法浮空色块。
 
 ## 8.6 核心推理参数速查
 
 | 参数项 | 默认值 | 作用 |
 | :--- | :--- | :--- |
-| `outer_route_confidence_threshold` | `0.80` | 外层预测置信度门槛 |
-| `outer_uv_min_source_pixels` | `4` | 外层纹素最少源像素数（保护单视角高频细节） |
-| `outer_silhouette_min_pixels` | `1` | 外层微小突起最小像素数（保护皇冠尖角） |
-| `hypothesis_render_refine` | `True` | 开启 Analysis-by-Synthesis 可微渲染假说裁决 |
+| `outer_route_confidence_threshold` | `0.60` | 外层预测置信度门槛 |
+| `outer_route_margin_threshold` | `0.30` | 外层预测胜出边际门槛 |
+| `outer_uv_min_source_pixels` | `2` | 外层纹素最少源像素数（保护单视角高频细节） |
+| `hypothesis_render_refine` | `True` | 开启 Analysis-by-Synthesis 连通分量可微渲染假说裁决 |
 | `protect_chin_occlusion` | `True` | 开启下巴/面部防遮挡物理裁决 |
 
 ## 本章要点
 
 1. 洪水填充提取前景，自适应纯色替换背景。
-2. 中心得分加权众数取色（`grid_mode`），保留 1 像素高频原色。
-3. 极简内层盲区修复（对称 + 近邻），外层未观测严格透明。
-4. 可微渲染假说检验（Analysis-by-Synthesis）作为物理终审，彻底根除遮挡面罩与假外层。
+2. 2D 逐像素开集语义图输出（`parser_debug_semantic_pixel_labels.png`），提供可解释的视觉诊断。
+3. 中心得分加权众数取色（`grid_mode`），保留 1 像素高频原色。
+4. 极简内层盲区修复（对称 + 近邻），外层未观测严格透明。
+5. 连通分量可微渲染假说检验（Analysis-by-Synthesis）作为物理终审，彻底根除遮挡面罩与同色穿透假外层。
+

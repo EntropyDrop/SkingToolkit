@@ -37,7 +37,16 @@
 - **投影纹素一致性损失（`LAMBDA_ROUTE_TEXEL_CONSISTENCY=0.25`）**：
   - 约束投射到同一图集纹素的所有 2D 像素保持路由概率一致。
 
-### 2. 3D UV 外层直接真值监督（Outer UV Occupancy Losses）
+### 2. 多任务稠密语义辅助监督（Dense Multi-Task Semantic Losses）
+
+- **15 类开集语义焦点损失（`dense_semantic_supervision_loss`, `LAMBDA_DENSE_SEMANTICS=0.30`）**：
+  - 直接监督 2D 逐像素分类为眼镜、帽子、连帽衫、面部五官等 15 类语义原型。
+  - **类别逆频重平衡（Inverse Frequency Class Balancing）**：针对微小配件（如眼镜框仅占画面 ~1% 像素）容易被 99% 的大面积背景与衣服像素淹没的问题，计算有效像素的类别频次逆平方根权重。
+  - **外层微配件 2.50 倍梯度强力加权（Accessory Gradient Boost）**：对所有外层饰品类别（类别 0..7）施加 2.50 倍的梯度反传倍率，强力惩罚将眼镜框、皇冠等微小突起漏判或切断为内层皮肤的行为。
+- **开集提示词路由正则化（`LAMBDA_TEXT_PROMPT_ROUTE=0.35`）**：
+  - 约束提示词注意力响应与几何路由的联合一致性。
+
+### 3. 3D UV 外层直接真值监督（Outer UV Occupancy Losses）
 
 - **全局 64×64 占有率损失（`LAMBDA_OUTER_UV_OCCUPANCY=0.55`）**：
   - 结合 BCE 与 Dice Loss（`OUTER_UV_OCCUPANCY_DICE_WEIGHT=0.50`），直接用 GT 外层 Alpha 图监督 3D UV 融合特征。
@@ -46,7 +55,7 @@
 - **路由-占有率一致性约束（`LAMBDA_ROUTE_OCCUPANCY_AGREEMENT=0.30`）**：
   - 强制 2D 像素路由判决与 3D UV 全局占有率预测高度对齐。
 
-### 3. 可微重渲染分支（Differentiable Re-rendering Losses）
+### 4. 可微重渲染分支（Differentiable Re-rendering Losses）
 
 通过 `soft_splat_geometry_predictions_to_uv` 将预测概率软映射回 64×64 临时皮肤，并调用 `DifferentiableRenderer` 重新投射为 2D 渲染图：
 

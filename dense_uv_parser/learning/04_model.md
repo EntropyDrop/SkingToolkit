@@ -43,31 +43,37 @@ UVMultiViewSpatialFusion (3D UV 空间跨视角投影融合)
 2. **3D UV 空间特征聚合**：在物理 UV 空间中，无论来自哪个视角的特征，都在其对应的身体纹素处汇聚。通过两层残差卷积与 GroupNorm，网络在 3D 身体展开面上提取 360° 无缝环绕的上下文表征。
 3. **正向反投（Gather to 2D Views）**：将聚合了全局 3D 信息的 UV 特征，重新依据坐标查表回填给各个视角的 2D 像素，极大地增强了网络对遮挡、层级和立体饰品的辨识能力。
 
-## 4.3 语义旁路：SigLIP2 多模态先验
+## 4.3 语义旁路：SigLIP2 多模态与开集文本提示词解码
 
-模型引入了三条语义旁路（均采用零初始化，确保初始状态不扰乱几何主干）：
+模型引入了三条经过精心设计的语义旁路（均采用零初始化，确保初始状态不扰乱几何主干）：
 
 1. **`MultiViewSemanticFusion`（全局特征 FiLM 调制）**：
    - 提取 SigLIP2 768 维全局语义向量。
    - 经过 1 层 4 头 Transformer 编码器实现视角交互，输出 Scale 与 Shift 在 U-Net 瓶颈层进行仿射调制：$x = x \cdot (1 + \text{scale}) + \text{shift}$。
 2. **`SpatialSemanticFusion`（空间 Patch 适配器）**：
-   - 提取 SigLIP2 14×8 空间语义 Patch 特征，通过 1×1 卷积与双线性插值残差注入 U-Net 特征。
-3. **`TextPromptRouteFusion`（文本提示词原型）**：
-   - 使用固定的文本提示词嵌入（如 "3d protruding hat", "flat facial texture", "outer hoodie collar" 等）。
-   - 计算图像空间特征与文本提示词的余弦相似度图，为 `layer` 路由头提供显式的语义证据。
+   - 提取 SigLIP2 14×8 空间语义 Patch 特征，通过 1×1 卷积与双线性插值残差注入 U-Net 瓶颈层特征。
+3. **`TextPromptRouteFusion`（稠密开集提示词注意力解码器与高分辨率引导）**：
+   - **结构化概念词表**：内置 15 类精细的视觉-语言提示词原型（8 类外层 3D 饰品、6 类内层基底皮肤/衣物、1 类背景），在 SigLIP2 共享多模态空间中建立概念基准。
+   - **局部语义响应与全局残差**：将 SigLIP2 空间投影特征与文本提示词特征做点积相似度，计算每类提示词在图像中的空间响应热力图，并融合弱全局图像文本得分作为稳定残差。
+   - **高分辨率 U-Net 引导特征精炼（High-Resolution Skip Guidance）**：由于 SigLIP2 的 Patch Token 是 $16 \times 16$ 像素的大块，单纯双线性上采样会导致饰品边缘模糊或产生空间漂移。解码头将上采样的低分辨率语义特征与主干 U-Net 的 $256 \times 512$ 像素级高分辨率特征图（$c$ 通道）拼接，并通过多层残差卷积精炼，输出像素级锐利的 `dense_semantic_logits`，使语义预测牢牢吸附贴合在 Minecraft 体素方块边界上。
+   - **语义驱动的路由残差注入**：通过 `route_projection` 将多类别语义判决映射为内/外/次级路由修正量，使得“眼镜/皇冠”等概念强力引导外层路由，而“面部五官/平铺皮肤”强力约束内层路由。
 
 ## 4.4 核心输出头详解
 
-| 输出头 | 输出形状 | 物理含义 |
+| 输出头 | 输出形状 | 物理含义与用途 |
 | :--- | :--- | :--- |
 | `foreground` | `(B, 1, H, W)` | 像素属于角色的前景概率 |
 | `layer` | `(B, 3, H, W)` | 3 类路由角色：0: 内层 (Inner), 1: 外层 (Outer), 2: 次级表面 (Secondary) |
 | `surface` | `(B, N, H, W)` | $N$ 个预计算表面槽位分类（用于穿透透明孔洞映射深层表面） |
 | `route_confidence` | `(B, 1, H, W)` | 路由预测的标定置信度，供推理阶段硬门控使用 |
 | `outer_uv_occupancy` | `(B, 1, 64, 64)` | 64×64 3D UV 图集上的全局外层存在性与占有率预测 |
+| `dense_semantic_logits` | `(B, 15, H, W)` | 15 类稠密开集语义概率图（眼镜/帽子/耳朵/外套/面部五官等） |
+| `spatial_prompt_similarity` | `(B, 15, H, W)` | SigLIP2 空间 Patch 特征与文本提示词的归一化相似度图 |
 
 ## 本章要点
 
 1. U-Net 主干结合视图 one-hot 条件处理多视角输入。
 2. `UVMultiViewSpatialFusion` 通过 3D 射线在 64×64 UV 空间实现跨视角特征物理对齐与融合。
-3. 冻结 SigLIP2 视觉-语言模型通过全局 FiLM、空间适配器与文本原型提供强先验。
+3. 冻结 SigLIP2 视觉-语言模型通过全局 FiLM、空间适配器与开集提示词解码头提供语义支撑。
+4. 高分辨率 U-Net 引导精炼机制（High-Res Guidance）消除 $16\times$ Patch 空间模糊，确保语义边界像素级精准。
+

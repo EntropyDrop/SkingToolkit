@@ -85,27 +85,35 @@
 - 语义特征按"完整视图组"组织，`MultiViewSemanticFusion` 要求
   样本数能被视图数整除，且视图顺序是规范的。
 
-## 5.4 图集级语义标签：semantic_targets.py
+## 5.4 2D 稠密多任务语义标签生成：semantic_targets.py
 
-除逐像素标签外，还有**图集级/部位级**的软标签（从 GT 皮肤直接
-算出）：
+为了彻底解决单像素颜色一致性在同色区域（如纯蓝连帽衫、纯黑头发）产生的内外层误判，系统利用 18 万 Minecraft 皮肤真实图集与 3D 渲染映射，实现了 **零人工标注成本的 2D 逐像素 15 类语义真值生成器（`build_dense_view_semantic_targets`）**：
 
-- `build_semantic_attribute_targets`：每个部位的外层**存在性**
-  （`outer_presence`，覆盖率 > 0）与**覆盖率**（`outer_coverage`，
-  外层 alpha 加权面积 / 部位外层总面积）；每个部位的
-  inner/outer 平均颜色（`part_colors`，用于诊断与可能的颜色
-  先验）。
-- `build_head_outer_face_targets`：头部 6 个外层面各自的 **8×8
-  占用图**（alpha > 0.5），以及由此派生的结构标签：
-  - `closed_ring_rows` / `closed_side_ring`：侧环是否闭合
-    （侧面 4 个面每行 ≥4 个可见纹素）；
-  - `open_top_rim`：侧环闭合但顶面只有外圈可见（"开顶帽"，
-    修复时不允许闭合顶面）。
+1. **图集与 3D 几何拓扑对齐**：
+   - 提取各视角的静态 3D 映射表（`static_mappings`），获取每个 2D 像素对应的内/外层部件索引（`part`）、立方体面索引（`face`）与展平 UV 坐标（`flat_uv`）。
+2. **内层基底分类（Inner Base Labels）**：
+   - **面部五官（`inner_face`, 类别 8）**：头部正面（`part=0, face=0`）眼鼻口区域（`y >= 10`），赋予内层面部五官标签。
+   - **发际线与头皮（`inner_hair`, 类别 9）**：头部顶面、侧面、背面及前额发际线（`y < 10`），赋予内层发型标签。
+   - **基础衣物（`inner_clothes`, 类别 11）**：身体内层区域。
+   - **基础裸露皮肤（`inner_skin`, 类别 10）**：四肢基础层。
+3. **外层立体饰品分类（Outer Decor Labels，仅在 Alpha > 0.5 时生效）**：
+   - **眼镜/护目镜（`outer_glasses`, 类别 0）**：覆盖头部正面（Face 0）及两侧（Face 2, Face 3）眼部区域（`outer_y in [9, 13]`），保证镜框与两侧镜腿/绑带 360° 完整标注。
+   - **帽子/皇冠（`outer_crown_hat`, 类别 1）**：头部顶面（Face 5）或头顶发线（`outer_y <= 8`）的立体突起。
+   - **外套/连帽衫（`outer_jacket`, 类别 3）**：躯干外层凸起结构。
+   - **四肢饰品（`outer_limbs`, 类别 4）**：手套、袖口、腰带、鞋靴立体饰品。
+   - **外凸发量/面罩（`outer_hair`, 类别 5 / `outer_mask`, 类别 6）**：头部其他立体外发或下颌装饰。
+4. **背景分类（`background`, 类别 14）**：角色轮廓之外的纯色背景区域。
 
-这些标签喂给 04 章介绍的语义辅助头，让模型学会"这个皮肤有没有
-帽子、帽子是什么形状"，供推理时的头部结构修复使用。
+## 5.5 图集级语义软标签
 
-## 5.5 验证集与 checkpoint 选择
+除 2D 逐像素多任务标签外，还有**图集级/部位级**的软标签（从 GT 皮肤直接算出）：
+
+- `build_semantic_attribute_targets`：每个部位的外层**存在性**（`outer_presence`，覆盖率 > 0）与**覆盖率**（`outer_coverage`，外层 alpha 加权面积 / 部位外层总面积）；每个部位的 inner/outer 平均颜色（`part_colors`，用于诊断与可能的颜色先验）。
+- `build_head_outer_face_targets`：头部 6 个外层面各自的 **8×8 占用图**（alpha > 0.5），以及由此派生的结构标签：
+  - `closed_ring_rows` / `closed_side_ring`：侧环是否闭合（侧面 4 个面每行 ≥4 个可见纹素）；
+  - `open_top_rim`：侧环闭合但顶面只有外圈可见（"开顶帽"，修复时不允许闭合顶面）。
+
+## 5.6 验证集与 checkpoint 选择
 
 - 数据按 `--val_split`（默认 0.1）用**固定种子**的 `random_split`
   切分训练/验证；

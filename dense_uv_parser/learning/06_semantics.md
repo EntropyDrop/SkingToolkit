@@ -24,23 +24,20 @@
    因此"预测的 UV → 重渲染 → SigLIP2 → 语义损失"这条梯度链可以
    一直回传到 UV 输出（用于 07 章的可微渲染分支）。
 3. **特征提取**：
-   - `encode_global()` → pooled 全局特征（768 维，可再投影到
-     `semantic_channels=128`）；
-   - `encode_dense()` → 逐 patch 空间特征图：224×224 输入、16×16
-     patch ⇒ 14×14 token；再按 letterbox 的内容矩形**裁剪**
-     （`_valid_token_indices`），得到 **768×14×8** 的特征图
-     （对应 256×512 输入）。
-   - 投影头 `token_projection` / `global_projection`（LayerNorm +
-     Linear）是**可训练的**（只有它们是），把 768 维压到 128 维。
-4. **文本提示词编码**：`encode_siglip2_text_prompts()` 用同一模型
-   的文本塔编码固定提示词库 `DEFAULT_SIGLIP_ROUTE_PROMPTS`
-   （`semantic_backbone.py`，描述"凸起的头发/帽子/兜帽/眼镜/面罩/
-   耳机/动物耳朵/围巾高领/外套袖子/四肢装饰/平面头发/平面五官
-   纹理"等），返回归一化嵌入与**SigLIP 校准标量**（logit scale /
-   bias）。这些直接存进 parser checkpoint，推理时**不运行文本塔**。
+   - `encode_global()` → pooled 全局特征（768 维，可再投影到 `semantic_channels=128`）；
+   - `encode_dense()` → 逐 patch 空间特征图：224×224 输入、16×16 patch ⇒ 14×14 token；再按 letterbox 的内容矩形**裁剪**（`_valid_token_indices`），得到 **768×14×8** 的特征图（对应 256×512 输入）。
+   - 投影头 `token_projection` / `global_projection`（LayerNorm + Linear）是**可训练的**（只有它们是），把 768 维压到 128 维。
+4. **开集结构化文本提示词库（15 类概念原型）**：
+   `encode_siglip2_text_prompts()` 用 SigLIP2 文本塔编码固定提示词库 `DEFAULT_SIGLIP_ROUTE_PROMPTS`，构建结构化 15 类语义概念空间：
+   - **外层 3D 饰品（类别 0..7）**：`outer_glasses` (眼镜/护目镜), `outer_crown_hat` (皇冠/帽子/头盔), `outer_ears` (兽耳/角/耳机), `outer_jacket` (外套/连帽衫/高领), `outer_limbs` (手套/袖口/腰带/靴子), `outer_hair` (立体外发), `outer_mask` (面罩/下颌饰品), `outer_back` (后背饰品)。
+   - **内层基底皮肤与衣物（类别 8..13）**：`inner_face` (面部五官/眼睛/嘴巴), `inner_hair` (头皮基础发型), `inner_skin` (基础裸露皮肤), `inner_clothes` (内层衣服), `inner_logo` (平铺印花), `inner_pattern` (条纹/方格)。
+   - **背景（类别 14）**：`background` (纯色背景)。
+   
+   编码得到的归一化嵌入与 **SigLIP 校准标量**（logit scale / bias）直接存进 parser checkpoint，推理时**零文本塔开销**。
 
-> TIPSv2（`TIPSv2VisionBackbone`）是另一个可选骨干，仅在显式选择
-> 时作为在线消融使用（`SEMANTIC_BACKBONE=tipsv2`），不是生产默认。
+5. **高分辨率 U-Net 引导特征精炼（High-Resolution Skip Refinement）**：
+   - SigLIP2 视觉塔的 Patch 尺寸为 $16 \times 16$ 像素，在 256×512 分辨率下只能提供 16×32 的粗粒度 Token，直接双线性上采样会导致饰品边缘发生数个像素的空间漂移与模糊。
+   - `TextPromptRouteFusion` 将 SigLIP2 的语义 Token 空间响应图与来自主干 U-Net 的 $256 \times 512$ 像素级高分辨率特征图（$c$ 通道）在通道维度拼接，通过多层残差卷积精炼（$3\times3 \text{ Conv} \rightarrow \text{GELU} \rightarrow 3\times3 \text{ Conv} \rightarrow \text{GELU} \rightarrow 1\times1 \text{ Conv}$），使语义预测完美吸附贴合在 Minecraft 体素方块边界上。
 
 ## 6.2 运行时挂载：semantic.py
 

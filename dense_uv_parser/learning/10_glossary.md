@@ -25,8 +25,11 @@
 | 术语 | 英文 | 说明 |
 | :--- | :--- | :--- |
 | 3D UV 跨视角融合 | UVMultiViewSpatialFusion | 将 2D 特征反向投影到 64×64 UV 空间进行 360° 全局聚合并广播回各视角（04） |
+| 稠密提示词交叉注意力解码器 | Dense Prompt Cross-Attention Decoder | 结合 SigLIP2 15 类开集语义与高分辨率 U-Net 特征的逐像素语义预测头（04/06） |
+| 高分辨率跳跃引导 | High-Resolution Skip Guidance | 将 U-Net 主干的 256×512 像素级特征与低分辨率语义特征拼接消除模糊与空间漂移（04/06） |
+| 微配件梯度加权 | Accessory Gradient Boost | 对眼镜/皇冠等稀疏微小饰品施加 2.50 倍损失加权，防止被大面积背景淹没（07） |
 | 假说检验 | Analysis-by-Synthesis | 生成多套 UV 假说并用可微渲染器重渲染对比真实残差进行物理裁决（01/08） |
-| 可微假说裁决器 | Differentiable Hypothesis Refiner | 执行 Analysis-by-Synthesis 消除内外层误判与遮挡面罩的推理模块（08） |
+| 连通分量假说裁决器 | Connected Component Hypothesis Refiner | 将外层切分为四连通分量并进行带外溢惩罚的可微渲染终审后处理（08） |
 | 路由角色 | route role | 像素属于内层(0)/外层(1)/次级表面(2) 的三分类（01/04） |
 | 次级表面 | secondary surface | 不属于直接内/外映射的可见表面（透过透明孔看到的深处/背面）（05） |
 | 表面槽位 | surface slot | 映射文件中的候选表面编号，训练/推理用它精确定位纹素（05） |
