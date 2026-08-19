@@ -17,7 +17,7 @@ import torch.nn.functional as F
 # Indices 8..13: Inner Layer Base Skin & Clothing Concepts
 # Index 14: Background
 DEFAULT_SIGLIP_ROUTE_PROMPTS = (
-    "a rendered Minecraft character wearing raised glasses, sunglasses, eyeglasses frame, lenses, or goggles across the eyes",
+    "a rendered Minecraft character wearing raised glasses, sunglasses, eyeglasses frame, tinted or transparent lenses, or goggles across the eyes",
     "a rendered Minecraft character wearing a raised hat, crown, helmet, or headband",
     "a rendered Minecraft character with raised animal ears, horns, or headphones",
     "a rendered Minecraft character wearing a raised jacket, coat, hoodie, high collar, or scarf",
@@ -25,7 +25,7 @@ DEFAULT_SIGLIP_ROUTE_PROMPTS = (
     "a rendered Minecraft character with raised outer hair protruding from the head",
     "a rendered Minecraft character wearing a raised visor or face mask",
     "a rendered Minecraft character with raised 3D accessories on the torso or back",
-    "a rendered Minecraft character with flat eyes, eyebrows, nose, mouth, and teeth painted directly on the inner head skin",
+    "a rendered Minecraft character with flat eyes, eyebrows, nose, mouth, and teeth painted directly on the inner head skin without glasses",
     "a rendered Minecraft character with flat hair painted on the base head scalp",
     "a rendered Minecraft character with exposed bare base skin on the face, arms, or legs",
     "a rendered Minecraft character with flat shirt, pants, and base clothing texture",

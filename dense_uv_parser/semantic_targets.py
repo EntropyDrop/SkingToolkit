@@ -167,10 +167,14 @@ def build_dense_view_semantic_targets(
             outer_flat_uv = static["flat_uv"][1]
             outer_y = outer_flat_uv // 64
 
-            outer_active = outer_mask & (flat_alpha[outer_flat_uv] > float(alpha_threshold))
+            outer_alpha = flat_alpha[outer_flat_uv]
+            # Use lower alpha threshold (0.05) for head outer layer to capture translucent sunglasses / tinted lenses
+            head_outer_active = outer_mask & (outer_part == 0) & (outer_alpha > 0.05)
+            body_outer_active = outer_mask & (outer_part > 0) & (outer_alpha > float(alpha_threshold))
+            outer_active = head_outer_active | body_outer_active
 
             # Head outer breakdown:
-            is_head_outer = outer_active & (outer_part == 0)
+            is_head_outer = head_outer_active
 
             # Crown / hat: top face (5) or top forehead hairline (outer_y <= 8)
             is_outer_crown = is_head_outer & ((outer_face == 5) | (outer_y <= 8))

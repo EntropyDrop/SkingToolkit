@@ -567,17 +567,6 @@ class TextPromptRouteFusion(nn.Module):
             dim=-1, keepdim=True, unbiased=False
         ).clamp_min(1e-4)
         global_residual = 0.10 * torch.tanh(normalized_global)
-        prompt_evidence = (
-            local_similarity + global_residual[:, :, None, None]
-        )
-        route_logits = self.route_projection(prompt_evidence)
-        route_logits = F.interpolate(
-            route_logits,
-            size=output_size,
-            mode="bilinear",
-            align_corners=False,
-        )
-
         upsampled_spatial = F.interpolate(
             proj_spatial,
             size=output_size,
@@ -590,6 +579,9 @@ class TextPromptRouteFusion(nn.Module):
             dense_semantic_logits = self.semantic_head(combined)
         else:
             dense_semantic_logits = self.semantic_head(upsampled_spatial)
+
+        # High-resolution dense semantic logits directly project to pixel-exact route adjustments
+        route_logits = self.route_projection(dense_semantic_logits)
 
         spatial_prompt_similarity = F.interpolate(
             local_similarity,
