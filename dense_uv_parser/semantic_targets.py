@@ -171,14 +171,13 @@ def build_dense_view_semantic_targets(
 
             # Head outer breakdown:
             is_head_outer = outer_active & (outer_part == 0)
-            outer_face_row = (outer_y - 8).clamp_min(0)
 
-            # Glasses / goggles: eye level (rows 2..4) across Front, Right, Left faces
+            # Crown / hat: top face (5) or top forehead hairline (outer_y <= 8)
+            is_outer_crown = is_head_outer & ((outer_face == 5) | (outer_y <= 8))
+            # Glasses / goggles: eye/sunglasses level (rows 9..13) across Front, Right, Left faces
             is_glasses_face = (outer_face == 0) | (outer_face == 2) | (outer_face == 3)
-            is_outer_glasses = is_head_outer & is_glasses_face & (outer_y >= 10) & (outer_y <= 12)
-            # Crown / hat: top face (5) or top forehead rows (0..1)
-            is_outer_crown = is_head_outer & ((outer_face == 5) | (outer_y < 10)) & ~is_outer_glasses
-            # Outer hair / lower face:
+            is_outer_glasses = is_head_outer & is_glasses_face & (outer_y >= 9) & (outer_y <= 13) & ~is_outer_crown
+            # Outer hair / lower face (beard, chin, back hair):
             is_outer_head_other = is_head_outer & ~is_outer_glasses & ~is_outer_crown
 
             is_outer_torso = outer_active & (outer_part == 1)

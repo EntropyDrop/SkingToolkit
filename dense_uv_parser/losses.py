@@ -265,9 +265,30 @@ def dense_semantic_supervision_loss(
     target_p = probs.gather(1, safe_targets.unsqueeze(1)).squeeze(1)
 
     focal_weight = (1.0 - target_p).clamp_min(0.0) ** float(focal_gamma)
-    loss = -focal_weight * target_log_p
+    per_pixel_loss = focal_weight * (-target_log_p)
 
-    return loss[valid].mean()
+    # Class-frequency rebalancing for small micro-accessories (glasses, crowns, ears):
+    valid_targets = safe_targets[valid]
+    class_counts = torch.bincount(valid_targets, minlength=P).float()
+    active_classes = class_counts > 0
+
+    class_weights = torch.where(
+        active_classes,
+        class_counts.clamp_min(1.0).rsqrt(),
+        torch.zeros_like(class_counts),
+    )
+    class_weights[active_classes] = (
+        class_weights[active_classes]
+        / class_weights[active_classes].mean().clamp_min(1e-6)
+    )
+    # Boost outer decor classes (0..7, e.g. outer_glasses) so thin accessories receive strong gradient
+    outer_decor_indices = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7], device=logits.device)
+    class_weights[outer_decor_indices] = class_weights[outer_decor_indices] * 2.50
+
+    element_weights = class_weights.gather(0, safe_targets.view(-1)).view_as(safe_targets)
+    weighted_loss = per_pixel_loss * element_weights
+
+    return weighted_loss[valid].sum() / element_weights[valid].sum().clamp_min(1e-12)
 
 
 class DenseUVParserLoss(nn.Module):
