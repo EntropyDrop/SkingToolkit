@@ -142,34 +142,53 @@ def build_dense_view_semantic_targets(
             inner_mask = static["masks"][0]
             inner_part = static["part"][0]
             inner_face = static["face"][0]
+            inner_flat_uv = static["flat_uv"][0]
+            inner_y = inner_flat_uv // 64
 
-            is_inner_head_face = inner_mask & (inner_part == 0) & (inner_face == 0)
+            # On head front face (part 0, face 0): rows 2..7 are face features (eyes/mouth)
+            is_head_front = inner_mask & (inner_part == 0) & (inner_face == 0)
+            inner_face_row = inner_y - 8
+            is_inner_face_features = is_head_front & (inner_face_row >= 2)
+            is_inner_face_hairline = is_head_front & (inner_face_row < 2)
             is_inner_head_other = inner_mask & (inner_part == 0) & (inner_face != 0)
             is_inner_torso = inner_mask & (inner_part == 1)
             is_inner_limbs = inner_mask & (inner_part >= 2)
 
-            sem[is_inner_head_face] = 8   # inner_face (eyes, mouth, facial skin)
-            sem[is_inner_head_other] = 9  # inner_hair (scalp)
-            sem[is_inner_torso] = 11      # inner_clothes
-            sem[is_inner_limbs] = 10      # inner_skin / limbs
+            sem[is_inner_face_features] = 8  # inner_face (eyes, mouth, facial skin)
+            sem[is_inner_face_hairline] = 9  # inner_hair (forehead hairline)
+            sem[is_inner_head_other] = 9     # inner_hair (scalp, sides, back)
+            sem[is_inner_torso] = 11         # inner_clothes
+            sem[is_inner_limbs] = 10         # inner_skin / limbs
 
             # 2. Outer Layer 3D Decor Classification (only where alpha > alpha_threshold)
             outer_mask = static["masks"][1]
             outer_part = static["part"][1]
             outer_face = static["face"][1]
             outer_flat_uv = static["flat_uv"][1]
+            outer_y = outer_flat_uv // 64
 
             outer_active = outer_mask & (flat_alpha[outer_flat_uv] > float(alpha_threshold))
 
-            is_outer_head_front = outer_active & (outer_part == 0) & (outer_face == 0)
-            is_outer_head_other = outer_active & (outer_part == 0) & (outer_face != 0)
+            # Head outer breakdown:
+            is_head_outer = outer_active & (outer_part == 0)
+            outer_face_row = (outer_y - 8).clamp_min(0)
+
+            # Glasses / goggles: eye level (rows 2..4) across Front, Right, Left faces
+            is_glasses_face = (outer_face == 0) | (outer_face == 2) | (outer_face == 3)
+            is_outer_glasses = is_head_outer & is_glasses_face & (outer_y >= 10) & (outer_y <= 12)
+            # Crown / hat: top face (5) or top forehead rows (0..1)
+            is_outer_crown = is_head_outer & ((outer_face == 5) | (outer_y < 10)) & ~is_outer_glasses
+            # Outer hair / lower face:
+            is_outer_head_other = is_head_outer & ~is_outer_glasses & ~is_outer_crown
+
             is_outer_torso = outer_active & (outer_part == 1)
             is_outer_limbs = outer_active & (outer_part >= 2)
 
-            sem[is_outer_head_front] = 0  # outer_glasses / visor
-            sem[is_outer_head_other] = 1  # outer_crown_hat / ears
-            sem[is_outer_torso] = 3       # outer_jacket / hoodie
-            sem[is_outer_limbs] = 4       # outer_limbs
+            sem[is_outer_glasses] = 0        # outer_glasses (sunglasses, goggles, temples)
+            sem[is_outer_crown] = 1          # outer_crown_hat (crown, hat, tiara)
+            sem[is_outer_head_other] = 5     # outer_hair (hair volume, lower face accessories)
+            sem[is_outer_torso] = 3          # outer_jacket / hoodie
+            sem[is_outer_limbs] = 4          # outer_limbs
 
             targets.append(sem)
 

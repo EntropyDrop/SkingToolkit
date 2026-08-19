@@ -419,6 +419,7 @@ class TextPromptRouteFusion(nn.Module):
         raw_feature_dim,
         prompt_count,
         route_classes,
+        highres_channels=0,
         hidden_channels=32,
         logit_scale=1.0,
         logit_bias=0.0,
@@ -431,6 +432,7 @@ class TextPromptRouteFusion(nn.Module):
         self.raw_feature_dim = int(raw_feature_dim)
         self.prompt_count = int(prompt_count)
         self.hidden_channels = int(hidden_channels)
+        self.highres_channels = int(highres_channels)
         self.register_buffer(
             "prompt_embeddings",
             torch.zeros(prompt_count, raw_feature_dim),
@@ -443,17 +445,23 @@ class TextPromptRouteFusion(nn.Module):
             "logit_bias",
             torch.tensor(float(logit_bias), dtype=torch.float32),
         )
-        # SigLIP2's pooled vision and text outputs share the contrastive space,
-        # but raw patch tokens do not pass through the vision pooling head.
-        # Learn a small common local space instead of treating raw patch/text
-        # cosine values as calibrated open-vocabulary scores.
         self.spatial_projection = nn.Conv2d(
             raw_feature_dim, hidden_channels, kernel_size=1, bias=False
         )
         self.prompt_projection = nn.Linear(
             raw_feature_dim, hidden_channels, bias=False
         )
+        self.highres_projection = (
+            nn.Conv2d(highres_channels, hidden_channels, kernel_size=1)
+            if highres_channels > 0
+            else None
+        )
+        combined_channels = (
+            hidden_channels * 2 if highres_channels > 0 else hidden_channels
+        )
         self.semantic_head = nn.Sequential(
+            nn.Conv2d(combined_channels, hidden_channels, kernel_size=3, padding=1),
+            nn.GELU(),
             nn.Conv2d(hidden_channels, hidden_channels, kernel_size=3, padding=1),
             nn.GELU(),
             nn.Conv2d(hidden_channels, prompt_count, kernel_size=1),
@@ -495,6 +503,7 @@ class TextPromptRouteFusion(nn.Module):
         raw_global_features,
         sample_count,
         output_size,
+        highres_features=None,
     ):
         if raw_features.dim() == 5:
             raw_features = raw_features.reshape(
@@ -551,11 +560,6 @@ class TextPromptRouteFusion(nn.Module):
         local_similarity = torch.einsum(
             "nchw,pc->nphw", local_image_features, local_prompt_features
         )
-        # The frozen pooled image/text scores are weak accessory classifiers:
-        # in particular, a visible hat can receive a lower score than an image
-        # without one. Do not let those scores suppress trainable local prompt
-        # evidence. They are retained only as a bounded, per-image residual;
-        # exact route supervision decides how the local similarities are used.
         centered_global = global_logits - global_logits.mean(
             dim=-1, keepdim=True
         )
@@ -574,13 +578,19 @@ class TextPromptRouteFusion(nn.Module):
             align_corners=False,
         )
 
-        dense_semantic_logits = self.semantic_head(proj_spatial)
-        dense_semantic_logits = F.interpolate(
-            dense_semantic_logits,
+        upsampled_spatial = F.interpolate(
+            proj_spatial,
             size=output_size,
             mode="bilinear",
             align_corners=False,
         )
+        if self.highres_projection is not None and highres_features is not None:
+            highres_proj = self.highres_projection(highres_features.float())
+            combined = torch.cat([upsampled_spatial, highres_proj], dim=1)
+            dense_semantic_logits = self.semantic_head(combined)
+        else:
+            dense_semantic_logits = self.semantic_head(upsampled_spatial)
+
         spatial_prompt_similarity = F.interpolate(
             local_similarity,
             size=output_size,
@@ -955,6 +965,7 @@ class DenseUVParserNet(nn.Module):
                 self.semantic_text_prompt_feature_dim,
                 self.semantic_text_prompt_count,
                 self.layer_classes,
+                highres_channels=c,
                 hidden_channels=self.semantic_text_prompt_channels,
                 logit_scale=semantic_text_logit_scale,
                 logit_bias=semantic_text_logit_bias,
@@ -1233,6 +1244,7 @@ class DenseUVParserNet(nn.Module):
                 semantic_global,
                 source_images.shape[0],
                 layer_evidence.shape[-2:],
+                highres_features=x,
             )
             layer_evidence = layer_evidence + text_prompt_route_logits.to(
                 dtype=layer_evidence.dtype
