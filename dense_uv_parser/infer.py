@@ -201,6 +201,9 @@ def load_parser(checkpoint_path, device):
         semantic_text_logit_bias=model_config.get(
             "semantic_text_logit_bias", 0.0
         ),
+        dense_semantic_target_version=model_config.get(
+            "dense_semantic_target_version", 1
+        ),
         predict_confidence=model_config.get(
             "predict_confidence",
             any(key.startswith("route_confidence.") for key in state_dict),
@@ -610,8 +613,16 @@ def save_semantic_pixel_labels(
     N, P, H, W = evidence.shape
     predicted_classes = evidence.argmax(dim=1)
 
-    palette = torch.tensor(
-        [
+    if P == 4:
+        palette_values = [
+            [255, 215, 0],    # 0: head_top_accessory (gold)
+            [220, 20, 60],    # 1: other_outer (crimson)
+            [30, 144, 255],   # 2: inner (dodger blue)
+            [30, 30, 30],     # 3: background (dark gray)
+        ]
+        background_index = 3
+    else:
+        palette_values = [
             [0, 255, 200],    # 0: outer_glasses (bright cyan)
             [255, 215, 0],    # 1: outer_crown_hat (gold)
             [255, 105, 180],  # 2: outer_ears (hot pink)
@@ -627,7 +638,10 @@ def save_semantic_pixel_labels(
             [50, 205, 50],    # 12: inner_logo (lime green)
             [255, 255, 255],  # 13: inner_pattern (white)
             [30, 30, 30],     # 14: background (dark gray)
-        ],
+        ]
+        background_index = 14
+    palette = torch.tensor(
+        palette_values,
         dtype=torch.float32,
         device=evidence.device,
     ) / 255.0
@@ -637,7 +651,7 @@ def save_semantic_pixel_labels(
 
     if observed_foreground is not None:
         fg = observed_foreground.unsqueeze(1) if observed_foreground.dim() == 3 else observed_foreground
-        bg = palette[14].view(1, 3, 1, 1)
+        bg = palette[background_index].view(1, 3, 1, 1)
         color_map = torch.where(fg.bool(), color_map, bg)
 
     raw_rgb = rendered[:, :3].to(device=evidence.device, dtype=torch.float32)

@@ -27,6 +27,7 @@ from SkingToolkit.dense_uv_parser.semantic import (  # noqa: E402
 )
 from SkingToolkit.dense_uv_parser.semantic_backbone import (  # noqa: E402
     DEFAULT_SIGLIP_ROUTE_PROMPTS,
+    LAYER_TOPOLOGY_SIGLIP_ROUTE_PROMPTS,
     encode_siglip2_text_prompts,
 )
 from SkingToolkit.dense_uv_parser.utils import (  # noqa: E402
@@ -2530,6 +2531,7 @@ def run_epoch(
                             alpha_threshold=getattr(
                                 args, "target_alpha_threshold", 0.5
                             ),
+                            target_version=args.dense_semantic_target_version,
                         )
                     )
                 losses = criterion(outputs, targets)
@@ -3619,6 +3621,9 @@ def save_checkpoint(
                 if model.semantic_text_prompt_fusion is not None
                 else 0.0
             ),
+            "dense_semantic_target_version": (
+                model.dense_semantic_target_version
+            ),
             "predict_confidence": model.predict_confidence,
             "route_role_spatial_prior": model.route_role_spatial_prior,
             "route_prior_height": model.route_prior_height,
@@ -3736,6 +3741,16 @@ def build_arg_parser():
     )
     parser.add_argument(
         "--semantic_text_prompt_channels", type=int, default=32
+    )
+    parser.add_argument(
+        "--dense_semantic_target_version",
+        type=int,
+        choices=(1, 2),
+        default=1,
+        help=(
+            "Dense semantic schema. Version 2 supervises exact head-top "
+            "outer components, other outer pixels, inner pixels, and background."
+        ),
     )
     parser.add_argument(
         "--predict_head_outer_structure",
@@ -4580,6 +4595,14 @@ def main():
         raise ValueError("Semantic channels and layers must be positive.")
     if args.semantic_attention_heads < 1:
         raise ValueError("--semantic_attention_heads must be positive.")
+    if (
+        args.dense_semantic_target_version == 2
+        and not args.siglip_text_prompt_fusion
+    ):
+        raise ValueError(
+            "Dense semantic target version 2 requires "
+            "--siglip_text_prompt_fusion."
+        )
     if args.semantic_channels % args.semantic_attention_heads != 0:
         raise ValueError("Semantic channels must be divisible by attention heads.")
     if not 0.0 <= args.semantic_dropout < 1.0:
@@ -4711,9 +4734,14 @@ def main():
         print(
             "Encoding fixed SigLIP2 route prompts with the frozen text tower..."
         )
+        semantic_prompts = (
+            LAYER_TOPOLOGY_SIGLIP_ROUTE_PROMPTS
+            if args.dense_semantic_target_version == 2
+            else DEFAULT_SIGLIP_ROUTE_PROMPTS
+        )
         text_prompt_bundle = encode_siglip2_text_prompts(
             args.siglip_model,
-            prompts=DEFAULT_SIGLIP_ROUTE_PROMPTS,
+            prompts=semantic_prompts,
             device=device,
             local_files_only=args.siglip_local_files_only,
         )
@@ -4833,6 +4861,7 @@ def main():
             if text_prompt_bundle is not None
             else 0.0
         ),
+        dense_semantic_target_version=args.dense_semantic_target_version,
         predict_confidence=args.semantic_backbone != "none",
         route_role_spatial_prior=(
             geometry_only and args.route_role_spatial_prior
@@ -5026,6 +5055,17 @@ def main():
                     f"{checkpoint_prompt_shape}, requested="
                     f"{requested_prompt_shape}. Start a new run."
                 )
+            checkpoint_semantic_target_version = int(
+                checkpoint_config.get("dense_semantic_target_version", 1)
+            )
+            if (
+                checkpoint_semantic_target_version
+                != model.dense_semantic_target_version
+            ):
+                raise ValueError(
+                    "Cannot change dense semantic target schema while "
+                    "resuming. Start a new run."
+                )
         checkpoint_layer_classes = checkpoint.get("model_config", {}).get("layer_classes", 2)
         if geometry_only and checkpoint_layer_classes != model.layer_classes:
             raise ValueError(
@@ -5203,6 +5243,9 @@ def main():
         "semantic_layers": args.semantic_layers,
         "semantic_spatial_feature_dim": semantic_spatial_feature_dim,
         "semantic_spatial_channels": args.semantic_spatial_channels,
+        "dense_semantic_target_version": (
+            args.dense_semantic_target_version
+        ),
         "siglip_text_prompt_fusion": (
             model.semantic_text_prompt_fusion is not None
         ),

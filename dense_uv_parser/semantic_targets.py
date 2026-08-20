@@ -7,6 +7,40 @@ from SkingToolkit.dense_uv_parser.uv_layout import (
     build_part_layer_masks,
     minecraft_layer_rects,
 )
+from SkingToolkit.dense_uv_parser.uv_topology import (
+    build_head_outer_face_graph,
+)
+
+
+def _graph_component_labels(candidate, edge_index, max_steps=48):
+    """Label boolean graph components without creating gradient paths."""
+    batch, node_count = candidate.shape
+    source, destination = edge_index.to(candidate.device)
+    labels = torch.arange(
+        node_count, device=candidate.device, dtype=torch.long
+    ).view(1, -1).expand(batch, -1).clone()
+    labels[~candidate] = node_count
+    connected_edge = candidate[:, source] & candidate[:, destination]
+    expanded_destination = destination.view(1, -1).expand(batch, -1)
+    with torch.no_grad():
+        for _ in range(int(max_steps)):
+            neighbour_label = torch.where(
+                connected_edge,
+                labels[:, source],
+                torch.full_like(labels[:, source], node_count),
+            )
+            updated = labels.clone()
+            updated.scatter_reduce_(
+                1,
+                expanded_destination,
+                neighbour_label,
+                reduce="amin",
+                include_self=True,
+            )
+            if torch.equal(updated, labels):
+                break
+            labels = updated
+    return labels
 
 
 def build_semantic_attribute_targets(target_uv, inner_part_masks, outer_part_masks):
@@ -86,6 +120,59 @@ def build_head_outer_face_targets(target_uv, alpha_threshold=0.5):
     }
 
 
+def build_head_top_accessory_face_targets(
+    target_uv,
+    alpha_threshold=0.5,
+    side_seed_rows=2,
+):
+    """Return exact outer components physically connected to the head top.
+
+    Components are found on the six-face cube graph, not in 2D atlas space.
+    A component is selected when any of its true outer-alpha texels touches
+    the top face or the upper rows of a side face.  The complete connected
+    component is returned, so crown tips and hat sides remain one semantic
+    object across UV seams.  Every selected texel is still a real outer-alpha
+    texel; no bounding rectangle or transparent gap is fabricated.
+    """
+    if not 1 <= int(side_seed_rows) <= 8:
+        raise ValueError("side_seed_rows must be in [1, 8].")
+    occupancy = build_head_outer_face_targets(
+        target_uv, alpha_threshold=alpha_threshold
+    )["occupancy"] > 0.5
+    nodes = occupancy.flatten(1)
+    labels = _graph_component_labels(
+        nodes,
+        build_head_outer_face_graph(),
+    )
+    node_count = nodes.shape[1]
+    seed_template = torch.zeros(
+        FACE_COUNT, 8, 8, dtype=torch.bool, device=nodes.device
+    )
+    seed_template[:4, : int(side_seed_rows)] = True
+    seed_template[5] = True
+    seed_nodes = nodes & seed_template.flatten().unsqueeze(0)
+
+    component_has_seed = torch.zeros(
+        nodes.shape[0],
+        node_count + 1,
+        dtype=torch.uint8,
+        device=nodes.device,
+    )
+    component_has_seed.scatter_reduce_(
+        1,
+        labels,
+        seed_nodes.to(torch.uint8),
+        reduce="amax",
+        include_self=True,
+    )
+    selected = nodes & component_has_seed.gather(1, labels).bool()
+    return {
+        "mask": selected.reshape(-1, FACE_COUNT, 8, 8).float(),
+        "presence": selected.any(dim=1).float(),
+        "component_labels": labels,
+    }
+
+
 def head_outer_face_values_to_uv(values):
     """Scatter face-major Bx6x8x8 head values into a 64x64 atlas."""
     if values.dim() != 4 or values.shape[1:] != (FACE_COUNT, 8, 8):
@@ -113,11 +200,14 @@ def build_dense_view_semantic_targets(
     views,
     device=None,
     alpha_threshold=0.5,
+    target_version=1,
 ):
-    """Build exact 2D pixel-level multi-class semantic ground truth (0..14).
+    """Build dense pixel semantics for the requested target schema.
 
     Returns:
-        semantic_targets: (B * V, H, W) long tensor with class indices 0..14.
+        semantic_targets: (B * V, H, W) long tensor. Version 1 uses the
+            legacy 15-class pseudo labels; version 2 uses four exact
+            layer/topology classes.
     """
     from SkingToolkit.dense_uv_parser.utils import (
         build_static_surface_routing,
@@ -129,13 +219,48 @@ def build_dense_view_semantic_targets(
     if device is None:
         device = target_uv.device
 
+    target_version = int(target_version)
+    if target_version not in (1, 2):
+        raise ValueError("target_version must be 1 or 2.")
     targets = []
+    top_accessory_atlas = None
+    if target_version == 2:
+        top_faces = build_head_top_accessory_face_targets(
+            target_uv,
+            alpha_threshold=alpha_threshold,
+        )["mask"]
+        top_accessory_atlas = head_outer_face_values_to_uv(top_faces)[
+            :, 0
+        ].flatten(1).bool()
     for b in range(B):
         uv_b = target_uv[b : b + 1]
         flat_alpha = uv_b[0, 3].flatten()
         for v_name in parsed_views:
             static = build_static_surface_routing(renderer, v_name, device)
             H, W = static["masks"].shape[-2:]
+            if target_version == 2:
+                # 0: head_top_accessory, 1: other_outer,
+                # 2: inner, 3: background.
+                sem = torch.full((H, W), 3, dtype=torch.long, device=device)
+                inner_mask = static["masks"][0]
+                outer_mask = static["masks"][1]
+                outer_part = static["part"][1]
+                outer_flat_uv = static["flat_uv"][1]
+                outer_alpha = flat_alpha[outer_flat_uv]
+                outer_active = outer_mask & (
+                    outer_alpha > float(alpha_threshold)
+                )
+                sem[inner_mask] = 2
+                sem[outer_active] = 1
+                top_active = (
+                    outer_active
+                    & (outer_part == 0)
+                    & top_accessory_atlas[b, outer_flat_uv]
+                )
+                sem[top_active] = 0
+                targets.append(sem)
+                continue
+
             sem = torch.full((H, W), 14, dtype=torch.long, device=device)
 
             # 1. Inner Layer Base Classification
@@ -217,6 +342,7 @@ def build_dense_view_semantic_targets(
 __all__ = [
     "build_part_layer_masks",
     "build_head_outer_face_targets",
+    "build_head_top_accessory_face_targets",
     "head_outer_face_values_to_uv",
     "build_semantic_attribute_targets",
     "build_dense_view_semantic_targets",

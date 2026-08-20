@@ -423,6 +423,7 @@ class TextPromptRouteFusion(nn.Module):
         hidden_channels=32,
         logit_scale=1.0,
         logit_bias=0.0,
+        semantic_target_version=1,
     ):
         super().__init__()
         if raw_feature_dim < 1 or prompt_count < 1:
@@ -433,6 +434,13 @@ class TextPromptRouteFusion(nn.Module):
         self.prompt_count = int(prompt_count)
         self.hidden_channels = int(hidden_channels)
         self.highres_channels = int(highres_channels)
+        self.semantic_target_version = int(semantic_target_version)
+        if self.semantic_target_version not in (1, 2):
+            raise ValueError("semantic_target_version must be 1 or 2.")
+        if self.semantic_target_version == 2 and prompt_count != 4:
+            raise ValueError(
+                "Layer-topology semantic targets require exactly four prompts."
+            )
         self.register_buffer(
             "prompt_embeddings",
             torch.zeros(prompt_count, raw_feature_dim),
@@ -475,6 +483,11 @@ class TextPromptRouteFusion(nn.Module):
         # starts as a no-op and learns corrections from exact route targets.
         nn.init.zeros_(self.route_projection[-1].weight)
         nn.init.zeros_(self.route_projection[-1].bias)
+        self.semantic_route_scale = (
+            nn.Parameter(torch.zeros(()))
+            if self.semantic_target_version == 2
+            else None
+        )
 
     def set_prompt_embeddings(self, embeddings, logit_scale=None, logit_bias=None):
         if embeddings.shape != self.prompt_embeddings.shape:
@@ -573,15 +586,47 @@ class TextPromptRouteFusion(nn.Module):
             mode="bilinear",
             align_corners=False,
         )
-        if self.highres_projection is not None and highres_features is not None:
-            highres_proj = self.highres_projection(highres_features.float())
+        if self.highres_projection is not None:
+            highres_proj = (
+                self.highres_projection(highres_features.float())
+                if highres_features is not None
+                else torch.zeros_like(upsampled_spatial)
+            )
             combined = torch.cat([upsampled_spatial, highres_proj], dim=1)
             dense_semantic_logits = self.semantic_head(combined)
-        # Compute direct semantic outer vs inner log-odds:
-        # Outer indices: 0..7 (glasses, crown, ears, jacket, limbs, hair, mask, back)
-        # Inner indices: 8..13 (face, hair, skin, clothes, logo, pattern)
-        sem_outer = torch.logsumexp(dense_semantic_logits[:, :8], dim=1, keepdim=True)
-        sem_inner = torch.logsumexp(dense_semantic_logits[:, 8:14], dim=1, keepdim=True)
+        else:
+            dense_semantic_logits = self.semantic_head(upsampled_spatial)
+
+        if self.semantic_target_version == 2:
+            # Make the frozen text tower actual evidence instead of a
+            # diagnostics-only side path.  Both residuals are deliberately
+            # bounded; the trained high-resolution decoder remains primary.
+            spatial_prompt_similarity = F.interpolate(
+                local_similarity,
+                size=output_size,
+                mode="bilinear",
+                align_corners=False,
+            )
+            dense_semantic_logits = (
+                dense_semantic_logits
+                + 0.20 * spatial_prompt_similarity
+                + global_residual.unsqueeze(-1).unsqueeze(-1)
+            )
+            # 0: head-top outer component, 1: other outer, 2: inner,
+            # 3: background. Background is handled by the foreground head and
+            # does not push a surface route.
+            sem_outer = torch.logsumexp(
+                dense_semantic_logits[:, :2], dim=1, keepdim=True
+            )
+            sem_inner = dense_semantic_logits[:, 2:3]
+        else:
+            # Legacy object-name pseudo labels.
+            sem_outer = torch.logsumexp(
+                dense_semantic_logits[:, :8], dim=1, keepdim=True
+            )
+            sem_inner = torch.logsumexp(
+                dense_semantic_logits[:, 8:14], dim=1, keepdim=True
+            )
         sem_delta = (sem_outer - sem_inner).clamp(-10.0, 10.0)
 
         sem_bias = torch.cat(
@@ -593,15 +638,30 @@ class TextPromptRouteFusion(nn.Module):
             dim=1,
         )
 
-        # High-resolution dense semantic logits directly project to pixel-exact route adjustments
-        route_logits = sem_bias + self.route_projection(dense_semantic_logits)
+        projected_route = self.route_projection(dense_semantic_logits)
+        if self.semantic_target_version == 2:
+            probabilities = dense_semantic_logits.softmax(dim=1)
+            top_two = probabilities.topk(k=2, dim=1).values
+            confidence_gate = (top_two[:, :1] - top_two[:, 1:2]).clamp(
+                0.0, 1.0
+            )
+            # Exact zero initialization preserves the established parser. The
+            # scalar must first learn that calibrated semantic evidence helps
+            # before outer/inner log-odds can affect routing.
+            route_logits = confidence_gate * (
+                projected_route
+                + torch.tanh(self.semantic_route_scale) * sem_bias
+            )
+        else:
+            route_logits = sem_bias + projected_route
 
-        spatial_prompt_similarity = F.interpolate(
-            local_similarity,
-            size=output_size,
-            mode="bilinear",
-            align_corners=False,
-        )
+        if self.semantic_target_version != 2:
+            spatial_prompt_similarity = F.interpolate(
+                local_similarity,
+                size=output_size,
+                mode="bilinear",
+                align_corners=False,
+            )
         return (
             route_logits,
             global_logits,
@@ -745,6 +805,7 @@ class DenseUVParserNet(nn.Module):
         semantic_text_prompt_channels=32,
         semantic_text_logit_scale=1.0,
         semantic_text_logit_bias=0.0,
+        dense_semantic_target_version=1,
         predict_confidence=False,
         route_role_spatial_prior=False,
         route_prior_height=32,
@@ -788,6 +849,11 @@ class DenseUVParserNet(nn.Module):
         self.semantic_text_prompt_channels = int(
             semantic_text_prompt_channels
         )
+        self.dense_semantic_target_version = int(
+            dense_semantic_target_version
+        )
+        if self.dense_semantic_target_version not in (1, 2):
+            raise ValueError("dense_semantic_target_version must be 1 or 2.")
         self.predict_confidence = bool(predict_confidence)
         self.route_role_spatial_prior = bool(route_role_spatial_prior)
         self.route_prior_height = int(route_prior_height)
@@ -974,6 +1040,7 @@ class DenseUVParserNet(nn.Module):
                 hidden_channels=self.semantic_text_prompt_channels,
                 logit_scale=semantic_text_logit_scale,
                 logit_bias=semantic_text_logit_bias,
+                semantic_target_version=self.dense_semantic_target_version,
             )
             if self.semantic_text_prompt_count > 0
             else None

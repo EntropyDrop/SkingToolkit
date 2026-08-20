@@ -34,6 +34,18 @@ DEFAULT_SIGLIP_ROUTE_PROMPTS = (
     "a plain solid uniform background without any character",
 )
 
+# Version 2 deliberately uses only concepts that can be generated exactly
+# from a ground-truth skin and the fixed renderer.  ``head_top_accessory`` is
+# a physical outer-layer component connected to the top of the head cube; it
+# includes crowns, hats, helmets and raised top hair without pretending that
+# UV coordinates alone reveal the object's natural-language identity.
+LAYER_TOPOLOGY_SIGLIP_ROUTE_PROMPTS = (
+    "pixels belonging to a raised outer-layer component connected across the top of a Minecraft character head, such as a crown hat helmet or raised top hair",
+    "pixels belonging to another visible raised Minecraft outer skin layer",
+    "pixels belonging to the visible flat inner Minecraft skin layer",
+    "pixels belonging to the plain background outside the Minecraft character",
+)
+
 SEMANTIC_OUTER_INDICES = (0, 1, 2, 3, 4, 5, 6, 7)
 SEMANTIC_INNER_INDICES = (8, 9, 10, 11, 12, 13)
 SEMANTIC_BACKGROUND_INDICES = (14,)

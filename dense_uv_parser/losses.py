@@ -267,7 +267,8 @@ def dense_semantic_supervision_loss(
     focal_weight = (1.0 - target_p).clamp_min(0.0) ** float(focal_gamma)
     per_pixel_loss = focal_weight * (-target_log_p)
 
-    # Class-frequency rebalancing for small micro-accessories (glasses, crowns, ears):
+    # Class-frequency rebalancing. Version-2 semantics use four exact classes:
+    # head-top component, other outer, inner, and background.
     valid_targets = safe_targets[valid]
     class_counts = torch.bincount(valid_targets, minlength=P).float()
     active_classes = class_counts > 0
@@ -281,14 +282,86 @@ def dense_semantic_supervision_loss(
         class_weights[active_classes]
         / class_weights[active_classes].mean().clamp_min(1e-6)
     )
-    # Boost outer decor classes (0..7, e.g. outer_glasses) so thin accessories receive strong gradient
-    outer_decor_indices = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7], device=logits.device)
-    class_weights[outer_decor_indices] = class_weights[outer_decor_indices] * 2.50
+    if P == 4:
+        class_weights = class_weights * logits.new_tensor(
+            [3.0, 1.5, 1.0, 0.75]
+        )
+    else:
+        outer_decor_indices = torch.arange(
+            min(8, P), device=logits.device
+        )
+        class_weights[outer_decor_indices] = (
+            class_weights[outer_decor_indices] * 2.50
+        )
 
     element_weights = class_weights.gather(0, safe_targets.view(-1)).view_as(safe_targets)
     weighted_loss = per_pixel_loss * element_weights
 
     return weighted_loss[valid].sum() / element_weights[valid].sum().clamp_min(1e-12)
+
+
+def head_top_accessory_semantic_terms(dense_semantic_logits, targets):
+    """Component-aware supervision for version-2 class zero."""
+    logits = dense_semantic_logits.float()
+    targets = targets.to(device=logits.device, dtype=torch.long)
+    zero = logits.sum() * 0.0
+    if logits.shape[1] != 4:
+        return {
+            "loss_head_top_accessory_dice": zero,
+            "loss_head_top_accessory_hard_recall": zero,
+            "loss_head_top_accessory_presence": zero,
+            "head_top_accessory_precision": zero,
+            "head_top_accessory_recall": zero,
+            "head_top_accessory_presence_accuracy": zero,
+            "count_head_top_accessory_pixels": zero,
+        }
+    valid = targets != IGNORE_INDEX
+    expected = valid & (targets == 0)
+    probability = logits.softmax(dim=1)[:, 0]
+    expected_float = expected.float()
+    intersection = (probability * expected_float).flatten(1).sum(dim=1)
+    denominator = (
+        probability.flatten(1).sum(dim=1)
+        + expected_float.flatten(1).sum(dim=1)
+    )
+    present = expected.flatten(1).any(dim=1)
+    dice_per_sample = 1.0 - (2.0 * intersection + 1.0) / (
+        denominator + 1.0
+    )
+    loss_dice = (
+        dice_per_sample[present].mean() if present.any() else zero
+    )
+    loss_hard_recall = (
+        F.softplus(-logits[:, 0])[expected].mean()
+        if expected.any()
+        else zero
+    )
+    predicted_presence = probability.flatten(1).amax(dim=1).clamp(
+        1e-5, 1.0 - 1e-5
+    )
+    loss_presence = F.binary_cross_entropy(
+        predicted_presence,
+        present.float(),
+    )
+    predicted = logits.argmax(dim=1) == 0
+    true_positive = (predicted & expected).float().sum()
+    false_positive = (predicted & valid & ~expected).float().sum()
+    false_negative = (~predicted & expected).float().sum()
+    return {
+        "loss_head_top_accessory_dice": loss_dice,
+        "loss_head_top_accessory_hard_recall": loss_hard_recall,
+        "loss_head_top_accessory_presence": loss_presence,
+        "head_top_accessory_precision": (
+            true_positive / (true_positive + false_positive).clamp_min(1.0)
+        ),
+        "head_top_accessory_recall": (
+            true_positive / (true_positive + false_negative).clamp_min(1.0)
+        ),
+        "head_top_accessory_presence_accuracy": (
+            ((predicted_presence >= 0.5) == present).float().mean()
+        ),
+        "count_head_top_accessory_pixels": expected_float.sum(),
+    }
 
 
 class DenseUVParserLoss(nn.Module):
@@ -622,17 +695,41 @@ class DenseUVParserLoss(nn.Module):
         )
 
         if "dense_semantic_logits" in outputs and "dense_semantics" in targets:
-            loss_dense_semantics = dense_semantic_supervision_loss(
+            loss_dense_semantic_focal = dense_semantic_supervision_loss(
                 outputs["dense_semantic_logits"],
                 targets["dense_semantics"],
+            )
+            top_accessory_terms = head_top_accessory_semantic_terms(
+                outputs["dense_semantic_logits"],
+                targets["dense_semantics"],
+            )
+            loss_dense_semantics = (
+                loss_dense_semantic_focal
+                + 0.50
+                * top_accessory_terms["loss_head_top_accessory_dice"]
+                + 0.50
+                * top_accessory_terms[
+                    "loss_head_top_accessory_hard_recall"
+                ]
+                + 0.10
+                * top_accessory_terms["loss_head_top_accessory_presence"]
             )
             acc_dense_semantics = _masked_accuracy(
                 outputs["dense_semantic_logits"],
                 targets["dense_semantics"],
             )
         else:
+            loss_dense_semantic_focal = zero
             loss_dense_semantics = zero
             acc_dense_semantics = zero
+            top_accessory_terms = head_top_accessory_semantic_terms(
+                outputs["foreground"].new_zeros(
+                    outputs["foreground"].shape[0],
+                    1,
+                    *outputs["foreground"].shape[-2:],
+                ),
+                targets["foreground"][:, 0].long(),
+            )
         weighted_dense_semantics = (
             self.lambda_dense_semantics * loss_dense_semantics
         )
@@ -691,8 +788,10 @@ class DenseUVParserLoss(nn.Module):
             "loss_text_prompt_route_swap": loss_text_prompt_route_swap,
             "loss_text_prompt_route_weighted": weighted_text_prompt_route,
             "loss_dense_semantics": loss_dense_semantics,
+            "loss_dense_semantic_focal": loss_dense_semantic_focal,
             "loss_dense_semantics_weighted": weighted_dense_semantics,
             "acc_dense_semantics": acc_dense_semantics,
+            **top_accessory_terms,
             "acc_text_prompt_route": acc_text_prompt_route,
             "loss_route_prior_regularization": loss_route_prior_regularization,
             "confidence_mae": confidence_mae,

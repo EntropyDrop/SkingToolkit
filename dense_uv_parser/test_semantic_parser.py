@@ -24,6 +24,8 @@ from SkingToolkit.dense_uv_parser.train import (
 from SkingToolkit.dense_uv_parser.utils import splat_to_uv_conditioning
 from SkingToolkit.dense_uv_parser.semantic_targets import (
     build_head_outer_face_targets,
+    build_head_top_accessory_face_targets,
+    head_outer_face_values_to_uv,
     build_part_layer_masks,
 )
 from SkingToolkit.dense_uv_parser.simple_inpainting import (
@@ -230,6 +232,84 @@ class SemanticDenseUVParserTest(unittest.TestCase):
         self.assertIsNotNone(gradient)
         self.assertGreater(float(gradient.abs().sum()), 0.0)
 
+    def test_head_top_accessory_semantics_start_as_gated_noop(self):
+        model = DenseUVParserNet(
+            base_channels=8,
+            view_classes=2,
+            geometry_only=True,
+            semantic_feature_dim=12,
+            semantic_channels=8,
+            semantic_attention_heads=2,
+            semantic_spatial_feature_dim=12,
+            semantic_spatial_channels=8,
+            semantic_text_prompt_count=4,
+            semantic_text_prompt_feature_dim=12,
+            semantic_text_prompt_channels=6,
+            dense_semantic_target_version=2,
+        )
+        model.set_semantic_text_prompt_embeddings(torch.randn(4, 12))
+        outputs = model(
+            torch.rand(2, 4, 16, 16),
+            view_ids=torch.tensor([0, 1]),
+            semantic_features={
+                "raw_global": torch.rand(2, 12),
+                "raw_spatial": torch.rand(2, 12, 5, 5),
+            },
+        )
+        self.assertEqual(
+            tuple(outputs["dense_semantic_logits"].shape),
+            (2, 4, 16, 16),
+        )
+        self.assertTrue(
+            torch.equal(
+                outputs["text_prompt_route_logits"],
+                torch.zeros_like(outputs["text_prompt_route_logits"]),
+            )
+        )
+        outputs["text_prompt_route_logits"][:, 1].mean().backward()
+        self.assertIsNotNone(
+            model.semantic_text_prompt_fusion.semantic_route_scale.grad
+        )
+        self.assertGreater(
+            float(
+                model.semantic_text_prompt_fusion.semantic_route_scale.grad.abs()
+            ),
+            0.0,
+        )
+
+    def test_head_top_accessory_semantics_receive_component_recall_loss(self):
+        dense_logits = torch.zeros(1, 4, 8, 8, requires_grad=True)
+        outputs = {
+            "foreground": torch.zeros(1, 1, 8, 8),
+            "layer": torch.zeros(1, 3, 8, 8),
+            "dense_semantic_logits": dense_logits,
+        }
+        dense_target = torch.full((1, 8, 8), 2, dtype=torch.long)
+        dense_target[:, :2, 2:6] = 0
+        targets = {
+            "foreground": torch.ones(1, 1, 8, 8),
+            "route_role": torch.zeros(1, 8, 8, dtype=torch.long),
+            "layer": torch.zeros(1, 8, 8, dtype=torch.long),
+            "part": torch.zeros(1, 8, 8, dtype=torch.long),
+            "face": torch.zeros(1, 8, 8, dtype=torch.long),
+            "uv": torch.zeros(1, 2, 8, 8),
+            "dense_semantics": dense_target,
+        }
+        losses = DenseUVParserLoss(
+            lambda_dense_semantics=0.4,
+            use_uv=False,
+        )(outputs, targets)
+        losses["loss_dense_semantics_weighted"].backward()
+        self.assertGreater(
+            float(losses["loss_head_top_accessory_dice"].detach()), 0.0
+        )
+        self.assertGreater(
+            float(
+                losses["loss_head_top_accessory_hard_recall"].detach()
+            ),
+            0.0,
+        )
+        self.assertGreater(float(dense_logits.grad.abs().sum()), 0.0)
     def test_text_prompt_route_has_independent_deep_supervision(self):
         model = DenseUVParserNet(
             base_channels=8,
@@ -338,6 +418,25 @@ class SemanticDenseUVParserTest(unittest.TestCase):
         self.assertIsNotNone(
             model.semantic_fusion.input_projection[1].weight.grad
         )
+
+    def test_head_top_accessory_target_crosses_physical_uv_seams(self):
+        graph = build_head_outer_face_graph()
+        cross_face = (graph[0] // 64) != (graph[1] // 64)
+        top_side = cross_face & (
+            ((graph[0] // 64) == 5) | ((graph[1] // 64) == 5)
+        )
+        edge = graph[:, top_side][:, 0]
+        faces = torch.zeros(1, 6, 8, 8)
+        faces.flatten(1)[0, edge] = 1.0
+        disconnected = 1 * 64 + 7 * 8 + 4
+        faces.flatten(1)[0, disconnected] = 1.0
+        target_uv = torch.zeros(1, 4, 64, 64)
+        target_uv[:, 3:4] = head_outer_face_values_to_uv(faces)
+
+        target = build_head_top_accessory_face_targets(target_uv)["mask"]
+        selected = target.flatten(1).bool()
+        self.assertTrue(bool(selected[0, edge].all()))
+        self.assertFalse(bool(selected[0, disconnected]))
 
     def test_projected_head_outer_structure_uses_uv_features(self):
         for input_version, extra_channels in (
