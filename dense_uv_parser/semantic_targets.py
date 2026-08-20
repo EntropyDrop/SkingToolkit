@@ -173,14 +173,30 @@ def build_dense_view_semantic_targets(
             body_outer_active = outer_mask & (outer_part > 0) & (outer_alpha > float(alpha_threshold))
             outer_active = head_outer_active | body_outer_active
 
-            # Head outer breakdown:
+            # Detect if this skin has outer glasses / goggles on head front or sides
+            skin_has_front_glasses = (uv_b[0, 3, 9:14, 40:48] > 0.05).any()
+            skin_has_side_glasses = (
+                (uv_b[0, 3, 9:14, 32:40] > 0.05).any()
+                | (uv_b[0, 3, 9:14, 48:56] > 0.05).any()
+            )
+            skin_has_glasses = skin_has_front_glasses | skin_has_side_glasses
             is_head_outer = head_outer_active
 
             # Crown / hat: top face (5) or top forehead hairline (outer_y <= 8)
             is_outer_crown = is_head_outer & ((outer_face == 5) | (outer_y <= 8))
             # Glasses / goggles: eye/sunglasses level (rows 9..13) across Front, Right, Left faces
             is_glasses_face = (outer_face == 0) | (outer_face == 2) | (outer_face == 3)
-            is_outer_glasses = is_head_outer & is_glasses_face & (outer_y >= 9) & (outer_y <= 13) & ~is_outer_crown
+            is_glasses_box = (
+                outer_mask
+                & (outer_part == 0)
+                & is_glasses_face
+                & (outer_y >= 9)
+                & (outer_y <= 13)
+            )
+            is_outer_glasses = (
+                (head_outer_active & is_glasses_box)
+                | (skin_has_front_glasses & is_glasses_box & (outer_face == 0))
+            ) & ~is_outer_crown
             # Outer hair / lower face (beard, chin, back hair):
             is_outer_head_other = is_head_outer & ~is_outer_glasses & ~is_outer_crown
 

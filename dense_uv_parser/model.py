@@ -577,11 +577,24 @@ class TextPromptRouteFusion(nn.Module):
             highres_proj = self.highres_projection(highres_features.float())
             combined = torch.cat([upsampled_spatial, highres_proj], dim=1)
             dense_semantic_logits = self.semantic_head(combined)
-        else:
-            dense_semantic_logits = self.semantic_head(upsampled_spatial)
+        # Compute direct semantic outer vs inner log-odds:
+        # Outer indices: 0..7 (glasses, crown, ears, jacket, limbs, hair, mask, back)
+        # Inner indices: 8..13 (face, hair, skin, clothes, logo, pattern)
+        sem_outer = torch.logsumexp(dense_semantic_logits[:, :8], dim=1, keepdim=True)
+        sem_inner = torch.logsumexp(dense_semantic_logits[:, 8:14], dim=1, keepdim=True)
+        sem_delta = (sem_outer - sem_inner).clamp(-10.0, 10.0)
+
+        sem_bias = torch.cat(
+            [
+                -0.5 * sem_delta,
+                +0.5 * sem_delta,
+                torch.zeros_like(sem_delta),
+            ],
+            dim=1,
+        )
 
         # High-resolution dense semantic logits directly project to pixel-exact route adjustments
-        route_logits = self.route_projection(dense_semantic_logits)
+        route_logits = sem_bias + self.route_projection(dense_semantic_logits)
 
         spatial_prompt_similarity = F.interpolate(
             local_similarity,
