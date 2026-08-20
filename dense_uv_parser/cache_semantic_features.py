@@ -65,7 +65,13 @@ def cache_is_reusable(
         )
     except (FileNotFoundError, ValueError, KeyError, json.JSONDecodeError):
         return False
-    return list(cache.filename_to_index) == [path.name for path in dataset.skin_paths]
+    cached_filenames = list(cache.filename_to_index)
+    requested_filenames = [path.name for path in dataset.skin_paths]
+    # ``max_samples`` selects a deterministic prefix of the sorted dataset.
+    # A complete larger cache is therefore a valid source for a smaller run.
+    # Reusing it also prevents a quick smoke test from replacing a costly
+    # full-dataset mmap with a tiny cache under the same directory name.
+    return cached_filenames[: len(requested_filenames)] == requested_filenames
 
 
 def build_arg_parser():
