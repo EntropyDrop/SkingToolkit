@@ -336,13 +336,12 @@ def head_top_accessory_semantic_terms(dense_semantic_logits, targets):
         if expected.any()
         else zero
     )
-    predicted_presence = probability.flatten(1).amax(dim=1).clamp(
-        1e-5, 1.0 - 1e-5
-    )
-    loss_presence = F.binary_cross_entropy(
-        predicted_presence,
+    predicted_presence_logits = logits[:, 0].flatten(1).amax(dim=1)
+    loss_presence = F.binary_cross_entropy_with_logits(
+        predicted_presence_logits,
         present.float(),
     )
+    predicted_presence = predicted_presence_logits.sigmoid()
     predicted = logits.argmax(dim=1) == 0
     true_positive = (predicted & expected).float().sum()
     false_positive = (predicted & valid & ~expected).float().sum()
