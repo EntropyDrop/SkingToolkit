@@ -23,6 +23,7 @@ from SkingToolkit.dense_uv_parser.train import (
 )
 from SkingToolkit.dense_uv_parser.utils import splat_to_uv_conditioning
 from SkingToolkit.dense_uv_parser.semantic_targets import (
+    build_head_eye_accessory_face_targets,
     build_head_outer_face_targets,
     build_head_top_accessory_face_targets,
     head_outer_face_values_to_uv,
@@ -33,7 +34,9 @@ from SkingToolkit.dense_uv_parser.simple_inpainting import (
 )
 from SkingToolkit.dense_uv_parser.uv_topology import (
     build_head_outer_face_graph,
+    build_head_outer_face_indices,
     build_outer_uv_graph,
+    build_simple_uv_topology,
 )
 
 
@@ -306,6 +309,93 @@ class SemanticDenseUVParserTest(unittest.TestCase):
         self.assertGreater(
             float(
                 losses["loss_head_top_accessory_hard_recall"].detach()
+            ),
+            0.0,
+        )
+        self.assertGreater(float(dense_logits.grad.abs().sum()), 0.0)
+
+    def test_v3_eye_accessory_semantics_are_exact_outer_alpha(self):
+        faces = torch.zeros(1, 6, 8, 8)
+        faces[0, 0, 2, 1] = 1.0  # Front eye-level outer alpha.
+        faces[0, 2, 2, 1] = 1.0  # Right temple across the physical seam.
+        faces[0, 1, 2, 1] = 1.0  # Back alpha must not be an eye label.
+        faces[0, 0, 7, 1] = 1.0  # Lower-face alpha is outside the band.
+        target_uv = torch.zeros(1, 4, 64, 64)
+        target_uv[:, 3:4] = head_outer_face_values_to_uv(faces)
+
+        eye = build_head_eye_accessory_face_targets(target_uv)["mask"]
+        self.assertEqual(float(eye[0, 0, 2, 1]), 1.0)
+        self.assertEqual(float(eye[0, 2, 2, 1]), 1.0)
+        self.assertEqual(float(eye[0, 1, 2, 1]), 0.0)
+        self.assertEqual(float(eye[0, 0, 7, 1]), 0.0)
+        self.assertTrue(torch.all(eye <= faces))
+
+    def test_v3_eye_semantics_start_as_gated_noop(self):
+        model = DenseUVParserNet(
+            base_channels=8,
+            view_classes=2,
+            geometry_only=True,
+            semantic_feature_dim=12,
+            semantic_channels=8,
+            semantic_attention_heads=2,
+            semantic_spatial_feature_dim=12,
+            semantic_spatial_channels=8,
+            semantic_text_prompt_count=5,
+            semantic_text_prompt_feature_dim=12,
+            semantic_text_prompt_channels=6,
+            dense_semantic_target_version=3,
+        )
+        model.set_semantic_text_prompt_embeddings(torch.randn(5, 12))
+        outputs = model(
+            torch.rand(2, 4, 16, 16),
+            view_ids=torch.tensor([0, 1]),
+            semantic_features={
+                "raw_global": torch.rand(2, 12),
+                "raw_spatial": torch.rand(2, 12, 5, 5),
+            },
+        )
+        self.assertEqual(
+            tuple(outputs["dense_semantic_logits"].shape),
+            (2, 5, 16, 16),
+        )
+        self.assertTrue(
+            torch.equal(
+                outputs["text_prompt_route_logits"],
+                torch.zeros_like(outputs["text_prompt_route_logits"]),
+            )
+        )
+
+    def test_v3_eye_semantics_receive_dedicated_recall_loss(self):
+        dense_logits = torch.zeros(1, 5, 8, 8, requires_grad=True)
+        dense_target = torch.full((1, 8, 8), 3, dtype=torch.long)
+        dense_target[:, 2:4, 1:7] = 1
+        outputs = {
+            "foreground": torch.zeros(1, 1, 8, 8),
+            "layer": torch.zeros(1, 3, 8, 8),
+            "dense_semantic_logits": dense_logits,
+        }
+        targets = {
+            "foreground": torch.ones(1, 1, 8, 8),
+            "route_role": torch.zeros(1, 8, 8, dtype=torch.long),
+            "layer": torch.zeros(1, 8, 8, dtype=torch.long),
+            "part": torch.zeros(1, 8, 8, dtype=torch.long),
+            "face": torch.zeros(1, 8, 8, dtype=torch.long),
+            "uv": torch.zeros(1, 2, 8, 8),
+            "dense_semantics": dense_target,
+        }
+        losses = DenseUVParserLoss(
+            lambda_dense_semantics=0.4,
+            use_uv=False,
+        )(outputs, targets)
+        losses["loss_dense_semantics_weighted"].backward()
+
+        self.assertGreater(
+            float(losses["loss_head_eye_accessory_dice"].detach()),
+            0.0,
+        )
+        self.assertGreater(
+            float(
+                losses["loss_head_eye_accessory_hard_recall"].detach()
             ),
             0.0,
         )
@@ -711,6 +801,48 @@ class SemanticDenseUVParserTest(unittest.TestCase):
         self.assertGreater(
             float(broken["count_head_outer_route_positive_edges"]),
             0.0,
+        )
+
+    def test_main_route_penalizes_one_sided_mirrored_outer_pair(self):
+        head_indices = build_head_outer_face_indices()
+        topology = build_simple_uv_topology()
+        flat_to_head = torch.full((64 * 64,), -1, dtype=torch.long)
+        flat_to_head[head_indices] = torch.arange(head_indices.numel())
+        mirrored_nodes = flat_to_head[
+            topology.mirrored_texel.flatten()[head_indices]
+        ]
+        node_ids = torch.arange(head_indices.numel())
+        candidates = (
+            (mirrored_nodes >= 0)
+            & (node_ids < mirrored_nodes)
+            & (node_ids // 64 == 0)
+        )
+        first = candidates.nonzero(as_tuple=False)[0, 0]
+        second = mirrored_nodes[first]
+        target = torch.zeros(1, 6 * 8 * 8, dtype=torch.bool)
+        visible = torch.zeros_like(target)
+        target[0, [first, second]] = True
+        visible[0, [first, second]] = True
+
+        split = torch.full((1, 6 * 8 * 8), 0.01)
+        split[0, first] = 0.95
+        split[0, second] = 0.05
+        paired = split.clone()
+        paired[0, second] = 0.95
+        broken = _head_outer_route_connectivity_terms(
+            split.requires_grad_(), target, visible
+        )
+        consistent = _head_outer_route_connectivity_terms(
+            paired, target, visible
+        )
+
+        self.assertGreater(
+            float(broken["loss_head_outer_route_symmetry"].detach()),
+            float(consistent["loss_head_outer_route_symmetry"].detach()),
+        )
+        self.assertEqual(
+            float(broken["count_head_outer_route_symmetric_pairs"]),
+            1.0,
         )
 
     def test_siglip_text_branch_preserves_seeded_base_initialization(self):

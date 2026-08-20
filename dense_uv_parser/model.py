@@ -435,11 +435,20 @@ class TextPromptRouteFusion(nn.Module):
         self.hidden_channels = int(hidden_channels)
         self.highres_channels = int(highres_channels)
         self.semantic_target_version = int(semantic_target_version)
-        if self.semantic_target_version not in (1, 2):
-            raise ValueError("semantic_target_version must be 1 or 2.")
-        if self.semantic_target_version == 2 and prompt_count != 4:
+        if self.semantic_target_version not in (1, 2, 3):
+            raise ValueError("semantic_target_version must be 1, 2, or 3.")
+        expected_topology_prompts = {
+            2: 4,
+            3: 5,
+        }.get(self.semantic_target_version)
+        if (
+            expected_topology_prompts is not None
+            and prompt_count != expected_topology_prompts
+        ):
             raise ValueError(
-                "Layer-topology semantic targets require exactly four prompts."
+                "Layer-topology semantic target version "
+                f"{self.semantic_target_version} requires exactly "
+                f"{expected_topology_prompts} prompts."
             )
         self.register_buffer(
             "prompt_embeddings",
@@ -485,7 +494,7 @@ class TextPromptRouteFusion(nn.Module):
         nn.init.zeros_(self.route_projection[-1].bias)
         self.semantic_route_scale = (
             nn.Parameter(torch.zeros(()))
-            if self.semantic_target_version == 2
+            if self.semantic_target_version in (2, 3)
             else None
         )
 
@@ -597,7 +606,7 @@ class TextPromptRouteFusion(nn.Module):
         else:
             dense_semantic_logits = self.semantic_head(upsampled_spatial)
 
-        if self.semantic_target_version == 2:
+        if self.semantic_target_version in (2, 3):
             # Make the frozen text tower actual evidence instead of a
             # diagnostics-only side path.  Both residuals are deliberately
             # bounded; the trained high-resolution decoder remains primary.
@@ -612,13 +621,21 @@ class TextPromptRouteFusion(nn.Module):
                 + 0.20 * spatial_prompt_similarity
                 + global_residual.unsqueeze(-1).unsqueeze(-1)
             )
-            # 0: head-top outer component, 1: other outer, 2: inner,
-            # 3: background. Background is handled by the foreground head and
-            # does not push a surface route.
-            sem_outer = torch.logsumexp(
-                dense_semantic_logits[:, :2], dim=1, keepdim=True
+            # Version 2 has two outer classes followed by inner/background;
+            # version 3 has three outer classes (top, eye-level, other)
+            # followed by inner/background. Background is handled by the
+            # foreground head and does not push a surface route.
+            outer_class_count = (
+                3 if self.semantic_target_version == 3 else 2
             )
-            sem_inner = dense_semantic_logits[:, 2:3]
+            sem_outer = torch.logsumexp(
+                dense_semantic_logits[:, :outer_class_count],
+                dim=1,
+                keepdim=True,
+            )
+            sem_inner = dense_semantic_logits[
+                :, outer_class_count : outer_class_count + 1
+            ]
         else:
             # Legacy object-name pseudo labels.
             sem_outer = torch.logsumexp(
@@ -639,7 +656,7 @@ class TextPromptRouteFusion(nn.Module):
         )
 
         projected_route = self.route_projection(dense_semantic_logits)
-        if self.semantic_target_version == 2:
+        if self.semantic_target_version in (2, 3):
             probabilities = dense_semantic_logits.softmax(dim=1)
             top_two = probabilities.topk(k=2, dim=1).values
             confidence_gate = (top_two[:, :1] - top_two[:, 1:2]).clamp(
@@ -655,7 +672,7 @@ class TextPromptRouteFusion(nn.Module):
         else:
             route_logits = sem_bias + projected_route
 
-        if self.semantic_target_version != 2:
+        if self.semantic_target_version not in (2, 3):
             spatial_prompt_similarity = F.interpolate(
                 local_similarity,
                 size=output_size,
@@ -852,8 +869,10 @@ class DenseUVParserNet(nn.Module):
         self.dense_semantic_target_version = int(
             dense_semantic_target_version
         )
-        if self.dense_semantic_target_version not in (1, 2):
-            raise ValueError("dense_semantic_target_version must be 1 or 2.")
+        if self.dense_semantic_target_version not in (1, 2, 3):
+            raise ValueError(
+                "dense_semantic_target_version must be 1, 2, or 3."
+            )
         self.predict_confidence = bool(predict_confidence)
         self.route_role_spatial_prior = bool(route_role_spatial_prior)
         self.route_prior_height = int(route_prior_height)

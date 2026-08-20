@@ -46,6 +46,18 @@ LAYER_TOPOLOGY_SIGLIP_ROUTE_PROMPTS = (
     "pixels belonging to the plain background outside the Minecraft character",
 )
 
+# Version 3 keeps the exact topology-derived targets from version 2 and
+# separates true head-outer alpha crossing the physical eye-level band.  This
+# gives paired glasses/goggles and their side temples a coherent semantic
+# channel without claiming that text alone can infer hidden UV occupancy.
+LAYER_TOPOLOGY_EYE_SIGLIP_ROUTE_PROMPTS = (
+    "pixels belonging to a raised outer-layer component connected across the top of a Minecraft character head, such as a crown hat helmet or raised top hair",
+    "pixels belonging to the true raised outer skin layer across the eye-level front or side of a Minecraft character head, such as glasses goggles visor mask or headset temples",
+    "pixels belonging to another visible raised Minecraft outer skin layer",
+    "pixels belonging to the visible flat inner Minecraft skin layer",
+    "pixels belonging to the plain background outside the Minecraft character",
+)
+
 SEMANTIC_OUTER_INDICES = (0, 1, 2, 3, 4, 5, 6, 7)
 SEMANTIC_INNER_INDICES = (8, 9, 10, 11, 12, 13)
 SEMANTIC_BACKGROUND_INDICES = (14,)

@@ -27,6 +27,7 @@ from SkingToolkit.dense_uv_parser.semantic import (  # noqa: E402
 )
 from SkingToolkit.dense_uv_parser.semantic_backbone import (  # noqa: E402
     DEFAULT_SIGLIP_ROUTE_PROMPTS,
+    LAYER_TOPOLOGY_EYE_SIGLIP_ROUTE_PROMPTS,
     LAYER_TOPOLOGY_SIGLIP_ROUTE_PROMPTS,
     encode_siglip2_text_prompts,
 )
@@ -1765,11 +1766,14 @@ def _head_outer_route_connectivity_terms(
             "loss_head_outer_route_edge_connectivity": zero,
             "loss_head_outer_route_component_recall": zero,
             "loss_head_outer_route_connectivity": zero,
+            "loss_head_outer_route_symmetry": zero,
             "head_outer_route_recall": zero,
             "head_outer_route_component_recall": zero,
+            "head_outer_route_symmetric_pair_recall": zero,
             "count_head_outer_route_visible_texels": zero,
             "count_head_outer_route_positive_edges": zero,
             "count_head_outer_route_visible_components": zero,
+            "count_head_outer_route_symmetric_pairs": zero,
         }
 
     probability_nodes = probability_nodes.clamp(1e-6, 1.0 - 1e-6)
@@ -1834,6 +1838,61 @@ def _head_outer_route_connectivity_terms(
         / component_size[existing_components].clamp_min(1.0)
     )
     loss_component_recall = (1.0 - component_recall).mean()
+
+    # Supervise the *main route*, not only the auxiliary occupancy head.  A
+    # bilateral accessory can otherwise produce a plausible render while one
+    # lens is assigned to inner skin and its counterpart to outer skin.  Only
+    # pairs that truly exist in target alpha and are visible on both sides are
+    # constrained, so asymmetric hair and one-sided accessories are untouched.
+    topology = build_simple_uv_topology()
+    head_indices = build_head_outer_face_indices().to(
+        probability_nodes.device
+    )
+    mirrored_flat = topology.mirrored_texel.flatten().to(
+        probability_nodes.device
+    ).index_select(0, head_indices)
+    flat_to_head = torch.full(
+        (UV_SIZE * UV_SIZE,),
+        -1,
+        dtype=torch.long,
+        device=probability_nodes.device,
+    )
+    flat_to_head[head_indices] = torch.arange(
+        head_indices.numel(), device=probability_nodes.device
+    )
+    mirrored_nodes = flat_to_head[mirrored_flat]
+    node_ids = torch.arange(
+        target_nodes.shape[1], device=target_nodes.device
+    ).view(1, -1)
+    unique_pair = node_ids < mirrored_nodes.view(1, -1)
+    safe_mirrored_nodes = mirrored_nodes.clamp_min(0)
+    symmetric_pairs = (
+        (mirrored_nodes.view(1, -1) >= 0)
+        & unique_pair
+        & target_nodes
+        & target_nodes[:, safe_mirrored_nodes]
+        & visible_nodes
+        & visible_nodes[:, safe_mirrored_nodes]
+    )
+    mirrored_probability = probability_nodes[:, safe_mirrored_nodes]
+    if symmetric_pairs.any():
+        pair_probability = probability_nodes[symmetric_pairs]
+        pair_mirror_probability = mirrored_probability[symmetric_pairs]
+        loss_symmetric_consistency = (
+            pair_probability - pair_mirror_probability
+        ).square().mean()
+        symmetric_pair_recall = torch.minimum(
+            pair_probability, pair_mirror_probability
+        )
+        loss_symmetric_worst_recall = (
+            1.0 - symmetric_pair_recall
+        ).mean()
+        loss_route_symmetry = 0.5 * (
+            loss_symmetric_consistency + loss_symmetric_worst_recall
+        )
+    else:
+        symmetric_pair_recall = probability_nodes.new_zeros(0)
+        loss_route_symmetry = zero
     loss_connectivity = 0.25 * (
         loss_recall
         + loss_hard_recall
@@ -1850,14 +1909,23 @@ def _head_outer_route_connectivity_terms(
             loss_component_recall
         ),
         "loss_head_outer_route_connectivity": loss_connectivity,
+        "loss_head_outer_route_symmetry": loss_route_symmetry,
         "head_outer_route_recall": (
             (probability_nodes[selected] >= 0.5).float().mean()
         ),
         "head_outer_route_component_recall": component_recall.mean(),
+        "head_outer_route_symmetric_pair_recall": (
+            symmetric_pair_recall.mean()
+            if symmetric_pair_recall.numel() > 0
+            else zero
+        ),
         "count_head_outer_route_visible_texels": selected.float().sum(),
         "count_head_outer_route_positive_edges": positive_edges.float().sum(),
         "count_head_outer_route_visible_components": (
             existing_components.float().sum()
+        ),
+        "count_head_outer_route_symmetric_pairs": (
+            symmetric_pairs.float().sum()
         ),
     }
 
@@ -2681,7 +2749,10 @@ def run_epoch(
                         "count_head_outer_open_top_samples",
                     ):
                         losses[name] = zero
-                if args.lambda_head_outer_route_connectivity > 0.0:
+                if (
+                    args.lambda_head_outer_route_connectivity > 0.0
+                    or args.lambda_head_outer_route_symmetry > 0.0
+                ):
                     head_route = head_outer_route_connectivity_loss(
                         outputs,
                         batch["uv"],
@@ -2698,6 +2769,8 @@ def run_epoch(
                         * head_route[
                             "loss_head_outer_route_connectivity"
                         ]
+                        + args.lambda_head_outer_route_symmetry
+                        * head_route["loss_head_outer_route_symmetry"]
                     )
                     losses.update(head_route)
                     losses[
@@ -2716,12 +2789,15 @@ def run_epoch(
                         "loss_head_outer_route_edge_connectivity",
                         "loss_head_outer_route_component_recall",
                         "loss_head_outer_route_connectivity",
+                        "loss_head_outer_route_symmetry",
                         "loss_head_outer_route_connectivity_weighted",
                         "head_outer_route_recall",
                         "head_outer_route_component_recall",
+                        "head_outer_route_symmetric_pair_recall",
                         "count_head_outer_route_visible_texels",
                         "count_head_outer_route_positive_edges",
                         "count_head_outer_route_visible_components",
+                        "count_head_outer_route_symmetric_pairs",
                     ):
                         losses[name] = zero
                 if (
@@ -3745,11 +3821,12 @@ def build_arg_parser():
     parser.add_argument(
         "--dense_semantic_target_version",
         type=int,
-        choices=(1, 2),
+        choices=(1, 2, 3),
         default=1,
         help=(
             "Dense semantic schema. Version 2 supervises exact head-top "
-            "outer components, other outer pixels, inner pixels, and background."
+            "outer components; version 3 additionally separates exact "
+            "eye-level head-outer alpha for paired accessories."
         ),
     )
     parser.add_argument(
@@ -4205,6 +4282,15 @@ def build_arg_parser():
         default=0.0,
     )
     parser.add_argument(
+        "--lambda_head_outer_route_symmetry",
+        type=float,
+        default=0.0,
+        help=(
+            "Penalize disagreement and worst-side misses for visible "
+            "ground-truth mirrored head-outer texel pairs in the main route."
+        ),
+    )
+    parser.add_argument(
         "--head_outer_route_hard_fraction", type=float, default=0.25
     )
     parser.add_argument("--lambda_outer_uv_occupancy", type=float, default=0.0)
@@ -4450,6 +4536,7 @@ def main():
         args.lambda_head_outer_open_top_shape,
         args.lambda_head_outer_accessory_classification,
         args.lambda_head_outer_route_connectivity,
+        args.lambda_head_outer_route_symmetry,
         args.lambda_outer_uv_occupancy,
         args.outer_uv_occupancy_dice_weight,
         args.outer_hard_positive_weight,
@@ -4596,11 +4683,11 @@ def main():
     if args.semantic_attention_heads < 1:
         raise ValueError("--semantic_attention_heads must be positive.")
     if (
-        args.dense_semantic_target_version == 2
+        args.dense_semantic_target_version in (2, 3)
         and not args.siglip_text_prompt_fusion
     ):
         raise ValueError(
-            "Dense semantic target version 2 requires "
+            "Dense semantic topology target versions require "
             "--siglip_text_prompt_fusion."
         )
     if args.semantic_channels % args.semantic_attention_heads != 0:
@@ -4734,10 +4821,12 @@ def main():
         print(
             "Encoding fixed SigLIP2 route prompts with the frozen text tower..."
         )
-        semantic_prompts = (
-            LAYER_TOPOLOGY_SIGLIP_ROUTE_PROMPTS
-            if args.dense_semantic_target_version == 2
-            else DEFAULT_SIGLIP_ROUTE_PROMPTS
+        semantic_prompts = {
+            2: LAYER_TOPOLOGY_SIGLIP_ROUTE_PROMPTS,
+            3: LAYER_TOPOLOGY_EYE_SIGLIP_ROUTE_PROMPTS,
+        }.get(
+            args.dense_semantic_target_version,
+            DEFAULT_SIGLIP_ROUTE_PROMPTS,
         )
         text_prompt_bundle = encode_siglip2_text_prompts(
             args.siglip_model,
@@ -5412,6 +5501,9 @@ def main():
         ),
         "lambda_head_outer_route_connectivity": (
             args.lambda_head_outer_route_connectivity
+        ),
+        "lambda_head_outer_route_symmetry": (
+            args.lambda_head_outer_route_symmetry
         ),
         "head_outer_route_hard_fraction": (
             args.head_outer_route_hard_fraction

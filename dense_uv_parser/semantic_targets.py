@@ -173,6 +173,43 @@ def build_head_top_accessory_face_targets(
     }
 
 
+def build_head_eye_accessory_face_targets(
+    target_uv,
+    alpha_threshold=0.5,
+    eye_seed_row_start=1,
+    eye_seed_row_end=6,
+):
+    """Return exact head-outer alpha in the physical eye-level band.
+
+    The target is intentionally geometric rather than an object-name guess:
+    every selected texel must exist in ground-truth outer alpha.  Front,
+    left, and right head faces share the same vertical eye band, so glasses,
+    goggles, visors, masks, and headset temples receive one consistent class
+    across atlas seams.  Hair or helmet alpha crossing this band is harmless:
+    it is still genuinely outer-layer evidence and should support the same
+    inner/outer route.
+    """
+    row_start = int(eye_seed_row_start)
+    row_end = int(eye_seed_row_end)
+    if not 0 <= row_start < row_end <= 8:
+        raise ValueError(
+            "Require 0 <= eye_seed_row_start < eye_seed_row_end <= 8."
+        )
+    occupancy = build_head_outer_face_targets(
+        target_uv, alpha_threshold=alpha_threshold
+    )["occupancy"] > 0.5
+    band = torch.zeros_like(occupancy)
+    # Face order is front, back, right, left, bottom, top.  The back face is
+    # excluded because an eye accessory seen from behind is represented by
+    # its side temples, not arbitrary back-hair alpha at the same height.
+    band[:, (0, 2, 3), row_start:row_end] = True
+    selected = occupancy & band
+    return {
+        "mask": selected.float(),
+        "presence": selected.flatten(1).any(dim=1).float(),
+    }
+
+
 def head_outer_face_values_to_uv(values):
     """Scatter face-major Bx6x8x8 head values into a 64x64 atlas."""
     if values.dim() != 4 or values.shape[1:] != (FACE_COUNT, 8, 8):
@@ -207,7 +244,8 @@ def build_dense_view_semantic_targets(
     Returns:
         semantic_targets: (B * V, H, W) long tensor. Version 1 uses the
             legacy 15-class pseudo labels; version 2 uses four exact
-            layer/topology classes.
+            layer/topology classes; version 3 separates exact eye-level head
+            outer alpha into a fifth class.
     """
     from SkingToolkit.dense_uv_parser.utils import (
         build_static_surface_routing,
@@ -220,16 +258,25 @@ def build_dense_view_semantic_targets(
         device = target_uv.device
 
     target_version = int(target_version)
-    if target_version not in (1, 2):
-        raise ValueError("target_version must be 1 or 2.")
+    if target_version not in (1, 2, 3):
+        raise ValueError("target_version must be 1, 2, or 3.")
     targets = []
     top_accessory_atlas = None
-    if target_version == 2:
+    eye_accessory_atlas = None
+    if target_version in (2, 3):
         top_faces = build_head_top_accessory_face_targets(
             target_uv,
             alpha_threshold=alpha_threshold,
         )["mask"]
         top_accessory_atlas = head_outer_face_values_to_uv(top_faces)[
+            :, 0
+        ].flatten(1).bool()
+    if target_version == 3:
+        eye_faces = build_head_eye_accessory_face_targets(
+            target_uv,
+            alpha_threshold=alpha_threshold,
+        )["mask"]
+        eye_accessory_atlas = head_outer_face_values_to_uv(eye_faces)[
             :, 0
         ].flatten(1).bool()
     for b in range(B):
@@ -238,10 +285,22 @@ def build_dense_view_semantic_targets(
         for v_name in parsed_views:
             static = build_static_surface_routing(renderer, v_name, device)
             H, W = static["masks"].shape[-2:]
-            if target_version == 2:
-                # 0: head_top_accessory, 1: other_outer,
-                # 2: inner, 3: background.
-                sem = torch.full((H, W), 3, dtype=torch.long, device=device)
+            if target_version in (2, 3):
+                # Version 2: 0 head_top_accessory, 1 other_outer,
+                # 2 inner, 3 background.
+                # Version 3: 0 head_top_accessory,
+                # 1 head_eye_accessory, 2 other_outer, 3 inner,
+                # 4 background.  Eye-level alpha takes priority where a tall
+                # top-connected component overlaps the physical eye band.
+                background_class = 4 if target_version == 3 else 3
+                other_outer_class = 2 if target_version == 3 else 1
+                inner_class = 3 if target_version == 3 else 2
+                sem = torch.full(
+                    (H, W),
+                    background_class,
+                    dtype=torch.long,
+                    device=device,
+                )
                 inner_mask = static["masks"][0]
                 outer_mask = static["masks"][1]
                 outer_part = static["part"][1]
@@ -250,14 +309,21 @@ def build_dense_view_semantic_targets(
                 outer_active = outer_mask & (
                     outer_alpha > float(alpha_threshold)
                 )
-                sem[inner_mask] = 2
-                sem[outer_active] = 1
+                sem[inner_mask] = inner_class
+                sem[outer_active] = other_outer_class
                 top_active = (
                     outer_active
                     & (outer_part == 0)
                     & top_accessory_atlas[b, outer_flat_uv]
                 )
                 sem[top_active] = 0
+                if target_version == 3:
+                    eye_active = (
+                        outer_active
+                        & (outer_part == 0)
+                        & eye_accessory_atlas[b, outer_flat_uv]
+                    )
+                    sem[eye_active] = 1
                 targets.append(sem)
                 continue
 
@@ -343,6 +409,7 @@ __all__ = [
     "build_part_layer_masks",
     "build_head_outer_face_targets",
     "build_head_top_accessory_face_targets",
+    "build_head_eye_accessory_face_targets",
     "head_outer_face_values_to_uv",
     "build_semantic_attribute_targets",
     "build_dense_view_semantic_targets",

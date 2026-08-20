@@ -267,8 +267,9 @@ def dense_semantic_supervision_loss(
     focal_weight = (1.0 - target_p).clamp_min(0.0) ** float(focal_gamma)
     per_pixel_loss = focal_weight * (-target_log_p)
 
-    # Class-frequency rebalancing. Version-2 semantics use four exact classes:
-    # head-top component, other outer, inner, and background.
+    # Class-frequency rebalancing. Topology schemas use exact alpha-derived
+    # classes. Rare head-top and head-eye outer pixels need explicit emphasis
+    # so the large inner/background regions do not dominate a one-epoch run.
     valid_targets = safe_targets[valid]
     class_counts = torch.bincount(valid_targets, minlength=P).float()
     active_classes = class_counts > 0
@@ -286,6 +287,10 @@ def dense_semantic_supervision_loss(
         class_weights = class_weights * logits.new_tensor(
             [3.0, 1.5, 1.0, 0.75]
         )
+    elif P == 5:
+        class_weights = class_weights * logits.new_tensor(
+            [3.0, 3.0, 1.5, 1.0, 0.75]
+        )
     else:
         outer_decor_indices = torch.arange(
             min(8, P), device=logits.device
@@ -300,24 +305,36 @@ def dense_semantic_supervision_loss(
     return weighted_loss[valid].sum() / element_weights[valid].sum().clamp_min(1e-12)
 
 
-def head_top_accessory_semantic_terms(dense_semantic_logits, targets):
-    """Component-aware supervision for version-2 class zero."""
+def _dense_semantic_class_terms(
+    dense_semantic_logits,
+    targets,
+    class_index,
+    metric_prefix,
+    enabled_class_counts,
+):
+    """Return Dice, hard-recall, presence, and metrics for one class."""
     logits = dense_semantic_logits.float()
     targets = targets.to(device=logits.device, dtype=torch.long)
     zero = logits.sum() * 0.0
-    if logits.shape[1] != 4:
+    keys = {
+        "dice": f"loss_{metric_prefix}_dice",
+        "hard_recall": f"loss_{metric_prefix}_hard_recall",
+        "presence": f"loss_{metric_prefix}_presence",
+        "precision": f"{metric_prefix}_precision",
+        "recall": f"{metric_prefix}_recall",
+        "presence_accuracy": f"{metric_prefix}_presence_accuracy",
+        "count": f"count_{metric_prefix}_pixels",
+    }
+    if (
+        logits.shape[1] not in tuple(enabled_class_counts)
+        or not 0 <= int(class_index) < logits.shape[1]
+    ):
         return {
-            "loss_head_top_accessory_dice": zero,
-            "loss_head_top_accessory_hard_recall": zero,
-            "loss_head_top_accessory_presence": zero,
-            "head_top_accessory_precision": zero,
-            "head_top_accessory_recall": zero,
-            "head_top_accessory_presence_accuracy": zero,
-            "count_head_top_accessory_pixels": zero,
+            key: zero for key in keys.values()
         }
     valid = targets != IGNORE_INDEX
-    expected = valid & (targets == 0)
-    probability = logits.softmax(dim=1)[:, 0]
+    expected = valid & (targets == int(class_index))
+    probability = logits.softmax(dim=1)[:, int(class_index)]
     expected_float = expected.float()
     intersection = (probability * expected_float).flatten(1).sum(dim=1)
     denominator = (
@@ -332,35 +349,57 @@ def head_top_accessory_semantic_terms(dense_semantic_logits, targets):
         dice_per_sample[present].mean() if present.any() else zero
     )
     loss_hard_recall = (
-        F.softplus(-logits[:, 0])[expected].mean()
+        F.softplus(-logits[:, int(class_index)])[expected].mean()
         if expected.any()
         else zero
     )
-    predicted_presence_logits = logits[:, 0].flatten(1).amax(dim=1)
+    predicted_presence_logits = logits[:, int(class_index)].flatten(1).amax(dim=1)
     loss_presence = F.binary_cross_entropy_with_logits(
         predicted_presence_logits,
         present.float(),
     )
     predicted_presence = predicted_presence_logits.sigmoid()
-    predicted = logits.argmax(dim=1) == 0
+    predicted = logits.argmax(dim=1) == int(class_index)
     true_positive = (predicted & expected).float().sum()
     false_positive = (predicted & valid & ~expected).float().sum()
     false_negative = (~predicted & expected).float().sum()
     return {
-        "loss_head_top_accessory_dice": loss_dice,
-        "loss_head_top_accessory_hard_recall": loss_hard_recall,
-        "loss_head_top_accessory_presence": loss_presence,
-        "head_top_accessory_precision": (
+        keys["dice"]: loss_dice,
+        keys["hard_recall"]: loss_hard_recall,
+        keys["presence"]: loss_presence,
+        keys["precision"]: (
             true_positive / (true_positive + false_positive).clamp_min(1.0)
         ),
-        "head_top_accessory_recall": (
+        keys["recall"]: (
             true_positive / (true_positive + false_negative).clamp_min(1.0)
         ),
-        "head_top_accessory_presence_accuracy": (
+        keys["presence_accuracy"]: (
             ((predicted_presence >= 0.5) == present).float().mean()
         ),
-        "count_head_top_accessory_pixels": expected_float.sum(),
+        keys["count"]: expected_float.sum(),
     }
+
+
+def head_top_accessory_semantic_terms(dense_semantic_logits, targets):
+    """Component-aware supervision for topology class zero."""
+    return _dense_semantic_class_terms(
+        dense_semantic_logits,
+        targets,
+        class_index=0,
+        metric_prefix="head_top_accessory",
+        enabled_class_counts=(4, 5),
+    )
+
+
+def head_eye_accessory_semantic_terms(dense_semantic_logits, targets):
+    """Supervise exact eye-level head-outer alpha in schema version 3."""
+    return _dense_semantic_class_terms(
+        dense_semantic_logits,
+        targets,
+        class_index=1,
+        metric_prefix="head_eye_accessory",
+        enabled_class_counts=(5,),
+    )
 
 
 class DenseUVParserLoss(nn.Module):
@@ -702,6 +741,10 @@ class DenseUVParserLoss(nn.Module):
                 outputs["dense_semantic_logits"],
                 targets["dense_semantics"],
             )
+            eye_accessory_terms = head_eye_accessory_semantic_terms(
+                outputs["dense_semantic_logits"],
+                targets["dense_semantics"],
+            )
             loss_dense_semantics = (
                 loss_dense_semantic_focal
                 + 0.50
@@ -712,6 +755,14 @@ class DenseUVParserLoss(nn.Module):
                 ]
                 + 0.10
                 * top_accessory_terms["loss_head_top_accessory_presence"]
+                + 0.50
+                * eye_accessory_terms["loss_head_eye_accessory_dice"]
+                + 0.75
+                * eye_accessory_terms[
+                    "loss_head_eye_accessory_hard_recall"
+                ]
+                + 0.10
+                * eye_accessory_terms["loss_head_eye_accessory_presence"]
             )
             acc_dense_semantics = _masked_accuracy(
                 outputs["dense_semantic_logits"],
@@ -722,6 +773,14 @@ class DenseUVParserLoss(nn.Module):
             loss_dense_semantics = zero
             acc_dense_semantics = zero
             top_accessory_terms = head_top_accessory_semantic_terms(
+                outputs["foreground"].new_zeros(
+                    outputs["foreground"].shape[0],
+                    1,
+                    *outputs["foreground"].shape[-2:],
+                ),
+                targets["foreground"][:, 0].long(),
+            )
+            eye_accessory_terms = head_eye_accessory_semantic_terms(
                 outputs["foreground"].new_zeros(
                     outputs["foreground"].shape[0],
                     1,
@@ -791,6 +850,7 @@ class DenseUVParserLoss(nn.Module):
             "loss_dense_semantics_weighted": weighted_dense_semantics,
             "acc_dense_semantics": acc_dense_semantics,
             **top_accessory_terms,
+            **eye_accessory_terms,
             "acc_text_prompt_route": acc_text_prompt_route,
             "loss_route_prior_regularization": loss_route_prior_regularization,
             "confidence_mae": confidence_mae,

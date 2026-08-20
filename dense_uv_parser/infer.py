@@ -621,6 +621,15 @@ def save_semantic_pixel_labels(
             [30, 30, 30],     # 3: background (dark gray)
         ]
         background_index = 3
+    elif P == 5:
+        palette_values = [
+            [255, 215, 0],    # 0: head_top_accessory (gold)
+            [0, 255, 200],    # 1: head_eye_accessory (bright cyan)
+            [220, 20, 60],    # 2: other_outer (crimson)
+            [30, 144, 255],   # 3: inner (dodger blue)
+            [30, 30, 30],     # 4: background (dark gray)
+        ]
+        background_index = 4
     else:
         palette_values = [
             [0, 255, 200],    # 0: outer_glasses (bright cyan)
