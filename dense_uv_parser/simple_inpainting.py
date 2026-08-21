@@ -2,17 +2,22 @@
 
 Inner-layer blind spots (e.g. armpits, between legs, bottom of head) are repaired
 using body symmetry and same-part nearest neighbors.  Outer-layer completion is
-normally forbidden.  The one deliberately narrow exception is a missing
-head-eye texel that has all three of the following forms of evidence:
+normally forbidden.  Two deliberately narrow exceptions are supported.  The
+first is a missing head-eye texel that has all three of the following forms of
+evidence:
 
 * the accessory-level head prediction says the structure is symmetric;
 * dense v3 semantics project a strong outer candidate to that exact UV texel;
 * either its bilateral counterpart is observed outer, or both semantic
   candidates have observed inner-layer colors at their exact counterparts.
 
-That exception repairs split glasses/headphones without turning ordinary eyes
-or arbitrary head pixels into outer-layer skin.  Every other unobserved outer
-texel remains 100% transparent (alpha = 0.0, RGB = 0.0).
+The second repairs a broken horizontal hat brim only when the learned
+accessory classifier predicts a closed ring and the same physical row already
+contains observed outer-layer evidence on at least three of the four side
+faces. Missing colors are copied only from observed outer texels on that row.
+These exceptions repair split glasses/headphones and hat brims without turning
+ordinary eyes or arbitrary head pixels into outer-layer skin. Every other
+unobserved outer texel remains 100% transparent (alpha = 0.0, RGB = 0.0).
 """
 
 from functools import lru_cache
@@ -287,6 +292,114 @@ def _complete_symmetric_head_eye_outer(
     )
 
 
+def _complete_closed_head_outer_ring(
+    flat,
+    valid,
+    layer,
+    part,
+    face,
+    grid_x,
+    grid_y,
+    alpha_threshold,
+    closed_ring_probability,
+    closed_ring_threshold,
+    min_seed_faces=3,
+    min_face_texels=2,
+    min_row_texels=8,
+    min_template_columns=4,
+):
+    """Complete a strongly classified horizontal brim across head side faces.
+
+    The four outer head side rectangles occupy one contiguous 32-texel atlas
+    strip (x=32..63). A row is eligible only when parser evidence already
+    covers at least three physical faces. The fourth face therefore cannot be
+    invented from a single front-view stripe. Columns are inferred from the
+    union of the observed faces, and RGB is copied from the nearest *original*
+    outer texel on the same cyclic row; inner skin and newly generated texels
+    are never color sources.
+    """
+    if closed_ring_probability is None or float(
+        closed_ring_probability
+    ) < float(closed_ring_threshold):
+        return 0, 0
+
+    side_outer = (
+        valid
+        & (layer == 1)
+        & (part == 0)
+        & (face >= 0)
+        & (face < 4)
+    )
+    original_defined = side_outer & (
+        flat[3] > float(alpha_threshold)
+    )
+    if not original_defined.any():
+        return 0, 0
+
+    filled_count = 0
+    completed_rows = 0
+    for row_value in torch.unique(grid_y[side_outer]).tolist():
+        row_mask = side_outer & (grid_y == int(row_value))
+        row_observed = original_defined & row_mask
+        face_counts = torch.stack(
+            [
+                (row_observed & (face == face_index)).sum()
+                for face_index in range(4)
+            ]
+        )
+        seeded_faces = face_counts >= int(min_face_texels)
+        if int(seeded_faces.sum().item()) < int(min_seed_faces):
+            continue
+        if int(face_counts.sum().item()) < int(min_row_texels):
+            continue
+
+        # All four side faces use local columns 0..7. Observations from the
+        # visible faces vote for which columns belong to the brim, while the
+        # missing face contributes no fabricated shape evidence.
+        template_columns = torch.zeros(
+            8, dtype=torch.bool, device=flat.device
+        )
+        observed_indices = row_observed.nonzero(
+            as_tuple=False
+        ).flatten()
+        local_columns = torch.remainder(
+            grid_x.index_select(0, observed_indices) - 32,
+            8,
+        )
+        template_columns[local_columns] = True
+        if int(template_columns.sum().item()) < int(min_template_columns):
+            continue
+
+        row_candidates = row_mask & template_columns[
+            torch.remainder(grid_x - 32, 8)
+        ]
+        row_candidates &= ~original_defined
+        target_indices = row_candidates.nonzero(
+            as_tuple=False
+        ).flatten()
+        if target_indices.numel() == 0:
+            continue
+
+        source_x = grid_x.index_select(0, observed_indices) - 32
+        target_x = grid_x.index_select(0, target_indices) - 32
+        atlas_distance = (
+            target_x[:, None] - source_x[None, :]
+        ).abs()
+        cyclic_distance = torch.minimum(
+            atlas_distance,
+            32 - atlas_distance,
+        )
+        nearest_sources = observed_indices.index_select(
+            0, cyclic_distance.argmin(dim=1)
+        )
+        flat[:, target_indices] = flat[:, nearest_sources]
+        flat[3, target_indices] = 1.0
+        filled_count += int(target_indices.numel())
+        completed_rows += 1
+
+    return filled_count, completed_rows
+
+
 def simple_symmetry_nearest_inpaint(
     skin_uv: torch.Tensor,
     alpha_threshold: float = 0.5,
@@ -337,6 +450,22 @@ def simple_symmetry_nearest_inpaint(
     missing_inner = is_inner & ~defined_inner
 
     (
+        head_outer_closed_ring_filled,
+        head_outer_closed_ring_completed_rows,
+    ) = _complete_closed_head_outer_ring(
+        flat,
+        valid,
+        layer,
+        part,
+        face,
+        grid_x,
+        grid_y,
+        alpha_threshold=alpha_threshold,
+        closed_ring_probability=head_outer_closed_ring_probability,
+        closed_ring_threshold=head_outer_closed_ring_threshold,
+    )
+
+    (
         symmetric_candidate_count,
         head_outer_direct_mirror_filled,
         head_outer_paired_semantic_filled,
@@ -379,13 +508,24 @@ def simple_symmetry_nearest_inpaint(
         "head_outer_front_span_filled_texels": (
             head_outer_front_span_filled
         ),
+        "head_outer_closed_ring_filled_texels": (
+            head_outer_closed_ring_filled
+        ),
+        "head_outer_closed_ring_completed_rows": (
+            head_outer_closed_ring_completed_rows
+        ),
+        "head_outer_closed_ring_probability": (
+            round(float(head_outer_closed_ring_probability), 6)
+            if head_outer_closed_ring_probability is not None
+            else None
+        ),
         "head_outer_symmetry_probability": (
             round(float(head_outer_symmetry_probability), 6)
             if head_outer_symmetry_probability is not None
             else None
         ),
         "outer_completion_policy": (
-            "direct_mirror_paired_or_bounded_front_eye_candidates_only"
+            "closed_side_ring_or_direct_mirror_paired_bounded_front_eye"
         ),
     }
 

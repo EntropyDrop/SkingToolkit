@@ -878,6 +878,24 @@ class SemanticDenseUVParserTest(unittest.TestCase):
             stats["head_outer_closed_ring_filled_texels"], 0
         )
 
+    def test_v4_closed_ring_completion_rejects_two_face_evidence(self):
+        uv = torch.zeros(4, 64, 64)
+        color = torch.tensor([0.9, 0.1, 0.1]).view(3, 1)
+        for x in (40, 48):
+            uv[:3, 11, x : x + 8] = color
+            uv[3, 11, x : x + 8] = 1.0
+
+        repaired, stats = simple_symmetry_nearest_inpaint(
+            uv,
+            head_outer_closed_ring_probability=0.99,
+            head_outer_closed_ring_threshold=0.70,
+        )
+
+        self.assertEqual(float(repaired[3, 11, 56:64].sum()), 0.0)
+        self.assertEqual(
+            stats["head_outer_closed_ring_filled_texels"], 0
+        )
+
     def test_head_outer_route_connectivity_penalizes_brim_gap(self):
         edge = build_head_outer_face_graph()[:, 0]
         target = torch.zeros(1, 6 * 8 * 8, dtype=torch.bool)
