@@ -30,6 +30,7 @@ from SkingToolkit.dense_uv_parser.semantic_targets import (
     build_part_layer_masks,
 )
 from SkingToolkit.dense_uv_parser.simple_inpainting import (
+    build_basic_minecraft_metadata,
     simple_symmetry_nearest_inpaint,
 )
 from SkingToolkit.dense_uv_parser.uv_topology import (
@@ -1148,6 +1149,157 @@ class SemanticDenseUVParserTest(unittest.TestCase):
             self.assertEqual(image.getpixel((20, 20)), (0, 0, 0, 0))
             self.assertEqual(image.getpixel((40, 8)), (0, 128, 255, 255))
             self.assertEqual(image.getpixel((63, 0)), (0, 0, 0, 0))
+
+    def test_head_eye_semantic_candidate_completes_only_direct_mirror(self):
+        metadata = build_basic_minecraft_metadata()
+        head_outer = (
+            metadata["valid"]
+            & (metadata["layer"] == 1)
+            & (metadata["part"] == 0)
+            & (metadata["face"] == 0)
+            & (metadata["mirrored_texel"] >= 0)
+        )
+        target = int(head_outer.nonzero(as_tuple=False)[0])
+        source = int(metadata["mirrored_texel"][target])
+        self.assertNotEqual(target, source)
+
+        uv = torch.zeros(4, 64, 64)
+        uv.reshape(4, -1)[:, source] = torch.tensor(
+            [0.05, 0.20, 0.80, 1.0]
+        )
+        candidate = torch.zeros(64, 64)
+        candidate.reshape(-1)[target] = 0.95
+
+        repaired, stats = simple_symmetry_nearest_inpaint(
+            uv,
+            head_outer_symmetric_candidate_probability=candidate,
+            head_outer_symmetry_probability=torch.tensor(0.95),
+            head_outer_symmetry_threshold=0.80,
+            head_outer_symmetry_candidate_threshold=0.65,
+        )
+        self.assertTrue(
+            torch.equal(
+                repaired.reshape(4, -1)[:, target],
+                repaired.reshape(4, -1)[:, source],
+            )
+        )
+        self.assertEqual(stats["head_outer_symmetry_filled_texels"], 1)
+
+    def test_head_eye_semantic_candidate_requires_high_global_symmetry(self):
+        metadata = build_basic_minecraft_metadata()
+        head_outer = (
+            metadata["valid"]
+            & (metadata["layer"] == 1)
+            & (metadata["part"] == 0)
+            & (metadata["face"] == 0)
+            & (metadata["mirrored_texel"] >= 0)
+        )
+        target = int(head_outer.nonzero(as_tuple=False)[0])
+        source = int(metadata["mirrored_texel"][target])
+        uv = torch.zeros(4, 64, 64)
+        uv.reshape(4, -1)[:, source] = torch.tensor(
+            [0.05, 0.20, 0.80, 1.0]
+        )
+        candidate = torch.zeros(64, 64)
+        candidate.reshape(-1)[target] = 0.95
+
+        repaired, stats = simple_symmetry_nearest_inpaint(
+            uv,
+            head_outer_symmetric_candidate_probability=candidate,
+            head_outer_symmetry_probability=torch.tensor(0.40),
+            head_outer_symmetry_threshold=0.80,
+            head_outer_symmetry_candidate_threshold=0.65,
+        )
+        self.assertEqual(
+            float(repaired.reshape(4, -1)[3, target].item()), 0.0
+        )
+        self.assertEqual(stats["head_outer_symmetry_filled_texels"], 0)
+
+    def test_paired_head_eye_semantics_promote_observed_inner_colors(self):
+        metadata = build_basic_minecraft_metadata()
+        head_outer = (
+            metadata["valid"]
+            & (metadata["layer"] == 1)
+            & (metadata["part"] == 0)
+            & (metadata["face"] == 0)
+            & (metadata["mirrored_texel"] >= 0)
+        )
+        target = int(head_outer.nonzero(as_tuple=False)[0])
+        mirror = int(metadata["mirrored_texel"][target])
+        target_inner = int(metadata["counterpart_texel"][target])
+        mirror_inner = int(metadata["counterpart_texel"][mirror])
+
+        uv = torch.zeros(4, 64, 64)
+        uv.reshape(4, -1)[:, target_inner] = torch.tensor(
+            [0.10, 0.80, 0.20, 1.0]
+        )
+        uv.reshape(4, -1)[:, mirror_inner] = torch.tensor(
+            [0.20, 0.90, 0.30, 1.0]
+        )
+        candidate = torch.zeros(64, 64)
+        candidate.reshape(-1)[target] = 0.95
+        candidate.reshape(-1)[mirror] = 0.90
+
+        repaired, stats = simple_symmetry_nearest_inpaint(
+            uv,
+            head_outer_symmetric_candidate_probability=candidate,
+            head_outer_symmetry_probability=torch.tensor(0.95),
+            head_outer_symmetry_threshold=0.80,
+            head_outer_symmetry_candidate_threshold=0.65,
+        )
+        repaired_flat = repaired.reshape(4, -1)
+        self.assertTrue(
+            torch.equal(repaired_flat[:, target], repaired_flat[:, target_inner])
+        )
+        self.assertTrue(
+            torch.equal(repaired_flat[:, mirror], repaired_flat[:, mirror_inner])
+        )
+        self.assertEqual(stats["head_outer_paired_semantic_filled_texels"], 2)
+
+    def test_symmetric_outer_endpoints_complete_bounded_front_span(self):
+        metadata = build_basic_minecraft_metadata()
+        front = (
+            metadata["valid"]
+            & (metadata["layer"] == 1)
+            & (metadata["part"] == 0)
+            & (metadata["face"] == 0)
+        )
+        row = int(metadata["grid_y"][front].min())
+        row_indices = (
+            front & (metadata["grid_y"] == row)
+        ).nonzero(as_tuple=False).flatten()
+        row_indices = row_indices[
+            metadata["grid_x"][row_indices].argsort()
+        ]
+        self.assertEqual(row_indices.numel(), 8)
+
+        uv = torch.zeros(4, 64, 64)
+        uv_flat = uv.reshape(4, -1)
+        for offset, outer_index in enumerate(row_indices.tolist()):
+            inner_index = int(metadata["counterpart_texel"][outer_index])
+            uv_flat[:, inner_index] = torch.tensor(
+                [offset / 8.0, 0.70, 0.20, 1.0]
+            )
+        uv_flat[:, row_indices[0]] = uv_flat[
+            :, int(metadata["counterpart_texel"][row_indices[0]])
+        ]
+        uv_flat[:, row_indices[-1]] = uv_flat[
+            :, int(metadata["counterpart_texel"][row_indices[-1]])
+        ]
+        candidate = torch.zeros(64, 64)
+        candidate.reshape(-1)[row_indices[0]] = 0.95
+        candidate.reshape(-1)[row_indices[-1]] = 0.95
+
+        repaired, stats = simple_symmetry_nearest_inpaint(
+            uv,
+            head_outer_symmetric_candidate_probability=candidate,
+            head_outer_symmetry_probability=torch.tensor(0.95),
+            head_outer_symmetry_threshold=0.80,
+            head_outer_symmetry_candidate_threshold=0.65,
+        )
+        repaired_alpha = repaired.reshape(4, -1)[3]
+        self.assertTrue((repaired_alpha[row_indices] > 0.5).all())
+        self.assertEqual(stats["head_outer_front_span_filled_texels"], 6)
 
 
 if __name__ == "__main__":

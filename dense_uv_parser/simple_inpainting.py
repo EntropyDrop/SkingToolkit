@@ -1,9 +1,18 @@
-"""Deterministic, minimal inpainting of missing inner-layer Minecraft texels.
+"""Deterministic, minimal inpainting of missing Minecraft texels.
 
-Only inner-layer blind spots (e.g. armpits, between legs, bottom of head) are
-repaired using body symmetry and same-part nearest neighbors.
-Outer-layer texels are NEVER filled or expanded: unobserved outer texels remain
-100% transparent (alpha = 0.0, RGB = 0.0).
+Inner-layer blind spots (e.g. armpits, between legs, bottom of head) are repaired
+using body symmetry and same-part nearest neighbors.  Outer-layer completion is
+normally forbidden.  The one deliberately narrow exception is a missing
+head-eye texel that has all three of the following forms of evidence:
+
+* the accessory-level head prediction says the structure is symmetric;
+* dense v3 semantics project a strong outer candidate to that exact UV texel;
+* either its bilateral counterpart is observed outer, or both semantic
+  candidates have observed inner-layer colors at their exact counterparts.
+
+That exception repairs split glasses/headphones without turning ordinary eyes
+or arbitrary head pixels into outer-layer skin.  Every other unobserved outer
+texel remains 100% transparent (alpha = 0.0, RGB = 0.0).
 """
 
 from functools import lru_cache
@@ -117,12 +126,184 @@ def build_basic_minecraft_metadata(device=None):
     return metadata
 
 
+def _complete_symmetric_head_eye_outer(
+    flat,
+    valid,
+    layer,
+    part,
+    face,
+    grid_x,
+    grid_y,
+    mirrored_texel,
+    counterpart_texel,
+    candidate_probability,
+    alpha_threshold,
+    candidate_threshold,
+    symmetry_probability,
+    symmetry_threshold,
+):
+    """Copy only directly mirrored, model-backed head-eye outer texels.
+
+    Sources are snapshotted before filling so a newly completed texel cannot
+    seed a second completion.  Existing outer evidence is mirrored exactly;
+    when both sides are strong candidates but both were routed inner, each side
+    is promoted from its own corresponding inner texel.  A physical front-face
+    row bounded by two such observed symmetric endpoints may fill only the
+    texels between them.  This remains a one-row repair rather than graph
+    diffusion.
+    """
+    if candidate_probability is None:
+        return 0, 0, 0, 0
+    if symmetry_probability is None or float(symmetry_probability) < float(
+        symmetry_threshold
+    ):
+        return 0, 0, 0, 0
+
+    probability = candidate_probability.to(
+        device=flat.device,
+        dtype=torch.float32,
+    ).reshape(-1)
+    if probability.numel() != UV_SIZE * UV_SIZE:
+        raise ValueError(
+            "head_outer_symmetric_candidate_probability must contain "
+            f"{UV_SIZE * UV_SIZE} texels, got {probability.numel()}."
+        )
+
+    original_defined_outer = (
+        valid
+        & (layer == 1)
+        & (part == 0)
+        & (flat[3] > float(alpha_threshold))
+    )
+    safe_mirror = mirrored_texel.clamp_min(0)
+    mirror_is_observed_outer = (
+        (mirrored_texel >= 0)
+        & original_defined_outer.index_select(0, safe_mirror)
+    )
+    semantic_candidates = probability >= float(candidate_threshold)
+    direct_mirror_candidates = (
+        valid
+        & (layer == 1)
+        & (part == 0)
+        & ~original_defined_outer
+        & mirror_is_observed_outer
+        & semantic_candidates
+    )
+    safe_counterpart = counterpart_texel.clamp_min(0)
+    inner_source_is_observed = (
+        (counterpart_texel >= 0)
+        & (layer.index_select(0, safe_counterpart) == 0)
+        & (flat[3].index_select(0, safe_counterpart) > float(alpha_threshold))
+    )
+    mirrored_semantic_candidate = (
+        (mirrored_texel >= 0)
+        & semantic_candidates.index_select(0, safe_mirror)
+    )
+    mirrored_inner_source_is_observed = (
+        (mirrored_texel >= 0)
+        & inner_source_is_observed.index_select(0, safe_mirror)
+    )
+    paired_semantic_candidates = (
+        valid
+        & (layer == 1)
+        & (part == 0)
+        & ~original_defined_outer
+        & semantic_candidates
+        & mirrored_semantic_candidate
+        & inner_source_is_observed
+        & mirrored_inner_source_is_observed
+    )
+    paired_semantic_candidates &= ~direct_mirror_candidates
+    # A glasses/visor row can be confidently identified at its two protruding
+    # endpoints while the lens and bridge pixels between them are projected on
+    # the inner plane.  Complete only the bounded span on the physical front
+    # face, and only when both endpoints are observed outer, semantically
+    # outer, and exact bilateral mirrors of one another.
+    front_span_candidates = torch.zeros_like(direct_mirror_candidates)
+    front_face = valid & (layer == 1) & (part == 0) & (face == 0)
+    symmetric_outer_seeds = (
+        front_face
+        & original_defined_outer
+        & semantic_candidates
+        & mirrored_semantic_candidate
+        & mirror_is_observed_outer
+    )
+    for row_value in torch.unique(grid_y[front_face]).tolist():
+        row_seeds = symmetric_outer_seeds & (grid_y == int(row_value))
+        seed_indices = row_seeds.nonzero(as_tuple=False).flatten()
+        if seed_indices.numel() < 2:
+            continue
+        left = seed_indices[grid_x[seed_indices].argmin()]
+        right = seed_indices[grid_x[seed_indices].argmax()]
+        if int(mirrored_texel[left]) != int(right):
+            continue
+        left_x = int(grid_x[left])
+        right_x = int(grid_x[right])
+        front_span_candidates |= (
+            front_face
+            & (grid_y == int(row_value))
+            & (grid_x >= left_x)
+            & (grid_x <= right_x)
+            & ~original_defined_outer
+            & inner_source_is_observed
+        )
+
+    front_span_candidates &= ~direct_mirror_candidates
+    front_span_candidates &= ~paired_semantic_candidates
+    candidates = (
+        direct_mirror_candidates
+        | paired_semantic_candidates
+        | front_span_candidates
+    )
+    candidate_count = int(candidates.sum().item())
+    if candidate_count == 0:
+        return 0, 0, 0, 0
+
+    direct_targets = direct_mirror_candidates.nonzero(
+        as_tuple=False
+    ).flatten()
+    if direct_targets.numel() > 0:
+        direct_sources = mirrored_texel.index_select(0, direct_targets)
+        flat[:, direct_targets] = flat[:, direct_sources]
+
+    paired_targets = paired_semantic_candidates.nonzero(
+        as_tuple=False
+    ).flatten()
+    if paired_targets.numel() > 0:
+        paired_sources = counterpart_texel.index_select(0, paired_targets)
+        flat[:, paired_targets] = flat[:, paired_sources]
+        flat[3, paired_targets] = 1.0
+
+    span_targets = front_span_candidates.nonzero(as_tuple=False).flatten()
+    if span_targets.numel() > 0:
+        span_sources = counterpart_texel.index_select(0, span_targets)
+        flat[:, span_targets] = flat[:, span_sources]
+        flat[3, span_targets] = 1.0
+    return (
+        candidate_count,
+        int(direct_targets.numel()),
+        int(paired_targets.numel()),
+        int(span_targets.numel()),
+    )
+
+
 def simple_symmetry_nearest_inpaint(
     skin_uv: torch.Tensor,
     alpha_threshold: float = 0.5,
-    **kwargs,
+    head_outer_probability=None,
+    head_outer_threshold=0.65,
+    head_outer_min_component_seeds=2,
+    head_outer_symmetric_candidate_probability=None,
+    head_outer_symmetry_probability=None,
+    head_outer_symmetry_threshold=0.80,
+    head_outer_symmetry_candidate_threshold=0.65,
+    head_outer_closed_ring_probability=None,
+    head_outer_closed_ring_threshold=0.70,
+    head_outer_open_top_probability=None,
+    head_outer_open_top_threshold=0.70,
+    head_outer_open_top_max_gap=3,
 ) -> Tuple[torch.Tensor, Dict[str, int]]:
-    """Clean, deterministic repair of missing inner-layer texels only.
+    """Clean, deterministic repair of inner holes and mirrored eye accessories.
 
     Args:
         skin_uv: (4, 64, 64) tensor with RGB and Alpha in [0, 1].
@@ -138,9 +319,11 @@ def simple_symmetry_nearest_inpaint(
     valid = meta["valid"]
     layer = meta["layer"]
     part = meta["part"]
+    face = meta["face"]
     grid_x = meta["grid_x"]
     grid_y = meta["grid_y"]
     mirrored_texel = meta["mirrored_texel"]
+    counterpart_texel = meta["counterpart_texel"]
 
     flat = skin_uv.clone().reshape(4, UV_SIZE * UV_SIZE)
     rgb = flat[:3]
@@ -153,10 +336,57 @@ def simple_symmetry_nearest_inpaint(
     defined_inner = is_inner & (alpha > alpha_threshold)
     missing_inner = is_inner & ~defined_inner
 
+    (
+        symmetric_candidate_count,
+        head_outer_direct_mirror_filled,
+        head_outer_paired_semantic_filled,
+        head_outer_front_span_filled,
+    ) = (
+        _complete_symmetric_head_eye_outer(
+            flat,
+            valid,
+            layer,
+            part,
+            face,
+            grid_x,
+            grid_y,
+            mirrored_texel,
+            counterpart_texel,
+            head_outer_symmetric_candidate_probability,
+            alpha_threshold=alpha_threshold,
+            candidate_threshold=head_outer_symmetry_candidate_threshold,
+            symmetry_probability=head_outer_symmetry_probability,
+            symmetry_threshold=head_outer_symmetry_threshold,
+        )
+    )
+
     stats = {
         "missing_inner_texels": int(missing_inner.sum().item()),
         "symmetry_filled": 0,
         "nearest_filled": 0,
+        "head_outer_symmetric_candidate_texels": symmetric_candidate_count,
+        "head_outer_symmetry_filled_texels": (
+            head_outer_direct_mirror_filled
+            + head_outer_paired_semantic_filled
+            + head_outer_front_span_filled
+        ),
+        "head_outer_direct_mirror_filled_texels": (
+            head_outer_direct_mirror_filled
+        ),
+        "head_outer_paired_semantic_filled_texels": (
+            head_outer_paired_semantic_filled
+        ),
+        "head_outer_front_span_filled_texels": (
+            head_outer_front_span_filled
+        ),
+        "head_outer_symmetry_probability": (
+            round(float(head_outer_symmetry_probability), 6)
+            if head_outer_symmetry_probability is not None
+            else None
+        ),
+        "outer_completion_policy": (
+            "direct_mirror_paired_or_bounded_front_eye_candidates_only"
+        ),
     }
 
     if not missing_inner.any():

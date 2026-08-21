@@ -137,6 +137,7 @@ OUTER_UV_OCCUPANCY_OUTPUT="${OUTER_UV_OCCUPANCY_OUTPUT-outputs/parser_debug_oute
 HEAD_OUTER_STRUCTURE_OUTPUT="${HEAD_OUTER_STRUCTURE_OUTPUT-outputs/parser_debug_head_outer_structure.png}"
 SEMANTIC_OUTPUT="${SEMANTIC_OUTPUT-outputs/parser_semantic_summary.json}"
 SEMANTIC_PIXEL_OUTPUT="${SEMANTIC_PIXEL_OUTPUT-outputs/parser_debug_semantic_pixel_labels.png}"
+HEAD_EYE_SEMANTIC_OUTER_UV_OUTPUT="${HEAD_EYE_SEMANTIC_OUTER_UV_OUTPUT-outputs/parser_debug_head_eye_semantic_outer_uv.png}"
 FOREGROUND_PROBABILITY_OUTPUT="${FOREGROUND_PROBABILITY_OUTPUT-outputs/foreground_probability.png}"
 FOREGROUND_MASK_OUTPUT="${FOREGROUND_MASK_OUTPUT-outputs/foreground_mask.png}"
 FOREGROUND_RAW_MASK_OUTPUT="${FOREGROUND_RAW_MASK_OUTPUT-outputs/foreground_mask_raw.png}"
@@ -215,6 +216,9 @@ HEAD_OUTER_COMPLETION_THRESHOLD="${HEAD_OUTER_COMPLETION_THRESHOLD:-0.65}"
 HEAD_OUTER_COMPLETION_MIN_COMPONENT_SEEDS="${HEAD_OUTER_COMPLETION_MIN_COMPONENT_SEEDS:-2}"
 HEAD_OUTER_SYMMETRY_COMPLETION_THRESHOLD="${HEAD_OUTER_SYMMETRY_COMPLETION_THRESHOLD:-0.80}"
 HEAD_OUTER_SYMMETRY_CANDIDATE_THRESHOLD="${HEAD_OUTER_SYMMETRY_CANDIDATE_THRESHOLD:-0.20}"
+HEAD_EYE_SEMANTIC_SYMMETRY_RESCUE="${HEAD_EYE_SEMANTIC_SYMMETRY_RESCUE:-true}"
+HEAD_EYE_SEMANTIC_SYMMETRY_CANDIDATE_THRESHOLD="${HEAD_EYE_SEMANTIC_SYMMETRY_CANDIDATE_THRESHOLD:-0.65}"
+HEAD_EYE_SEMANTIC_PROMPT_MARGIN_THRESHOLD="${HEAD_EYE_SEMANTIC_PROMPT_MARGIN_THRESHOLD:-0.75}"
 HEAD_OUTER_CLOSED_RING_COMPLETION_THRESHOLD="${HEAD_OUTER_CLOSED_RING_COMPLETION_THRESHOLD:-0.70}"
 HEAD_OUTER_OPEN_TOP_COMPLETION_THRESHOLD="${HEAD_OUTER_OPEN_TOP_COMPLETION_THRESHOLD:-0.70}"
 HEAD_OUTER_OPEN_TOP_MAX_GAP="${HEAD_OUTER_OPEN_TOP_MAX_GAP:-3}"
@@ -299,6 +303,8 @@ args=(
   --head_outer_completion_min_component_seeds "$HEAD_OUTER_COMPLETION_MIN_COMPONENT_SEEDS"
   --head_outer_symmetry_completion_threshold "$HEAD_OUTER_SYMMETRY_COMPLETION_THRESHOLD"
   --head_outer_symmetry_candidate_threshold "$HEAD_OUTER_SYMMETRY_CANDIDATE_THRESHOLD"
+  --head_eye_semantic_symmetry_candidate_threshold "$HEAD_EYE_SEMANTIC_SYMMETRY_CANDIDATE_THRESHOLD"
+  --head_eye_semantic_prompt_margin_threshold "$HEAD_EYE_SEMANTIC_PROMPT_MARGIN_THRESHOLD"
   --head_outer_closed_ring_completion_threshold "$HEAD_OUTER_CLOSED_RING_COMPLETION_THRESHOLD"
   --head_outer_open_top_completion_threshold "$HEAD_OUTER_OPEN_TOP_COMPLETION_THRESHOLD"
   --head_outer_open_top_max_gap "$HEAD_OUTER_OPEN_TOP_MAX_GAP"
@@ -373,6 +379,12 @@ if [[ "$HEAD_OUTER_TOPOLOGY_AUTO_RELIABILITY" == "true" ]]; then
   args+=(--head_outer_topology_auto_reliability)
 else
   args+=(--no_head_outer_topology_auto_reliability)
+fi
+
+if [[ "$HEAD_EYE_SEMANTIC_SYMMETRY_RESCUE" == "true" ]]; then
+  args+=(--head_eye_semantic_symmetry_rescue)
+else
+  args+=(--no_head_eye_semantic_symmetry_rescue)
 fi
 
 if [[ "$GEOMETRY_CROSS_VIEW_OUTER_CONSISTENCY" == "true" ]]; then
@@ -450,6 +462,10 @@ fi
 
 if [[ -n "$SIMPLE_INPAINT_OUTPUT" ]]; then
   args+=(--simple_inpaint_output "$SIMPLE_INPAINT_OUTPUT")
+fi
+
+if [[ -n "$HEAD_EYE_SEMANTIC_OUTER_UV_OUTPUT" ]]; then
+  args+=(--head_eye_semantic_outer_uv_output "$HEAD_EYE_SEMANTIC_OUTER_UV_OUTPUT")
 fi
 
 if [[ -n "$DEBUG_OUTPUT" ]]; then

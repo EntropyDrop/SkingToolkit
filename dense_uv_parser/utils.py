@@ -2306,13 +2306,14 @@ def _head_outer_visible_color_coverage(
     return pixel_coverage, pixel_assessed
 
 
-def aggregate_direct_outer_values_by_view(
+def _aggregate_direct_values_by_view(
     renderer,
     views,
     values,
+    route_role,
     center_power=2.0,
 ):
-    """Pool image-space values into direct outer UV texels, keeping views separate."""
+    """Pool image-space values into one physical UV role, keeping views separate."""
     views = parse_views(views)
     if not views:
         raise ValueError("At least one renderer view is required.")
@@ -2339,10 +2340,10 @@ def aggregate_direct_outer_values_by_view(
                 f"value shape {tuple(values.shape[-2:])}."
             )
 
-        valid = static["masks"][ROUTE_OUTER_PRIMARY].reshape(1, 1, -1)
-        flat_uv = static["flat_uv"][ROUTE_OUTER_PRIMARY].reshape(1, 1, -1)
+        valid = static["masks"][route_role].reshape(1, 1, -1)
+        flat_uv = static["flat_uv"][route_role].reshape(1, 1, -1)
         center_weight = static["texel_center_score"][
-            ROUTE_OUTER_PRIMARY
+            route_role
         ].float().clamp(0.0, 1.0).pow(float(center_power))
         weight = center_weight.reshape(1, 1, -1) * valid
         weight = weight.expand(group_count, 1, -1)
@@ -2366,6 +2367,38 @@ def aggregate_direct_outer_values_by_view(
     return (
         torch.stack(pooled_views, dim=1),
         torch.stack(supported_views, dim=1),
+    )
+
+
+def aggregate_direct_outer_values_by_view(
+    renderer,
+    views,
+    values,
+    center_power=2.0,
+):
+    """Pool image-space values into direct outer UV texels, keeping views separate."""
+    return _aggregate_direct_values_by_view(
+        renderer,
+        views,
+        values,
+        ROUTE_OUTER_PRIMARY,
+        center_power=center_power,
+    )
+
+
+def aggregate_direct_inner_values_by_view(
+    renderer,
+    views,
+    values,
+    center_power=2.0,
+):
+    """Pool image-space values into direct inner UV texels, keeping views separate."""
+    return _aggregate_direct_values_by_view(
+        renderer,
+        views,
+        values,
+        ROUTE_INNER_PRIMARY,
+        center_power=center_power,
     )
 
 

@@ -32,9 +32,11 @@ from SkingToolkit.dense_uv_parser.differentiable_hypothesis_refiner import (  # 
 )
 from SkingToolkit.dense_uv_parser.runtime import get_device  # noqa: E402
 from SkingToolkit.dense_uv_parser.simple_inpainting import (  # noqa: E402
+    build_basic_minecraft_metadata,
     simple_symmetry_nearest_inpaint,
 )
 from SkingToolkit.dense_uv_parser.uv_layout import (  # noqa: E402
+    UV_SIZE,
     finalize_minecraft_alpha,
     tensor_to_rgba_image,
     view_native_size,
@@ -47,9 +49,12 @@ from SkingToolkit.dense_uv_parser.utils import (  # noqa: E402
     PART_PALETTE,
     ROUTE_ROLE_PALETTE,
     SPLAT_COLOR_AGGREGATIONS,
+    aggregate_direct_inner_values_by_view,
+    aggregate_direct_outer_values_by_view,
     attach_projected_head_outer_structure,
     attach_projected_outer_uv_occupancy,
     build_static_surface_routing,
+    canonicalize_parser_outputs,
     combine_layer_face,
     build_geometry_grid_debug,
     fill_geometry_grid_debug,
@@ -93,6 +98,127 @@ def image_to_render_tensor(image, view_size, bg_color=(128, 128, 128)):
         ).squeeze(0)
     tensor = tensor.clamp(0.0, 1.0)
     return torch.cat([tensor, torch.ones_like(tensor[:1])], dim=0)
+
+
+def project_head_eye_semantic_outer_probability(
+    outputs,
+    renderer,
+    views,
+    center_power=2.0,
+):
+    """Project v3 dense outer semantics into the physical head eye-band UV.
+
+    The result is evidence, not an occupancy prediction.  It is consumed only
+    by the one-hop bilateral completion rule, which additionally requires high
+    accessory symmetry plus either observed mirrored outer evidence or a
+    mirrored pair of observed inner colors.
+    """
+    canonical = canonicalize_parser_outputs(outputs)
+    logits = canonical.get("dense_semantic_logits")
+    if logits is None or logits.dim() != 4 or logits.shape[1] != 5:
+        return None, {
+            "available": False,
+            "reason": "requires_dense_semantic_target_v3",
+        }
+
+    probabilities = logits.float().softmax(dim=1)
+    outer_probability = probabilities[:, :3].sum(dim=1, keepdim=True)
+    outer_pooled_by_view, outer_supported_by_view = (
+        aggregate_direct_outer_values_by_view(
+            renderer,
+            views,
+            outer_probability,
+            center_power=float(center_power),
+        )
+    )
+    inner_pooled_by_view, inner_supported_by_view = (
+        aggregate_direct_inner_values_by_view(
+            renderer,
+            views,
+            outer_probability,
+            center_power=float(center_power),
+        )
+    )
+
+    def collapse_views(pooled_by_view, supported_by_view):
+        supported = supported_by_view.unsqueeze(2)
+        pooled_supported = torch.where(
+            supported,
+            pooled_by_view,
+            torch.full_like(pooled_by_view, -1.0),
+        )
+        collapsed = pooled_supported.amax(dim=1)[:, 0]
+        return torch.where(
+            supported_by_view.any(dim=1),
+            collapsed,
+            torch.zeros_like(collapsed),
+        ), supported_by_view.any(dim=1)
+
+    direct_outer, direct_outer_supported = collapse_views(
+        outer_pooled_by_view, outer_supported_by_view
+    )
+    direct_inner, direct_inner_supported = collapse_views(
+        inner_pooled_by_view, inner_supported_by_view
+    )
+
+    metadata = build_basic_minecraft_metadata(
+        device=outer_probability.device
+    )
+    counterpart = metadata["counterpart_texel"]
+    outer_head = (
+        metadata["valid"]
+        & (metadata["layer"] == 1)
+        & (metadata["part"] == 0)
+        & (counterpart >= 0)
+    )
+    source_inner = counterpart[outer_head]
+    inner_as_outer = torch.zeros_like(direct_outer)
+    inner_as_outer_supported = torch.zeros_like(
+        direct_outer_supported
+    )
+    inner_as_outer[:, outer_head] = direct_inner[:, source_inner]
+    inner_as_outer_supported[:, outer_head] = direct_inner_supported[
+        :, source_inner
+    ]
+    projected = torch.maximum(direct_outer, inner_as_outer).reshape(
+        -1, UV_SIZE, UV_SIZE
+    )
+    projected_supported = (
+        direct_outer_supported | inner_as_outer_supported
+    ).reshape(-1, UV_SIZE, UV_SIZE)
+
+    eye_faces = projected.new_zeros(projected.shape[0], 6, 8, 8)
+    eye_faces[:, (0, 2, 3), 1:6] = 1.0
+    eye_band = head_outer_face_values_to_uv(eye_faces)[:, 0] > 0.5
+    projected = torch.where(eye_band, projected, torch.zeros_like(projected))
+    supported_eye = eye_band & projected_supported
+    stats = {
+        "available": True,
+        "supported_eye_texels": int(supported_eye.sum().item()),
+        "mean_supported_probability": round(
+            float(projected[supported_eye].mean().item()), 6
+        )
+        if supported_eye.any()
+        else 0.0,
+        "max_probability": round(float(projected.max().item()), 6),
+    }
+    prompt_scores = outputs.get("text_prompt_scores")
+    if (
+        prompt_scores is not None
+        and prompt_scores.dim() == 2
+        and prompt_scores.shape[1] >= 4
+        and prompt_scores.shape[0] % len(views) == 0
+    ):
+        eye_over_inner = (
+            prompt_scores[:, 1].float() - prompt_scores[:, 3].float()
+        ).reshape(-1, len(views))
+        stats["global_eye_over_inner_margin_min"] = round(
+            float(eye_over_inner.amin(dim=1)[0].item()), 6
+        )
+        stats["global_eye_over_inner_margin_mean"] = round(
+            float(eye_over_inner.mean(dim=1)[0].item()), 6
+        )
+    return projected, stats
 
 
 def load_parser(checkpoint_path, device):
@@ -386,6 +512,7 @@ def simple_inpaint_uv(
     head_outer_probability=None,
     head_outer_threshold=0.65,
     head_outer_min_component_seeds=2,
+    head_outer_symmetric_candidate_probability=None,
     head_outer_symmetry_probability=None,
     head_outer_symmetry_threshold=0.80,
     head_outer_symmetry_candidate_threshold=0.20,
@@ -408,6 +535,9 @@ def simple_inpaint_uv(
         head_outer_probability=head_outer_probability,
         head_outer_threshold=head_outer_threshold,
         head_outer_min_component_seeds=head_outer_min_component_seeds,
+        head_outer_symmetric_candidate_probability=(
+            head_outer_symmetric_candidate_probability
+        ),
         head_outer_symmetry_probability=head_outer_symmetry_probability,
         head_outer_symmetry_threshold=head_outer_symmetry_threshold,
         head_outer_symmetry_candidate_threshold=(
@@ -1076,6 +1206,14 @@ def build_arg_parser():
         default="outputs/parser_debug_semantic_pixel_labels.png",
         help="Optional path to write a 2D pixel-level semantic concept map.",
     )
+    parser.add_argument(
+        "--head_eye_semantic_outer_uv_output",
+        default="outputs/parser_debug_head_eye_semantic_outer_uv.png",
+        help=(
+            "Optional grayscale UV diagnostic for projected v3 eye-band "
+            "outer semantic evidence."
+        ),
+    )
     parser.add_argument("--overlay_output", default=None, help="Optional path for segmentation overlays on canonicalized input views.")
     parser.add_argument("--overlay_alpha", type=float, default=0.45)
     parser.add_argument("--inner_cutout_output", default=None, help="Original-color cutout for routed inner-layer pixels.")
@@ -1349,6 +1487,43 @@ def build_arg_parser():
         help=(
             "Minimum v3 head-occupancy support for a directly mirrored "
             "completion candidate."
+        ),
+    )
+    parser.add_argument(
+        "--head_eye_semantic_symmetry_rescue",
+        dest="head_eye_semantic_symmetry_rescue",
+        action="store_true",
+        default=splat_defaults["head_eye_semantic_symmetry_rescue"],
+        help=(
+            "Allow strong v3 head-eye outer semantics to complete only an "
+            "exactly mirrored, already observed outer texel."
+        ),
+    )
+    parser.add_argument(
+        "--no_head_eye_semantic_symmetry_rescue",
+        dest="head_eye_semantic_symmetry_rescue",
+        action="store_false",
+    )
+    parser.add_argument(
+        "--head_eye_semantic_symmetry_candidate_threshold",
+        type=float,
+        default=splat_defaults[
+            "head_eye_semantic_symmetry_candidate_threshold"
+        ],
+        help=(
+            "Minimum projected total-outer semantic probability for a "
+            "mirrored eye-band completion candidate."
+        ),
+    )
+    parser.add_argument(
+        "--head_eye_semantic_prompt_margin_threshold",
+        type=float,
+        default=splat_defaults[
+            "head_eye_semantic_prompt_margin_threshold"
+        ],
+        help=(
+            "Minimum eye-accessory minus inner-layer SigLIP text score in "
+            "every input view before semantic eye-band completion is allowed."
         ),
     )
     parser.add_argument(
@@ -1725,6 +1900,14 @@ def main():
     if not 0.0 <= args.head_outer_symmetry_candidate_threshold <= 1.0:
         raise ValueError(
             "--head_outer_symmetry_candidate_threshold must be in [0, 1]."
+        )
+    if not 0.0 <= args.head_eye_semantic_symmetry_candidate_threshold <= 1.0:
+        raise ValueError(
+            "--head_eye_semantic_symmetry_candidate_threshold must be in [0, 1]."
+        )
+    if args.head_eye_semantic_prompt_margin_threshold < 0.0:
+        raise ValueError(
+            "--head_eye_semantic_prompt_margin_threshold must be non-negative."
         )
     if not 0.0 <= args.head_outer_closed_ring_completion_threshold <= 1.0:
         raise ValueError(
@@ -2945,9 +3128,14 @@ def main():
         repair_outputs.append(("completed_uv", Path(args.output)))
     if needs_repair:
         head_outer_completion_probability = None
+        head_outer_symmetric_candidate_probability = None
         head_outer_symmetry_probability = None
         head_outer_closed_ring_probability = None
         head_outer_open_top_probability = None
+        if "head_outer_symmetry_logit" in outputs:
+            head_outer_symmetry_probability = torch.sigmoid(
+                outputs["head_outer_symmetry_logit"].float()
+            )[0].detach().cpu()
         if (
             int(
                 getattr(
@@ -2965,16 +3153,85 @@ def main():
                     outputs["head_outer_face_occupancy_logits"].float()
                 )
             )[0, 0].detach().cpu()
-            if "head_outer_symmetry_logit" in outputs:
-                head_outer_symmetry_probability = torch.sigmoid(
-                    outputs["head_outer_symmetry_logit"].float()
-                )[0].detach().cpu()
             if "head_outer_accessory_logits" in outputs:
                 accessory_probability = torch.sigmoid(
                     outputs["head_outer_accessory_logits"].float()
                 )[0].detach().cpu()
                 head_outer_closed_ring_probability = accessory_probability[0]
                 head_outer_open_top_probability = accessory_probability[1]
+        if (
+            args.head_eye_semantic_symmetry_rescue
+            and head_outer_topology_rescue
+            and int(
+                getattr(parser_model, "dense_semantic_target_version", 1)
+            )
+            == 3
+        ):
+            (
+                projected_head_eye_outer,
+                projected_head_eye_stats,
+            ) = project_head_eye_semantic_outer_probability(
+                outputs,
+                renderer,
+                views,
+                center_power=float(
+                    parser_args.get("route_texel_center_power", 2.0)
+                ),
+            )
+            if projected_head_eye_outer is not None:
+                projected_candidate_probability = (
+                    projected_head_eye_outer[0].detach().cpu()
+                )
+                threshold = float(
+                    args.head_eye_semantic_symmetry_candidate_threshold
+                )
+                projected_head_eye_stats["candidate_threshold"] = threshold
+                projected_head_eye_stats["candidate_texels"] = int(
+                    (
+                        projected_candidate_probability
+                        >= threshold
+                    ).sum().item()
+                )
+                prompt_margin = projected_head_eye_stats.get(
+                    "global_eye_over_inner_margin_min"
+                )
+                prompt_margin_threshold = float(
+                    args.head_eye_semantic_prompt_margin_threshold
+                )
+                prompt_gate = (
+                    prompt_margin is not None
+                    and float(prompt_margin) >= prompt_margin_threshold
+                )
+                projected_head_eye_stats[
+                    "prompt_margin_threshold"
+                ] = prompt_margin_threshold
+                projected_head_eye_stats[
+                    "rescue_enabled_by_prompt_margin"
+                ] = bool(prompt_gate)
+                if prompt_gate:
+                    head_outer_symmetric_candidate_probability = (
+                        projected_candidate_probability
+                    )
+                if args.head_eye_semantic_outer_uv_output:
+                    semantic_uv_path = Path(
+                        args.head_eye_semantic_outer_uv_output
+                    )
+                    semantic_uv_path.parent.mkdir(
+                        parents=True, exist_ok=True
+                    )
+                    save_image(
+                        projected_head_eye_outer.detach().cpu().unsqueeze(1),
+                        semantic_uv_path,
+                        nrow=projected_head_eye_outer.shape[0],
+                    )
+                    print(
+                        "Saved head_eye_semantic_outer_uv="
+                        f"{semantic_uv_path}"
+                    )
+            print(
+                "head_eye_semantic_outer_uv="
+                + json.dumps(projected_head_eye_stats, sort_keys=True)
+            )
         repaired, stats = simple_inpaint_uv(
             conditioning.detach().cpu(),
             alpha_threshold=args.alpha_threshold,
@@ -2983,6 +3240,9 @@ def main():
             head_outer_min_component_seeds=(
                 args.head_outer_completion_min_component_seeds
             ),
+            head_outer_symmetric_candidate_probability=(
+                head_outer_symmetric_candidate_probability
+            ),
             head_outer_symmetry_probability=(
                 head_outer_symmetry_probability
             ),
@@ -2990,7 +3250,7 @@ def main():
                 args.head_outer_symmetry_completion_threshold
             ),
             head_outer_symmetry_candidate_threshold=(
-                args.head_outer_symmetry_candidate_threshold
+                args.head_eye_semantic_symmetry_candidate_threshold
             ),
             head_outer_closed_ring_probability=(
                 head_outer_closed_ring_probability
