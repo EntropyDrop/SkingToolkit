@@ -18,6 +18,7 @@ from SkingToolkit.dense_uv_parser.semantic import (
 )
 from SkingToolkit.dense_uv_parser.train import (
     _head_outer_route_connectivity_terms,
+    head_eye_accessory_structure_losses,
     head_outer_structure_losses,
     outer_uv_occupancy_losses,
 )
@@ -401,6 +402,76 @@ class SemanticDenseUVParserTest(unittest.TestCase):
             0.0,
         )
         self.assertGreater(float(dense_logits.grad.abs().sum()), 0.0)
+
+    def test_v5_head_eye_branch_has_independent_uv_and_presence_outputs(self):
+        model = DenseUVParserNet(
+            base_channels=8,
+            view_classes=2,
+            geometry_only=True,
+            semantic_feature_dim=12,
+            semantic_channels=8,
+            semantic_attention_heads=2,
+            predict_head_outer_structure=True,
+            head_outer_structure_mode="projected",
+            head_outer_projected_input_version=5,
+            outer_uv_feature_channels=8,
+            outer_uv_topology_channels=12,
+            outer_uv_topology_layers=1,
+            outer_uv_topology_dropout=0.0,
+        )
+        outputs = model(
+            torch.rand(2, 4, 16, 16),
+            view_ids=torch.tensor([0, 1]),
+            semantic_features=torch.rand(1, 2, 12),
+        )
+        atlas_features = torch.rand(1, 30, 64, 64)
+        eye_logits = model.predict_projected_head_eye_structure(
+            atlas_features,
+            outputs["head_outer_uv_global_context"],
+        )
+        self.assertEqual(tuple(eye_logits.shape), (1, 6, 8, 8))
+        self.assertEqual(
+            tuple(outputs["head_eye_accessory_presence_logit"].shape),
+            (1,),
+        )
+        (
+            eye_logits.mean()
+            + outputs["head_eye_accessory_presence_logit"].mean()
+        ).backward()
+        self.assertIsNotNone(
+            model.head_eye_projected_head.output[-1].weight.grad
+        )
+        self.assertIsNotNone(
+            model.head_eye_accessory_presence_head[-1].weight.grad
+        )
+
+    def test_v5_head_eye_loss_balances_sparse_positive_and_inner_negative(self):
+        faces = torch.zeros(1, 6, 8, 8)
+        faces[0, 0, 2, 1] = 1.0
+        faces[0, 0, 2, 6] = 1.0
+        target_uv = torch.zeros(1, 4, 64, 64)
+        target_uv[:, 3:4] = head_outer_face_values_to_uv(faces)
+        logits = torch.zeros(1, 6, 8, 8, requires_grad=True)
+        presence_logit = torch.zeros(1, requires_grad=True)
+        losses = head_eye_accessory_structure_losses(
+            {
+                "head_eye_face_occupancy_logits": logits,
+                "head_eye_accessory_presence_logit": presence_logit,
+            },
+            target_uv,
+        )
+        total = (
+            losses["loss_head_eye_occupancy_bce"]
+            + losses["loss_head_eye_occupancy_hard_positive"]
+            + losses["loss_head_eye_occupancy_hard_negative"]
+            + losses["loss_head_eye_presence"]
+            + losses["loss_head_eye_symmetry"]
+        )
+        total.backward()
+        self.assertGreater(float(total.detach()), 0.0)
+        self.assertLess(float(logits.grad[0, 0, 2, 1]), 0.0)
+        self.assertGreater(float(logits.grad[0, 0, 2, 3]), 0.0)
+        self.assertLess(float(presence_logit.grad[0]), 0.0)
     def test_text_prompt_route_has_independent_deep_supervision(self):
         model = DenseUVParserNet(
             base_channels=8,

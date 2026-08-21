@@ -2402,14 +2402,15 @@ def aggregate_direct_inner_values_by_view(
     )
 
 
-def aggregate_direct_outer_values_by_role_group(
+def _aggregate_direct_values_by_role_group(
     renderer,
     views,
     values,
     view_group_size,
+    route_role,
     center_power=2.0,
 ):
-    """Pool physical views in repeated inference-role groups.
+    """Pool one physical route across repeated inference-role groups.
 
     Privileged training uses ``front_left, back_left, front_right,
     back_right`` while the parser owns two view roles. The primary pair and
@@ -2441,10 +2442,11 @@ def aggregate_direct_outer_values_by_role_group(
         selected = grouped_values[:, start:end].reshape(
             skins * view_group_size, *values.shape[1:]
         )
-        pooled, supported = aggregate_direct_outer_values_by_view(
+        pooled, supported = _aggregate_direct_values_by_view(
             renderer,
             views[start:end],
             selected,
+            route_role,
             center_power=center_power,
         )
         pooled_groups.append(pooled)
@@ -2461,6 +2463,40 @@ def aggregate_direct_outer_values_by_role_group(
             view_group_size,
             UV_SIZE * UV_SIZE,
         ),
+    )
+
+
+def aggregate_direct_outer_values_by_role_group(
+    renderer,
+    views,
+    values,
+    view_group_size,
+    center_power=2.0,
+):
+    return _aggregate_direct_values_by_role_group(
+        renderer,
+        views,
+        values,
+        view_group_size,
+        ROUTE_OUTER_PRIMARY,
+        center_power=center_power,
+    )
+
+
+def aggregate_direct_inner_values_by_role_group(
+    renderer,
+    views,
+    values,
+    view_group_size,
+    center_power=2.0,
+):
+    return _aggregate_direct_values_by_role_group(
+        renderer,
+        views,
+        values,
+        view_group_size,
+        ROUTE_INNER_PRIMARY,
+        center_power=center_power,
     )
 
 
@@ -2685,12 +2721,29 @@ def attach_projected_head_outer_structure(
         view_group_size=model.view_classes,
         center_power=center_power,
     )
+    inner_pooled = None
+    inner_support = None
+    if projected_input_version >= 5:
+        inner_pooled, inner_support = (
+            aggregate_direct_inner_values_by_role_group(
+                renderer,
+                views,
+                values,
+                view_group_size=model.view_classes,
+                center_power=center_power,
+            )
+        )
     support_weight = support.unsqueeze(2).to(dtype=pooled.dtype)
-    support_count = support_weight.sum(dim=1).clamp_min(1.0)
+    raw_support_count = support_weight.sum(dim=1)
+    support_count = raw_support_count.clamp_min(1.0)
     pooled_mean = (pooled * support_weight).sum(dim=1) / support_count
     mean_features = pooled_mean[:, :feature_channels]
     mean_foreground = pooled_mean[:, feature_channels : feature_channels + 1]
-    support_fraction = support_count / max(float(model.view_classes), 1.0)
+    support_fraction = (
+        raw_support_count
+        if projected_input_version >= 5
+        else support_count
+    ) / max(float(model.view_classes), 1.0)
     atlas_feature_values = [
         mean_features,
         mean_foreground,
@@ -2727,6 +2780,82 @@ def attach_projected_head_outer_structure(
             outputs["head_outer_uv_global_context"],
         )
     )
+    if projected_input_version >= 5:
+        # Re-index direct inner evidence onto its exact outer-layer
+        # counterpart before decoding the sparse eye-accessory occupancy.
+        # This is essential when a lens is initially routed as face/inner:
+        # an outer-only projection would never show the branch the pixels it
+        # is meant to correct.
+        inner_at_outer = torch.zeros_like(inner_pooled)
+        inner_support_at_outer = torch.zeros_like(inner_support)
+        for (
+            inner_x,
+            inner_y,
+            width,
+            height,
+            decor_dx,
+            decor_dy,
+        ) in minecraft_layer_rects(is_slim=False)[:6]:
+            local_y = torch.arange(height, device=feature_map.device)
+            local_x = torch.arange(width, device=feature_map.device)
+            grid_y, grid_x = torch.meshgrid(
+                local_y, local_x, indexing="ij"
+            )
+            inner_indices = (
+                (inner_y + grid_y) * UV_SIZE + inner_x + grid_x
+            ).reshape(-1)
+            outer_indices = (
+                (inner_y + decor_dy + grid_y) * UV_SIZE
+                + inner_x
+                + decor_dx
+                + grid_x
+            ).reshape(-1)
+            inner_at_outer[:, :, :, outer_indices] = inner_pooled[
+                :, :, :, inner_indices
+            ]
+            inner_support_at_outer[:, :, outer_indices] = inner_support[
+                :, :, inner_indices
+            ]
+        inner_support_weight = inner_support_at_outer.unsqueeze(2).to(
+            dtype=inner_at_outer.dtype
+        )
+        raw_inner_support_count = inner_support_weight.sum(dim=1)
+        inner_support_count = raw_inner_support_count.clamp_min(1.0)
+        inner_mean = (
+            inner_at_outer * inner_support_weight
+        ).sum(dim=1) / inner_support_count
+        inner_support_fraction = raw_inner_support_count / max(
+            float(model.view_classes), 1.0
+        )
+        rgb_start = feature_channels + 1
+        rgb_end = rgb_start + 3
+        eye_atlas_features = torch.cat(
+            [
+                atlas_features,
+                inner_mean[:, :feature_channels].reshape(
+                    mean_features.shape[0],
+                    feature_channels,
+                    UV_SIZE,
+                    UV_SIZE,
+                ),
+                inner_mean[:, feature_channels : feature_channels + 1].reshape(
+                    mean_features.shape[0], 1, UV_SIZE, UV_SIZE
+                ),
+                inner_mean[:, rgb_start:rgb_end].reshape(
+                    mean_features.shape[0], 3, UV_SIZE, UV_SIZE
+                ),
+                inner_support_fraction.reshape(
+                    mean_features.shape[0], 1, UV_SIZE, UV_SIZE
+                ),
+            ],
+            dim=1,
+        )
+        outputs["head_eye_face_occupancy_logits"] = (
+            model.predict_projected_head_eye_structure(
+                eye_atlas_features,
+                outputs["head_outer_uv_global_context"],
+            )
+        )
     head_indices = build_head_outer_face_indices().to(feature_map.device)
     outputs["head_outer_structure_support"] = (
         support.any(dim=1).index_select(1, head_indices).reshape(-1, 6, 8, 8)

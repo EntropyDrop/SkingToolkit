@@ -3159,9 +3159,75 @@ def main():
                 )[0].detach().cpu()
                 head_outer_closed_ring_probability = accessory_probability[0]
                 head_outer_open_top_probability = accessory_probability[1]
+        learned_head_eye_available = (
+            "head_eye_face_occupancy_logits" in outputs
+            and "head_eye_accessory_presence_logit" in outputs
+        )
         if (
             args.head_eye_semantic_symmetry_rescue
             and head_outer_topology_rescue
+            and learned_head_eye_available
+        ):
+            learned_eye_faces = torch.sigmoid(
+                outputs["head_eye_face_occupancy_logits"].float()
+            )
+            learned_eye_presence = torch.sigmoid(
+                outputs["head_eye_accessory_presence_logit"].float()
+            )
+            eye_band = torch.zeros_like(learned_eye_faces)
+            eye_band[:, (0, 2, 3), 1:6] = 1.0
+            learned_eye_faces = (
+                learned_eye_faces
+                * eye_band
+                * (learned_eye_presence >= 0.5)
+                .to(dtype=learned_eye_faces.dtype)
+                .view(-1, 1, 1, 1)
+            )
+            learned_eye_uv = head_outer_face_values_to_uv(
+                learned_eye_faces
+            )[:, 0].detach().cpu()
+            head_outer_symmetric_candidate_probability = learned_eye_uv[0]
+            learned_eye_stats = {
+                "available": True,
+                "source": "dedicated_projected_uv_head",
+                "presence_probability": round(
+                    float(learned_eye_presence[0].item()), 6
+                ),
+                "presence_threshold": 0.5,
+                "rescue_enabled_by_presence": bool(
+                    learned_eye_presence[0].item() >= 0.5
+                ),
+                "candidate_threshold": float(
+                    args.head_eye_semantic_symmetry_candidate_threshold
+                ),
+                "candidate_texels": int(
+                    (
+                        learned_eye_uv[0]
+                        >= float(
+                            args.head_eye_semantic_symmetry_candidate_threshold
+                        )
+                    ).sum().item()
+                ),
+            }
+            if args.head_eye_semantic_outer_uv_output:
+                learned_eye_path = Path(
+                    args.head_eye_semantic_outer_uv_output
+                )
+                learned_eye_path.parent.mkdir(parents=True, exist_ok=True)
+                save_image(
+                    learned_eye_uv.unsqueeze(1),
+                    learned_eye_path,
+                    nrow=learned_eye_uv.shape[0],
+                )
+                print(f"Saved head_eye_learned_outer_uv={learned_eye_path}")
+            print(
+                "head_eye_learned_outer_uv="
+                + json.dumps(learned_eye_stats, sort_keys=True)
+            )
+        if (
+            args.head_eye_semantic_symmetry_rescue
+            and head_outer_topology_rescue
+            and not learned_head_eye_available
             and int(
                 getattr(parser_model, "dense_semantic_target_version", 1)
             )

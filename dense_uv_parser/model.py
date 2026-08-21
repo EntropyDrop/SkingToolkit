@@ -891,9 +891,9 @@ class DenseUVParserNet(nn.Module):
         self.head_outer_projected_input_version = int(
             head_outer_projected_input_version
         )
-        if self.head_outer_projected_input_version not in (1, 2, 3, 4):
+        if self.head_outer_projected_input_version not in (1, 2, 3, 4, 5):
             raise ValueError(
-                "head_outer_projected_input_version must be 1, 2, 3, or 4."
+                "head_outer_projected_input_version must be 1, 2, 3, 4, or 5."
             )
         self.outer_uv_feature_channels = int(outer_uv_feature_channels)
         self.outer_uv_topology_channels = int(outer_uv_topology_channels)
@@ -1114,6 +1114,20 @@ class DenseUVParserNet(nn.Module):
                 if self.head_outer_projected_input_version >= 4
                 else None
             )
+            self.head_eye_accessory_presence_head = (
+                nn.Sequential(
+                    nn.LayerNorm(self.semantic_channels),
+                    nn.Linear(
+                        self.semantic_channels,
+                        self.semantic_channels,
+                    ),
+                    nn.GELU(),
+                    nn.Linear(self.semantic_channels, 1),
+                )
+                if self.head_outer_projected_input_version >= 5
+                else None
+            )
+            self.head_eye_projected_head = None
             if self.head_outer_structure_mode == "global":
                 self.head_outer_face_occupancy_head = nn.Sequential(
                     nn.LayerNorm(self.semantic_channels),
@@ -1161,6 +1175,27 @@ class DenseUVParserNet(nn.Module):
                         dropout=self.outer_uv_topology_dropout,
                         uv_size=uv_size,
                     )
+                )
+                # Eye-level accessories are sparse enough that a single
+                # all-head occupancy decoder is dominated by hair and hats.
+                # Version 5 gives the exact eye band its own decoder while
+                # retaining the shared projected evidence and UV graph.
+                self.head_eye_projected_head = (
+                    ProjectedOuterUVTopologyHead(
+                        # Outer evidence is followed by the inner-surface
+                        # feature/RGB/support projected onto its exact outer
+                        # counterpart. Glasses painted over the face can then
+                        # be recovered even when the main route initially
+                        # calls those source pixels inner.
+                        2 * self.outer_uv_feature_channels + 14,
+                        head_context_channels,
+                        hidden_channels=self.outer_uv_topology_channels,
+                        layers=self.outer_uv_topology_layers,
+                        dropout=self.outer_uv_topology_dropout,
+                        uv_size=uv_size,
+                    )
+                    if self.head_outer_projected_input_version >= 5
+                    else None
                 )
 
     def _runtime_semantic_features(self, images, foreground=None):
@@ -1418,6 +1453,12 @@ class DenseUVParserNet(nn.Module):
                             semantic_summary
                         )
                     )
+                if self.head_eye_accessory_presence_head is not None:
+                    outputs["head_eye_accessory_presence_logit"] = (
+                        self.head_eye_accessory_presence_head(
+                            semantic_summary
+                        ).squeeze(-1)
+                    )
                 if self.head_outer_structure_mode == "global":
                     outputs["head_outer_face_occupancy_logits"] = (
                         self.head_outer_face_occupancy_head(semantic_summary)
@@ -1491,6 +1532,32 @@ class DenseUVParserNet(nn.Module):
                 "This parser has no projected head outer structure head."
             )
         atlas_logits = self.head_outer_projected_head(
+            atlas_features,
+            global_context,
+        )
+        head_indices = build_head_outer_face_indices().to(
+            atlas_logits.device
+        )
+        return (
+            atlas_logits.flatten(2)[:, 0]
+            .index_select(1, head_indices)
+            .reshape(-1, 6, 8, 8)
+        )
+
+    def predict_projected_head_eye_structure(
+        self,
+        atlas_features,
+        global_context,
+    ):
+        if (
+            not self.predict_head_outer_structure
+            or self.head_outer_structure_mode != "projected"
+            or self.head_eye_projected_head is None
+        ):
+            raise ValueError(
+                "This parser has no projected head-eye occupancy head."
+            )
+        atlas_logits = self.head_eye_projected_head(
             atlas_features,
             global_context,
         )

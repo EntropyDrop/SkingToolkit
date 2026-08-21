@@ -73,6 +73,7 @@ from SkingToolkit.dense_uv_parser.semantic_cache import (  # noqa: E402
     SigLIPGlobalCache,
 )
 from SkingToolkit.dense_uv_parser.semantic_targets import (  # noqa: E402
+    build_head_eye_accessory_face_targets,
     build_head_outer_face_targets,
     build_part_layer_masks,
     build_semantic_attribute_targets,
@@ -1744,6 +1745,202 @@ def head_outer_structure_losses(
     }
 
 
+def head_eye_accessory_structure_losses(
+    outputs,
+    target_uv,
+    alpha_threshold=0.5,
+    positive_balance=0.60,
+    hard_fraction=0.25,
+):
+    """Supervise sparse eye-level outer occupancy independently of hair.
+
+    The generic head head sees 384 texels and is dominated by large hair and
+    hat regions.  This loss restricts both positives and hard negatives to the
+    exact front/side eye band, so a missing lens or temple remains visible to
+    the optimizer even when the rest of the head occupancy is correct.
+    """
+    logits = outputs["head_eye_face_occupancy_logits"].float()
+    target_values = build_head_eye_accessory_face_targets(
+        target_uv,
+        alpha_threshold=alpha_threshold,
+    )
+    if logits.shape[0] % target_values["mask"].shape[0] != 0:
+        raise ValueError(
+            "Head-eye occupancy batch must be an integer multiple of UV targets."
+        )
+    repeats = logits.shape[0] // target_values["mask"].shape[0]
+    if repeats > 1:
+        target_values = {
+            name: value.repeat_interleave(repeats, dim=0)
+            for name, value in target_values.items()
+        }
+    target = target_values["mask"].to(
+        device=logits.device, dtype=logits.dtype
+    )
+    presence = target_values["presence"].to(
+        device=logits.device, dtype=logits.dtype
+    )
+    if logits.shape != target.shape:
+        raise ValueError(
+            "Expected head-eye logits shaped "
+            f"{tuple(target.shape)}, got {tuple(logits.shape)}."
+        )
+    if not 0.0 <= float(positive_balance) <= 1.0:
+        raise ValueError("positive_balance must be in [0, 1].")
+    if not 0.0 < float(hard_fraction) <= 1.0:
+        raise ValueError("hard_fraction must be in (0, 1].")
+
+    valid = torch.zeros_like(target, dtype=torch.bool)
+    valid[:, (0, 2, 3), 1:6] = True
+    positive = (target > 0.5) & valid
+    negative = (~positive) & valid
+    flat_logits = logits.flatten(1)
+    flat_positive = positive.flatten(1)
+    flat_negative = negative.flatten(1)
+    positive_count = flat_positive.float().sum(dim=1)
+    negative_count = flat_negative.float().sum(dim=1)
+    positive_per_sample = (
+        (F.softplus(-flat_logits) * flat_positive).sum(dim=1)
+        / positive_count.clamp_min(1.0)
+    )
+    negative_per_sample = (
+        (F.softplus(flat_logits) * flat_negative).sum(dim=1)
+        / negative_count.clamp_min(1.0)
+    )
+    positive_samples = positive_count > 0
+    if positive_samples.any():
+        loss_bce = (
+            float(positive_balance)
+            * positive_per_sample[positive_samples].mean()
+            + (1.0 - float(positive_balance))
+            * negative_per_sample.mean()
+        )
+    else:
+        loss_bce = negative_per_sample.mean()
+
+    zero = logits.sum() * 0.0
+    positive_losses = F.softplus(-logits[positive])
+    if positive_losses.numel():
+        hard_positive_count = max(
+            1, math.ceil(positive_losses.numel() * float(hard_fraction))
+        )
+        loss_hard_positive = positive_losses.topk(
+            hard_positive_count, sorted=False
+        ).values.mean()
+    else:
+        hard_positive_count = 0
+        loss_hard_positive = zero
+    negative_losses = F.softplus(logits[negative])
+    if negative_losses.numel():
+        hard_negative_count = max(
+            1, math.ceil(negative_losses.numel() * float(hard_fraction))
+        )
+        loss_hard_negative = negative_losses.topk(
+            hard_negative_count, sorted=False
+        ).values.mean()
+    else:
+        hard_negative_count = 0
+        loss_hard_negative = zero
+
+    probability = torch.sigmoid(logits)
+    intersection = (probability * target * valid).sum(dim=(1, 2, 3))
+    predicted_mass = (probability * valid).sum(dim=(1, 2, 3))
+    target_mass = (target * valid).sum(dim=(1, 2, 3))
+    dice_per_sample = 1.0 - (
+        2.0 * intersection + 1.0
+    ) / (predicted_mass + target_mass + 1.0)
+    loss_dice = (
+        dice_per_sample[positive_samples].mean()
+        if positive_samples.any()
+        else zero
+    )
+    presence_logits = outputs[
+        "head_eye_accessory_presence_logit"
+    ].float()
+    loss_presence = F.binary_cross_entropy_with_logits(
+        presence_logits,
+        presence,
+        pos_weight=presence_logits.new_tensor(3.0),
+    )
+
+    # Apply bilateral regularization only to mirrored texels that really are
+    # occupied in the target.  This improves glasses/headphones without
+    # hallucinating a counterpart for asymmetric hair or decorations.
+    head_indices = build_head_outer_face_indices().to(logits.device)
+    topology = build_simple_uv_topology()
+    mirrored_flat = topology.mirrored_texel.reshape(-1).to(logits.device)
+    flat_to_head = torch.full(
+        (UV_SIZE * UV_SIZE,), -1, dtype=torch.long, device=logits.device
+    )
+    flat_to_head[head_indices] = torch.arange(
+        head_indices.numel(), device=logits.device
+    )
+    mirrored_nodes = flat_to_head[mirrored_flat[head_indices]]
+    safe_mirror = mirrored_nodes.clamp_min(0)
+    node_probability = probability.flatten(1)
+    target_nodes = positive.flatten(1)
+    node_ids = torch.arange(
+        target_nodes.shape[1], device=logits.device
+    ).view(1, -1)
+    symmetric_pairs = (
+        (mirrored_nodes.view(1, -1) >= 0)
+        & (node_ids < mirrored_nodes.view(1, -1))
+        & target_nodes
+        & target_nodes[:, safe_mirror]
+    )
+    mirrored_probability = node_probability[:, safe_mirror]
+    if symmetric_pairs.any():
+        pair_probability = node_probability[symmetric_pairs]
+        pair_mirror_probability = mirrored_probability[symmetric_pairs]
+        pair_minimum = torch.minimum(
+            pair_probability, pair_mirror_probability
+        )
+        loss_symmetry = 0.5 * (
+            (pair_probability - pair_mirror_probability).square().mean()
+            + (1.0 - pair_minimum).mean()
+        )
+        symmetric_pair_recall = pair_minimum.mean()
+    else:
+        loss_symmetry = zero
+        symmetric_pair_recall = zero
+
+    predicted = (probability >= 0.5) & valid
+    true_positive = (predicted & positive).float().sum()
+    false_positive = (predicted & negative).float().sum()
+    false_negative = (~predicted & positive).float().sum()
+    presence_probability = torch.sigmoid(presence_logits)
+    return {
+        "loss_head_eye_occupancy_bce": loss_bce,
+        "loss_head_eye_occupancy_dice": loss_dice,
+        "loss_head_eye_occupancy_hard_positive": loss_hard_positive,
+        "loss_head_eye_occupancy_hard_negative": loss_hard_negative,
+        "loss_head_eye_presence": loss_presence,
+        "loss_head_eye_symmetry": loss_symmetry,
+        "head_eye_occupancy_precision": (
+            true_positive / (true_positive + false_positive).clamp_min(1.0)
+        ),
+        "head_eye_occupancy_recall": (
+            true_positive / (true_positive + false_negative).clamp_min(1.0)
+        ),
+        "head_eye_presence_accuracy": (
+            ((presence_probability >= 0.5) == (presence >= 0.5))
+            .float()
+            .mean()
+        ),
+        "head_eye_presence_mae": (
+            presence_probability - presence
+        ).abs().mean(),
+        "head_eye_symmetric_pair_recall": symmetric_pair_recall,
+        "count_head_eye_positive_texels": positive.float().sum(),
+        "count_head_eye_hard_positive_candidates": logits.new_tensor(
+            float(hard_positive_count)
+        ),
+        "count_head_eye_hard_negative_candidates": logits.new_tensor(
+            float(hard_negative_count)
+        ),
+    }
+
+
 def _head_outer_route_connectivity_terms(
     probability_nodes,
     target_nodes,
@@ -1978,6 +2175,75 @@ def head_outer_route_connectivity_loss(
         visible_nodes,
         hard_fraction=hard_fraction,
     )
+
+
+def head_eye_route_connectivity_loss(
+    outputs,
+    target_uv,
+    renderer,
+    views,
+    center_power=2.0,
+    alpha_threshold=0.5,
+    hard_fraction=0.25,
+):
+    """Give eye-level accessories first-order weight in the main route."""
+    canonical_outputs = canonicalize_parser_outputs(outputs)
+    route_probability = torch.softmax(
+        canonical_outputs["layer"].float(), dim=1
+    )
+    pooled, support = aggregate_direct_outer_values_by_view(
+        renderer,
+        views,
+        route_probability,
+        center_power=center_power,
+    )
+    support_float = support.to(dtype=pooled.dtype)
+    consensus_outer = (
+        (
+            pooled[:, :, ROUTE_OUTER_PRIMARY]
+            * support_float
+        ).sum(dim=1)
+        / support_float.sum(dim=1).clamp_min(1.0)
+    )
+    head_indices = build_head_outer_face_indices().to(
+        route_probability.device
+    )
+    probability_nodes = consensus_outer.index_select(1, head_indices)
+    visible_nodes = support.any(dim=1).index_select(1, head_indices)
+    target_nodes = build_head_eye_accessory_face_targets(
+        target_uv,
+        alpha_threshold=alpha_threshold,
+    )["mask"].to(
+        device=route_probability.device,
+        dtype=torch.bool,
+    ).flatten(1)
+    terms = _head_outer_route_connectivity_terms(
+        probability_nodes,
+        target_nodes,
+        visible_nodes,
+        hard_fraction=hard_fraction,
+    )
+    return {
+        "loss_head_eye_route_connectivity": terms[
+            "loss_head_outer_route_connectivity"
+        ],
+        "loss_head_eye_route_symmetry": terms[
+            "loss_head_outer_route_symmetry"
+        ],
+        "head_eye_route_recall": terms["head_outer_route_recall"],
+        "head_eye_route_component_recall": terms[
+            "head_outer_route_component_recall"
+        ],
+        "head_eye_route_symmetric_pair_recall": terms[
+            "head_outer_route_symmetric_pair_recall"
+        ],
+        "count_head_eye_route_visible_texels": terms[
+            "count_head_outer_route_visible_texels"
+        ],
+        "count_head_eye_route_symmetric_pairs": terms[
+            "count_head_outer_route_symmetric_pairs"
+        ],
+    }
 
 
 def route_occupancy_agreement_loss(
@@ -2749,6 +3015,70 @@ def run_epoch(
                         "count_head_outer_open_top_samples",
                     ):
                         losses[name] = zero
+                if "head_eye_face_occupancy_logits" in outputs:
+                    head_eye = head_eye_accessory_structure_losses(
+                        outputs,
+                        batch["uv"],
+                        alpha_threshold=args.target_alpha_threshold,
+                        positive_balance=(
+                            args.head_eye_occupancy_positive_balance
+                        ),
+                        hard_fraction=args.head_eye_hard_fraction,
+                    )
+                    loss_head_eye_occupancy = (
+                        head_eye["loss_head_eye_occupancy_bce"]
+                        + args.head_eye_occupancy_dice_weight
+                        * head_eye["loss_head_eye_occupancy_dice"]
+                        + args.head_eye_hard_positive_weight
+                        * head_eye[
+                            "loss_head_eye_occupancy_hard_positive"
+                        ]
+                        + args.head_eye_hard_negative_weight
+                        * head_eye[
+                            "loss_head_eye_occupancy_hard_negative"
+                        ]
+                    )
+                    weighted_head_eye = (
+                        args.lambda_head_eye_occupancy
+                        * loss_head_eye_occupancy
+                        + args.lambda_head_eye_presence
+                        * head_eye["loss_head_eye_presence"]
+                        + args.lambda_head_eye_symmetry
+                        * head_eye["loss_head_eye_symmetry"]
+                    )
+                    losses.update(head_eye)
+                    losses["loss_head_eye_occupancy"] = (
+                        loss_head_eye_occupancy
+                    )
+                    losses["loss_head_eye_structure_weighted"] = (
+                        weighted_head_eye
+                    )
+                    losses["loss_total"] = (
+                        losses["loss_total"] + weighted_head_eye
+                    )
+                    losses["loss_routing"] = (
+                        losses["loss_routing"] + weighted_head_eye
+                    )
+                else:
+                    for name in (
+                        "loss_head_eye_occupancy_bce",
+                        "loss_head_eye_occupancy_dice",
+                        "loss_head_eye_occupancy_hard_positive",
+                        "loss_head_eye_occupancy_hard_negative",
+                        "loss_head_eye_occupancy",
+                        "loss_head_eye_presence",
+                        "loss_head_eye_symmetry",
+                        "loss_head_eye_structure_weighted",
+                        "head_eye_occupancy_precision",
+                        "head_eye_occupancy_recall",
+                        "head_eye_presence_accuracy",
+                        "head_eye_presence_mae",
+                        "head_eye_symmetric_pair_recall",
+                        "count_head_eye_positive_texels",
+                        "count_head_eye_hard_positive_candidates",
+                        "count_head_eye_hard_negative_candidates",
+                    ):
+                        losses[name] = zero
                 if (
                     args.lambda_head_outer_route_connectivity > 0.0
                     or args.lambda_head_outer_route_symmetry > 0.0
@@ -2798,6 +3128,49 @@ def run_epoch(
                         "count_head_outer_route_positive_edges",
                         "count_head_outer_route_visible_components",
                         "count_head_outer_route_symmetric_pairs",
+                    ):
+                        losses[name] = zero
+                if (
+                    args.lambda_head_eye_route_connectivity > 0.0
+                    or args.lambda_head_eye_route_symmetry > 0.0
+                ):
+                    head_eye_route = head_eye_route_connectivity_loss(
+                        outputs,
+                        batch["uv"],
+                        renderer,
+                        views,
+                        center_power=args.route_texel_center_power,
+                        alpha_threshold=args.target_alpha_threshold,
+                        hard_fraction=args.head_eye_hard_fraction,
+                    )
+                    weighted_head_eye_route = (
+                        args.lambda_head_eye_route_connectivity
+                        * head_eye_route[
+                            "loss_head_eye_route_connectivity"
+                        ]
+                        + args.lambda_head_eye_route_symmetry
+                        * head_eye_route["loss_head_eye_route_symmetry"]
+                    )
+                    losses.update(head_eye_route)
+                    losses["loss_head_eye_route_weighted"] = (
+                        weighted_head_eye_route
+                    )
+                    losses["loss_total"] = (
+                        losses["loss_total"] + weighted_head_eye_route
+                    )
+                    losses["loss_routing"] = (
+                        losses["loss_routing"] + weighted_head_eye_route
+                    )
+                else:
+                    for name in (
+                        "loss_head_eye_route_connectivity",
+                        "loss_head_eye_route_symmetry",
+                        "loss_head_eye_route_weighted",
+                        "head_eye_route_recall",
+                        "head_eye_route_component_recall",
+                        "head_eye_route_symmetric_pair_recall",
+                        "count_head_eye_route_visible_texels",
+                        "count_head_eye_route_symmetric_pairs",
                     ):
                         losses[name] = zero
                 if (
@@ -3856,13 +4229,15 @@ def build_arg_parser():
     parser.add_argument(
         "--head_outer_projected_input_version",
         type=int,
-        choices=(1, 2, 3, 4),
+        choices=(1, 2, 3, 4, 5),
         default=1,
         help=(
             "Projected head feature schema. Version 2 adds projected RGB, "
             "cross-view RGB variation, and protruding-silhouette evidence; "
             "version 3 adds calibrated accessory-symmetry prediction; "
-            "version 4 adds explicit closed-ring and open-top semantics."
+            "version 4 adds explicit closed-ring and open-top semantics; "
+            "version 5 adds an independent eye-accessory presence and "
+            "projected UV occupancy branch."
         ),
     )
     parser.add_argument(
@@ -4276,6 +4651,28 @@ def build_arg_parser():
         type=float,
         default=0.0,
     )
+    parser.add_argument("--lambda_head_eye_occupancy", type=float, default=0.0)
+    parser.add_argument(
+        "--head_eye_occupancy_dice_weight", type=float, default=0.50
+    )
+    parser.add_argument(
+        "--head_eye_occupancy_positive_balance", type=float, default=0.60
+    )
+    parser.add_argument("--head_eye_hard_fraction", type=float, default=0.25)
+    parser.add_argument(
+        "--head_eye_hard_positive_weight", type=float, default=0.75
+    )
+    parser.add_argument(
+        "--head_eye_hard_negative_weight", type=float, default=0.50
+    )
+    parser.add_argument("--lambda_head_eye_presence", type=float, default=0.0)
+    parser.add_argument("--lambda_head_eye_symmetry", type=float, default=0.0)
+    parser.add_argument(
+        "--lambda_head_eye_route_connectivity", type=float, default=0.0
+    )
+    parser.add_argument(
+        "--lambda_head_eye_route_symmetry", type=float, default=0.0
+    )
     parser.add_argument(
         "--lambda_head_outer_route_connectivity",
         type=float,
@@ -4648,6 +5045,9 @@ def main():
         args.lambda_head_outer_ring_worst_face_recall,
         args.lambda_head_outer_open_top_shape,
         args.lambda_head_outer_accessory_classification,
+        args.lambda_head_eye_occupancy,
+        args.lambda_head_eye_presence,
+        args.lambda_head_eye_symmetry,
     )
     if any(weight > 0.0 for weight in head_structure_weights) and not (
         args.predict_head_outer_structure
@@ -4668,6 +5068,42 @@ def main():
             "--lambda_head_outer_accessory_classification requires "
             "--head_outer_projected_input_version 4."
         )
+    head_eye_weights = (
+        args.lambda_head_eye_occupancy,
+        args.lambda_head_eye_presence,
+        args.lambda_head_eye_symmetry,
+        args.lambda_head_eye_route_connectivity,
+        args.lambda_head_eye_route_symmetry,
+    )
+    if (
+        any(weight > 0.0 for weight in head_eye_weights)
+        and args.head_outer_projected_input_version < 5
+    ):
+        raise ValueError(
+            "Head-eye occupancy and route losses require "
+            "--head_outer_projected_input_version 5."
+        )
+    if (
+        any(
+            weight > 0.0
+            for weight in (
+                args.lambda_head_eye_occupancy,
+                args.lambda_head_eye_presence,
+                args.lambda_head_eye_symmetry,
+            )
+        )
+        and args.head_outer_structure_mode != "projected"
+    ):
+        raise ValueError(
+            "Head-eye occupancy losses require "
+            "--head_outer_structure_mode projected."
+        )
+    if not 0.0 <= args.head_eye_occupancy_positive_balance <= 1.0:
+        raise ValueError(
+            "--head_eye_occupancy_positive_balance must be in [0, 1]."
+        )
+    if not 0.0 < args.head_eye_hard_fraction <= 1.0:
+        raise ValueError("--head_eye_hard_fraction must be in (0, 1].")
     if not 0.0 < args.head_outer_route_hard_fraction <= 1.0:
         raise ValueError(
             "--head_outer_route_hard_fraction must be in (0, 1]."
@@ -5498,6 +5934,28 @@ def main():
         ),
         "lambda_head_outer_accessory_classification": (
             args.lambda_head_outer_accessory_classification
+        ),
+        "lambda_head_eye_occupancy": args.lambda_head_eye_occupancy,
+        "head_eye_occupancy_dice_weight": (
+            args.head_eye_occupancy_dice_weight
+        ),
+        "head_eye_occupancy_positive_balance": (
+            args.head_eye_occupancy_positive_balance
+        ),
+        "head_eye_hard_fraction": args.head_eye_hard_fraction,
+        "head_eye_hard_positive_weight": (
+            args.head_eye_hard_positive_weight
+        ),
+        "head_eye_hard_negative_weight": (
+            args.head_eye_hard_negative_weight
+        ),
+        "lambda_head_eye_presence": args.lambda_head_eye_presence,
+        "lambda_head_eye_symmetry": args.lambda_head_eye_symmetry,
+        "lambda_head_eye_route_connectivity": (
+            args.lambda_head_eye_route_connectivity
+        ),
+        "lambda_head_eye_route_symmetry": (
+            args.lambda_head_eye_route_symmetry
         ),
         "lambda_head_outer_route_connectivity": (
             args.lambda_head_outer_route_connectivity
