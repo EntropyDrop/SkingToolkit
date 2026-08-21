@@ -73,8 +73,8 @@ from SkingToolkit.dense_uv_parser.semantic_cache import (  # noqa: E402
     SigLIPGlobalCache,
 )
 from SkingToolkit.dense_uv_parser.semantic_targets import (  # noqa: E402
-    build_head_eye_accessory_face_targets,
     build_head_outer_face_targets,
+    build_structured_head_eye_accessory_face_targets,
     build_part_layer_masks,
     build_semantic_attribute_targets,
     build_dense_view_semantic_targets,
@@ -1760,7 +1760,7 @@ def head_eye_accessory_structure_losses(
     the optimizer even when the rest of the head occupancy is correct.
     """
     logits = outputs["head_eye_face_occupancy_logits"].float()
-    target_values = build_head_eye_accessory_face_targets(
+    target_values = build_structured_head_eye_accessory_face_targets(
         target_uv,
         alpha_threshold=alpha_threshold,
     )
@@ -1777,6 +1777,12 @@ def head_eye_accessory_structure_losses(
     target = target_values["mask"].to(
         device=logits.device, dtype=logits.dtype
     )
+    broad_target = target_values["broad_mask"].to(
+        device=logits.device, dtype=logits.dtype
+    )
+    top_connected_rejected = target_values[
+        "top_connected_rejected_mask"
+    ].to(device=logits.device, dtype=logits.dtype)
     presence = target_values["presence"].to(
         device=logits.device, dtype=logits.dtype
     )
@@ -1932,6 +1938,13 @@ def head_eye_accessory_structure_losses(
         ).abs().mean(),
         "head_eye_symmetric_pair_recall": symmetric_pair_recall,
         "count_head_eye_positive_texels": positive.float().sum(),
+        "count_head_eye_broad_positive_texels": broad_target.sum(),
+        "count_head_eye_top_connected_rejected_texels": (
+            top_connected_rejected.sum()
+        ),
+        "head_eye_structured_positive_fraction": (
+            positive.float().sum() / broad_target.sum().clamp_min(1.0)
+        ),
         "count_head_eye_hard_positive_candidates": logits.new_tensor(
             float(hard_positive_count)
         ),
@@ -2210,7 +2223,7 @@ def head_eye_route_connectivity_loss(
     )
     probability_nodes = consensus_outer.index_select(1, head_indices)
     visible_nodes = support.any(dim=1).index_select(1, head_indices)
-    target_nodes = build_head_eye_accessory_face_targets(
+    target_nodes = build_structured_head_eye_accessory_face_targets(
         target_uv,
         alpha_threshold=alpha_threshold,
     )["mask"].to(
@@ -3075,6 +3088,9 @@ def run_epoch(
                         "head_eye_presence_mae",
                         "head_eye_symmetric_pair_recall",
                         "count_head_eye_positive_texels",
+                        "count_head_eye_broad_positive_texels",
+                        "count_head_eye_top_connected_rejected_texels",
+                        "head_eye_structured_positive_fraction",
                         "count_head_eye_hard_positive_candidates",
                         "count_head_eye_hard_negative_candidates",
                     ):
@@ -4089,6 +4105,11 @@ def save_checkpoint(
             "head_outer_projected_input_version": (
                 model.head_outer_projected_input_version
             ),
+            "head_eye_target_schema": (
+                "structured_non_top_mirrored_v1"
+                if model.head_outer_projected_input_version >= 5
+                else "disabled"
+            ),
             "outer_uv_feature_channels": model.outer_uv_feature_channels,
             "outer_uv_topology_channels": model.outer_uv_topology_channels,
             "outer_uv_topology_layers": model.outer_uv_topology_layers,
@@ -4656,14 +4677,14 @@ def build_arg_parser():
         "--head_eye_occupancy_dice_weight", type=float, default=0.50
     )
     parser.add_argument(
-        "--head_eye_occupancy_positive_balance", type=float, default=0.60
+        "--head_eye_occupancy_positive_balance", type=float, default=0.45
     )
     parser.add_argument("--head_eye_hard_fraction", type=float, default=0.25)
     parser.add_argument(
-        "--head_eye_hard_positive_weight", type=float, default=0.75
+        "--head_eye_hard_positive_weight", type=float, default=0.50
     )
     parser.add_argument(
-        "--head_eye_hard_negative_weight", type=float, default=0.50
+        "--head_eye_hard_negative_weight", type=float, default=1.00
     )
     parser.add_argument("--lambda_head_eye_presence", type=float, default=0.0)
     parser.add_argument("--lambda_head_eye_symmetry", type=float, default=0.0)
@@ -5797,6 +5818,11 @@ def main():
         "head_outer_structure_mode": model.head_outer_structure_mode,
         "head_outer_projected_input_version": (
             model.head_outer_projected_input_version
+        ),
+        "head_eye_target_schema": (
+            "structured_non_top_mirrored_v1"
+            if model.head_outer_projected_input_version >= 5
+            else "disabled"
         ),
         "outer_uv_occupancy_supervision": (
             "visible_projected_texels"

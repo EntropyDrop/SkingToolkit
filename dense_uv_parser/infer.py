@@ -658,7 +658,43 @@ def log_and_save_semantic_diagnostics(
             ),
         }
 
-    # 4. 3D Outer UV Occupancy Stats
+    # 4. Dedicated projected head-eye occupancy (v5+).  Report this branch
+    # separately from the broad pixel-semantic labels: it is the branch that
+    # may promote isolated glasses/goggles into the outer layer.
+    if "head_eye_face_occupancy_logits" in outputs:
+        eye_probability = torch.sigmoid(
+            outputs["head_eye_face_occupancy_logits"].float()
+        ).detach().cpu()[0]
+        eye_band = torch.zeros_like(eye_probability, dtype=torch.bool)
+        eye_band[(0, 2, 3), 1:6] = True
+        eye_band_probability = eye_probability[eye_band]
+        presence_probability = (
+            torch.sigmoid(
+                outputs["head_eye_accessory_presence_logit"].float()
+            ).detach().cpu()[0].item()
+            if "head_eye_accessory_presence_logit" in outputs
+            else None
+        )
+        semantic_report["head_eye_accessory"] = {
+            "source": "dedicated_projected_uv_head",
+            "presence_probability": (
+                round(float(presence_probability), 4)
+                if presence_probability is not None
+                else None
+            ),
+            "active_texels_at_0_65": int(
+                (eye_band_probability >= 0.65).sum().item()
+            ),
+            "eye_band_texels": int(eye_band_probability.numel()),
+            "mean_eye_band_probability": round(
+                float(eye_band_probability.mean().item()), 4
+            ),
+            "max_eye_band_probability": round(
+                float(eye_band_probability.max().item()), 4
+            ),
+        }
+
+    # 5. 3D Outer UV Occupancy Stats
     if "outer_uv_occupancy_logits" in outputs:
         occ_prob = torch.sigmoid(outputs["outer_uv_occupancy_logits"].float()).cpu()[0, 0]
         active_texels = int((occ_prob > 0.5).sum().item())
@@ -703,6 +739,21 @@ def log_and_save_semantic_diagnostics(
             print(f"   • 闭合环/发带特征 (Closed Ring Decor): {ha['closed_ring_prob']*100:5.1f}%")
         if ha["symmetry_prob"] is not None:
             print(f"   • 头部左右对称置信度 (Symmetry):       {ha['symmetry_prob']*100:5.1f}%")
+
+    if "head_eye_accessory" in semantic_report:
+        eye = semantic_report["head_eye_accessory"]
+        presence = eye["presence_probability"]
+        presence_text = (
+            f"{presence*100:5.1f}%" if presence is not None else "n/a"
+        )
+        print("\n 📌 投影式眼部外层分支 (Projected Eye Accessory):")
+        print(f"   • 配件存在概率: {presence_text}")
+        print(
+            "   • 眼部带活跃纹素: "
+            f"{eye['active_texels_at_0_65']} / {eye['eye_band_texels']} "
+            f"(均值: {eye['mean_eye_band_probability']*100:.1f}%, "
+            f"最大值: {eye['max_eye_band_probability']*100:.1f}%)"
+        )
 
     if "outer_uv_occupancy" in semantic_report:
         occ = semantic_report["outer_uv_occupancy"]
@@ -2306,12 +2357,6 @@ def main():
             semantic_foreground=observed_foreground,
             static_mappings=static_mappings,
         )
-        log_and_save_semantic_diagnostics(
-            outputs,
-            views,
-            parser_model,
-            output_json_path=args.semantic_output,
-        )
         if args.semantic_pixel_output:
             save_semantic_pixel_labels(
                 outputs,
@@ -2339,6 +2384,12 @@ def main():
             center_power=float(
                 parser_args.get("route_texel_center_power", 2.0)
             ),
+        )
+        log_and_save_semantic_diagnostics(
+            outputs,
+            views,
+            parser_model,
+            output_json_path=args.semantic_output,
         )
         if (
             args.outer_uv_occupancy_output

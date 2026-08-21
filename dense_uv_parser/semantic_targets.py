@@ -9,6 +9,8 @@ from SkingToolkit.dense_uv_parser.uv_layout import (
 )
 from SkingToolkit.dense_uv_parser.uv_topology import (
     build_head_outer_face_graph,
+    build_head_outer_face_indices,
+    build_simple_uv_topology,
 )
 
 
@@ -231,6 +233,53 @@ def head_outer_face_values_to_uv(values):
     return atlas
 
 
+def build_structured_head_eye_accessory_face_targets(
+    target_uv,
+    alpha_threshold=0.5,
+):
+    """Return conservative paired eye accessories, excluding top structures.
+
+    The broad v3 pixel semantic target intentionally labels every real outer
+    texel at eye height. That is useful for image-space routing, but far too
+    common for a global accessory-presence gate: bangs, helmets and headphone
+    arches make roughly 84% of skins positive. The dedicated v5 occupancy
+    branch instead learns only mirrored eye-band texels whose physical alpha
+    component is not connected to the head top. Hair/hat/headphone structures
+    remain supervised by the generic head occupancy branch, while isolated
+    glasses, goggles and visor pieces receive a high-precision target.
+    """
+    broad = build_head_eye_accessory_face_targets(
+        target_uv,
+        alpha_threshold=alpha_threshold,
+    )["mask"] > 0.5
+    top_connected = build_head_top_accessory_face_targets(
+        target_uv,
+        alpha_threshold=alpha_threshold,
+    )["mask"] > 0.5
+    candidate = broad & ~top_connected
+    candidate_atlas = head_outer_face_values_to_uv(
+        candidate.float()
+    )[:, 0].flatten(1).bool()
+    topology = build_simple_uv_topology()
+    mirrored = topology.mirrored_texel.flatten().to(candidate.device)
+    valid_mirror = mirrored >= 0
+    paired_atlas = torch.zeros_like(candidate_atlas)
+    paired_atlas[:, valid_mirror] = (
+        candidate_atlas[:, valid_mirror]
+        & candidate_atlas[:, mirrored[valid_mirror]]
+    )
+    head_indices = build_head_outer_face_indices().to(candidate.device)
+    selected = paired_atlas.index_select(1, head_indices).reshape(
+        -1, FACE_COUNT, 8, 8
+    )
+    return {
+        "mask": selected.float(),
+        "presence": selected.flatten(1).any(dim=1).float(),
+        "broad_mask": broad.float(),
+        "top_connected_rejected_mask": (broad & top_connected).float(),
+    }
+
+
 def build_dense_view_semantic_targets(
     target_uv,
     renderer,
@@ -410,6 +459,7 @@ __all__ = [
     "build_head_outer_face_targets",
     "build_head_top_accessory_face_targets",
     "build_head_eye_accessory_face_targets",
+    "build_structured_head_eye_accessory_face_targets",
     "head_outer_face_values_to_uv",
     "build_semantic_attribute_targets",
     "build_dense_view_semantic_targets",

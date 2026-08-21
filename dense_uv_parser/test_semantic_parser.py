@@ -26,6 +26,7 @@ from SkingToolkit.dense_uv_parser.utils import splat_to_uv_conditioning
 from SkingToolkit.dense_uv_parser.semantic_targets import (
     build_head_eye_accessory_face_targets,
     build_head_outer_face_targets,
+    build_structured_head_eye_accessory_face_targets,
     build_head_top_accessory_face_targets,
     head_outer_face_values_to_uv,
     build_part_layer_masks,
@@ -331,6 +332,43 @@ class SemanticDenseUVParserTest(unittest.TestCase):
         self.assertEqual(float(eye[0, 1, 2, 1]), 0.0)
         self.assertEqual(float(eye[0, 0, 7, 1]), 0.0)
         self.assertTrue(torch.all(eye <= faces))
+
+    def test_v5_structured_eye_target_keeps_only_isolated_mirrored_pairs(self):
+        isolated = torch.zeros(1, 6, 8, 8)
+        isolated[0, 0, 2, 1] = 1.0
+        isolated[0, 0, 2, 6] = 1.0
+        isolated_uv = torch.zeros(1, 4, 64, 64)
+        isolated_uv[:, 3:4] = head_outer_face_values_to_uv(isolated)
+        selected = build_structured_head_eye_accessory_face_targets(
+            isolated_uv
+        )
+        self.assertEqual(float(selected["mask"].sum()), 2.0)
+        self.assertEqual(float(selected["presence"][0]), 1.0)
+
+        unilateral = isolated.clone()
+        unilateral[0, 0, 2, 6] = 0.0
+        unilateral_uv = torch.zeros(1, 4, 64, 64)
+        unilateral_uv[:, 3:4] = head_outer_face_values_to_uv(unilateral)
+        selected = build_structured_head_eye_accessory_face_targets(
+            unilateral_uv
+        )
+        self.assertEqual(float(selected["mask"].sum()), 0.0)
+        self.assertEqual(float(selected["presence"][0]), 0.0)
+
+        top_connected = isolated.clone()
+        top_connected[0, 0, 0:2, 1] = 1.0
+        top_connected[0, 0, 0:2, 6] = 1.0
+        top_connected_uv = torch.zeros(1, 4, 64, 64)
+        top_connected_uv[:, 3:4] = head_outer_face_values_to_uv(
+            top_connected
+        )
+        selected = build_structured_head_eye_accessory_face_targets(
+            top_connected_uv
+        )
+        self.assertEqual(float(selected["mask"].sum()), 0.0)
+        self.assertGreater(
+            float(selected["top_connected_rejected_mask"].sum()), 0.0
+        )
 
     def test_v3_eye_semantics_start_as_gated_noop(self):
         model = DenseUVParserNet(
