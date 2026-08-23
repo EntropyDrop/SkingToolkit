@@ -1148,6 +1148,14 @@ def build_arg_parser():
     parser = argparse.ArgumentParser(description="Infer UV conditioning with a dense UV parser.")
     parser.add_argument("--parser_checkpoint", required=True)
     parser.add_argument(
+        "--semantic_only",
+        action="store_true",
+        help=(
+            "Stop after the raw dense pixel-semantic prediction. This does "
+            "not run UV routing, occupancy, or deterministic inpainting."
+        ),
+    )
+    parser.add_argument(
         "--foreground_method",
         choices=["flood", "legacy"],
         default="flood",
@@ -2018,6 +2026,7 @@ def main():
             args.geometry_fill_output,
             args.outer_uv_occupancy_output,
             args.head_outer_structure_output,
+            args.semantic_pixel_output,
             args.simple_inpaint_render_output,
         )
     ):
@@ -2361,9 +2370,20 @@ def main():
             save_semantic_pixel_labels(
                 outputs,
                 parser_rendered,
-                observed_foreground=observed_foreground,
+                observed_foreground=(
+                    None if args.semantic_only else observed_foreground
+                ),
                 output_path=args.semantic_pixel_output,
             )
+        if args.semantic_only:
+            log_and_save_semantic_diagnostics(
+                outputs,
+                views,
+                parser_model,
+                output_json_path=args.semantic_output,
+            )
+            print("Semantic-only inference complete; UV routing was not run.")
+            return
         outputs = attach_projected_outer_uv_occupancy(
             parser_model,
             outputs,

@@ -309,6 +309,51 @@ def format_metrics(
                 + outer_projection_area_selection_weight
                 * result.get("loss_outer_projected_area", 0.0)
             )
+
+    semantic_class_indices = []
+    class_index = 0
+    while all(
+        f"count_dense_semantic_class_{class_index}_{suffix}" in result
+        for suffix in ("tp", "fp", "fn")
+    ):
+        semantic_class_indices.append(class_index)
+        class_index += 1
+    if semantic_class_indices:
+        semantic_ious = []
+        for class_index in semantic_class_indices:
+            prefix = f"count_dense_semantic_class_{class_index}"
+            tp = result[f"{prefix}_tp"]
+            fp = result[f"{prefix}_fp"]
+            fn = result[f"{prefix}_fn"]
+            precision = tp / max(tp + fp, 1.0)
+            recall = tp / max(tp + fn, 1.0)
+            iou = tp / max(tp + fp + fn, 1.0)
+            result[f"dense_semantic_class_{class_index}_precision"] = precision
+            result[f"dense_semantic_class_{class_index}_recall"] = recall
+            result[f"dense_semantic_class_{class_index}_iou"] = iou
+            semantic_ious.append(iou)
+
+        # Every supported schema stores background in the final class and
+        # inner immediately before it.  All earlier classes describe outer
+        # topology.  Equal-weight IoU prevents large inner/background regions
+        # from hiding a failed crown, glasses, or hat-brim class.
+        foreground_ious = semantic_ious[:-1]
+        outer_ious = semantic_ious[:-2]
+        if foreground_ious:
+            foreground_macro_iou = sum(foreground_ious) / len(
+                foreground_ious
+            )
+            result["dense_semantic_foreground_macro_iou"] = (
+                foreground_macro_iou
+            )
+            result["semantic_foreground_macro_iou_error"] = (
+                1.0 - foreground_macro_iou
+            )
+        if outer_ious:
+            result["dense_semantic_outer_macro_iou"] = sum(
+                outer_ious
+            ) / len(outer_ious)
+        result["dense_semantic_background_iou"] = semantic_ious[-1]
     return result
 
 
@@ -334,6 +379,48 @@ def clip_parser_gradients(model, max_norm):
         torch.nn.utils.clip_grad_norm_(parser_parameters, max_norm)
     if occupancy_parameters:
         torch.nn.utils.clip_grad_norm_(occupancy_parameters, max_norm)
+
+
+def configure_training_stage(model, training_stage):
+    """Select the parameters that may change in a staged training run."""
+    if training_stage == "parser":
+        for parameter in model.parameters():
+            parameter.requires_grad_(True)
+        return
+    if training_stage != "semantic":
+        raise ValueError(f"Unsupported training stage {training_stage!r}.")
+    if model.semantic_text_prompt_fusion is None:
+        raise ValueError(
+            "Semantic-only training requires --siglip_text_prompt_fusion."
+        )
+
+    trainable_prefixes = (
+        "stem.",
+        "down1.",
+        "down2.",
+        "down3.",
+        "mid.",
+        "semantic_fusion.",
+        "semantic_spatial_fusion.",
+        "up2.",
+        "up1.",
+        "up0.",
+        "features.",
+        "semantic_text_prompt_fusion.",
+    )
+    for name, parameter in model.named_parameters():
+        parameter.requires_grad_(name.startswith(trainable_prefixes))
+
+    # These submodules consume semantic logits but do not improve the pixel
+    # classifier itself.  Keeping them frozen makes stage-one gradients fully
+    # independent of the main inner/outer route head.
+    for parameter in model.semantic_text_prompt_fusion.route_projection.parameters():
+        parameter.requires_grad_(False)
+    semantic_route_scale = (
+        model.semantic_text_prompt_fusion.semantic_route_scale
+    )
+    if semantic_route_scale is not None:
+        semantic_route_scale.requires_grad_(False)
 
 
 def stack_view_targets(targets_by_view):
@@ -2851,23 +2938,24 @@ def run_epoch(
                     static_mappings=static_mappings,
                     **semantic_kwargs,
                 )
-                outputs = attach_projected_outer_uv_occupancy(
-                    model,
-                    outputs,
-                    renderer,
-                    views,
-                    observed_foreground=targets["foreground"][:, 0],
-                    center_power=args.route_texel_center_power,
-                )
-                outputs = attach_projected_head_outer_structure(
-                    model,
-                    outputs,
-                    renderer,
-                    views,
-                    observed_foreground=targets["foreground"][:, 0],
-                    source_images=rendered,
-                    center_power=args.route_texel_center_power,
-                )
+                if args.training_stage != "semantic":
+                    outputs = attach_projected_outer_uv_occupancy(
+                        model,
+                        outputs,
+                        renderer,
+                        views,
+                        observed_foreground=targets["foreground"][:, 0],
+                        center_power=args.route_texel_center_power,
+                    )
+                    outputs = attach_projected_head_outer_structure(
+                        model,
+                        outputs,
+                        renderer,
+                        views,
+                        observed_foreground=targets["foreground"][:, 0],
+                        source_images=rendered,
+                        center_power=args.route_texel_center_power,
+                    )
                 if "dense_semantic_logits" in outputs:
                     targets["dense_semantics"] = (
                         build_dense_view_semantic_targets(
@@ -3462,6 +3550,15 @@ def run_epoch(
                 losses["loss_total"] = losses["loss_total"] + weighted_auxiliary
                 losses["loss_geometry"] = losses["loss_geometry"] + weighted_auxiliary
                 losses["loss_routing"] = losses["loss_routing"] + weighted_auxiliary
+                if args.training_stage == "semantic":
+                    # Do not merely make parser losses small: remove them from
+                    # the backward graph entirely.  This makes stage one a
+                    # true dense segmentation run and keeps route/occupancy
+                    # heads unchanged until the user explicitly starts stage
+                    # two.
+                    losses["loss_total"] = losses[
+                        "loss_dense_semantics_weighted"
+                    ]
                 loss = losses["loss_total"]
 
         if train:
@@ -3532,11 +3629,22 @@ def run_epoch(
                     args.outer_projection_area_selection_weight
                 ),
             )
-            postfix = {
-                "total": f"{avg['loss_total']:.4f}",
-                "fg": f"{avg.get('recall_foreground', avg['acc_foreground']):.3f}",
-            }
-            if args.parser_mode in ("global_affine", "geometry_fit"):
+            if args.training_stage == "semantic":
+                postfix = {
+                    "semantic": f"{avg['loss_total']:.4f}",
+                    "mIoU": f"{avg.get('dense_semantic_foreground_macro_iou', 0.0):.3f}",
+                    "top": f"{avg.get('dense_semantic_class_0_iou', 0.0):.3f}",
+                    "eye": f"{avg.get('dense_semantic_class_1_iou', 0.0):.3f}",
+                }
+            else:
+                postfix = {
+                    "total": f"{avg['loss_total']:.4f}",
+                    "fg": f"{avg.get('recall_foreground', avg['acc_foreground']):.3f}",
+                }
+            if (
+                args.training_stage != "semantic"
+                and args.parser_mode in ("global_affine", "geometry_fit")
+            ):
                 postfix["align"] = f"{avg.get('err_affine_translation_px', 0.0):.2f}px"
                 postfix["scale"] = f"{avg.get('err_affine_scale_pct', 0.0):.2f}%"
                 if args.parser_mode == "geometry_fit":
@@ -3545,7 +3653,7 @@ def run_epoch(
                     postfix["render"] = f"{avg.get('loss_render_rgb', 0.0):.3f}"
                 else:
                     postfix["surface"] = f"{avg.get('acc_surface', 0.0):.3f}"
-            else:
+            elif args.training_stage != "semantic":
                 postfix["uv"] = f"{avg.get('loss_uv_l1_px', avg['loss_uv']):.2f}px"
                 postfix["uv1"] = f"{avg.get('acc_uv_within1', 0.0):.3f}"
             iterator.set_postfix(
@@ -3570,6 +3678,53 @@ def run_epoch(
 
 
 
+
+
+def dense_semantic_palette(class_count, device):
+    if class_count == 5:
+        colors = (
+            (255, 215, 0),   # head-top outer accessory
+            (0, 255, 200),   # eye-level outer accessory
+            (220, 20, 60),   # other outer layer
+            (30, 144, 255),  # inner layer
+            (30, 30, 30),    # background
+        )
+    elif class_count == 4:
+        colors = (
+            (255, 215, 0),
+            (220, 20, 60),
+            (30, 144, 255),
+            (30, 30, 30),
+        )
+    else:
+        raise ValueError(
+            f"No dense-semantic preview palette for {class_count} classes."
+        )
+    return torch.tensor(colors, device=device, dtype=torch.float32) / 255.0
+
+
+def save_dense_semantic_preview(rendered, logits, targets, output_path, max_items):
+    count = min(max_items, rendered.shape[0])
+    logits = logits[:count].float()
+    targets = targets[:count].long()
+    palette = dense_semantic_palette(logits.shape[1], logits.device)
+    predicted = logits.argmax(dim=1)
+    predicted_rgb = palette[predicted].permute(0, 3, 1, 2)
+    target_rgb = palette[
+        targets.clamp(0, palette.shape[0] - 1)
+    ].permute(0, 3, 1, 2)
+    raw_rgb = rendered[:count, :3].float()
+    blended = raw_rgb * 0.50 + predicted_rgb * 0.50
+    preview = torch.cat(
+        [raw_rgb, predicted_rgb, target_rgb, blended], dim=0
+    )
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    save_image(
+        preview.clamp(0.0, 1.0).detach().cpu(),
+        output_path,
+        nrow=count,
+    )
 
 
 def save_preview(
@@ -3618,6 +3773,27 @@ def save_preview(
             static_mappings=static_mappings,
             **semantic_kwargs,
         )
+        if getattr(args, "training_stage", "parser") == "semantic":
+            if "dense_semantic_logits" not in outputs:
+                raise ValueError(
+                    "Semantic training preview requires dense semantic logits."
+                )
+            semantic_targets = build_dense_view_semantic_targets(
+                batch["uv"],
+                renderer,
+                views,
+                device=device,
+                alpha_threshold=args.target_alpha_threshold,
+                target_version=args.dense_semantic_target_version,
+            )
+            save_dense_semantic_preview(
+                rendered,
+                outputs["dense_semantic_logits"],
+                semantic_targets,
+                output_path,
+                max_items=max_items * len(views),
+            )
+            return
         outputs = attach_projected_outer_uv_occupancy(
             model,
             outputs,
@@ -4023,6 +4199,7 @@ def save_checkpoint(
         "metrics": metrics,
         "best_metric": best_metric,
         "model_config": {
+            "training_stage": args.training_stage,
             "input_channels": 4,
             "base_channels": args.base_channels,
             "uv_size": UV_SIZE,
@@ -4132,6 +4309,15 @@ def build_arg_parser():
     parser.add_argument("--data_dir", default="../skins")
     parser.add_argument("--output_dir", default="runs/dense_uv_parser")
     parser.add_argument("--resume", default=None, help="Checkpoint to resume; --epochs remains the final epoch number.")
+    parser.add_argument(
+        "--training_stage",
+        choices=("parser", "semantic"),
+        default="parser",
+        help=(
+            "Train the complete parser, or isolate the dense five-class pixel "
+            "semantic classifier before allowing it to influence routing."
+        ),
+    )
     parser.add_argument("--mappings_dir", default=None)
     parser.add_argument("--views", default="walk_front_both_layer_ortho,walk_back_both_layer_ortho")
     parser.add_argument(
@@ -4826,6 +5012,7 @@ def build_arg_parser():
             "loss_outer_selection",
             "loss_hard_uv_selection",
             "loss_hard_uv_color_selection",
+            "semantic_foreground_macro_iou_error",
         ],
         default="loss_hard_uv_color_selection",
     )
@@ -5054,6 +5241,25 @@ def main():
         raise ValueError(
             "--lambda_text_prompt_route requires --siglip_text_prompt_fusion."
         )
+    if args.training_stage == "semantic":
+        if args.semantic_backbone != "siglip2":
+            raise ValueError(
+                "Semantic-only training currently requires SigLIP2 spatial "
+                "and text features."
+            )
+        if not args.siglip_text_prompt_fusion:
+            raise ValueError(
+                "Semantic-only training requires --siglip_text_prompt_fusion."
+            )
+        if args.dense_semantic_target_version != 3:
+            raise ValueError(
+                "Semantic-only training requires the five-class "
+                "--dense_semantic_target_version 3 schema."
+            )
+        if args.lambda_dense_semantics <= 0.0:
+            raise ValueError(
+                "Semantic-only training requires --lambda_dense_semantics > 0."
+            )
     head_structure_weights = (
         args.lambda_head_outer_presence,
         args.lambda_head_outer_coverage,
@@ -5452,6 +5658,7 @@ def main():
             backbone=runtime_semantic_backbone,
             runtime_batch_size=args.semantic_runtime_batch_size,
         )
+    configure_training_stage(model, args.training_stage)
     criterion = DenseUVParserLoss(
         lambda_foreground=args.lambda_foreground,
         lambda_layer=args.lambda_layer,
@@ -5483,7 +5690,16 @@ def main():
         affine_translation_limit=model.affine_translation_limit if affine_mode else 1.0,
         affine_log_scale_limit=model.affine_log_scale_limit if affine_mode else 1.0,
     ).to(device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    trainable_parameters = [
+        parameter for parameter in model.parameters() if parameter.requires_grad
+    ]
+    if not trainable_parameters:
+        raise ValueError("The selected training stage has no trainable parameters.")
+    optimizer = torch.optim.AdamW(
+        trainable_parameters,
+        lr=args.lr,
+        weight_decay=args.weight_decay,
+    )
     scaler = build_grad_scaler(device, args.mixed_precision)
 
     start_epoch = 1
@@ -5506,6 +5722,16 @@ def main():
         if checkpoint_mode != args.parser_mode:
             raise ValueError(
                 f"Cannot resume parser_mode={checkpoint_mode!r} as {args.parser_mode!r}. Start a new run."
+            )
+        checkpoint_training_stage = checkpoint.get("model_config", {}).get(
+            "training_stage",
+            checkpoint.get("args", {}).get("training_stage", "parser"),
+        )
+        if checkpoint_training_stage != args.training_stage:
+            raise ValueError(
+                "Cannot resume a checkpoint from a different training stage: "
+                f"checkpoint={checkpoint_training_stage!r}, "
+                f"requested={args.training_stage!r}."
             )
         checkpoint_semantic_backbone = checkpoint.get("model_config", {}).get(
             "semantic_backbone", "none"
@@ -5753,6 +5979,7 @@ def main():
         )
 
     metadata = {
+        "training_stage": args.training_stage,
         "num_samples": len(dataset),
         "train_samples": len(train_dataset),
         "val_samples": len(val_dataset) if val_dataset is not None else 0,
@@ -5774,6 +6001,11 @@ def main():
         "privileged_views": privileged_views,
         "training_views": training_views,
         "parameters": count_parameters(model),
+        "trainable_parameters": sum(
+            parameter.numel()
+            for parameter in model.parameters()
+            if parameter.requires_grad
+        ),
         "batch_size": args.batch_size,
         "gradient_accumulation_steps": args.gradient_accumulation_steps,
         "effective_skin_batch_size": (
@@ -6098,7 +6330,9 @@ def main():
                     args.mixed_precision,
                     args,
                     train=False,
-                    compute_hard_metrics=True,
+                    compute_hard_metrics=(
+                        args.training_stage != "semantic"
+                    ),
                     semantic_cache=semantic_cache,
                     semantic_masks=semantic_masks,
                 )

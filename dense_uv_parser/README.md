@@ -20,6 +20,35 @@ It keeps the existing two-image `view_images` contract by default:
 walk_front_both_layer_ortho,walk_back_both_layer_ortho
 ```
 
+## Train Pixel Semantics First
+
+Before changing UV routing, train and validate the isolated five-class pixel
+classifier:
+
+```bash
+./run_dense_semantic_training.sh
+```
+
+This creates `runs/dense_uv_semantic_vN`. Only the image encoder/decoder and
+the dense SigLIP2 semantic adapter are trainable; route, occupancy, and head
+topology heads cannot receive gradients. The five exact renderer-derived
+classes are head-top outer accessory, eye-level outer accessory, other outer,
+inner, and background. `best.pt` is selected by foreground macro-IoU rather
+than background-dominated pixel accuracy or UV reconstruction quality.
+
+Each `previews/epoch_XXXX.png` contains input, predicted labels, exact labels,
+and the prediction overlay. To inspect a real two-view input without running
+any UV routing or applying the foreground mask to the predicted labels:
+
+```bash
+COMBINED=/path/to/front_back.png ./run_dense_semantic_infer.sh
+```
+
+The raw result is written to
+`outputs/parser_debug_semantic_pixel_labels.png`. Do not use this checkpoint
+as a production UV parser yet; first verify class-0/1 accessory continuity,
+outer-vs-inner boundaries, and background precision on a held-out case set.
+
 ## Train Parser
 
 ```bash

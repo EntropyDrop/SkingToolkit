@@ -14,6 +14,7 @@ from SkingToolkit.dense_uv_parser.losses import (
     DenseUVParserLoss,
     _balanced_cross_entropy,
     _deterministic_cross_entropy,
+    dense_semantic_segmentation_terms,
     outer_false_negative_loss,
     outer_false_positive_loss,
     primary_route_swap_loss,
@@ -2385,6 +2386,56 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         self.assertAlmostEqual(
             metrics["loss_hard_uv_color_selection"],
             metrics["loss_hard_uv_selection"] + 0.15,
+        )
+
+    def test_dense_semantic_checkpoint_metric_uses_per_class_iou(self):
+        targets = torch.tensor([[[0, 1, 2, 3, 4]]])
+        logits = torch.full((1, 5, 1, 5), -8.0)
+        for column, class_index in enumerate((0, 1, 2, 3, 4)):
+            logits[0, class_index, 0, column] = 8.0
+        terms = dense_semantic_segmentation_terms(logits, targets)
+        metrics = parser_train.format_metrics(terms, count=1)
+
+        self.assertAlmostEqual(
+            metrics["dense_semantic_foreground_macro_iou"], 1.0
+        )
+        self.assertAlmostEqual(
+            metrics["semantic_foreground_macro_iou_error"], 0.0
+        )
+        self.assertAlmostEqual(
+            metrics["dense_semantic_outer_macro_iou"], 1.0
+        )
+
+    def test_semantic_training_stage_freezes_route_projection(self):
+        model = DenseUVParserNet(
+            base_channels=4,
+            layer_classes=3,
+            geometry_only=True,
+            view_classes=2,
+            semantic_feature_dim=8,
+            semantic_channels=8,
+            semantic_attention_heads=1,
+            semantic_layers=1,
+            semantic_spatial_feature_dim=8,
+            semantic_spatial_channels=4,
+            semantic_text_prompt_count=5,
+            semantic_text_prompt_feature_dim=8,
+            semantic_text_prompt_channels=4,
+            dense_semantic_target_version=3,
+        )
+
+        parser_train.configure_training_stage(model, "semantic")
+
+        self.assertTrue(model.stem.block[0].weight.requires_grad)
+        self.assertTrue(
+            model.semantic_text_prompt_fusion.semantic_head[0].weight.requires_grad
+        )
+        self.assertFalse(model.layer.weight.requires_grad)
+        self.assertFalse(
+            model.semantic_text_prompt_fusion.route_projection[-1].weight.requires_grad
+        )
+        self.assertFalse(
+            model.semantic_text_prompt_fusion.semantic_route_scale.requires_grad
         )
 
     def test_global_model_emits_surface_and_affine_losses(self):

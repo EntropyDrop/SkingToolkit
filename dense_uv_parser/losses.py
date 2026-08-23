@@ -305,6 +305,75 @@ def dense_semantic_supervision_loss(
     return weighted_loss[valid].sum() / element_weights[valid].sum().clamp_min(1e-12)
 
 
+def dense_semantic_segmentation_terms(
+    dense_semantic_logits,
+    semantic_targets,
+    ignore_index=IGNORE_INDEX,
+):
+    """Return a balanced foreground Dice loss and additive confusion counts.
+
+    Pixel accuracy is a misleading checkpoint metric for this task because the
+    inner/background classes occupy most render pixels.  The count metrics are
+    intentionally additive so ``train.format_metrics`` can compute exact
+    dataset-level precision, recall, and IoU instead of averaging noisy
+    per-batch ratios.
+    """
+    logits = dense_semantic_logits.float()
+    targets = semantic_targets.to(device=logits.device, dtype=torch.long)
+    class_count = logits.shape[1]
+    valid = (
+        (targets >= 0)
+        & (targets < class_count)
+        & (targets != int(ignore_index))
+    )
+    zero = logits.sum() * 0.0
+    result = {}
+    if not valid.any():
+        result["loss_dense_semantic_macro_dice"] = zero
+        for class_index in range(class_count):
+            for suffix in ("tp", "fp", "fn"):
+                result[
+                    f"count_dense_semantic_class_{class_index}_{suffix}"
+                ] = zero
+        return result
+
+    safe_targets = targets.clamp(0, class_count - 1)
+    probabilities = logits.softmax(dim=1)
+    predicted = logits.argmax(dim=1)
+    dice_losses = []
+    # The final class is background in every supported dense-semantic schema.
+    # Select checkpoints on semantic foreground quality, while focal CE still
+    # supervises background explicitly.
+    foreground_class_count = max(class_count - 1, 1)
+    for class_index in range(class_count):
+        expected = valid & (safe_targets == class_index)
+        selected = valid & (predicted == class_index)
+        result[f"count_dense_semantic_class_{class_index}_tp"] = (
+            selected & expected
+        ).float().sum()
+        result[f"count_dense_semantic_class_{class_index}_fp"] = (
+            selected & ~expected
+        ).float().sum()
+        result[f"count_dense_semantic_class_{class_index}_fn"] = (
+            ~selected & expected
+        ).float().sum()
+
+        if class_index >= foreground_class_count or not expected.any():
+            continue
+        expected_float = expected.float()
+        probability = probabilities[:, class_index] * valid.float()
+        intersection = (probability * expected_float).sum()
+        denominator = probability.sum() + expected_float.sum()
+        dice_losses.append(
+            1.0 - (2.0 * intersection + 1.0) / (denominator + 1.0)
+        )
+
+    result["loss_dense_semantic_macro_dice"] = (
+        torch.stack(dice_losses).mean() if dice_losses else zero
+    )
+    return result
+
+
 def _dense_semantic_class_terms(
     dense_semantic_logits,
     targets,
@@ -745,8 +814,16 @@ class DenseUVParserLoss(nn.Module):
                 outputs["dense_semantic_logits"],
                 targets["dense_semantics"],
             )
+            dense_segmentation_terms = dense_semantic_segmentation_terms(
+                outputs["dense_semantic_logits"],
+                targets["dense_semantics"],
+            )
             loss_dense_semantics = (
                 loss_dense_semantic_focal
+                + 0.50
+                * dense_segmentation_terms[
+                    "loss_dense_semantic_macro_dice"
+                ]
                 + 0.50
                 * top_accessory_terms["loss_head_top_accessory_dice"]
                 + 0.50
@@ -788,6 +865,9 @@ class DenseUVParserLoss(nn.Module):
                 ),
                 targets["foreground"][:, 0].long(),
             )
+            dense_segmentation_terms = {
+                "loss_dense_semantic_macro_dice": zero,
+            }
         weighted_dense_semantics = (
             self.lambda_dense_semantics * loss_dense_semantics
         )
@@ -849,6 +929,7 @@ class DenseUVParserLoss(nn.Module):
             "loss_dense_semantic_focal": loss_dense_semantic_focal,
             "loss_dense_semantics_weighted": weighted_dense_semantics,
             "acc_dense_semantics": acc_dense_semantics,
+            **dense_segmentation_terms,
             **top_accessory_terms,
             **eye_accessory_terms,
             "acc_text_prompt_route": acc_text_prompt_route,

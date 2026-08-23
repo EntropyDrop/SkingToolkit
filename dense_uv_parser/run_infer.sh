@@ -59,24 +59,30 @@ find_latest_family_checkpoint() {
 
 PYTHON_BIN="${PYTHON_BIN:-python}"
 PARSER_ONLY="${PARSER_ONLY:-false}"
+SEMANTIC_ONLY="${SEMANTIC_ONLY:-false}"
 
 PARSER_RUNS_DIR="${PARSER_RUNS_DIR:-runs}"
 PARSER_RUN_PREFIX="${PARSER_RUN_PREFIX:-dense_uv_parser_v}"
 PARSER_CHECKPOINT_NAME="${PARSER_CHECKPOINT_NAME:-best.pt}"
 PARSER_CHECKPOINT="${PARSER_CHECKPOINT:-${CHECKPOINT:-}}"
+PARSER_CHECKPOINT_FALLBACK="${PARSER_CHECKPOINT_FALLBACK:-true}"
 
 if [[ -z "$PARSER_CHECKPOINT" ]]; then
   PARSER_CHECKPOINT="$(find_latest_checkpoint "$PARSER_RUNS_DIR" "$PARSER_RUN_PREFIX" "$PARSER_CHECKPOINT_NAME")"
 fi
-if [[ -z "$PARSER_CHECKPOINT" ]]; then
+if [[ -z "$PARSER_CHECKPOINT" && "$PARSER_CHECKPOINT_FALLBACK" == "true" ]]; then
   PARSER_CHECKPOINT="$(find_latest_family_checkpoint "$PARSER_RUNS_DIR" "dense_uv_parser" "$PARSER_CHECKPOINT_NAME")"
 fi
-if [[ -z "$PARSER_CHECKPOINT" && "$PARSER_CHECKPOINT_NAME" != "latest.pt" ]]; then
+if [[ -z "$PARSER_CHECKPOINT" && "$PARSER_CHECKPOINT_FALLBACK" == "true" && "$PARSER_CHECKPOINT_NAME" != "latest.pt" ]]; then
   PARSER_CHECKPOINT="$(find_latest_family_checkpoint "$PARSER_RUNS_DIR" "dense_uv_parser" "latest.pt")"
 fi
 if [[ -z "$PARSER_CHECKPOINT" ]]; then
   echo "No parser checkpoint found in $PARSER_RUNS_DIR." >&2
-  echo "Train one first with ./run_dense_uv_parser_training.sh or set PARSER_CHECKPOINT=/path/to/best.pt." >&2
+  if [[ "$PARSER_RUN_PREFIX" == "dense_uv_semantic_v" ]]; then
+    echo "Train one first with ./run_dense_semantic_training.sh or set PARSER_CHECKPOINT=/path/to/best.pt." >&2
+  else
+    echo "Train one first with ./run_dense_uv_parser_training.sh or set PARSER_CHECKPOINT=/path/to/best.pt." >&2
+  fi
   exit 1
 fi
 if [[ ! -f "$PARSER_CHECKPOINT" ]]; then
@@ -270,6 +276,9 @@ echo "Using grid color aggregation: $COLOR_AGGREGATION"
 if [[ "$PARSER_ONLY" == "true" ]]; then
   echo "Parser-only mode: deterministic UV repair is disabled."
 fi
+if [[ "$SEMANTIC_ONLY" == "true" ]]; then
+  echo "Semantic-only mode: UV routing and repair are disabled."
+fi
 
 args=(
   infer.py
@@ -340,6 +349,10 @@ args=(
   --alpha_threshold "$ALPHA_THRESHOLD"
   --device "$DEVICE"
 )
+
+if [[ "$SEMANTIC_ONLY" == "true" ]]; then
+  args+=(--semantic_only)
+fi
 
 if [[ -n "$FOREGROUND_PROBABILITY_OUTPUT" ]]; then
   args+=(--foreground_probability_output "$FOREGROUND_PROBABILITY_OUTPUT")
@@ -542,7 +555,7 @@ if [[ -n "$OUTPUT" ]]; then
   args+=(--output "$OUTPUT")
 fi
 
-if [[ -z "$CONDITIONING_OUTPUT" && -z "$PARSER_UV_OUTPUT" && -z "$SIMPLE_INPAINT_OUTPUT" && -z "$DEBUG_OUTPUT" && -z "$OVERLAY_OUTPUT" && -z "$INNER_CUTOUT_OUTPUT" && -z "$OUTER_CUTOUT_OUTPUT" && -z "$SECONDARY_CUTOUT_OUTPUT" && -z "$COLOR_SOURCE_OUTPUT" && -z "$FACE_OUTPUT" && -z "$LAYER_FACE_OUTPUT" && -z "$RAW_FACE_OUTPUT" && -z "$RAW_LAYER_FACE_OUTPUT" && -z "$CANONICAL_FOREGROUND_OUTPUT" && -z "$GEOMETRY_GRID_OUTPUT" && -z "$GEOMETRY_OVERLAY_OUTPUT" && -z "$GEOMETRY_ROUTED_OVERLAY_OUTPUT" && -z "$GEOMETRY_FILL_OUTPUT" && -z "$OUTER_UV_OCCUPANCY_OUTPUT" && -z "$HEAD_OUTER_STRUCTURE_OUTPUT" && -z "$OUTPUT" ]]; then
+if [[ -z "$CONDITIONING_OUTPUT" && -z "$PARSER_UV_OUTPUT" && -z "$SIMPLE_INPAINT_OUTPUT" && -z "$DEBUG_OUTPUT" && -z "$OVERLAY_OUTPUT" && -z "$INNER_CUTOUT_OUTPUT" && -z "$OUTER_CUTOUT_OUTPUT" && -z "$SECONDARY_CUTOUT_OUTPUT" && -z "$COLOR_SOURCE_OUTPUT" && -z "$FACE_OUTPUT" && -z "$LAYER_FACE_OUTPUT" && -z "$RAW_FACE_OUTPUT" && -z "$RAW_LAYER_FACE_OUTPUT" && -z "$CANONICAL_FOREGROUND_OUTPUT" && -z "$GEOMETRY_GRID_OUTPUT" && -z "$GEOMETRY_OVERLAY_OUTPUT" && -z "$GEOMETRY_ROUTED_OVERLAY_OUTPUT" && -z "$GEOMETRY_FILL_OUTPUT" && -z "$OUTER_UV_OCCUPANCY_OUTPUT" && -z "$HEAD_OUTER_STRUCTURE_OUTPUT" && -z "$SEMANTIC_OUTPUT" && -z "$SEMANTIC_PIXEL_OUTPUT" && -z "$OUTPUT" ]]; then
   echo "Nothing to write. Set at least one parser/debug/final output." >&2
   exit 1
 fi

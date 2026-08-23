@@ -20,16 +20,18 @@ if command -v flock >/dev/null 2>&1; then
   fi
 fi
 
+RUN_FAMILY="${RUN_FAMILY:-dense_uv_parser_v}"
+
 find_latest_checkpoint() {
   local best_v=-1
   local best_checkpoint=""
   local dir base suffix v
 
   shopt -s nullglob
-  for dir in runs/dense_uv_parser_v*; do
+  for dir in runs/"${RUN_FAMILY}"*; do
     [[ -d "$dir" && -f "$dir/latest.pt" ]] || continue
     base="$(basename "$dir")"
-    suffix="${base#dense_uv_parser_v}"
+    suffix="${base#"$RUN_FAMILY"}"
     [[ "$suffix" =~ ^[0-9]+$ ]] || continue
     v=$((10#$suffix))
     if (( v > best_v )); then
@@ -46,7 +48,7 @@ RESUME="${RESUME:-}"
 if [[ "$RESUME" == "latest" ]]; then
   RESUME="$(find_latest_checkpoint)"
   if [[ -z "$RESUME" ]]; then
-    echo "No runs/dense_uv_parser_v*/latest.pt checkpoint found to resume." >&2
+    echo "No runs/${RUN_FAMILY}*/latest.pt checkpoint found to resume." >&2
     exit 1
   fi
 fi
@@ -60,10 +62,10 @@ if [[ -n "$RESUME" && -z "${RUN_NAME:-}" ]]; then
   RUN_NAME="$(basename "$OUTPUT_DIR")"
 elif [[ -z "${RUN_NAME:-}" ]]; then
   v=1
-  while [[ -d "runs/dense_uv_parser_v${v}" ]]; do
+  while [[ -d "runs/${RUN_FAMILY}${v}" ]]; do
     ((v++))
   done
-  RUN_NAME="dense_uv_parser_v${v}"
+  RUN_NAME="${RUN_FAMILY}${v}"
   OUTPUT_DIR="runs/$RUN_NAME"
 else
   OUTPUT_DIR="runs/$RUN_NAME"
@@ -107,6 +109,7 @@ resolve_mappings_dir() {
 resolve_mappings_dir
 
 PARSER_MODE="${PARSER_MODE:-geometry_fit}"
+TRAINING_STAGE="${TRAINING_STAGE:-parser}"
 MAX_SAMPLES="${MAX_SAMPLES:-180000}"
 BASE_CHANNELS="${BASE_CHANNELS:-32}"
 FEATURE_DROPOUT="${FEATURE_DROPOUT:-0.10}"
@@ -566,6 +569,7 @@ exec python train.py \
   --views "$VIEWS" \
   --privileged_views "$PRIVILEGED_VIEWS" \
   --parser_mode "$PARSER_MODE" \
+  --training_stage "$TRAINING_STAGE" \
   --max_samples "$MAX_SAMPLES" \
   --base_channels "$BASE_CHANNELS" \
   --feature_dropout "$FEATURE_DROPOUT" \
