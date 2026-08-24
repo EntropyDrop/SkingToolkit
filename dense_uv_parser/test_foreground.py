@@ -175,6 +175,23 @@ class DenseParserForegroundTest(unittest.TestCase):
         self.assertEqual(cutout.getpixel((0, 0))[3], 0)
         self.assertEqual(cutout.getpixel((3, 3))[3], 255)
 
+    def test_flood_outputs_accept_empty_paths_as_disabled(self):
+        rendered = torch.zeros(1, 4, 4, 4)
+        rendered[:, 3] = 1.0
+        foreground = torch.ones(1, 4, 4, dtype=torch.bool)
+
+        returned = save_flood_outputs(
+            rendered,
+            foreground,
+            view_count=1,
+            probability_output="",
+            raw_mask_output="",
+            mask_output="",
+            cutout_output="",
+        )
+
+        self.assertTrue(torch.equal(returned, foreground))
+
 
 if __name__ == "__main__":
     unittest.main()

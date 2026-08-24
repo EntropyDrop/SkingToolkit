@@ -131,7 +131,7 @@ def save_flood_outputs(
         (score, mask_output),
         (cutout, cutout_output),
     ):
-        if output is None:
+        if not output:
             continue
         path = Path(output)
         path.parent.mkdir(parents=True, exist_ok=True)
