@@ -2394,6 +2394,13 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         for column, class_index in enumerate((0, 1, 2, 3, 4)):
             logits[0, class_index, 0, column] = 8.0
         terms = dense_semantic_segmentation_terms(logits, targets)
+        terms.update(
+            {
+                "count_dense_semantic_outer_union_tp": torch.tensor(3.0),
+                "count_dense_semantic_outer_union_fp": torch.tensor(0.0),
+                "count_dense_semantic_outer_union_fn": torch.tensor(0.0),
+            }
+        )
         metrics = parser_train.format_metrics(terms, count=1)
 
         self.assertAlmostEqual(
@@ -2405,8 +2412,14 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         self.assertAlmostEqual(
             metrics["dense_semantic_outer_macro_iou"], 1.0
         )
+        self.assertAlmostEqual(
+            metrics["semantic_outer_macro_iou_error"], 0.0
+        )
+        self.assertAlmostEqual(
+            metrics["semantic_outer_union_iou_error"], 0.0
+        )
 
-    def test_semantic_training_stage_freezes_route_projection(self):
+    def test_semantic_training_stage_freezes_projection_but_learns_text_gate(self):
         model = DenseUVParserNet(
             base_channels=4,
             layer_classes=3,
@@ -2434,7 +2447,7 @@ class GlobalAffineRoutingTest(unittest.TestCase):
         self.assertFalse(
             model.semantic_text_prompt_fusion.route_projection[-1].weight.requires_grad
         )
-        self.assertFalse(
+        self.assertTrue(
             model.semantic_text_prompt_fusion.semantic_route_scale.requires_grad
         )
 

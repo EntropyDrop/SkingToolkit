@@ -402,7 +402,10 @@ def dense_semantic_outer_false_positive_loss(
         return zero
     # Compare the outer union directly with the inner class.  This is invariant
     # to a common shift of all logits and therefore matches argmax routing.
-    outer_union_logit = torch.logsumexp(logits[:, :3], dim=1)
+    # Match the final argmax classifier exactly. Logsumexp adds a log(3)
+    # penalty merely because outer has three subclasses and was a major source
+    # of the old conservative inner bias.
+    outer_union_logit = logits[:, :3].amax(dim=1)
     outer_vs_inner_margin = outer_union_logit - logits[:, 3]
     sample_losses = []
     for sample_index in range(logits.shape[0]):
@@ -419,6 +422,118 @@ def dense_semantic_outer_false_positive_loss(
         hard_margins = margins.topk(hard_count, sorted=False).values
         sample_losses.append(F.softplus(hard_margins).mean())
     return torch.stack(sample_losses).mean() if sample_losses else zero
+
+
+def _one_vs_rest_margin(logits, class_index):
+    """Return a shift-invariant class logit relative to all competitors."""
+    class_index = int(class_index)
+    selected = logits[:, class_index]
+    competitors = torch.cat(
+        [logits[:, :class_index], logits[:, class_index + 1 :]],
+        dim=1,
+    )
+    return selected - competitors.amax(dim=1)
+
+
+def dense_semantic_outer_union_terms(
+    dense_semantic_logits,
+    semantic_targets,
+    positive_margin=0.5,
+    hard_positive_fraction=0.25,
+    min_hard_positives=32,
+    ignore_index=IGNORE_INDEX,
+):
+    """Supervise the physical outer-vs-inner decision independently.
+
+    The five-class schema divides outer pixels into three semantic subclasses.
+    Collapsing those logits into one outer score prevents subclass competition
+    from hiding a wrong physical layer decision. Background is deliberately
+    excluded because foreground extraction owns that boundary at inference.
+    """
+    logits = dense_semantic_logits.float()
+    targets = semantic_targets.to(device=logits.device, dtype=torch.long)
+    zero = logits.sum() * 0.0
+    keys = (
+        "loss_dense_semantic_outer_union_bce",
+        "loss_dense_semantic_outer_union_dice",
+        "loss_dense_semantic_outer_union_hard_recall",
+        "count_dense_semantic_outer_union_tp",
+        "count_dense_semantic_outer_union_fp",
+        "count_dense_semantic_outer_union_fn",
+    )
+    if logits.shape[1] != 5:
+        return {key: zero for key in keys}
+
+    valid_surface = (
+        (targets >= 0)
+        & (targets <= 3)
+        & (targets != int(ignore_index))
+    )
+    if not valid_surface.any():
+        return {key: zero for key in keys}
+
+    expected_outer = valid_surface & (targets < 3)
+    expected_inner = valid_surface & (targets == 3)
+    outer_logit = logits[:, :3].amax(dim=1)
+    outer_vs_inner = outer_logit - logits[:, 3]
+
+    positive_loss = F.softplus(-outer_vs_inner[expected_outer])
+    negative_loss = F.softplus(outer_vs_inner[expected_inner])
+    balanced_terms = []
+    if positive_loss.numel() > 0:
+        balanced_terms.append(positive_loss.mean())
+    if negative_loss.numel() > 0:
+        balanced_terms.append(negative_loss.mean())
+    loss_bce = (
+        torch.stack(balanced_terms).mean() if balanced_terms else zero
+    )
+
+    probability = torch.sigmoid(outer_vs_inner) * valid_surface.float()
+    expected_float = expected_outer.float()
+    intersection = (probability * expected_float).flatten(1).sum(dim=1)
+    denominator = (
+        probability.flatten(1).sum(dim=1)
+        + expected_float.flatten(1).sum(dim=1)
+    )
+    present = expected_outer.flatten(1).any(dim=1)
+    dice_per_sample = 1.0 - (2.0 * intersection + 1.0) / (
+        denominator + 1.0
+    )
+    loss_dice = dice_per_sample[present].mean() if present.any() else zero
+
+    hard_losses = []
+    for sample_index in range(logits.shape[0]):
+        margins = outer_vs_inner[sample_index][expected_outer[sample_index]]
+        if margins.numel() == 0:
+            continue
+        hard_count = max(
+            int(min_hard_positives),
+            int(math.ceil(margins.numel() * float(hard_positive_fraction))),
+        )
+        hard_count = min(hard_count, margins.numel())
+        per_pixel = F.softplus(float(positive_margin) - margins)
+        hard_losses.append(
+            per_pixel.topk(hard_count, sorted=False).values.mean()
+        )
+    loss_hard_recall = (
+        torch.stack(hard_losses).mean() if hard_losses else zero
+    )
+
+    predicted_outer = valid_surface & (outer_vs_inner >= 0.0)
+    return {
+        "loss_dense_semantic_outer_union_bce": loss_bce,
+        "loss_dense_semantic_outer_union_dice": loss_dice,
+        "loss_dense_semantic_outer_union_hard_recall": loss_hard_recall,
+        "count_dense_semantic_outer_union_tp": (
+            predicted_outer & expected_outer
+        ).float().sum(),
+        "count_dense_semantic_outer_union_fp": (
+            predicted_outer & expected_inner
+        ).float().sum(),
+        "count_dense_semantic_outer_union_fn": (
+            ~predicted_outer & expected_outer
+        ).float().sum(),
+    }
 
 
 def _dense_semantic_class_terms(
@@ -464,12 +579,15 @@ def _dense_semantic_class_terms(
     loss_dice = (
         dice_per_sample[present].mean() if present.any() else zero
     )
+    # A positive raw logit does not imply an argmax win. Train recall and
+    # presence on a one-vs-rest margin so these losses match inference.
+    class_margin = _one_vs_rest_margin(logits, class_index)
     loss_hard_recall = (
-        F.softplus(-logits[:, int(class_index)])[expected].mean()
+        F.softplus(0.5 - class_margin[expected]).mean()
         if expected.any()
         else zero
     )
-    predicted_presence_logits = logits[:, int(class_index)].flatten(1).amax(dim=1)
+    predicted_presence_logits = class_margin.flatten(1).amax(dim=1)
     loss_presence = F.binary_cross_entropy_with_logits(
         predicted_presence_logits,
         present.float(),
@@ -538,6 +656,7 @@ class DenseUVParserLoss(nn.Module):
         lambda_text_prompt_route=0.0,
         lambda_dense_semantics=0.30,
         dense_semantic_outer_false_positive_weight=0.0,
+        dense_semantic_outer_union_weight=0.0,
         lambda_route_prior_regularization=0.001,
         outer_false_positive_gamma=2.0,
         outer_false_negative_gamma=2.0,
@@ -570,6 +689,9 @@ class DenseUVParserLoss(nn.Module):
         self.lambda_dense_semantics = lambda_dense_semantics
         self.dense_semantic_outer_false_positive_weight = max(
             float(dense_semantic_outer_false_positive_weight), 0.0
+        )
+        self.dense_semantic_outer_union_weight = max(
+            float(dense_semantic_outer_union_weight), 0.0
         )
         self.lambda_route_prior_regularization = float(
             lambda_route_prior_regularization
@@ -875,6 +997,10 @@ class DenseUVParserLoss(nn.Module):
                     targets["dense_semantics"],
                 )
             )
+            dense_outer_union_terms = dense_semantic_outer_union_terms(
+                outputs["dense_semantic_logits"],
+                targets["dense_semantics"],
+            )
             loss_dense_semantics = (
                 loss_dense_semantic_focal
                 + 0.50
@@ -899,6 +1025,21 @@ class DenseUVParserLoss(nn.Module):
                 * eye_accessory_terms["loss_head_eye_accessory_presence"]
                 + self.dense_semantic_outer_false_positive_weight
                 * loss_dense_semantic_outer_false_positive
+                + self.dense_semantic_outer_union_weight
+                * (
+                    0.50
+                    * dense_outer_union_terms[
+                        "loss_dense_semantic_outer_union_bce"
+                    ]
+                    + 0.75
+                    * dense_outer_union_terms[
+                        "loss_dense_semantic_outer_union_dice"
+                    ]
+                    + 0.75
+                    * dense_outer_union_terms[
+                        "loss_dense_semantic_outer_union_hard_recall"
+                    ]
+                )
             )
             acc_dense_semantics = _masked_accuracy(
                 outputs["dense_semantic_logits"],
@@ -927,6 +1068,14 @@ class DenseUVParserLoss(nn.Module):
             )
             dense_segmentation_terms = {
                 "loss_dense_semantic_macro_dice": zero,
+            }
+            dense_outer_union_terms = {
+                "loss_dense_semantic_outer_union_bce": zero,
+                "loss_dense_semantic_outer_union_dice": zero,
+                "loss_dense_semantic_outer_union_hard_recall": zero,
+                "count_dense_semantic_outer_union_tp": zero,
+                "count_dense_semantic_outer_union_fp": zero,
+                "count_dense_semantic_outer_union_fn": zero,
             }
         weighted_dense_semantics = (
             self.lambda_dense_semantics * loss_dense_semantics
@@ -990,6 +1139,7 @@ class DenseUVParserLoss(nn.Module):
             "loss_dense_semantic_outer_false_positive": (
                 loss_dense_semantic_outer_false_positive
             ),
+            **dense_outer_union_terms,
             "loss_dense_semantics_weighted": weighted_dense_semantics,
             "acc_dense_semantics": acc_dense_semantics,
             **dense_segmentation_terms,

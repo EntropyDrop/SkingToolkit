@@ -14,10 +14,10 @@ export RUN_FAMILY="${RUN_FAMILY:-dense_uv_semantic_v}"
 export REAL_SEMANTIC_DATA_DIR="${REAL_SEMANTIC_DATA_DIR-../../SKING_DDJ_Dataset/entropydrop_website_generations}"
 export REAL_SEMANTIC_RESULT_SUFFIX="${REAL_SEMANTIC_RESULT_SUFFIX:-_v94_result}"
 export PRIVILEGED_VIEWS=""
-export EPOCHS="${EPOCHS:-12}"
-export LR="${LR:-5e-5}"
-export BEST_METRIC="${BEST_METRIC:-semantic_foreground_macro_iou_error}"
-export FEATURE_DROPOUT="${FEATURE_DROPOUT:-0.15}"
+export EPOCHS="${EPOCHS:-24}"
+export LR="${LR:-1e-4}"
+export BEST_METRIC="${BEST_METRIC:-semantic_outer_macro_iou_error}"
+export FEATURE_DROPOUT="${FEATURE_DROPOUT:-0.05}"
 export REPRODUCIBLE="${REPRODUCIBLE:-true}"
 export STRICT_DETERMINISM="${STRICT_DETERMINISM:-false}"
 export BACKGROUND_AUGMENT="false"
@@ -33,24 +33,17 @@ if [[ -n "$REAL_SEMANTIC_DATA_DIR" ]]; then
 fi
 
 if [[ -n "$REAL_SEMANTIC_DATA_DIR" && -z "${INITIALIZE:-}" ]]; then
-  latest_version=-1
-  latest_checkpoint=""
-  shopt -s nullglob
-  for checkpoint in runs/dense_uv_semantic_v*/best.pt; do
-    run_name="$(basename "$(dirname "$checkpoint")")"
-    version="${run_name#dense_uv_semantic_v}"
-    [[ "$version" =~ ^[0-9]+$ ]] || continue
-    if (( 10#$version > latest_version )); then
-      latest_version=$((10#$version))
-      latest_checkpoint="$checkpoint"
-    fi
-  done
-  shopt -u nullglob
-  if [[ -n "$latest_checkpoint" ]]; then
-    export INITIALIZE="$latest_checkpoint"
-    echo "Initializing real-domain semantics from: $INITIALIZE"
+  # Restart adaptation from the high-recall synthetic semantic model. The
+  # previous real-domain run learned an over-conservative local optimum under
+  # the old hard-negative objective and must not initialize this corrected
+  # loss. An explicit INITIALIZE still overrides this choice.
+  SEMANTIC_BASE_CHECKPOINT="${SEMANTIC_BASE_CHECKPOINT:-runs/dense_uv_semantic_v1/best.pt}"
+  if [[ -f "$SEMANTIC_BASE_CHECKPOINT" ]]; then
+    export INITIALIZE="$SEMANTIC_BASE_CHECKPOINT"
+    echo "Initializing corrected real-domain semantics from: $INITIALIZE"
   else
-    echo "No previous semantic checkpoint found; training real-domain semantics from scratch."
+    echo "Semantic base checkpoint not found: $SEMANTIC_BASE_CHECKPOINT"
+    echo "Training corrected real-domain semantics from scratch."
   fi
 fi
 
@@ -58,7 +51,8 @@ export SEMANTIC_BACKBONE="siglip2"
 export SIGLIP_TEXT_PROMPT_FUSION="true"
 export DENSE_SEMANTIC_TARGET_VERSION="3"
 export LAMBDA_DENSE_SEMANTICS="${LAMBDA_DENSE_SEMANTICS:-1.0}"
-export DENSE_SEMANTIC_OUTER_FALSE_POSITIVE_WEIGHT="${DENSE_SEMANTIC_OUTER_FALSE_POSITIVE_WEIGHT:-1.0}"
+export DENSE_SEMANTIC_OUTER_FALSE_POSITIVE_WEIGHT="${DENSE_SEMANTIC_OUTER_FALSE_POSITIVE_WEIGHT:-0.20}"
+export DENSE_SEMANTIC_OUTER_UNION_WEIGHT="${DENSE_SEMANTIC_OUTER_UNION_WEIGHT:-1.0}"
 export LAMBDA_TEXT_PROMPT_ROUTE="0"
 
 export PREDICT_HEAD_OUTER_STRUCTURE="false"

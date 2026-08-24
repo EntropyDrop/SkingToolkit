@@ -358,10 +358,26 @@ def format_metrics(
                 1.0 - foreground_macro_iou
             )
         if outer_ious:
-            result["dense_semantic_outer_macro_iou"] = sum(
-                outer_ious
-            ) / len(outer_ious)
+            outer_macro_iou = sum(outer_ious) / len(outer_ious)
+            result["dense_semantic_outer_macro_iou"] = outer_macro_iou
+            result["semantic_outer_macro_iou_error"] = (
+                1.0 - outer_macro_iou
+            )
         result["dense_semantic_background_iou"] = semantic_ious[-1]
+
+    outer_union_count_keys = tuple(
+        f"count_dense_semantic_outer_union_{suffix}"
+        for suffix in ("tp", "fp", "fn")
+    )
+    if all(key in result for key in outer_union_count_keys):
+        tp, fp, fn = (result[key] for key in outer_union_count_keys)
+        precision = tp / max(tp + fp, 1.0)
+        recall = tp / max(tp + fn, 1.0)
+        iou = tp / max(tp + fp + fn, 1.0)
+        result["dense_semantic_outer_union_precision"] = precision
+        result["dense_semantic_outer_union_recall"] = recall
+        result["dense_semantic_outer_union_iou"] = iou
+        result["semantic_outer_union_iou_error"] = 1.0 - iou
     return result
 
 
@@ -431,11 +447,9 @@ def configure_training_stage(model, training_stage):
     # independent of the main inner/outer route head.
     for parameter in model.semantic_text_prompt_fusion.route_projection.parameters():
         parameter.requires_grad_(False)
-    semantic_route_scale = (
-        model.semantic_text_prompt_fusion.semantic_route_scale
-    )
-    if semantic_route_scale is not None:
-        semantic_route_scale.requires_grad_(False)
+    # The zero-initialized scalar also gates the frozen text residual entering
+    # dense pixel logits. It must remain trainable so real-domain supervision
+    # can accept, reject, or invert that prior without changing route heads.
 
 
 def stack_view_targets(targets_by_view):
@@ -3737,6 +3751,8 @@ def run_epoch(
                 postfix = {
                     "semantic": f"{avg['loss_total']:.4f}",
                     "mIoU": f"{avg.get('dense_semantic_foreground_macro_iou', 0.0):.3f}",
+                    "outer": f"{avg.get('dense_semantic_outer_macro_iou', 0.0):.3f}",
+                    "outer_r": f"{avg.get('dense_semantic_outer_union_recall', 0.0):.3f}",
                     "top": f"{avg.get('dense_semantic_class_0_iou', 0.0):.3f}",
                     "eye": f"{avg.get('dense_semantic_class_1_iou', 0.0):.3f}",
                 }
@@ -4977,6 +4993,15 @@ def build_arg_parser():
         ),
     )
     parser.add_argument(
+        "--dense_semantic_outer_union_weight",
+        type=float,
+        default=0.0,
+        help=(
+            "Weight for direct five-class outer-union vs inner semantic "
+            "supervision. Semantic-only real-domain training enables it."
+        ),
+    )
+    parser.add_argument(
         "--lambda_head_outer_presence", type=float, default=0.0
     )
     parser.add_argument(
@@ -5193,6 +5218,8 @@ def build_arg_parser():
             "loss_hard_uv_selection",
             "loss_hard_uv_color_selection",
             "semantic_foreground_macro_iou_error",
+            "semantic_outer_macro_iou_error",
+            "semantic_outer_union_iou_error",
         ],
         default="loss_hard_uv_color_selection",
     )
@@ -5245,6 +5272,10 @@ def main():
     if args.dense_semantic_outer_false_positive_weight < 0.0:
         raise ValueError(
             "--dense_semantic_outer_false_positive_weight must be non-negative."
+        )
+    if args.dense_semantic_outer_union_weight < 0.0:
+        raise ValueError(
+            "--dense_semantic_outer_union_weight must be non-negative."
         )
     seed_everything(args.seed, reproducible=args.reproducible)
     if not 0.0 <= args.feature_dropout < 1.0:
@@ -5964,6 +5995,9 @@ def main():
         dense_semantic_outer_false_positive_weight=(
             args.dense_semantic_outer_false_positive_weight
         ),
+        dense_semantic_outer_union_weight=(
+            args.dense_semantic_outer_union_weight
+        ),
         lambda_route_prior_regularization=(
             args.lambda_route_prior_regularization
         ),
@@ -6327,6 +6361,18 @@ def main():
         "semantic_spatial_channels": args.semantic_spatial_channels,
         "dense_semantic_target_version": (
             args.dense_semantic_target_version
+        ),
+        "dense_semantic_outer_false_positive_weight": (
+            args.dense_semantic_outer_false_positive_weight
+        ),
+        "dense_semantic_outer_union_weight": (
+            args.dense_semantic_outer_union_weight
+        ),
+        "semantic_text_residual_gating": (
+            "learned_zero_initialized"
+            if args.siglip_text_prompt_fusion
+            and args.dense_semantic_target_version in (2, 3)
+            else "disabled"
         ),
         "siglip_text_prompt_fusion": (
             model.semantic_text_prompt_fusion is not None

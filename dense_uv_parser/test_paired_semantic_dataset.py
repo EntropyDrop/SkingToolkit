@@ -9,6 +9,8 @@ from PIL import Image
 
 from SkingToolkit.dense_uv_parser.losses import (
     dense_semantic_outer_false_positive_loss,
+    dense_semantic_outer_union_terms,
+    head_top_accessory_semantic_terms,
 )
 from SkingToolkit.dense_uv_parser.skin_dataset import PairedRenderSkinDataset
 
@@ -125,6 +127,61 @@ class PairedSemanticDatasetTest(unittest.TestCase):
         )
 
         self.assertGreater(incorrect_loss.item(), correct_loss.item())
+
+    def test_accessory_hard_recall_requires_argmax_margin(self):
+        targets = torch.full((1, 2, 2), 3, dtype=torch.long)
+        targets[:, 0, 0] = 0
+        losing = torch.zeros(1, 5, 2, 2)
+        losing[:, 0, 0, 0] = 2.0
+        losing[:, 3, 0, 0] = 4.0
+        winning = losing.clone()
+        winning[:, 0, 0, 0] = 6.0
+
+        losing_terms = head_top_accessory_semantic_terms(losing, targets)
+        winning_terms = head_top_accessory_semantic_terms(winning, targets)
+        shifted_terms = head_top_accessory_semantic_terms(
+            losing + 17.0,
+            targets,
+        )
+
+        self.assertGreater(
+            losing_terms["loss_head_top_accessory_hard_recall"].item(),
+            winning_terms["loss_head_top_accessory_hard_recall"].item(),
+        )
+        self.assertAlmostEqual(
+            losing_terms["loss_head_top_accessory_hard_recall"].item(),
+            shifted_terms["loss_head_top_accessory_hard_recall"].item(),
+            places=5,
+        )
+
+    def test_outer_union_loss_penalizes_outer_pixels_routed_to_inner(self):
+        targets = torch.full((1, 4, 4), 3, dtype=torch.long)
+        targets[:, :2] = 0
+        correct = torch.zeros(1, 5, 4, 4)
+        correct[:, 0, :2] = 6.0
+        correct[:, 3, 2:] = 6.0
+        incorrect = correct.clone()
+        incorrect[:, 0, :2] = 0.0
+        incorrect[:, 3, :2] = 6.0
+
+        correct_terms = dense_semantic_outer_union_terms(correct, targets)
+        incorrect_terms = dense_semantic_outer_union_terms(
+            incorrect,
+            targets,
+        )
+
+        self.assertGreater(
+            incorrect_terms[
+                "loss_dense_semantic_outer_union_hard_recall"
+            ].item(),
+            correct_terms[
+                "loss_dense_semantic_outer_union_hard_recall"
+            ].item(),
+        )
+        self.assertEqual(
+            incorrect_terms["count_dense_semantic_outer_union_fn"].item(),
+            8.0,
+        )
 
 
 if __name__ == "__main__":

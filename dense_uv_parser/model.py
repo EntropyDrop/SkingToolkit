@@ -607,19 +607,25 @@ class TextPromptRouteFusion(nn.Module):
             dense_semantic_logits = self.semantic_head(upsampled_spatial)
 
         if self.semantic_target_version in (2, 3):
-            # Make the frozen text tower actual evidence instead of a
-            # diagnostics-only side path.  Both residuals are deliberately
-            # bounded; the trained high-resolution decoder remains primary.
+            # Let the frozen text tower contribute only after real pixel
+            # supervision learns that it is useful.  A fixed residual blurred
+            # thin crowns and glasses when a coarse prompt prior was wrong.
+            # Reusing the existing zero-initialized route scalar keeps old
+            # checkpoints loadable while making text a learned correction.
             spatial_prompt_similarity = F.interpolate(
                 local_similarity,
                 size=output_size,
                 mode="bilinear",
                 align_corners=False,
             )
+            text_gate = torch.tanh(self.semantic_route_scale)
             dense_semantic_logits = (
                 dense_semantic_logits
-                + 0.20 * spatial_prompt_similarity
-                + global_residual.unsqueeze(-1).unsqueeze(-1)
+                + text_gate
+                * (
+                    0.20 * spatial_prompt_similarity
+                    + global_residual.unsqueeze(-1).unsqueeze(-1)
+                )
             )
             # Version 2 has two outer classes followed by inner/background;
             # version 3 has three outer classes (top, eye-level, other)
