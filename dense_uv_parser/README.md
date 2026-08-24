@@ -29,12 +29,44 @@ classifier:
 ./run_dense_semantic_training.sh
 ```
 
-This creates `runs/dense_uv_semantic_vN`. Only the image encoder/decoder and
-the dense SigLIP2 semantic adapter are trainable; route, occupancy, and head
-topology heads cannot receive gradients. The five exact renderer-derived
-classes are head-top outer accessory, eye-level outer accessory, other outer,
-inner, and background. `best.pt` is selected by foreground macro-IoU rather
-than background-dominated pixel accuracy or UV reconstruction quality.
+This creates `runs/dense_uv_semantic_vN`. If an earlier semantic checkpoint is
+available, its model weights initialize the new run while optimizer, epoch,
+and best-metric history are reset. Only the image encoder/decoder and the dense
+SigLIP2 semantic adapter are trainable; route, occupancy, and head topology
+heads cannot receive gradients.
+
+By default the command recursively loads paired `*_edited` stage-one renders
+and 64x64 `*_result.png` UVs from
+`../../SKING_DDJ_Dataset/entropydrop_website_generations`. The input follows
+the exact inference preprocessing path: split front/back, resize with
+pixel-centre nearest sampling, flood-fill the background, then composite the
+deterministic adaptive high-contrast background. Exact five-class labels are
+projected from the paired UV: head-top outer accessory, eye-level outer
+accessory, other outer, inner, and background. The current archive contains
+about 1.8k such pairs and closes the stage-one shading/antialiasing domain gap
+that a random synthetic-skin validation split cannot measure. `best.pt` is
+selected by real-domain foreground macro-IoU rather than background-dominated
+pixel accuracy or UV reconstruction quality.
+
+The archive also contains older edited layouts with four or six character
+views. Before caching SigLIP2 features, the launcher re-renders every paired
+UV and writes `cache/paired_semantic_manifest.json`. A pair is retained only
+when both inferred view silhouettes overlap the re-render by at least `0.90`
+and shared-foreground RGB MAE is at most `0.12`. This prevents an unrelated
+historical layout from becoming semantic supervision. Override the gates with
+`REAL_SEMANTIC_MIN_SILHOUETTE_IOU` and `REAL_SEMANTIC_MAX_RGB_MAE` only after
+inspecting the manifest's rejected records.
+
+Semantic-only training also enables a per-image hard-negative loss on inner
+pixels with the strongest outer-class margin. This directly suppresses the
+isolated red accessory labels previously scattered across shirts, faces, and
+legs; averaging all inner negatives would make those few but destructive
+errors almost invisible to the loss.
+
+Set `REAL_SEMANTIC_DATA_DIR=` explicitly only when intentionally running the
+older synthetic-renderer experiment. A synthetic checkpoint can also be
+selected manually with `INITIALIZE=/path/to/best.pt`; initialization never
+resumes its optimizer.
 
 Each `previews/epoch_XXXX.png` contains input, predicted labels, exact labels,
 and the prediction overlay. To inspect a real two-view input without running

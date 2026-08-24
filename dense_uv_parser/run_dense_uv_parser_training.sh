@@ -45,6 +45,11 @@ find_latest_checkpoint() {
 }
 
 RESUME="${RESUME:-}"
+INITIALIZE="${INITIALIZE:-}"
+if [[ -n "$RESUME" && -n "$INITIALIZE" ]]; then
+  echo "RESUME and INITIALIZE are mutually exclusive." >&2
+  exit 1
+fi
 if [[ "$RESUME" == "latest" ]]; then
   RESUME="$(find_latest_checkpoint)"
   if [[ -z "$RESUME" ]]; then
@@ -54,6 +59,10 @@ if [[ "$RESUME" == "latest" ]]; then
 fi
 if [[ -n "$RESUME" && ! -f "$RESUME" ]]; then
   echo "Resume checkpoint not found: $RESUME" >&2
+  exit 1
+fi
+if [[ -n "$INITIALIZE" && ! -f "$INITIALIZE" ]]; then
+  echo "Initialization checkpoint not found: $INITIALIZE" >&2
   exit 1
 fi
 
@@ -72,6 +81,8 @@ else
 fi
 
 DATA_DIR="${DATA_DIR:-../skins}"
+REAL_SEMANTIC_DATA_DIR="${REAL_SEMANTIC_DATA_DIR:-}"
+REAL_SEMANTIC_MANIFEST="${REAL_SEMANTIC_MANIFEST:-cache/paired_semantic_manifest.json}"
 MAPPINGS_SIZE="${MAPPINGS_SIZE:-256x512}"
 VIEWS="${VIEWS:-front_left,back_left}"
 PRIVILEGED_VIEWS="${PRIVILEGED_VIEWS-front_right,back_right}"
@@ -80,6 +91,9 @@ SEMANTIC_VIEW_TAG="primary"
 if [[ -n "$PRIVILEGED_VIEWS" ]]; then
   TRAINING_VIEWS="$VIEWS,$PRIVILEGED_VIEWS"
   SEMANTIC_VIEW_TAG="privileged"
+fi
+if [[ -n "$REAL_SEMANTIC_DATA_DIR" ]]; then
+  SEMANTIC_VIEW_TAG="paired_stage_one"
 fi
 
 resolve_mappings_dir() {
@@ -173,6 +187,15 @@ MATMUL_PRECISION="${MATMUL_PRECISION:-high}"
 CUDNN_BENCHMARK="${CUDNN_BENCHMARK:-true}"
 LOG_EVERY="${LOG_EVERY:-50}"
 BEST_METRIC="${BEST_METRIC:-loss_hard_uv_color_selection}"
+REAL_SEMANTIC_VIEW_HEIGHT="${REAL_SEMANTIC_VIEW_HEIGHT:-512}"
+REAL_SEMANTIC_VIEW_WIDTH="${REAL_SEMANTIC_VIEW_WIDTH:-256}"
+REAL_SEMANTIC_FOREGROUND_FLOOD_TOLERANCE="${REAL_SEMANTIC_FOREGROUND_FLOOD_TOLERANCE:-0.03}"
+REAL_SEMANTIC_FOREGROUND_FLOOD_GRADIENT_TOLERANCE="${REAL_SEMANTIC_FOREGROUND_FLOOD_GRADIENT_TOLERANCE:-0.05}"
+REAL_SEMANTIC_FOREGROUND_FLOOD_MAX_SEED_TOLERANCE="${REAL_SEMANTIC_FOREGROUND_FLOOD_MAX_SEED_TOLERANCE:-0.20}"
+REAL_SEMANTIC_PARSER_BACKGROUND="${REAL_SEMANTIC_PARSER_BACKGROUND:-adaptive}"
+REAL_SEMANTIC_MIN_SILHOUETTE_IOU="${REAL_SEMANTIC_MIN_SILHOUETTE_IOU:-0.90}"
+REAL_SEMANTIC_MAX_RGB_MAE="${REAL_SEMANTIC_MAX_RGB_MAE:-0.12}"
+REAL_SEMANTIC_FILTER_BATCH_SIZE="${REAL_SEMANTIC_FILTER_BATCH_SIZE:-16}"
 
 if [[ "$REPRODUCIBLE" == "true" ]]; then
   export PYTHONHASHSEED="$SEED"
@@ -278,6 +301,7 @@ else
   DEFAULT_DENSE_SEMANTICS_WEIGHT=0.30
 fi
 LAMBDA_DENSE_SEMANTICS="${LAMBDA_DENSE_SEMANTICS:-$DEFAULT_DENSE_SEMANTICS_WEIGHT}"
+DENSE_SEMANTIC_OUTER_FALSE_POSITIVE_WEIGHT="${DENSE_SEMANTIC_OUTER_FALSE_POSITIVE_WEIGHT:-0.0}"
 if [[ "$PREDICT_HEAD_OUTER_STRUCTURE" == "true" ]]; then
   DEFAULT_HEAD_OUTER_PRESENCE_WEIGHT=0.10
   DEFAULT_HEAD_OUTER_COVERAGE_WEIGHT=0.10
@@ -496,6 +520,49 @@ resume_args=()
 if [[ -n "$RESUME" ]]; then
   resume_args=(--resume "$RESUME")
 fi
+initialize_args=()
+if [[ -n "$INITIALIZE" ]]; then
+  initialize_args=(--initialize "$INITIALIZE")
+fi
+real_semantic_args=()
+paired_cache_args=()
+if [[ -n "$REAL_SEMANTIC_DATA_DIR" ]]; then
+  real_semantic_args=(
+    --real_semantic_data_dir "$REAL_SEMANTIC_DATA_DIR"
+    --real_semantic_manifest "$REAL_SEMANTIC_MANIFEST"
+    --real_semantic_view_height "$REAL_SEMANTIC_VIEW_HEIGHT"
+    --real_semantic_view_width "$REAL_SEMANTIC_VIEW_WIDTH"
+    --real_semantic_foreground_flood_tolerance "$REAL_SEMANTIC_FOREGROUND_FLOOD_TOLERANCE"
+    --real_semantic_foreground_flood_gradient_tolerance "$REAL_SEMANTIC_FOREGROUND_FLOOD_GRADIENT_TOLERANCE"
+    --real_semantic_foreground_flood_max_seed_tolerance "$REAL_SEMANTIC_FOREGROUND_FLOOD_MAX_SEED_TOLERANCE"
+    --real_semantic_parser_background "$REAL_SEMANTIC_PARSER_BACKGROUND"
+  )
+  paired_cache_args=(
+    --paired_render_data_dir "$REAL_SEMANTIC_DATA_DIR"
+    --paired_manifest "$REAL_SEMANTIC_MANIFEST"
+    --paired_view_height "$REAL_SEMANTIC_VIEW_HEIGHT"
+    --paired_view_width "$REAL_SEMANTIC_VIEW_WIDTH"
+    --paired_foreground_flood_tolerance "$REAL_SEMANTIC_FOREGROUND_FLOOD_TOLERANCE"
+    --paired_foreground_flood_gradient_tolerance "$REAL_SEMANTIC_FOREGROUND_FLOOD_GRADIENT_TOLERANCE"
+    --paired_foreground_flood_max_seed_tolerance "$REAL_SEMANTIC_FOREGROUND_FLOOD_MAX_SEED_TOLERANCE"
+    --paired_parser_background "$REAL_SEMANTIC_PARSER_BACKGROUND"
+  )
+fi
+
+if [[ -n "$REAL_SEMANTIC_DATA_DIR" ]]; then
+  python filter_paired_semantic_data.py \
+    --data_dir "$REAL_SEMANTIC_DATA_DIR" \
+    --output "$REAL_SEMANTIC_MANIFEST" \
+    --mappings_dir "$MAPPINGS_DIR" \
+    --views "$VIEWS" \
+    --view_height "$REAL_SEMANTIC_VIEW_HEIGHT" \
+    --view_width "$REAL_SEMANTIC_VIEW_WIDTH" \
+    --min_silhouette_iou "$REAL_SEMANTIC_MIN_SILHOUETTE_IOU" \
+    --max_rgb_mae "$REAL_SEMANTIC_MAX_RGB_MAE" \
+    --batch_size "$REAL_SEMANTIC_FILTER_BATCH_SIZE" \
+    --num_workers "$NUM_WORKERS" \
+    --device "${DEVICE:-auto}"
+fi
 
 semantic_args=(--semantic_backbone "$SEMANTIC_BACKBONE")
 if [[ "$SEMANTIC_BACKBONE" == "siglip2" ]]; then
@@ -520,6 +587,7 @@ if [[ "$SEMANTIC_BACKBONE" == "siglip2" ]]; then
       --prefetch_factor "$PREFETCH_FACTOR" \
       --mixed_precision "$MIXED_PRECISION" \
       --device "${DEVICE:-auto}" \
+      "${paired_cache_args[@]}" \
       "${cache_args[@]}"
     semantic_args+=(--siglip_cache_dir "$SIGLIP_CACHE_DIR")
     if [[ "$SIGLIP_CACHE_SPATIAL" == "true" ]]; then
@@ -570,6 +638,7 @@ exec python train.py \
   --privileged_views "$PRIVILEGED_VIEWS" \
   --parser_mode "$PARSER_MODE" \
   --training_stage "$TRAINING_STAGE" \
+  "${real_semantic_args[@]}" \
   --max_samples "$MAX_SAMPLES" \
   --base_channels "$BASE_CHANNELS" \
   --feature_dropout "$FEATURE_DROPOUT" \
@@ -626,6 +695,7 @@ exec python train.py \
   --lambda_semantic_coverage "$LAMBDA_SEMANTIC_COVERAGE" \
   --lambda_text_prompt_route "$LAMBDA_TEXT_PROMPT_ROUTE" \
   --lambda_dense_semantics "$LAMBDA_DENSE_SEMANTICS" \
+  --dense_semantic_outer_false_positive_weight "$DENSE_SEMANTIC_OUTER_FALSE_POSITIVE_WEIGHT" \
   --lambda_head_outer_presence "$LAMBDA_HEAD_OUTER_PRESENCE" \
   --lambda_head_outer_coverage "$LAMBDA_HEAD_OUTER_COVERAGE" \
   --lambda_head_outer_occupancy "$LAMBDA_HEAD_OUTER_OCCUPANCY" \
@@ -748,4 +818,5 @@ exec python train.py \
   "${uv_class_args[@]}" \
   "${cudnn_args[@]}" \
   "${reproducibility_args[@]}" \
-  "${resume_args[@]}"
+  "${resume_args[@]}" \
+  "${initialize_args[@]}"

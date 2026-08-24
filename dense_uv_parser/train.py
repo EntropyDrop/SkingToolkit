@@ -20,6 +20,10 @@ if str(WORKSPACE_ROOT) not in sys.path:
 
 from SkingToolkit.dense_uv_parser.losses import DenseUVParserLoss  # noqa: E402
 from SkingToolkit.dense_uv_parser.model import DenseUVParserNet, count_parameters  # noqa: E402
+from SkingToolkit.dense_uv_parser.foreground import build_parser_input  # noqa: E402
+from SkingToolkit.dense_uv_parser.inference_config import (  # noqa: E402
+    PRODUCTION_PREPROCESSING_DEFAULTS,
+)
 from SkingToolkit.dense_uv_parser.semantic import (  # noqa: E402
     attach_semantic_runtime,
     build_semantic_runtime,
@@ -56,6 +60,7 @@ from SkingToolkit.dense_uv_parser.utils import (  # noqa: E402
     combine_layer_face,
     flat_uv_to_uv01,
     fill_geometry_grid_debug,
+    estimate_top_left_flood_foreground,
     overlay_geometry_grid_debug,
     parse_views,
     prediction_uv01,
@@ -80,7 +85,10 @@ from SkingToolkit.dense_uv_parser.semantic_targets import (  # noqa: E402
     build_dense_view_semantic_targets,
 )
 from SkingToolkit.dense_uv_parser.runtime import get_device  # noqa: E402
-from SkingToolkit.dense_uv_parser.skin_dataset import SkinUVDataset  # noqa: E402
+from SkingToolkit.dense_uv_parser.skin_dataset import (  # noqa: E402
+    PairedRenderSkinDataset,
+    SkinUVDataset,
+)
 from SkingToolkit.dense_uv_parser.uv_layout import (  # noqa: E402
     UV_SIZE,
     build_uv_masks,
@@ -358,10 +366,17 @@ def format_metrics(
 
 
 def move_batch(batch, device):
-    return {
+    moved = {
         "uv": batch["uv"].to(device, non_blocking=True),
         "path": batch["path"],
     }
+    if "rendered" in batch:
+        moved["rendered"] = batch["rendered"].to(
+            device, non_blocking=True
+        )
+    if "uv_path" in batch:
+        moved["uv_path"] = batch["uv_path"]
+    return moved
 
 
 def clip_parser_gradients(model, max_norm):
@@ -489,6 +504,84 @@ def build_parser_inputs(
     ).view(1, V).expand(B, -1).reshape(B * V)
     targets = stack_view_targets(targets_by_view)
     return rendered, targets, V, view_ids
+
+
+def build_paired_render_parser_inputs(
+    batch_uv,
+    paired_rendered,
+    renderer,
+    views,
+    args,
+):
+    """Prepare real stage-one renders with the exact inference preprocessing.
+
+    Supervision still comes from the paired 64x64 UV and the deterministic
+    renderer mappings.  Only the model input is replaced by the archived
+    stage-one image.  This closes the otherwise invisible synthetic-to-real
+    gap caused by shading, antialiasing, and generator-specific color detail.
+    """
+    if paired_rendered.dim() != 5 or paired_rendered.shape[2] != 4:
+        raise ValueError(
+            "Expected paired renders shaped BxVx4xHxW, got "
+            f"{tuple(paired_rendered.shape)}."
+        )
+    batch_size, view_count, channels, height, width = paired_rendered.shape
+    if view_count != len(views):
+        raise ValueError(
+            f"Paired batch contains {view_count} views, expected {len(views)}."
+        )
+
+    targets_by_view = []
+    with torch.no_grad():
+        for view in views:
+            synthetic_render, targets = build_dense_parser_batch(
+                batch_uv,
+                renderer,
+                view,
+                alpha_threshold=args.target_alpha_threshold,
+            )
+            if tuple(synthetic_render.shape[-2:]) != (height, width):
+                raise ValueError(
+                    "Paired render size does not match renderer mappings: "
+                    f"paired={(height, width)}, mapping="
+                    f"{tuple(synthetic_render.shape[-2:])}."
+                )
+            targets = dict(targets)
+            targets["affine"] = synthetic_render.new_zeros(
+                synthetic_render.shape[0], 3
+            )
+            targets_by_view.append(targets)
+
+        rendered = paired_rendered.reshape(
+            batch_size * view_count, channels, height, width
+        )
+        observed_foreground = estimate_top_left_flood_foreground(
+            rendered,
+            color_tolerance=args.real_semantic_foreground_flood_tolerance,
+            gradient_tolerance=(
+                args.real_semantic_foreground_flood_gradient_tolerance
+            ),
+            max_seed_tolerance=(
+                args.real_semantic_foreground_flood_max_seed_tolerance
+            ),
+        )
+        rendered = build_parser_input(
+            rendered,
+            observed_foreground,
+            bg_color=args.bg_color,
+            background_mode=args.real_semantic_parser_background,
+        )
+
+    view_ids = torch.arange(
+        view_count, device=rendered.device, dtype=torch.long
+    ).view(1, view_count).expand(batch_size, -1).reshape(-1)
+    targets = stack_view_targets(targets_by_view)
+    # Frozen semantic backbones use the same foreground evidence at training
+    # and inference.  Parser-only target heads are disabled in this stage.
+    targets["foreground"] = observed_foreground.unsqueeze(1).to(
+        dtype=rendered.dtype
+    )
+    return rendered, targets, view_count, view_ids
 
 
 def privileged_training_views(args):
@@ -2899,14 +2992,25 @@ def run_epoch(
 
     for batch_index, batch in enumerate(iterator):
         batch = move_batch(batch, device)
-        rendered, targets, _, view_ids = build_parser_inputs(
-            batch["uv"],
-            renderer,
-            views,
-            train=train,
-            args=args,
-            view_role_ids=view_role_ids,
-        )
+        if "rendered" in batch:
+            rendered, targets, _, view_ids = (
+                build_paired_render_parser_inputs(
+                    batch["uv"],
+                    batch["rendered"],
+                    renderer,
+                    views,
+                    args,
+                )
+            )
+        else:
+            rendered, targets, _, view_ids = build_parser_inputs(
+                batch["uv"],
+                renderer,
+                views,
+                train=train,
+                args=args,
+                view_role_ids=view_role_ids,
+            )
         parser_samples = rendered.shape[0]
         semantic_features = cached_semantic_batch(
             semantic_cache, batch["path"], device
@@ -3740,9 +3844,20 @@ def save_preview(
     model.eval()
     views = parse_views(args.views)
     batch = move_batch(next(iter(loader)), device)
-    rendered, targets, view_count, view_ids = build_parser_inputs(
-        batch["uv"], renderer, views, train=False, args=args
-    )
+    if "rendered" in batch:
+        rendered, targets, view_count, view_ids = (
+            build_paired_render_parser_inputs(
+                batch["uv"],
+                batch["rendered"],
+                renderer,
+                views,
+                args,
+            )
+        )
+    else:
+        rendered, targets, view_count, view_ids = build_parser_inputs(
+            batch["uv"], renderer, views, train=False, args=args
+        )
     semantic_features = cached_semantic_batch(
         semantic_cache, batch["path"], device
     )
@@ -4307,8 +4422,56 @@ def save_checkpoint(
 def build_arg_parser():
     parser = argparse.ArgumentParser(description="Train a dense render-pixel to Minecraft UV parser.")
     parser.add_argument("--data_dir", default="../skins")
+    parser.add_argument(
+        "--real_semantic_data_dir",
+        default=None,
+        help=(
+            "Recursively load paired *_edited renders and 64x64 *_result UVs "
+            "for real-domain semantic training. Only valid with "
+            "--training_stage semantic."
+        ),
+    )
+    parser.add_argument("--real_semantic_manifest", default=None)
+    parser.add_argument("--real_semantic_view_height", type=int, default=512)
+    parser.add_argument("--real_semantic_view_width", type=int, default=256)
+    parser.add_argument(
+        "--real_semantic_foreground_flood_tolerance",
+        type=float,
+        default=PRODUCTION_PREPROCESSING_DEFAULTS[
+            "foreground_flood_tolerance"
+        ],
+    )
+    parser.add_argument(
+        "--real_semantic_foreground_flood_gradient_tolerance",
+        type=float,
+        default=PRODUCTION_PREPROCESSING_DEFAULTS[
+            "foreground_flood_gradient_tolerance"
+        ],
+    )
+    parser.add_argument(
+        "--real_semantic_foreground_flood_max_seed_tolerance",
+        type=float,
+        default=PRODUCTION_PREPROCESSING_DEFAULTS[
+            "foreground_flood_max_seed_tolerance"
+        ],
+    )
+    parser.add_argument(
+        "--real_semantic_parser_background",
+        choices=("adaptive", "neutral"),
+        default=PRODUCTION_PREPROCESSING_DEFAULTS[
+            "foreground_parser_background"
+        ],
+    )
     parser.add_argument("--output_dir", default="runs/dense_uv_parser")
     parser.add_argument("--resume", default=None, help="Checkpoint to resume; --epochs remains the final epoch number.")
+    parser.add_argument(
+        "--initialize",
+        default=None,
+        help=(
+            "Load model weights from a compatible checkpoint while resetting "
+            "optimizer, epoch, and best-metric history."
+        ),
+    )
     parser.add_argument(
         "--training_stage",
         choices=("parser", "semantic"),
@@ -4797,6 +4960,15 @@ def build_arg_parser():
         "--lambda_dense_semantics", type=float, default=0.30
     )
     parser.add_argument(
+        "--dense_semantic_outer_false_positive_weight",
+        type=float,
+        default=0.0,
+        help=(
+            "Weight for per-image hard inner-to-outer semantic negatives. "
+            "Semantic-only real-domain training enables this explicitly."
+        ),
+    )
+    parser.add_argument(
         "--lambda_head_outer_presence", type=float, default=0.0
     )
     parser.add_argument(
@@ -5022,8 +5194,41 @@ def build_arg_parser():
 def main():
     args = build_arg_parser().parse_args()
     args.bg_color = (128, 128, 128)
+    if args.resume and args.initialize:
+        raise ValueError("--resume and --initialize are mutually exclusive.")
+    if args.real_semantic_data_dir:
+        if args.training_stage != "semantic":
+            raise ValueError(
+                "--real_semantic_data_dir is only valid with "
+                "--training_stage semantic."
+            )
+        if parse_views(args.privileged_views):
+            raise ValueError(
+                "Real paired semantic training has only the two inference "
+                "views; set --privileged_views to an empty string."
+            )
+        if len(parse_views(args.views)) != 2:
+            raise ValueError(
+                "Real paired semantic training requires exactly two views."
+            )
+        if min(
+            args.real_semantic_view_height,
+            args.real_semantic_view_width,
+        ) < 1:
+            raise ValueError("Real semantic view dimensions must be positive.")
+        for name in (
+            "real_semantic_foreground_flood_tolerance",
+            "real_semantic_foreground_flood_gradient_tolerance",
+            "real_semantic_foreground_flood_max_seed_tolerance",
+        ):
+            if not 0.0 <= getattr(args, name) <= 1.0:
+                raise ValueError(f"--{name} must be in [0, 1].")
     if args.strict_determinism and not args.reproducible:
         raise ValueError("--strict_determinism requires --reproducible.")
+    if args.dense_semantic_outer_false_positive_weight < 0.0:
+        raise ValueError(
+            "--dense_semantic_outer_false_positive_weight must be non-negative."
+        )
     seed_everything(args.seed, reproducible=args.reproducible)
     if not 0.0 <= args.feature_dropout < 1.0:
         raise ValueError("--feature_dropout must be in [0, 1).")
@@ -5393,12 +5598,28 @@ def main():
             "Primary and privileged renderer views must be unique."
         )
 
-    dataset = SkinUVDataset(
-        data_dir=args.data_dir,
-        mappings_dir=args.mappings_dir,
-        views=args.views,
-        max_samples=args.max_samples,
-    )
+    if args.real_semantic_data_dir:
+        dataset = PairedRenderSkinDataset(
+            data_dir=args.real_semantic_data_dir,
+            views=primary_views,
+            view_size=(
+                args.real_semantic_view_height,
+                args.real_semantic_view_width,
+            ),
+            max_samples=args.max_samples,
+            manifest_path=args.real_semantic_manifest,
+        )
+        print(
+            "Real-domain semantic pairs: "
+            f"{len(dataset)} from {Path(args.real_semantic_data_dir).resolve()}"
+        )
+    else:
+        dataset = SkinUVDataset(
+            data_dir=args.data_dir,
+            mappings_dir=args.mappings_dir,
+            views=args.views,
+            max_samples=args.max_samples,
+        )
     semantic_cache = None
     runtime_semantic_backbone = None
     semantic_feature_dim = 0
@@ -5423,7 +5644,7 @@ def main():
                 args.siglip_cache_dir,
                 expected_views=training_views,
                 expected_model=args.siglip_model,
-                expected_data_dir=args.data_dir,
+                expected_data_dir=dataset.data_dir,
                 require_spatial=args.siglip_cache_require_spatial,
             )
             missing_semantics = [
@@ -5564,6 +5785,20 @@ def main():
     ]
     if missing_views:
         raise ValueError(f"Unknown renderer views {missing_views}. Available views: {', '.join(renderer.views)}")
+    if args.real_semantic_data_dir:
+        expected_size = (
+            args.real_semantic_view_height,
+            args.real_semantic_view_width,
+        )
+        for view in primary_views:
+            mapping_size = tuple(
+                getattr(renderer, f"{view}_inner_mask").shape
+            )
+            if mapping_size != expected_size:
+                raise ValueError(
+                    f"Real semantic view size {expected_size} does not match "
+                    f"renderer mapping {view}={mapping_size}."
+                )
 
     affine_mode = args.parser_mode in ("geometry_fit", "global_affine")
     geometry_only = args.parser_mode == "geometry_fit"
@@ -5658,6 +5893,38 @@ def main():
             backbone=runtime_semantic_backbone,
             runtime_batch_size=args.semantic_runtime_batch_size,
         )
+    if args.initialize:
+        initialize_path = Path(args.initialize)
+        if not initialize_path.is_file():
+            raise FileNotFoundError(
+                f"Initialization checkpoint not found: {initialize_path}"
+            )
+        initialize_checkpoint = torch.load(
+            initialize_path,
+            map_location="cpu",
+            weights_only=False,
+        )
+        initialize_stage = initialize_checkpoint.get(
+            "model_config", {}
+        ).get(
+            "training_stage",
+            initialize_checkpoint.get("args", {}).get(
+                "training_stage", "parser"
+            ),
+        )
+        if initialize_stage != args.training_stage:
+            raise ValueError(
+                "Initialization checkpoint training stage does not match: "
+                f"checkpoint={initialize_stage!r}, "
+                f"requested={args.training_stage!r}."
+            )
+        model.load_state_dict(initialize_checkpoint["model"], strict=True)
+        print(
+            "Initialized model weights from "
+            f"{initialize_path} (checkpoint epoch "
+            f"{initialize_checkpoint.get('epoch', 'unknown')}); optimizer "
+            "and best-metric history were reset."
+        )
     configure_training_stage(model, args.training_stage)
     criterion = DenseUVParserLoss(
         lambda_foreground=args.lambda_foreground,
@@ -5676,6 +5943,9 @@ def main():
         lambda_route_texel_consistency=args.lambda_route_texel_consistency,
         lambda_text_prompt_route=args.lambda_text_prompt_route,
         lambda_dense_semantics=args.lambda_dense_semantics,
+        dense_semantic_outer_false_positive_weight=(
+            args.dense_semantic_outer_false_positive_weight
+        ),
         lambda_route_prior_regularization=(
             args.lambda_route_prior_regularization
         ),
@@ -5980,6 +6250,17 @@ def main():
 
     metadata = {
         "training_stage": args.training_stage,
+        "training_domain": (
+            "paired_stage_one"
+            if args.real_semantic_data_dir
+            else "synthetic_renderer"
+        ),
+        "real_semantic_data_dir": (
+            str(Path(args.real_semantic_data_dir).resolve())
+            if args.real_semantic_data_dir
+            else None
+        ),
+        "initialized_from": args.initialize,
         "num_samples": len(dataset),
         "train_samples": len(train_dataset),
         "val_samples": len(val_dataset) if val_dataset is not None else 0,

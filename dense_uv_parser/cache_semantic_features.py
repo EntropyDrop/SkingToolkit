@@ -32,8 +32,18 @@ from SkingToolkit.dense_uv_parser.semantic_cache import (  # noqa: E402
     SigLIPGlobalCache,
 )
 from SkingToolkit.dense_uv_parser.runtime import get_device  # noqa: E402
-from SkingToolkit.dense_uv_parser.skin_dataset import SkinUVDataset  # noqa: E402
-from SkingToolkit.dense_uv_parser.utils import parse_views  # noqa: E402
+from SkingToolkit.dense_uv_parser.foreground import build_parser_input  # noqa: E402
+from SkingToolkit.dense_uv_parser.inference_config import (  # noqa: E402
+    PRODUCTION_PREPROCESSING_DEFAULTS,
+)
+from SkingToolkit.dense_uv_parser.skin_dataset import (  # noqa: E402
+    PairedRenderSkinDataset,
+    SkinUVDataset,
+)
+from SkingToolkit.dense_uv_parser.utils import (  # noqa: E402
+    estimate_top_left_flood_foreground,
+    parse_views,
+)
 
 try:
     from tqdm import tqdm
@@ -54,6 +64,7 @@ def cache_is_reusable(
     views,
     siglip_model,
     require_spatial=False,
+    preprocessing=None,
 ):
     try:
         cache = SigLIPGlobalCache(
@@ -64,6 +75,8 @@ def cache_is_reusable(
             require_spatial=require_spatial,
         )
     except (FileNotFoundError, ValueError, KeyError, json.JSONDecodeError):
+        return False
+    if cache.metadata.get("preprocessing") != preprocessing:
         return False
     cached_filenames = list(cache.filename_to_index)
     requested_filenames = [path.name for path in dataset.skin_paths]
@@ -79,6 +92,42 @@ def build_arg_parser():
         description="Cache fixed-view SigLIP2 global and optional spatial features."
     )
     parser.add_argument("--data_dir", default="../skins")
+    parser.add_argument(
+        "--paired_render_data_dir",
+        default=None,
+        help="Cache preprocessed *_edited inputs instead of synthetic renders.",
+    )
+    parser.add_argument("--paired_manifest", default=None)
+    parser.add_argument("--paired_view_height", type=int, default=512)
+    parser.add_argument("--paired_view_width", type=int, default=256)
+    parser.add_argument(
+        "--paired_foreground_flood_tolerance",
+        type=float,
+        default=PRODUCTION_PREPROCESSING_DEFAULTS[
+            "foreground_flood_tolerance"
+        ],
+    )
+    parser.add_argument(
+        "--paired_foreground_flood_gradient_tolerance",
+        type=float,
+        default=PRODUCTION_PREPROCESSING_DEFAULTS[
+            "foreground_flood_gradient_tolerance"
+        ],
+    )
+    parser.add_argument(
+        "--paired_foreground_flood_max_seed_tolerance",
+        type=float,
+        default=PRODUCTION_PREPROCESSING_DEFAULTS[
+            "foreground_flood_max_seed_tolerance"
+        ],
+    )
+    parser.add_argument(
+        "--paired_parser_background",
+        choices=("adaptive", "neutral"),
+        default=PRODUCTION_PREPROCESSING_DEFAULTS[
+            "foreground_parser_background"
+        ],
+    )
     parser.add_argument("--cache_dir", required=True)
     parser.add_argument("--mappings_dir", required=True)
     parser.add_argument(
@@ -110,7 +159,37 @@ def main():
     views = parse_views(args.views)
     if len(views) < 2:
         raise ValueError("At least front and back cache views are required.")
-    dataset = SkinUVDataset(args.data_dir, max_samples=args.max_samples)
+    paired_preprocessing = None
+    if args.paired_render_data_dir:
+        for name in (
+            "paired_foreground_flood_tolerance",
+            "paired_foreground_flood_gradient_tolerance",
+            "paired_foreground_flood_max_seed_tolerance",
+        ):
+            if not 0.0 <= getattr(args, name) <= 1.0:
+                raise ValueError(f"--{name} must be in [0, 1].")
+        paired_preprocessing = {
+            "foreground_flood_tolerance": (
+                args.paired_foreground_flood_tolerance
+            ),
+            "foreground_flood_gradient_tolerance": (
+                args.paired_foreground_flood_gradient_tolerance
+            ),
+            "foreground_flood_max_seed_tolerance": (
+                args.paired_foreground_flood_max_seed_tolerance
+            ),
+            "foreground_parser_background": args.paired_parser_background,
+        }
+    if args.paired_render_data_dir:
+        dataset = PairedRenderSkinDataset(
+            args.paired_render_data_dir,
+            views=views,
+            view_size=(args.paired_view_height, args.paired_view_width),
+            max_samples=args.max_samples,
+            manifest_path=args.paired_manifest,
+        )
+    else:
+        dataset = SkinUVDataset(args.data_dir, max_samples=args.max_samples)
     cache_dir = Path(args.cache_dir)
     if not args.force and cache_is_reusable(
         cache_dir,
@@ -118,6 +197,7 @@ def main():
         views,
         args.siglip_model,
         require_spatial=args.spatial,
+        preprocessing=paired_preprocessing,
     ):
         cache_kind = "global + spatial" if args.spatial else "global"
         print(f"Reusing complete SigLIP {cache_kind} cache: {cache_dir}")
@@ -161,9 +241,34 @@ def main():
     offset = 0
     for batch in iterator:
         uv = batch["uv"].to(device, non_blocking=True)
-        renders = torch.stack(
-            [renderer.forward_view(uv, view) for view in views], dim=1
-        )
+        if "rendered" in batch:
+            renders = batch["rendered"].to(device, non_blocking=True)
+            batch_size, view_count, channels, height, width = renders.shape
+            flat_renders = renders.reshape(
+                batch_size * view_count, channels, height, width
+            )
+            foreground = estimate_top_left_flood_foreground(
+                flat_renders,
+                color_tolerance=args.paired_foreground_flood_tolerance,
+                gradient_tolerance=(
+                    args.paired_foreground_flood_gradient_tolerance
+                ),
+                max_seed_tolerance=(
+                    args.paired_foreground_flood_max_seed_tolerance
+                ),
+            )
+            flat_renders = build_parser_input(
+                flat_renders,
+                foreground,
+                background_mode=args.paired_parser_background,
+            )
+            renders = flat_renders.reshape(
+                batch_size, view_count, channels, height, width
+            )
+        else:
+            renders = torch.stack(
+                [renderer.forward_view(uv, view) for view in views], dim=1
+            )
         batch_size, view_count, _, height, width = renders.shape
         images = renders[:, :, :3].reshape(batch_size * view_count, 3, height, width)
         if images.is_cuda:
@@ -231,7 +336,13 @@ def main():
 
     metadata = {
         "version": SIGLIP_CACHE_VERSION,
-        "data_dir": str(Path(args.data_dir).resolve()),
+        "data_dir": str(dataset.data_dir.resolve()),
+        "input_domain": (
+            "paired_stage_one"
+            if args.paired_render_data_dir
+            else "synthetic_renderer"
+        ),
+        "preprocessing": paired_preprocessing,
         "filenames": [path.name for path in dataset.skin_paths],
         "views": views,
         "siglip_model": args.siglip_model,

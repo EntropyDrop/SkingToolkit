@@ -3,21 +3,50 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
-# Stage one trains only the five-class per-pixel semantic classifier.  The
-# main route, UV occupancy, and topology heads are deliberately disabled so a
-# good parser loss cannot hide a bad semantic map (or vice versa).
+# Train only the five-class per-pixel semantic classifier.  By default this
+# command performs real-domain adaptation on archived *_edited / *_result
+# pairs.  If a previous synthetic semantic checkpoint exists it is used only
+# to initialize model weights; optimizer and checkpoint-selection history are
+# reset and the real validation split chooses the new best checkpoint.
 export TRAINING_STAGE="semantic"
 export RUN_FAMILY="${RUN_FAMILY:-dense_uv_semantic_v}"
-export EPOCHS="${EPOCHS:-3}"
+export REAL_SEMANTIC_DATA_DIR="${REAL_SEMANTIC_DATA_DIR-../../SKING_DDJ_Dataset/entropydrop_website_generations}"
+export PRIVILEGED_VIEWS=""
+export EPOCHS="${EPOCHS:-12}"
+export LR="${LR:-5e-5}"
 export BEST_METRIC="${BEST_METRIC:-semantic_foreground_macro_iou_error}"
-export FEATURE_DROPOUT="${FEATURE_DROPOUT:-0.05}"
+export FEATURE_DROPOUT="${FEATURE_DROPOUT:-0.15}"
 export REPRODUCIBLE="${REPRODUCIBLE:-true}"
 export STRICT_DETERMINISM="${STRICT_DETERMINISM:-false}"
+export BACKGROUND_AUGMENT="false"
+
+if [[ -n "$REAL_SEMANTIC_DATA_DIR" && -z "${INITIALIZE:-}" ]]; then
+  latest_version=-1
+  latest_checkpoint=""
+  shopt -s nullglob
+  for checkpoint in runs/dense_uv_semantic_v*/best.pt; do
+    run_name="$(basename "$(dirname "$checkpoint")")"
+    version="${run_name#dense_uv_semantic_v}"
+    [[ "$version" =~ ^[0-9]+$ ]] || continue
+    if (( 10#$version > latest_version )); then
+      latest_version=$((10#$version))
+      latest_checkpoint="$checkpoint"
+    fi
+  done
+  shopt -u nullglob
+  if [[ -n "$latest_checkpoint" ]]; then
+    export INITIALIZE="$latest_checkpoint"
+    echo "Initializing real-domain semantics from: $INITIALIZE"
+  else
+    echo "No previous semantic checkpoint found; training real-domain semantics from scratch."
+  fi
+fi
 
 export SEMANTIC_BACKBONE="siglip2"
 export SIGLIP_TEXT_PROMPT_FUSION="true"
 export DENSE_SEMANTIC_TARGET_VERSION="3"
 export LAMBDA_DENSE_SEMANTICS="${LAMBDA_DENSE_SEMANTICS:-1.0}"
+export DENSE_SEMANTIC_OUTER_FALSE_POSITIVE_WEIGHT="${DENSE_SEMANTIC_OUTER_FALSE_POSITIVE_WEIGHT:-1.0}"
 export LAMBDA_TEXT_PROMPT_ROUTE="0"
 
 export PREDICT_HEAD_OUTER_STRUCTURE="false"

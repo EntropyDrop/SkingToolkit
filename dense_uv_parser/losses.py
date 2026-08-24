@@ -1,3 +1,5 @@
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -374,6 +376,51 @@ def dense_semantic_segmentation_terms(
     return result
 
 
+def dense_semantic_outer_false_positive_loss(
+    dense_semantic_logits,
+    semantic_targets,
+    hard_negative_fraction=0.01,
+    min_hard_negatives=32,
+    ignore_index=IGNORE_INDEX,
+):
+    """Penalize the strongest inner->outer semantic mistakes.
+
+    The first three classes in the five-class schema are outer-layer classes
+    and class three is inner skin.  Rare-class recall weighting alone can make
+    isolated shirt, face, or leg pixels look like accessories.  Averaging all
+    inner negatives hides those sparse errors, so this term selects the worst
+    inner pixels independently in every image.
+    """
+    logits = dense_semantic_logits.float()
+    targets = semantic_targets.to(device=logits.device, dtype=torch.long)
+    zero = logits.sum() * 0.0
+    if logits.shape[1] != 5:
+        return zero
+
+    valid_inner = (targets == 3) & (targets != int(ignore_index))
+    if not valid_inner.any():
+        return zero
+    # Compare the outer union directly with the inner class.  This is invariant
+    # to a common shift of all logits and therefore matches argmax routing.
+    outer_union_logit = torch.logsumexp(logits[:, :3], dim=1)
+    outer_vs_inner_margin = outer_union_logit - logits[:, 3]
+    sample_losses = []
+    for sample_index in range(logits.shape[0]):
+        margins = outer_vs_inner_margin[sample_index][
+            valid_inner[sample_index]
+        ]
+        if margins.numel() == 0:
+            continue
+        hard_count = max(
+            int(min_hard_negatives),
+            int(math.ceil(margins.numel() * float(hard_negative_fraction))),
+        )
+        hard_count = min(hard_count, margins.numel())
+        hard_margins = margins.topk(hard_count, sorted=False).values
+        sample_losses.append(F.softplus(hard_margins).mean())
+    return torch.stack(sample_losses).mean() if sample_losses else zero
+
+
 def _dense_semantic_class_terms(
     dense_semantic_logits,
     targets,
@@ -490,6 +537,7 @@ class DenseUVParserLoss(nn.Module):
         lambda_route_texel_consistency=0.25,
         lambda_text_prompt_route=0.0,
         lambda_dense_semantics=0.30,
+        dense_semantic_outer_false_positive_weight=0.0,
         lambda_route_prior_regularization=0.001,
         outer_false_positive_gamma=2.0,
         outer_false_negative_gamma=2.0,
@@ -520,6 +568,9 @@ class DenseUVParserLoss(nn.Module):
         self.lambda_route_texel_consistency = lambda_route_texel_consistency
         self.lambda_text_prompt_route = lambda_text_prompt_route
         self.lambda_dense_semantics = lambda_dense_semantics
+        self.dense_semantic_outer_false_positive_weight = max(
+            float(dense_semantic_outer_false_positive_weight), 0.0
+        )
         self.lambda_route_prior_regularization = float(
             lambda_route_prior_regularization
         )
@@ -818,6 +869,12 @@ class DenseUVParserLoss(nn.Module):
                 outputs["dense_semantic_logits"],
                 targets["dense_semantics"],
             )
+            loss_dense_semantic_outer_false_positive = (
+                dense_semantic_outer_false_positive_loss(
+                    outputs["dense_semantic_logits"],
+                    targets["dense_semantics"],
+                )
+            )
             loss_dense_semantics = (
                 loss_dense_semantic_focal
                 + 0.50
@@ -840,6 +897,8 @@ class DenseUVParserLoss(nn.Module):
                 ]
                 + 0.10
                 * eye_accessory_terms["loss_head_eye_accessory_presence"]
+                + self.dense_semantic_outer_false_positive_weight
+                * loss_dense_semantic_outer_false_positive
             )
             acc_dense_semantics = _masked_accuracy(
                 outputs["dense_semantic_logits"],
@@ -847,6 +906,7 @@ class DenseUVParserLoss(nn.Module):
             )
         else:
             loss_dense_semantic_focal = zero
+            loss_dense_semantic_outer_false_positive = zero
             loss_dense_semantics = zero
             acc_dense_semantics = zero
             top_accessory_terms = head_top_accessory_semantic_terms(
@@ -927,6 +987,9 @@ class DenseUVParserLoss(nn.Module):
             "loss_text_prompt_route_weighted": weighted_text_prompt_route,
             "loss_dense_semantics": loss_dense_semantics,
             "loss_dense_semantic_focal": loss_dense_semantic_focal,
+            "loss_dense_semantic_outer_false_positive": (
+                loss_dense_semantic_outer_false_positive
+            ),
             "loss_dense_semantics_weighted": weighted_dense_semantics,
             "acc_dense_semantics": acc_dense_semantics,
             **dense_segmentation_terms,
