@@ -121,8 +121,10 @@ if [[ "$PARSER_ONLY" == "true" && "$PARSER_UV_OUTPUT_WAS_SET" == "false" ]]; the
   PARSER_UV_OUTPUT="outputs/parser_only_uv.png"
 fi
 SIMPLE_INPAINT_OUTPUT="${SIMPLE_INPAINT_OUTPUT-outputs/parser_pred_uv_simple_inpainting.png}"
+SIMPLE_INPAINT_RENDER_OUTPUT="${SIMPLE_INPAINT_RENDER_OUTPUT-outputs/simple_inpaint_render.png}"
 if [[ "$PARSER_ONLY" == "true" ]]; then
   SIMPLE_INPAINT_OUTPUT=""
+  SIMPLE_INPAINT_RENDER_OUTPUT=""
 fi
 DEBUG_OUTPUT="${DEBUG_OUTPUT-outputs/parser_debug.png}"
 OVERLAY_OUTPUT="${OVERLAY_OUTPUT-outputs/parser_debug_overlay.png}"
@@ -354,21 +356,13 @@ if [[ "$SEMANTIC_ONLY" == "true" ]]; then
   args+=(--semantic_only)
 fi
 
-if [[ -n "$FOREGROUND_PROBABILITY_OUTPUT" ]]; then
-  args+=(--foreground_probability_output "$FOREGROUND_PROBABILITY_OUTPUT")
-fi
-if [[ -n "$FOREGROUND_MASK_OUTPUT" ]]; then
-  args+=(--foreground_mask_output "$FOREGROUND_MASK_OUTPUT")
-fi
-if [[ -n "$FOREGROUND_RAW_MASK_OUTPUT" ]]; then
-  args+=(--foreground_raw_mask_output "$FOREGROUND_RAW_MASK_OUTPUT")
-fi
-if [[ -n "$FOREGROUND_CUTOUT_OUTPUT" ]]; then
-  args+=(--foreground_cutout_output "$FOREGROUND_CUTOUT_OUTPUT")
-fi
-if [[ -n "$FOREGROUND_PARSER_INPUT_OUTPUT" ]]; then
-  args+=(--foreground_parser_input_output "$FOREGROUND_PARSER_INPUT_OUTPUT")
-fi
+args+=(
+  --foreground_probability_output "$FOREGROUND_PROBABILITY_OUTPUT"
+  --foreground_mask_output "$FOREGROUND_MASK_OUTPUT"
+  --foreground_raw_mask_output "$FOREGROUND_RAW_MASK_OUTPUT"
+  --foreground_cutout_output "$FOREGROUND_CUTOUT_OUTPUT"
+  --foreground_parser_input_output "$FOREGROUND_PARSER_INPUT_OUTPUT"
+)
 
 if [[ "$GEOMETRY_ROUTE_TEXEL_CONSENSUS" == "true" ]]; then
   args+=(--geometry_route_texel_consensus)
@@ -469,17 +463,12 @@ if [[ -n "$CONDITIONING_OUTPUT" ]]; then
   args+=(--conditioning_output "$CONDITIONING_OUTPUT")
 fi
 
-if [[ -n "$PARSER_UV_OUTPUT" ]]; then
-  args+=(--parser_uv_output "$PARSER_UV_OUTPUT")
-fi
-
-if [[ -n "$SIMPLE_INPAINT_OUTPUT" ]]; then
-  args+=(--simple_inpaint_output "$SIMPLE_INPAINT_OUTPUT")
-fi
-
-if [[ -n "$HEAD_EYE_SEMANTIC_OUTER_UV_OUTPUT" ]]; then
-  args+=(--head_eye_semantic_outer_uv_output "$HEAD_EYE_SEMANTIC_OUTER_UV_OUTPUT")
-fi
+args+=(
+  --parser_uv_output "$PARSER_UV_OUTPUT"
+  --simple_inpaint_output "$SIMPLE_INPAINT_OUTPUT"
+  --simple_inpaint_render_output "$SIMPLE_INPAINT_RENDER_OUTPUT"
+  --head_eye_semantic_outer_uv_output "$HEAD_EYE_SEMANTIC_OUTER_UV_OUTPUT"
+)
 
 if [[ -n "$DEBUG_OUTPUT" ]]; then
   args+=(--debug_output "$DEBUG_OUTPUT")
@@ -547,15 +536,12 @@ fi
 if [[ -n "$SEMANTIC_OUTPUT" ]]; then
   args+=(--semantic_output "$SEMANTIC_OUTPUT")
 fi
-if [[ -n "$SEMANTIC_PIXEL_OUTPUT" ]]; then
-  args+=(--semantic_pixel_output "$SEMANTIC_PIXEL_OUTPUT")
-fi
+args+=(
+  --semantic_pixel_output "$SEMANTIC_PIXEL_OUTPUT"
+  --output "$OUTPUT"
+)
 
-if [[ -n "$OUTPUT" ]]; then
-  args+=(--output "$OUTPUT")
-fi
-
-if [[ -z "$CONDITIONING_OUTPUT" && -z "$PARSER_UV_OUTPUT" && -z "$SIMPLE_INPAINT_OUTPUT" && -z "$DEBUG_OUTPUT" && -z "$OVERLAY_OUTPUT" && -z "$INNER_CUTOUT_OUTPUT" && -z "$OUTER_CUTOUT_OUTPUT" && -z "$SECONDARY_CUTOUT_OUTPUT" && -z "$COLOR_SOURCE_OUTPUT" && -z "$FACE_OUTPUT" && -z "$LAYER_FACE_OUTPUT" && -z "$RAW_FACE_OUTPUT" && -z "$RAW_LAYER_FACE_OUTPUT" && -z "$CANONICAL_FOREGROUND_OUTPUT" && -z "$GEOMETRY_GRID_OUTPUT" && -z "$GEOMETRY_OVERLAY_OUTPUT" && -z "$GEOMETRY_ROUTED_OVERLAY_OUTPUT" && -z "$GEOMETRY_FILL_OUTPUT" && -z "$OUTER_UV_OCCUPANCY_OUTPUT" && -z "$HEAD_OUTER_STRUCTURE_OUTPUT" && -z "$SEMANTIC_OUTPUT" && -z "$SEMANTIC_PIXEL_OUTPUT" && -z "$OUTPUT" ]]; then
+if [[ -z "$CONDITIONING_OUTPUT" && -z "$PARSER_UV_OUTPUT" && -z "$SIMPLE_INPAINT_OUTPUT" && -z "$SIMPLE_INPAINT_RENDER_OUTPUT" && -z "$DEBUG_OUTPUT" && -z "$OVERLAY_OUTPUT" && -z "$INNER_CUTOUT_OUTPUT" && -z "$OUTER_CUTOUT_OUTPUT" && -z "$SECONDARY_CUTOUT_OUTPUT" && -z "$COLOR_SOURCE_OUTPUT" && -z "$FACE_OUTPUT" && -z "$LAYER_FACE_OUTPUT" && -z "$RAW_FACE_OUTPUT" && -z "$RAW_LAYER_FACE_OUTPUT" && -z "$CANONICAL_FOREGROUND_OUTPUT" && -z "$GEOMETRY_GRID_OUTPUT" && -z "$GEOMETRY_OVERLAY_OUTPUT" && -z "$GEOMETRY_ROUTED_OVERLAY_OUTPUT" && -z "$GEOMETRY_FILL_OUTPUT" && -z "$OUTER_UV_OCCUPANCY_OUTPUT" && -z "$HEAD_OUTER_STRUCTURE_OUTPUT" && -z "$SEMANTIC_OUTPUT" && -z "$SEMANTIC_PIXEL_OUTPUT" && -z "$OUTPUT" ]]; then
   echo "Nothing to write. Set at least one parser/debug/final output." >&2
   exit 1
 fi

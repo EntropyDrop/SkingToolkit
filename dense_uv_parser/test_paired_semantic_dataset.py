@@ -89,6 +89,27 @@ class PairedSemanticDatasetTest(unittest.TestCase):
             self.assertEqual(len(dataset), 1)
             self.assertTrue(dataset[0]["path"].endswith("keep_edited.png"))
 
+    def test_versioned_result_suffix_never_falls_back(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _write_pair(root, "sample")
+            with self.assertRaisesRegex(ValueError, "_v94_result"):
+                PairedRenderSkinDataset(
+                    root,
+                    result_suffix="_v94_result",
+                )
+
+            (root / "sample_result.png").rename(
+                root / "sample_v94_result.png"
+            )
+            dataset = PairedRenderSkinDataset(
+                root,
+                result_suffix="_v94_result",
+            )
+            self.assertTrue(
+                dataset[0]["uv_path"].endswith("sample_v94_result.png")
+            )
+
     def test_hard_negative_loss_penalizes_sparse_inner_to_outer_error(self):
         targets = torch.full((1, 8, 8), 3, dtype=torch.long)
         correct = torch.zeros(1, 5, 8, 8)

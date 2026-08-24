@@ -4,13 +4,15 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 # Train only the five-class per-pixel semantic classifier.  By default this
-# command performs real-domain adaptation on archived *_edited / *_result
-# pairs.  If a previous synthetic semantic checkpoint exists it is used only
+# command performs real-domain adaptation on archived *_edited / *_v94_result
+# pairs. Files using the historical *_result suffix are deliberately ignored.
+# If a previous synthetic semantic checkpoint exists it is used only
 # to initialize model weights; optimizer and checkpoint-selection history are
 # reset and the real validation split chooses the new best checkpoint.
 export TRAINING_STAGE="semantic"
 export RUN_FAMILY="${RUN_FAMILY:-dense_uv_semantic_v}"
 export REAL_SEMANTIC_DATA_DIR="${REAL_SEMANTIC_DATA_DIR-../../SKING_DDJ_Dataset/entropydrop_website_generations}"
+export REAL_SEMANTIC_RESULT_SUFFIX="${REAL_SEMANTIC_RESULT_SUFFIX:-_v94_result}"
 export PRIVILEGED_VIEWS=""
 export EPOCHS="${EPOCHS:-12}"
 export LR="${LR:-5e-5}"
@@ -19,6 +21,16 @@ export FEATURE_DROPOUT="${FEATURE_DROPOUT:-0.15}"
 export REPRODUCIBLE="${REPRODUCIBLE:-true}"
 export STRICT_DETERMINISM="${STRICT_DETERMINISM:-false}"
 export BACKGROUND_AUGMENT="false"
+
+if [[ -n "$REAL_SEMANTIC_DATA_DIR" ]]; then
+  v94_pair_count="$(find "$REAL_SEMANTIC_DATA_DIR" -type f -name "*${REAL_SEMANTIC_RESULT_SUFFIX}.png" | wc -l | tr -d ' ')"
+  if (( v94_pair_count == 0 )); then
+    echo "No *${REAL_SEMANTIC_RESULT_SUFFIX}.png labels found under $REAL_SEMANTIC_DATA_DIR." >&2
+    echo "Generate them first with ./regenerate_v94_semantic_results.sh" >&2
+    exit 1
+  fi
+  echo "Found versioned semantic UV labels: $v94_pair_count"
+fi
 
 if [[ -n "$REAL_SEMANTIC_DATA_DIR" && -z "${INITIALIZE:-}" ]]; then
   latest_version=-1

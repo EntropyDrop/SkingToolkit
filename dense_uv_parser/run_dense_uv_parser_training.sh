@@ -83,6 +83,7 @@ fi
 DATA_DIR="${DATA_DIR:-../skins}"
 REAL_SEMANTIC_DATA_DIR="${REAL_SEMANTIC_DATA_DIR:-}"
 REAL_SEMANTIC_MANIFEST="${REAL_SEMANTIC_MANIFEST:-cache/paired_semantic_manifest.json}"
+REAL_SEMANTIC_RESULT_SUFFIX="${REAL_SEMANTIC_RESULT_SUFFIX:-_v94_result}"
 MAPPINGS_SIZE="${MAPPINGS_SIZE:-256x512}"
 VIEWS="${VIEWS:-front_left,back_left}"
 PRIVILEGED_VIEWS="${PRIVILEGED_VIEWS-front_right,back_right}"
@@ -530,6 +531,7 @@ if [[ -n "$REAL_SEMANTIC_DATA_DIR" ]]; then
   real_semantic_args=(
     --real_semantic_data_dir "$REAL_SEMANTIC_DATA_DIR"
     --real_semantic_manifest "$REAL_SEMANTIC_MANIFEST"
+    --real_semantic_result_suffix "$REAL_SEMANTIC_RESULT_SUFFIX"
     --real_semantic_view_height "$REAL_SEMANTIC_VIEW_HEIGHT"
     --real_semantic_view_width "$REAL_SEMANTIC_VIEW_WIDTH"
     --real_semantic_foreground_flood_tolerance "$REAL_SEMANTIC_FOREGROUND_FLOOD_TOLERANCE"
@@ -540,6 +542,7 @@ if [[ -n "$REAL_SEMANTIC_DATA_DIR" ]]; then
   paired_cache_args=(
     --paired_render_data_dir "$REAL_SEMANTIC_DATA_DIR"
     --paired_manifest "$REAL_SEMANTIC_MANIFEST"
+    --paired_result_suffix "$REAL_SEMANTIC_RESULT_SUFFIX"
     --paired_view_height "$REAL_SEMANTIC_VIEW_HEIGHT"
     --paired_view_width "$REAL_SEMANTIC_VIEW_WIDTH"
     --paired_foreground_flood_tolerance "$REAL_SEMANTIC_FOREGROUND_FLOOD_TOLERANCE"
@@ -552,6 +555,7 @@ fi
 if [[ -n "$REAL_SEMANTIC_DATA_DIR" ]]; then
   python filter_paired_semantic_data.py \
     --data_dir "$REAL_SEMANTIC_DATA_DIR" \
+    --result_suffix "$REAL_SEMANTIC_RESULT_SUFFIX" \
     --output "$REAL_SEMANTIC_MANIFEST" \
     --mappings_dir "$MAPPINGS_DIR" \
     --views "$VIEWS" \

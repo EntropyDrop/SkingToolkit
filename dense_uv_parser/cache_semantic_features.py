@@ -98,6 +98,9 @@ def build_arg_parser():
         help="Cache preprocessed *_edited inputs instead of synthetic renders.",
     )
     parser.add_argument("--paired_manifest", default=None)
+    parser.add_argument(
+        "--paired_result_suffix", default="_v94_result"
+    )
     parser.add_argument("--paired_view_height", type=int, default=512)
     parser.add_argument("--paired_view_width", type=int, default=256)
     parser.add_argument(
@@ -187,6 +190,7 @@ def main():
             view_size=(args.paired_view_height, args.paired_view_width),
             max_samples=args.max_samples,
             manifest_path=args.paired_manifest,
+            result_suffix=args.paired_result_suffix,
         )
     else:
         dataset = SkinUVDataset(args.data_dir, max_samples=args.max_samples)

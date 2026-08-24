@@ -27,17 +27,25 @@ except ImportError:
     tqdm = None
 
 
-MANIFEST_VERSION = 1
+MANIFEST_VERSION = 2
 
 
 def build_arg_parser():
     parser = argparse.ArgumentParser(
         description=(
             "Reject archived *_edited files whose layout or contents do not "
-            "match the paired 64x64 *_result skin."
+            "match the paired versioned 64x64 result skin."
         )
     )
     parser.add_argument("--data_dir", required=True)
+    parser.add_argument(
+        "--result_suffix",
+        default="_v94_result",
+        help=(
+            "Strict UV result suffix paired with each *_edited input. Files "
+            "using another suffix are never used as a fallback."
+        ),
+    )
     parser.add_argument("--output", required=True)
     parser.add_argument("--mappings_dir", required=True)
     parser.add_argument("--views", default="front_left,back_left")
@@ -63,6 +71,7 @@ def _manifest_is_reusable(path, args, candidate_count):
     expected = {
         "version": MANIFEST_VERSION,
         "data_dir": str(Path(args.data_dir).resolve()),
+        "result_suffix": args.result_suffix,
         "views": parse_views(args.views),
         "view_size": [args.view_height, args.view_width],
         "min_silhouette_iou": args.min_silhouette_iou,
@@ -91,6 +100,7 @@ def main():
         args.data_dir,
         views=views,
         view_size=(args.view_height, args.view_width),
+        result_suffix=args.result_suffix,
     )
     output_path = Path(args.output)
     if _manifest_is_reusable(output_path, args, len(dataset)):
@@ -182,6 +192,7 @@ def main():
     manifest = {
         "version": MANIFEST_VERSION,
         "data_dir": str(data_root),
+        "result_suffix": args.result_suffix,
         "views": views,
         "view_size": [args.view_height, args.view_width],
         "min_silhouette_iou": args.min_silhouette_iou,

@@ -81,9 +81,9 @@ class PairedRenderSkinDataset(Dataset):
     """Stage-one render / 64x64 UV pairs for real-domain semantic training.
 
     Website generation archives store a normalized two-view render as
-    ``*_edited`` beside its corresponding ``*_result`` skin.  These pairs are
-    the only validation source that measures the domain used by inference;
-    rendering a random UV with the differentiable renderer cannot expose
+    ``*_edited`` beside a versioned result skin such as ``*_v94_result``.
+    These pairs are the only validation source that measures the domain used
+    by inference; rendering a random UV with the differentiable renderer cannot expose
     failures caused by stage-one shading, antialiasing, or color statistics.
     """
 
@@ -96,6 +96,7 @@ class PairedRenderSkinDataset(Dataset):
         bg_color=(128, 128, 128),
         normalize_model=True,
         manifest_path=None,
+        result_suffix="_result",
         **_ignored,
     ):
         self.data_dir = Path(data_dir)
@@ -103,6 +104,15 @@ class PairedRenderSkinDataset(Dataset):
         self.view_size = tuple(int(value) for value in view_size)
         self.bg_color = bg_color
         self.normalize_model = bool(normalize_model)
+        self.result_suffix = str(result_suffix)
+        if (
+            not self.result_suffix.startswith("_")
+            or "/" in self.result_suffix
+            or "\\" in self.result_suffix
+        ):
+            raise ValueError(
+                "result_suffix must start with '_' and contain no path separators."
+            )
         if len(self.views) != 2:
             raise ValueError(
                 "Paired render training currently requires exactly the "
@@ -121,6 +131,15 @@ class PairedRenderSkinDataset(Dataset):
                     f"Paired manifest data_dir={manifest_root} does not match "
                     f"requested {self.data_dir.resolve()}."
                 )
+            manifest_suffix = manifest.get("result_suffix")
+            if (
+                manifest_suffix is not None
+                and manifest_suffix != self.result_suffix
+            ):
+                raise ValueError(
+                    f"Paired manifest result_suffix={manifest_suffix!r} does "
+                    f"not match requested {self.result_suffix!r}."
+                )
             for item in manifest.get("pairs", []):
                 edited_path = self.data_dir / item["edited"]
                 result_path = self.data_dir / item["result"]
@@ -138,7 +157,9 @@ class PairedRenderSkinDataset(Dataset):
                 result_paths = [
                     path
                     for path in sorted(
-                        edited_path.parent.glob(f"{sample_stem}_result.*")
+                        edited_path.parent.glob(
+                            f"{sample_stem}{self.result_suffix}.*"
+                        )
                     )
                     if path.suffix.lower() in IMAGE_EXTENSIONS
                 ]
@@ -157,7 +178,8 @@ class PairedRenderSkinDataset(Dataset):
             pairs = pairs[: int(max_samples)]
         if not pairs:
             raise ValueError(
-                f"No *_edited / 64x64 *_result pairs found under {self.data_dir}."
+                "No *_edited / 64x64 "
+                f"*{self.result_suffix} pairs found under {self.data_dir}."
             )
         self.pairs = pairs
         # Keep the established cache/trainer interface.  Cache keys use the
