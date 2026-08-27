@@ -20,30 +20,31 @@ export BEST_METRIC="${BEST_METRIC:-semantic_outer_macro_iou_error}"
 export FEATURE_DROPOUT="${FEATURE_DROPOUT:-0.05}"
 export REPRODUCIBLE="${REPRODUCIBLE:-true}"
 export STRICT_DETERMINISM="${STRICT_DETERMINISM:-false}"
-export BACKGROUND_AUGMENT="false"
+export BACKGROUND_AUGMENT="${BACKGROUND_AUGMENT:-true}"
 
-if [[ -n "$REAL_SEMANTIC_DATA_DIR" ]]; then
-  v94_pair_count="$(find "$REAL_SEMANTIC_DATA_DIR" -type f -name "*${REAL_SEMANTIC_RESULT_SUFFIX}.png" | wc -l | tr -d ' ')"
+if [[ -n "$REAL_SEMANTIC_DATA_DIR" && -d "$REAL_SEMANTIC_DATA_DIR" ]]; then
+  v94_pair_count="$(find "$REAL_SEMANTIC_DATA_DIR" -type f -name "*${REAL_SEMANTIC_RESULT_SUFFIX}.png" 2>/dev/null | wc -l | tr -d ' ')"
   if (( v94_pair_count == 0 )); then
     echo "No *${REAL_SEMANTIC_RESULT_SUFFIX}.png labels found under $REAL_SEMANTIC_DATA_DIR." >&2
-    echo "Generate them first with ./regenerate_v94_semantic_results.sh" >&2
-    exit 1
+    echo "Falling back to synthetic 100% GT skin dataset (skins/)." >&2
+    export REAL_SEMANTIC_DATA_DIR=""
+  else
+    echo "Found versioned semantic UV labels: $v94_pair_count"
   fi
-  echo "Found versioned semantic UV labels: $v94_pair_count"
+else
+  echo "Real semantic data dir not found or not specified. Training on clean synthetic skin dataset (skins/)."
+  export REAL_SEMANTIC_DATA_DIR=""
 fi
 
 if [[ -n "$REAL_SEMANTIC_DATA_DIR" && -z "${INITIALIZE:-}" ]]; then
-  # Restart adaptation from the high-recall synthetic semantic model. The
-  # previous real-domain run learned an over-conservative local optimum under
-  # the old hard-negative objective and must not initialize this corrected
-  # loss. An explicit INITIALIZE still overrides this choice.
+  # Restart adaptation from the high-recall synthetic semantic model.
   SEMANTIC_BASE_CHECKPOINT="${SEMANTIC_BASE_CHECKPOINT:-runs/dense_uv_semantic_v1/best.pt}"
   if [[ -f "$SEMANTIC_BASE_CHECKPOINT" ]]; then
     export INITIALIZE="$SEMANTIC_BASE_CHECKPOINT"
-    echo "Initializing corrected real-domain semantics from: $INITIALIZE"
+    echo "Initializing real-domain semantics from: $INITIALIZE"
   else
     echo "Semantic base checkpoint not found: $SEMANTIC_BASE_CHECKPOINT"
-    echo "Training corrected real-domain semantics from scratch."
+    echo "Training real-domain semantics from scratch."
   fi
 fi
 
@@ -51,7 +52,7 @@ export SEMANTIC_BACKBONE="siglip2"
 export SIGLIP_TEXT_PROMPT_FUSION="true"
 export DENSE_SEMANTIC_TARGET_VERSION="3"
 export LAMBDA_DENSE_SEMANTICS="${LAMBDA_DENSE_SEMANTICS:-1.0}"
-export DENSE_SEMANTIC_OUTER_FALSE_POSITIVE_WEIGHT="${DENSE_SEMANTIC_OUTER_FALSE_POSITIVE_WEIGHT:-0.20}"
+export DENSE_SEMANTIC_OUTER_FALSE_POSITIVE_WEIGHT="${DENSE_SEMANTIC_OUTER_FALSE_POSITIVE_WEIGHT:-0.05}"
 export DENSE_SEMANTIC_OUTER_UNION_WEIGHT="${DENSE_SEMANTIC_OUTER_UNION_WEIGHT:-1.0}"
 export LAMBDA_TEXT_PROMPT_ROUTE="0"
 

@@ -233,7 +233,7 @@ def route_prior_regularization(outputs, tv_weight=1.0):
 def dense_semantic_supervision_loss(
     dense_semantic_logits,
     semantic_targets,
-    focal_gamma=1.5,
+    focal_gamma=2.0,
     ignore_index=IGNORE_INDEX,
 ):
     """Compute dense multi-class semantic segmentation loss with Focal weighting.
@@ -287,11 +287,11 @@ def dense_semantic_supervision_loss(
     )
     if P == 4:
         class_weights = class_weights * logits.new_tensor(
-            [3.0, 1.5, 1.0, 0.75]
+            [4.0, 2.0, 1.0, 0.5]
         )
     elif P == 5:
         class_weights = class_weights * logits.new_tensor(
-            [3.0, 3.0, 1.5, 1.0, 0.75]
+            [4.5, 3.5, 2.0, 1.0, 0.5]
         )
     else:
         outer_decor_indices = torch.arange(
@@ -381,15 +381,16 @@ def dense_semantic_outer_false_positive_loss(
     semantic_targets,
     hard_negative_fraction=0.01,
     min_hard_negatives=32,
+    margin_threshold=0.0,
     ignore_index=IGNORE_INDEX,
 ):
-    """Penalize the strongest inner->outer semantic mistakes.
+    """Penalize true inner->outer semantic false positive mistakes.
 
     The first three classes in the five-class schema are outer-layer classes
-    and class three is inner skin.  Rare-class recall weighting alone can make
-    isolated shirt, face, or leg pixels look like accessories.  Averaging all
-    inner negatives hides those sparse errors, so this term selects the worst
-    inner pixels independently in every image.
+    and class three is inner skin. This term penalizes inner pixels where the
+    model incorrectly predicts outer (outer_union_logit > inner_logit).
+    Crucially, it does NOT penalize already-correct inner pixels, preventing
+    false-positive suppression from killing true outer recall (e.g. crowns).
     """
     logits = dense_semantic_logits.float()
     targets = semantic_targets.to(device=logits.device, dtype=torch.long)
@@ -400,11 +401,7 @@ def dense_semantic_outer_false_positive_loss(
     valid_inner = (targets == 3) & (targets != int(ignore_index))
     if not valid_inner.any():
         return zero
-    # Compare the outer union directly with the inner class.  This is invariant
-    # to a common shift of all logits and therefore matches argmax routing.
-    # Match the final argmax classifier exactly. Logsumexp adds a log(3)
-    # penalty merely because outer has three subclasses and was a major source
-    # of the old conservative inner bias.
+
     outer_union_logit = logits[:, :3].amax(dim=1)
     outer_vs_inner_margin = outer_union_logit - logits[:, 3]
     sample_losses = []
@@ -414,13 +411,15 @@ def dense_semantic_outer_false_positive_loss(
         ]
         if margins.numel() == 0:
             continue
-        hard_count = max(
-            int(min_hard_negatives),
-            int(math.ceil(margins.numel() * float(hard_negative_fraction))),
-        )
-        hard_count = min(hard_count, margins.numel())
-        hard_margins = margins.topk(hard_count, sorted=False).values
-        sample_losses.append(F.softplus(hard_margins).mean())
+        positive_margins = margins[margins > float(margin_threshold)]
+        if positive_margins.numel() > 0:
+            hard_count = max(
+                int(min_hard_negatives),
+                int(math.ceil(positive_margins.numel() * float(hard_negative_fraction))),
+            )
+            hard_count = min(hard_count, positive_margins.numel())
+            hard_margins = positive_margins.topk(hard_count, sorted=False).values
+            sample_losses.append(F.softplus(hard_margins).mean())
     return torch.stack(sample_losses).mean() if sample_losses else zero
 
 
@@ -1007,21 +1006,21 @@ class DenseUVParserLoss(nn.Module):
                 * dense_segmentation_terms[
                     "loss_dense_semantic_macro_dice"
                 ]
-                + 0.50
+                + 0.75
                 * top_accessory_terms["loss_head_top_accessory_dice"]
-                + 0.50
+                + 1.00
                 * top_accessory_terms[
                     "loss_head_top_accessory_hard_recall"
                 ]
-                + 0.10
+                + 0.25
                 * top_accessory_terms["loss_head_top_accessory_presence"]
-                + 0.50
+                + 0.75
                 * eye_accessory_terms["loss_head_eye_accessory_dice"]
                 + 0.75
                 * eye_accessory_terms[
                     "loss_head_eye_accessory_hard_recall"
                 ]
-                + 0.10
+                + 0.25
                 * eye_accessory_terms["loss_head_eye_accessory_presence"]
                 + self.dense_semantic_outer_false_positive_weight
                 * loss_dense_semantic_outer_false_positive

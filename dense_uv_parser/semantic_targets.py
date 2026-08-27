@@ -131,9 +131,9 @@ def build_head_top_accessory_face_targets(
 
     Components are found on the six-face cube graph, not in 2D atlas space.
     A component is selected when any of its true outer-alpha texels touches
-    the top face or the upper rows of a side face.  The complete connected
+    the top face or the upper rows of a side face. The complete connected
     component is returned, so crown tips and hat sides remain one semantic
-    object across UV seams.  Every selected texel is still a real outer-alpha
+    object across UV seams. Every selected texel is still a real outer-alpha
     texel; no bounding rectangle or transparent gap is fabricated.
     """
     if not 1 <= int(side_seed_rows) <= 8:
@@ -371,6 +371,7 @@ def build_dense_view_semantic_targets(
                         outer_active
                         & (outer_part == 0)
                         & eye_accessory_atlas[b, outer_flat_uv]
+                        & ~top_active
                     )
                     sem[eye_active] = 1
                 targets.append(sem)

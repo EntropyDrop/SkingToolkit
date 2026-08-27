@@ -40,22 +40,22 @@ DEFAULT_SIGLIP_ROUTE_PROMPTS = (
 # includes crowns, hats, helmets and raised top hair without pretending that
 # UV coordinates alone reveal the object's natural-language identity.
 LAYER_TOPOLOGY_SIGLIP_ROUTE_PROMPTS = (
-    "pixels belonging to a raised outer-layer component connected across the top of a Minecraft character head, such as a crown hat helmet or raised top hair",
-    "pixels belonging to another visible raised Minecraft outer skin layer",
-    "pixels belonging to the visible flat inner Minecraft skin layer",
-    "pixels belonging to the plain background outside the Minecraft character",
+    "a 3D raised outer accessory on the head top of a Minecraft character, such as a golden crown, king tiara, hat, cap, helmet, headband, horns, or voluminous top hair",
+    "a 3D raised outer clothing layer of a Minecraft character, such as a 3D jacket, hoodie, coat, sleeves, 3D armor, belt, or shoes",
+    "flat base inner skin layer, base face, flat hair, painted shirt, pants, arms, or bare skin of a Minecraft character without 3D raised accessories",
+    "plain solid uniform background canvas outside the Minecraft character",
 )
 
 # Version 3 keeps the exact topology-derived targets from version 2 and
-# separates true head-outer alpha crossing the physical eye-level band.  This
+# separates true head-outer alpha crossing the physical eye-level band. This
 # gives paired glasses/goggles and their side temples a coherent semantic
 # channel without claiming that text alone can infer hidden UV occupancy.
 LAYER_TOPOLOGY_EYE_SIGLIP_ROUTE_PROMPTS = (
-    "pixels belonging to a raised outer-layer component connected across the top of a Minecraft character head, such as a crown hat helmet or raised top hair",
-    "pixels belonging to the true raised outer skin layer across the eye-level front or side of a Minecraft character head, such as glasses goggles visor mask or headset temples",
-    "pixels belonging to another visible raised Minecraft outer skin layer",
-    "pixels belonging to the visible flat inner Minecraft skin layer",
-    "pixels belonging to the plain background outside the Minecraft character",
+    "a 3D raised outer accessory on the head top of a Minecraft character, such as a golden crown, king tiara, hat, cap, helmet, headband, horns, or voluminous top hair",
+    "3D raised glasses, sunglasses, goggles, eye patch, visor, mask, or headset temples around the eyes of a Minecraft character",
+    "a 3D raised outer clothing layer of a Minecraft character, such as a 3D jacket, hoodie, coat, sleeves, 3D armor, belt, or shoes",
+    "flat base inner skin layer, base face, flat hair, painted shirt, pants, arms, or bare skin of a Minecraft character without 3D raised accessories",
+    "plain solid uniform background canvas outside the Minecraft character",
 )
 
 SEMANTIC_OUTER_INDICES = (0, 1, 2, 3, 4, 5, 6, 7)
