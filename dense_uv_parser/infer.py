@@ -896,6 +896,53 @@ def save_semantic_pixel_labels(
         out_p.parent.mkdir(parents=True, exist_ok=True)
         save_image(grid.clamp(0.0, 1.0).detach().cpu(), str(out_p), nrow=N)
         print(f"Saved semantic_pixel_output={out_p}")
+        if outer_logit is not None and attribute_logits is not None:
+            outer_probability = torch.sigmoid(outer_logit.float())
+            attribute_probability = torch.sigmoid(
+                attribute_logits.float()
+            ) * outer_probability
+            heat_colors = evidence.new_tensor(
+                [
+                    [255, 255, 255],
+                    [255, 215, 0],
+                    [0, 255, 200],
+                    [220, 20, 60],
+                ]
+            ) / 255.0
+            probability_maps = torch.cat(
+                [outer_probability, attribute_probability], dim=1
+            )
+            if observed_foreground is not None:
+                hierarchy_foreground = (
+                    observed_foreground.unsqueeze(1)
+                    if observed_foreground.dim() == 3
+                    else observed_foreground
+                )
+                probability_maps = probability_maps * (
+                    hierarchy_foreground > 0.5
+                ).to(dtype=probability_maps.dtype)
+            panels = []
+            for channel_index in range(4):
+                probability = probability_maps[
+                    :, channel_index : channel_index + 1
+                ]
+                panels.append(
+                    probability
+                    * heat_colors[channel_index].view(1, 3, 1, 1)
+                )
+            hierarchy_grid = torch.cat(panels, dim=0)
+            hierarchy_path = out_p.with_name(
+                f"{out_p.stem}_hierarchical{out_p.suffix}"
+            )
+            save_image(
+                hierarchy_grid.clamp(0.0, 1.0).detach().cpu(),
+                str(hierarchy_path),
+                nrow=N,
+            )
+            print(
+                "Saved semantic_pixel_hierarchical_output="
+                f"{hierarchy_path}"
+            )
     except Exception as e:
         print(f"Warning: Failed to save semantic pixel map to {output_path}: {e}")
 
