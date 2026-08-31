@@ -535,6 +535,154 @@ def dense_semantic_outer_union_terms(
     }
 
 
+def hierarchical_dense_semantic_terms(
+    outer_logit,
+    attribute_logits,
+    outer_target,
+    attribute_targets,
+    outer_positive_weight=1.5,
+    attribute_positive_weights=(1.25, 1.5, 1.0),
+    ignore_index=IGNORE_INDEX,
+):
+    """Supervise physical layer first and non-exclusive attributes second."""
+    outer_logit = outer_logit.float()
+    attribute_logits = attribute_logits.float()
+    outer_target = outer_target.to(
+        device=outer_logit.device, dtype=torch.long
+    )
+    attribute_targets = attribute_targets.to(
+        device=attribute_logits.device, dtype=torch.float32
+    )
+    if outer_logit.dim() != 4 or outer_logit.shape[1] != 1:
+        raise ValueError("outer_logit must be shaped Nx1xHxW.")
+    if attribute_logits.dim() != 4 or attribute_logits.shape[1] != 3:
+        raise ValueError("attribute_logits must be shaped Nx3xHxW.")
+    if outer_target.shape != outer_logit.shape[:1] + outer_logit.shape[2:]:
+        raise ValueError("outer_target shape does not match outer_logit.")
+    if attribute_targets.shape != attribute_logits.shape:
+        raise ValueError("attribute_targets shape does not match logits.")
+
+    zero = outer_logit.sum() * 0.0
+    valid_outer = outer_target != int(ignore_index)
+    expected_outer = valid_outer & (outer_target == 1)
+    expected_inner = valid_outer & (outer_target == 0)
+    flat_outer_logit = outer_logit[:, 0]
+    outer_losses = []
+    if expected_outer.any():
+        outer_losses.append(
+            float(outer_positive_weight)
+            * F.softplus(-flat_outer_logit[expected_outer]).mean()
+        )
+    if expected_inner.any():
+        outer_losses.append(
+            F.softplus(flat_outer_logit[expected_inner]).mean()
+        )
+    loss_outer_bce = (
+        torch.stack(outer_losses).sum()
+        / (
+            (float(outer_positive_weight) if expected_outer.any() else 0.0)
+            + (1.0 if expected_inner.any() else 0.0)
+        )
+        if outer_losses
+        else zero
+    )
+
+    outer_probability = torch.sigmoid(flat_outer_logit) * valid_outer.float()
+    expected_outer_float = expected_outer.float()
+    outer_intersection = (
+        outer_probability * expected_outer_float
+    ).flatten(1).sum(dim=1)
+    outer_denominator = (
+        outer_probability.flatten(1).sum(dim=1)
+        + expected_outer_float.flatten(1).sum(dim=1)
+    )
+    outer_present = expected_outer.flatten(1).any(dim=1)
+    outer_dice = 1.0 - (2.0 * outer_intersection + 1.0) / (
+        outer_denominator + 1.0
+    )
+    loss_outer_dice = (
+        outer_dice[outer_present].mean() if outer_present.any() else zero
+    )
+
+    predicted_outer = valid_outer & (flat_outer_logit >= 0.0)
+    result = {
+        "loss_dense_semantic_outer_union_bce": loss_outer_bce,
+        "loss_dense_semantic_outer_union_dice": loss_outer_dice,
+        "loss_dense_semantic_outer_union_hard_recall": zero,
+        "count_dense_semantic_outer_union_tp": (
+            predicted_outer & expected_outer
+        ).float().sum(),
+        "count_dense_semantic_outer_union_fp": (
+            predicted_outer & expected_inner
+        ).float().sum(),
+        "count_dense_semantic_outer_union_fn": (
+            ~predicted_outer & expected_outer
+        ).float().sum(),
+    }
+
+    attribute_losses = []
+    attribute_dice_losses = []
+    positive_weights = attribute_logits.new_tensor(
+        attribute_positive_weights
+    )
+    for attribute_index in range(3):
+        target = attribute_targets[:, attribute_index]
+        valid = target >= 0.0
+        expected = valid & (target >= 0.5)
+        negative = valid & ~expected
+        logit = attribute_logits[:, attribute_index]
+        terms = []
+        if expected.any():
+            terms.append(
+                positive_weights[attribute_index]
+                * F.softplus(-logit[expected]).mean()
+            )
+        if negative.any():
+            terms.append(F.softplus(logit[negative]).mean())
+        if terms:
+            denominator = (
+                (positive_weights[attribute_index] if expected.any() else 0.0)
+                + (1.0 if negative.any() else 0.0)
+            )
+            attribute_losses.append(torch.stack(terms).sum() / denominator)
+
+        probability = torch.sigmoid(logit) * valid.float()
+        expected_float = expected.float()
+        intersection = (probability * expected_float).flatten(1).sum(dim=1)
+        dice_denominator = (
+            probability.flatten(1).sum(dim=1)
+            + expected_float.flatten(1).sum(dim=1)
+        )
+        present = expected.flatten(1).any(dim=1)
+        dice = 1.0 - (2.0 * intersection + 1.0) / (
+            dice_denominator + 1.0
+        )
+        if present.any():
+            attribute_dice_losses.append(dice[present].mean())
+
+        predicted = valid & (logit >= 0.0)
+        prefix = f"count_dense_semantic_attribute_{attribute_index}"
+        result[f"{prefix}_tp"] = (predicted & expected).float().sum()
+        result[f"{prefix}_fp"] = (predicted & negative).float().sum()
+        result[f"{prefix}_fn"] = (~predicted & expected).float().sum()
+
+    result["loss_dense_semantic_attributes_bce"] = (
+        torch.stack(attribute_losses).mean() if attribute_losses else zero
+    )
+    result["loss_dense_semantic_attributes_dice"] = (
+        torch.stack(attribute_dice_losses).mean()
+        if attribute_dice_losses
+        else zero
+    )
+    result["loss_dense_semantic_hierarchical"] = (
+        0.75 * loss_outer_bce
+        + 0.75 * loss_outer_dice
+        + 0.50 * result["loss_dense_semantic_attributes_bce"]
+        + 0.50 * result["loss_dense_semantic_attributes_dice"]
+    )
+    return result
+
+
 def _dense_semantic_class_terms(
     dense_semantic_logits,
     targets,
@@ -973,7 +1121,38 @@ class DenseUVParserLoss(nn.Module):
             else zero
         )
 
-        if "dense_semantic_logits" in outputs and "dense_semantics" in targets:
+        hierarchical_semantics = (
+            "dense_semantic_outer_logit" in outputs
+            and "dense_semantic_attribute_logits" in outputs
+            and "dense_semantic_outer" in targets
+            and "dense_semantic_attributes" in targets
+        )
+        hierarchical_terms = {}
+        if hierarchical_semantics:
+            hierarchical_terms = hierarchical_dense_semantic_terms(
+                outputs["dense_semantic_outer_logit"],
+                outputs["dense_semantic_attribute_logits"],
+                targets["dense_semantic_outer"],
+                targets["dense_semantic_attributes"],
+            )
+            loss_dense_semantics = hierarchical_terms[
+                "loss_dense_semantic_hierarchical"
+            ]
+            loss_dense_semantic_focal = zero
+            loss_dense_semantic_outer_false_positive = zero
+            acc_dense_semantics = zero
+            top_accessory_terms = {}
+            eye_accessory_terms = {}
+            dense_segmentation_terms = {
+                "loss_dense_semantic_macro_dice": zero,
+            }
+            dense_outer_union_terms = {
+                key: value
+                for key, value in hierarchical_terms.items()
+                if key.startswith("loss_dense_semantic_outer_union_")
+                or key.startswith("count_dense_semantic_outer_union_")
+            }
+        elif "dense_semantic_logits" in outputs and "dense_semantics" in targets:
             loss_dense_semantic_focal = dense_semantic_supervision_loss(
                 outputs["dense_semantic_logits"],
                 targets["dense_semantics"],
@@ -1139,6 +1318,11 @@ class DenseUVParserLoss(nn.Module):
                 loss_dense_semantic_outer_false_positive
             ),
             **dense_outer_union_terms,
+            **{
+                key: value
+                for key, value in hierarchical_terms.items()
+                if key not in dense_outer_union_terms
+            },
             "loss_dense_semantics_weighted": weighted_dense_semantics,
             "acc_dense_semantics": acc_dense_semantics,
             **dense_segmentation_terms,

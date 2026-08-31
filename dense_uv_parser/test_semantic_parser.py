@@ -405,6 +405,79 @@ class SemanticDenseUVParserTest(unittest.TestCase):
             )
         )
 
+    def test_hierarchical_semantics_have_independent_layer_and_attributes(self):
+        model = DenseUVParserNet(
+            base_channels=8,
+            view_classes=2,
+            geometry_only=True,
+            semantic_feature_dim=12,
+            semantic_channels=8,
+            semantic_attention_heads=2,
+            semantic_spatial_feature_dim=12,
+            semantic_spatial_channels=8,
+            semantic_text_prompt_count=5,
+            semantic_text_prompt_feature_dim=12,
+            semantic_text_prompt_channels=6,
+            dense_semantic_target_version=3,
+            hierarchical_dense_semantics=True,
+        )
+        model.set_semantic_text_prompt_embeddings(torch.randn(5, 12))
+        outputs = model(
+            torch.rand(2, 4, 16, 16),
+            view_ids=torch.tensor([0, 1]),
+            semantic_features={
+                "raw_global": torch.rand(2, 12),
+                "raw_spatial": torch.rand(2, 12, 5, 5),
+            },
+        )
+        self.assertEqual(
+            tuple(outputs["dense_semantic_outer_logit"].shape),
+            (2, 1, 16, 16),
+        )
+        self.assertEqual(
+            tuple(outputs["dense_semantic_attribute_logits"].shape),
+            (2, 3, 16, 16),
+        )
+
+    def test_hierarchical_loss_drives_new_heads(self):
+        outer_logit = torch.zeros(1, 1, 8, 8, requires_grad=True)
+        attribute_logits = torch.zeros(1, 3, 8, 8, requires_grad=True)
+        outputs = {
+            "foreground": torch.zeros(1, 1, 8, 8),
+            "layer": torch.zeros(1, 3, 8, 8),
+            "dense_semantic_logits": torch.zeros(1, 5, 8, 8),
+            "dense_semantic_outer_logit": outer_logit,
+            "dense_semantic_attribute_logits": attribute_logits,
+        }
+        outer_target = torch.zeros(1, 8, 8, dtype=torch.long)
+        outer_target[:, 2:6, 2:6] = 1
+        attribute_target = torch.full((1, 3, 8, 8), -1.0)
+        attribute_target[:, :, 2:6, 2:6] = 0.0
+        attribute_target[:, 0, 2:4, 2:6] = 1.0
+        attribute_target[:, 1, 3:5, 2:6] = 1.0
+        targets = {
+            "foreground": torch.ones(1, 1, 8, 8),
+            "route_role": torch.zeros(1, 8, 8, dtype=torch.long),
+            "layer": torch.zeros(1, 8, 8, dtype=torch.long),
+            "part": torch.zeros(1, 8, 8, dtype=torch.long),
+            "face": torch.zeros(1, 8, 8, dtype=torch.long),
+            "uv": torch.zeros(1, 2, 8, 8),
+            "dense_semantics": torch.full(
+                (1, 8, 8), 3, dtype=torch.long
+            ),
+            "dense_semantic_outer": outer_target,
+            "dense_semantic_attributes": attribute_target,
+        }
+        losses = DenseUVParserLoss(
+            lambda_dense_semantics=1.0,
+            use_uv=False,
+        )(outputs, targets)
+        losses["loss_dense_semantics_weighted"].backward()
+        self.assertIsNotNone(outer_logit.grad)
+        self.assertIsNotNone(attribute_logits.grad)
+        self.assertGreater(float(outer_logit.grad.abs().sum()), 0.0)
+        self.assertGreater(float(attribute_logits.grad.abs().sum()), 0.0)
+
     def test_v3_eye_semantics_receive_dedicated_recall_loss(self):
         dense_logits = torch.zeros(1, 5, 8, 8, requires_grad=True)
         dense_target = torch.full((1, 8, 8), 3, dtype=torch.long)

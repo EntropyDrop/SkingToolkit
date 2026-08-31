@@ -371,8 +371,13 @@ def build_dense_view_semantic_targets(
                         outer_active
                         & (outer_part == 0)
                         & eye_accessory_atlas[b, outer_flat_uv]
-                        & ~top_active
                     )
+                    # Eye-level semantics are an attribute of a physical
+                    # outer component, not a mutually-exclusive replacement
+                    # for top connectivity.  Keep the legacy visualization
+                    # deterministic by showing eye-level pixels when the two
+                    # attributes overlap.  The hierarchical targets below
+                    # retain both positives for training.
                     sem[eye_active] = 1
                 targets.append(sem)
                 continue
@@ -455,6 +460,110 @@ def build_dense_view_semantic_targets(
     return torch.stack(targets, dim=0)
 
 
+def build_dense_view_hierarchical_semantic_targets(
+    target_uv,
+    renderer,
+    views,
+    device=None,
+    alpha_threshold=0.5,
+):
+    """Build physical layer and non-exclusive outer-attribute targets.
+
+    ``outer`` is the only target that answers the physical inner/outer
+    routing question.  ``attributes`` are supervised only on visible outer
+    pixels and may overlap: a top-connected component can also occupy the
+    eye band.  This avoids forcing crowns, brims, glasses and headphones into
+    a single flat class before their physical layer has been decided.
+    """
+    from SkingToolkit.dense_uv_parser.utils import (  # local: avoid cycle
+        IGNORE_INDEX,
+        build_static_surface_routing,
+        parse_views,
+    )
+
+    if target_uv.dim() != 4 or target_uv.shape[1] != 4:
+        raise ValueError(
+            "Expected target UV shaped Bx4x64x64, got "
+            f"{tuple(target_uv.shape)}."
+        )
+    if device is None:
+        device = target_uv.device
+    parsed_views = parse_views(views)
+    flat_alpha = target_uv[:, 3].flatten(1)
+
+    top_faces = build_head_top_accessory_face_targets(
+        target_uv,
+        alpha_threshold=alpha_threshold,
+    )["mask"]
+    eye_faces = build_head_eye_accessory_face_targets(
+        target_uv,
+        alpha_threshold=alpha_threshold,
+    )["mask"]
+    top_atlas = head_outer_face_values_to_uv(top_faces)[
+        :, 0
+    ].flatten(1).bool()
+    eye_atlas = head_outer_face_values_to_uv(eye_faces)[
+        :, 0
+    ].flatten(1).bool()
+
+    outer_targets = []
+    attribute_targets = []
+    for batch_index in range(target_uv.shape[0]):
+        for view_name in parsed_views:
+            static = build_static_surface_routing(
+                renderer, view_name, device
+            )
+            height, width = static["masks"].shape[-2:]
+            outer = torch.full(
+                (height, width),
+                int(IGNORE_INDEX),
+                dtype=torch.long,
+                device=device,
+            )
+            attributes = torch.full(
+                (3, height, width),
+                -1.0,
+                dtype=torch.float32,
+                device=device,
+            )
+
+            inner_mask = static["masks"][0]
+            outer_mask = static["masks"][1]
+            outer_part = static["part"][1]
+            outer_flat_uv = static["flat_uv"][1]
+            outer_active = outer_mask & (
+                flat_alpha[batch_index, outer_flat_uv]
+                > float(alpha_threshold)
+            )
+            visible = inner_mask | outer_active
+            outer[visible] = 0
+            outer[outer_active] = 1
+
+            top_active = (
+                outer_active
+                & (outer_part == 0)
+                & top_atlas[batch_index, outer_flat_uv]
+            )
+            eye_active = (
+                outer_active
+                & (outer_part == 0)
+                & eye_atlas[batch_index, outer_flat_uv]
+            )
+            other_active = outer_active & ~top_active & ~eye_active
+            attributes[:, outer_active] = 0.0
+            attributes[0, top_active] = 1.0
+            attributes[1, eye_active] = 1.0
+            attributes[2, other_active] = 1.0
+
+            outer_targets.append(outer)
+            attribute_targets.append(attributes)
+
+    return {
+        "outer": torch.stack(outer_targets, dim=0),
+        "attributes": torch.stack(attribute_targets, dim=0),
+    }
+
+
 __all__ = [
     "build_part_layer_masks",
     "build_head_outer_face_targets",
@@ -464,4 +573,5 @@ __all__ = [
     "head_outer_face_values_to_uv",
     "build_semantic_attribute_targets",
     "build_dense_view_semantic_targets",
+    "build_dense_view_hierarchical_semantic_targets",
 ]

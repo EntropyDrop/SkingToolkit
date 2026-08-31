@@ -186,9 +186,51 @@ class PairedRenderSkinDataset(Dataset):
         # edited input filename because its pixels, rather than the UV result,
         # are encoded by SigLIP2.
         self.skin_paths = [edited_path for edited_path, _ in pairs]
+        self._semantic_strata = None
 
     def __len__(self):
         return len(self.pairs)
+
+    def semantic_strata(self, alpha_threshold=0.5):
+        """Return deterministic top/eye/other presence bitmasks per pair."""
+        if self._semantic_strata is not None:
+            return list(self._semantic_strata)
+        from SkingToolkit.dense_uv_parser.semantic_targets import (
+            build_head_eye_accessory_face_targets,
+            build_head_top_accessory_face_targets,
+            head_outer_face_values_to_uv,
+        )
+        from SkingToolkit.dense_uv_parser.uv_layout import (
+            build_part_layer_masks,
+        )
+
+        _, outer_part_masks = build_part_layer_masks()
+        outer_atlas = outer_part_masks[:, 0].bool().any(dim=0)
+        strata = []
+        for _, result_path in self.pairs:
+            uv = load_skin(
+                result_path,
+                bg_color=self.bg_color,
+                normalize_model=self.normalize_model,
+            ).unsqueeze(0)
+            top_faces = build_head_top_accessory_face_targets(
+                uv, alpha_threshold=alpha_threshold
+            )["mask"]
+            eye_faces = build_head_eye_accessory_face_targets(
+                uv, alpha_threshold=alpha_threshold
+            )["mask"]
+            top_uv = head_outer_face_values_to_uv(top_faces)[0, 0] > 0.5
+            eye_uv = head_outer_face_values_to_uv(eye_faces)[0, 0] > 0.5
+            occupied_outer = (uv[0, 3] > float(alpha_threshold)) & outer_atlas
+            other = occupied_outer & ~top_uv & ~eye_uv
+            stratum = (
+                int(top_uv.any().item())
+                | (int(eye_uv.any().item()) << 1)
+                | (int(other.any().item()) << 2)
+            )
+            strata.append(stratum)
+        self._semantic_strata = tuple(strata)
+        return list(self._semantic_strata)
 
     def _load_views(self, path):
         with Image.open(path) as source_image:

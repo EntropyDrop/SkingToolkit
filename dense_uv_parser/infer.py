@@ -115,14 +115,31 @@ def project_head_eye_semantic_outer_probability(
     """
     canonical = canonicalize_parser_outputs(outputs)
     logits = canonical.get("dense_semantic_logits")
+    hierarchical_outer = canonical.get("dense_semantic_outer_logit")
+    hierarchical_attributes = canonical.get(
+        "dense_semantic_attribute_logits"
+    )
+    if (
+        hierarchical_outer is not None
+        and hierarchical_attributes is not None
+        and hierarchical_attributes.shape[1] == 3
+    ):
+        outer_probability = torch.sigmoid(hierarchical_outer.float())
+        eye_probability = torch.sigmoid(
+            hierarchical_attributes[:, 1:2].float()
+        )
+        outer_probability = outer_probability * eye_probability
+    else:
+        outer_probability = None
     if logits is None or logits.dim() != 4 or logits.shape[1] != 5:
-        return None, {
-            "available": False,
-            "reason": "requires_dense_semantic_target_v3",
-        }
-
-    probabilities = logits.float().softmax(dim=1)
-    outer_probability = probabilities[:, :3].sum(dim=1, keepdim=True)
+        if outer_probability is None:
+            return None, {
+                "available": False,
+                "reason": "requires_dense_semantic_target_v3",
+            }
+    if outer_probability is None:
+        probabilities = logits.float().softmax(dim=1)
+        outer_probability = probabilities[:, :3].sum(dim=1, keepdim=True)
     outer_pooled_by_view, outer_supported_by_view = (
         aggregate_direct_outer_values_by_view(
             renderer,
@@ -329,6 +346,15 @@ def load_parser(checkpoint_path, device):
         ),
         dense_semantic_target_version=model_config.get(
             "dense_semantic_target_version", 1
+        ),
+        hierarchical_dense_semantics=model_config.get(
+            "hierarchical_dense_semantics",
+            any(
+                key.startswith(
+                    "semantic_text_prompt_fusion.hierarchical_head."
+                )
+                for key in state_dict
+            ),
         ),
         predict_confidence=model_config.get(
             "predict_confidence",
@@ -793,6 +819,23 @@ def save_semantic_pixel_labels(
     evidence = dense_logits if dense_logits is not None else sim
     N, P, H, W = evidence.shape
     predicted_classes = evidence.argmax(dim=1)
+    outer_logit = outputs.get("dense_semantic_outer_logit")
+    attribute_logits = outputs.get("dense_semantic_attribute_logits")
+    if (
+        outer_logit is not None
+        and attribute_logits is not None
+        and evidence.shape[1] == 5
+    ):
+        selected_outer = outer_logit[:, 0] >= 0.0
+        selected_attributes = attribute_logits >= 0.0
+        predicted_classes = torch.full_like(predicted_classes, 3)
+        predicted_classes[selected_outer] = 2
+        predicted_classes[
+            selected_outer & selected_attributes[:, 0]
+        ] = 0
+        predicted_classes[
+            selected_outer & selected_attributes[:, 1]
+        ] = 1
 
     if P == 4:
         palette_values = [

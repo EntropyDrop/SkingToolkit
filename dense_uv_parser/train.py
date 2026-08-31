@@ -10,7 +10,7 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader, Subset, WeightedRandomSampler, random_split
 from torchvision.utils import save_image
 
 TOOLKIT_ROOT = Path(__file__).resolve().parents[1]
@@ -83,6 +83,7 @@ from SkingToolkit.dense_uv_parser.semantic_targets import (  # noqa: E402
     build_part_layer_masks,
     build_semantic_attribute_targets,
     build_dense_view_semantic_targets,
+    build_dense_view_hierarchical_semantic_targets,
 )
 from SkingToolkit.dense_uv_parser.runtime import get_device  # noqa: E402
 from SkingToolkit.dense_uv_parser.skin_dataset import (  # noqa: E402
@@ -140,6 +141,42 @@ def seed_data_worker(_worker_id):
     random.seed(worker_seed)
     np.random.seed(worker_seed)
     torch.manual_seed(worker_seed)
+
+
+def stratified_semantic_split(strata, val_split, seed):
+    """Split every accessory-presence combination deterministically."""
+    groups = {}
+    for index, stratum in enumerate(strata):
+        groups.setdefault(int(stratum), []).append(index)
+    generator = torch.Generator().manual_seed(int(seed))
+    train_indices = []
+    val_indices = []
+    for stratum in sorted(groups):
+        indices = groups[stratum]
+        order = torch.randperm(len(indices), generator=generator).tolist()
+        shuffled = [indices[position] for position in order]
+        if val_split > 0.0 and len(shuffled) > 1:
+            val_count = max(1, int(round(len(shuffled) * val_split)))
+            val_count = min(val_count, len(shuffled) - 1)
+        else:
+            val_count = 0
+        val_indices.extend(shuffled[:val_count])
+        train_indices.extend(shuffled[val_count:])
+    return train_indices, val_indices
+
+
+def stratified_semantic_sample_weights(strata, indices, max_ratio=4.0):
+    """Moderately rebalance rare sample types without pixel over-weighting."""
+    counts = {}
+    for index in indices:
+        stratum = int(strata[index])
+        counts[stratum] = counts.get(stratum, 0) + 1
+    weights = torch.tensor(
+        [counts[int(strata[index])] ** -0.5 for index in indices],
+        dtype=torch.double,
+    )
+    minimum = weights.min().clamp_min(1e-12)
+    return weights.clamp(max=minimum * float(max_ratio))
 
 
 def capture_reproducibility_state(train_generator=None, val_generator=None):
@@ -378,6 +415,46 @@ def format_metrics(
         result["dense_semantic_outer_union_recall"] = recall
         result["dense_semantic_outer_union_iou"] = iou
         result["semantic_outer_union_iou_error"] = 1.0 - iou
+    attribute_ious = []
+    for attribute_index, attribute_name in enumerate(
+        ("top", "eye", "other")
+    ):
+        keys = tuple(
+            f"count_dense_semantic_attribute_{attribute_index}_{suffix}"
+            for suffix in ("tp", "fp", "fn")
+        )
+        if not all(key in result for key in keys):
+            continue
+        tp, fp, fn = (result[key] for key in keys)
+        precision = tp / max(tp + fp, 1.0)
+        recall = tp / max(tp + fn, 1.0)
+        iou = tp / max(tp + fp + fn, 1.0)
+        result[f"dense_semantic_{attribute_name}_precision"] = precision
+        result[f"dense_semantic_{attribute_name}_recall"] = recall
+        result[f"dense_semantic_{attribute_name}_iou"] = iou
+        attribute_ious.append(iou)
+    if attribute_ious:
+        attribute_macro_iou = sum(attribute_ious) / len(attribute_ious)
+        result["dense_semantic_attribute_macro_iou"] = attribute_macro_iou
+        # Preserve the established log column while making its meaning
+        # explicit for hierarchical runs.
+        result["dense_semantic_outer_macro_iou"] = attribute_macro_iou
+        result["semantic_outer_macro_iou_error"] = 1.0 - attribute_macro_iou
+        if "dense_semantic_outer_union_iou" in result:
+            hierarchical_iou = (
+                0.60 * result["dense_semantic_outer_union_iou"]
+                + 0.40 * attribute_macro_iou
+            )
+            result["dense_semantic_hierarchical_iou"] = hierarchical_iou
+            result["semantic_hierarchical_iou_error"] = (
+                1.0 - hierarchical_iou
+            )
+    confident = result.get("count_dense_semantic_confident_pixels")
+    candidate = result.get("count_dense_semantic_candidate_pixels")
+    if confident is not None and candidate is not None:
+        result["dense_semantic_confident_percent"] = (
+            100.0 * confident / max(candidate, 1.0)
+        )
     return result
 
 
@@ -546,6 +623,7 @@ def build_paired_render_parser_inputs(
         )
 
     targets_by_view = []
+    synthetic_by_view = []
     with torch.no_grad():
         for view in views:
             synthetic_render, targets = build_dense_parser_batch(
@@ -564,11 +642,13 @@ def build_paired_render_parser_inputs(
             targets["affine"] = synthetic_render.new_zeros(
                 synthetic_render.shape[0], 3
             )
+            synthetic_by_view.append(synthetic_render)
             targets_by_view.append(targets)
 
-        rendered = paired_rendered.reshape(
+        raw_rendered = paired_rendered.reshape(
             batch_size * view_count, channels, height, width
         )
+        rendered = raw_rendered
         observed_foreground = estimate_top_left_flood_foreground(
             rendered,
             color_tolerance=args.real_semantic_foreground_flood_tolerance,
@@ -590,12 +670,94 @@ def build_paired_render_parser_inputs(
         view_count, device=rendered.device, dtype=torch.long
     ).view(1, view_count).expand(batch_size, -1).reshape(-1)
     targets = stack_view_targets(targets_by_view)
+    synthetic_rendered = torch.stack(synthetic_by_view, dim=1).reshape(
+        batch_size * view_count, channels, height, width
+    )
+    target_foreground = targets["foreground"][:, 0] > 0.5
+    observed_binary = observed_foreground > 0.5
+    rgb_error = (
+        raw_rendered[:, :3] - synthetic_rendered[:, :3]
+    ).abs().mean(dim=1)
+    inconsistent = observed_binary ^ target_foreground
+    inconsistent = inconsistent | (
+        observed_binary
+        & target_foreground
+        & (
+            rgb_error
+            > float(args.real_semantic_pixel_rgb_tolerance)
+        )
+    )
+    dilation = int(args.real_semantic_mismatch_dilation)
+    if dilation > 0:
+        kernel = 2 * dilation + 1
+        inconsistent = (
+            F.max_pool2d(
+                inconsistent.float().unsqueeze(1),
+                kernel_size=kernel,
+                stride=1,
+                padding=dilation,
+            )[:, 0]
+            > 0.5
+        )
+    targets["dense_semantic_valid"] = (
+        observed_binary & target_foreground & ~inconsistent
+    )
     # Frozen semantic backbones use the same foreground evidence at training
     # and inference.  Parser-only target heads are disabled in this stage.
     targets["foreground"] = observed_foreground.unsqueeze(1).to(
         dtype=rendered.dtype
     )
     return rendered, targets, view_count, view_ids
+
+
+def attach_dense_semantic_targets(
+    targets,
+    outputs,
+    batch_uv,
+    renderer,
+    views,
+    args,
+    device,
+):
+    """Attach legacy visualization and hierarchical training targets."""
+    targets["dense_semantics"] = build_dense_view_semantic_targets(
+        batch_uv,
+        renderer,
+        views,
+        device=device,
+        alpha_threshold=args.target_alpha_threshold,
+        target_version=args.dense_semantic_target_version,
+    )
+    if "dense_semantic_outer_logit" not in outputs:
+        return
+
+    hierarchical = build_dense_view_hierarchical_semantic_targets(
+        batch_uv,
+        renderer,
+        views,
+        device=device,
+        alpha_threshold=args.target_alpha_threshold,
+    )
+    outer = hierarchical["outer"]
+    attributes = hierarchical["attributes"]
+    valid = targets.get("dense_semantic_valid")
+    if valid is not None:
+        valid = valid.to(device=device, dtype=torch.bool)
+        if valid.shape != outer.shape:
+            raise ValueError(
+                "Paired semantic confidence shape does not match targets: "
+                f"valid={tuple(valid.shape)}, outer={tuple(outer.shape)}."
+            )
+        outer = outer.masked_fill(~valid, IGNORE_INDEX)
+        attributes = attributes.masked_fill(
+            ~valid.unsqueeze(1), -1.0
+        )
+        targets["dense_semantic_confident_pixels"] = valid.float().sum()
+        targets["dense_semantic_candidate_pixels"] = (
+            hierarchical["outer"] != IGNORE_INDEX
+        ).float().sum()
+    targets["dense_semantic_outer"] = outer
+    targets["dense_semantic_attributes"] = attributes
 
 
 def privileged_training_views(args):
@@ -3075,19 +3237,23 @@ def run_epoch(
                         center_power=args.route_texel_center_power,
                     )
                 if "dense_semantic_logits" in outputs:
-                    targets["dense_semantics"] = (
-                        build_dense_view_semantic_targets(
-                            batch["uv"],
-                            renderer,
-                            views,
-                            device=device,
-                            alpha_threshold=getattr(
-                                args, "target_alpha_threshold", 0.5
-                            ),
-                            target_version=args.dense_semantic_target_version,
-                        )
+                    attach_dense_semantic_targets(
+                        targets,
+                        outputs,
+                        batch["uv"],
+                        renderer,
+                        views,
+                        args,
+                        device,
                     )
                 losses = criterion(outputs, targets)
+                if "dense_semantic_confident_pixels" in targets:
+                    losses["count_dense_semantic_confident_pixels"] = (
+                        targets["dense_semantic_confident_pixels"]
+                    )
+                    losses["count_dense_semantic_candidate_pixels"] = (
+                        targets["dense_semantic_candidate_pixels"]
+                    )
                 zero = losses["loss_total"].new_zeros(())
                 if semantic_masks is not None and "outer_presence_logits" in outputs:
                     inner_part_masks, outer_part_masks = semantic_masks
@@ -3753,8 +3919,9 @@ def run_epoch(
                     "mIoU": f"{avg.get('dense_semantic_foreground_macro_iou', 0.0):.3f}",
                     "outer": f"{avg.get('dense_semantic_outer_macro_iou', 0.0):.3f}",
                     "outer_r": f"{avg.get('dense_semantic_outer_union_recall', 0.0):.3f}",
-                    "top": f"{avg.get('dense_semantic_class_0_iou', 0.0):.3f}",
-                    "eye": f"{avg.get('dense_semantic_class_1_iou', 0.0):.3f}",
+                    "top": f"{avg.get('dense_semantic_top_iou', avg.get('dense_semantic_class_0_iou', 0.0)):.3f}",
+                    "eye": f"{avg.get('dense_semantic_eye_iou', avg.get('dense_semantic_class_1_iou', 0.0)):.3f}",
+                    "trusted": f"{avg.get('dense_semantic_confident_percent', 100.0):.1f}%",
                 }
             else:
                 postfix = {
@@ -3823,12 +3990,42 @@ def dense_semantic_palette(class_count, device):
     return torch.tensor(colors, device=device, dtype=torch.float32) / 255.0
 
 
-def save_dense_semantic_preview(rendered, logits, targets, output_path, max_items):
+def save_dense_semantic_preview(
+    rendered,
+    logits,
+    targets,
+    output_path,
+    max_items,
+    outer_logit=None,
+    attribute_logits=None,
+    outer_target=None,
+    attribute_targets=None,
+):
     count = min(max_items, rendered.shape[0])
     logits = logits[:count].float()
     targets = targets[:count].long()
     palette = dense_semantic_palette(logits.shape[1], logits.device)
     predicted = logits.argmax(dim=1)
+    if outer_logit is not None and attribute_logits is not None:
+        outer_selected = outer_logit[:count, 0] >= 0.0
+        attributes_selected = attribute_logits[:count] >= 0.0
+        predicted = torch.full_like(predicted, 3)
+        predicted[outer_selected] = 2
+        predicted[outer_selected & attributes_selected[:, 0]] = 0
+        # Eye is shown last only for the single-color preview. The model keeps
+        # both top and eye probabilities independently.
+        predicted[outer_selected & attributes_selected[:, 1]] = 1
+        foreground = targets != 4
+        predicted[~foreground] = 4
+    if outer_target is not None and attribute_targets is not None:
+        target_outer = outer_target[:count] == 1
+        target_attributes = attribute_targets[:count] >= 0.5
+        hierarchical_target = torch.full_like(targets, 3)
+        hierarchical_target[target_outer] = 2
+        hierarchical_target[target_outer & target_attributes[:, 0]] = 0
+        hierarchical_target[target_outer & target_attributes[:, 1]] = 1
+        hierarchical_target[outer_target[:count] == IGNORE_INDEX] = 4
+        targets = hierarchical_target
     predicted_rgb = palette[predicted].permute(0, 3, 1, 2)
     target_rgb = palette[
         targets.clamp(0, palette.shape[0] - 1)
@@ -3909,20 +4106,30 @@ def save_preview(
                 raise ValueError(
                     "Semantic training preview requires dense semantic logits."
                 )
-            semantic_targets = build_dense_view_semantic_targets(
+            attach_dense_semantic_targets(
+                targets,
+                outputs,
                 batch["uv"],
                 renderer,
                 views,
-                device=device,
-                alpha_threshold=args.target_alpha_threshold,
-                target_version=args.dense_semantic_target_version,
+                args,
+                device,
             )
+            semantic_targets = targets["dense_semantics"]
             save_dense_semantic_preview(
                 rendered,
                 outputs["dense_semantic_logits"],
                 semantic_targets,
                 output_path,
                 max_items=max_items * len(views),
+                outer_logit=outputs.get("dense_semantic_outer_logit"),
+                attribute_logits=outputs.get(
+                    "dense_semantic_attribute_logits"
+                ),
+                outer_target=targets.get("dense_semantic_outer"),
+                attribute_targets=targets.get(
+                    "dense_semantic_attributes"
+                ),
             )
             return
         outputs = attach_projected_outer_uv_occupancy(
@@ -4397,6 +4604,9 @@ def save_checkpoint(
             "dense_semantic_target_version": (
                 model.dense_semantic_target_version
             ),
+            "hierarchical_dense_semantics": (
+                model.hierarchical_dense_semantics
+            ),
             "predict_confidence": model.predict_confidence,
             "route_role_spatial_prior": model.route_role_spatial_prior,
             "route_prior_height": model.route_prior_height,
@@ -4485,6 +4695,24 @@ def build_arg_parser():
         default=PRODUCTION_PREPROCESSING_DEFAULTS[
             "foreground_parser_background"
         ],
+    )
+    parser.add_argument(
+        "--real_semantic_pixel_rgb_tolerance",
+        type=float,
+        default=0.12,
+        help=(
+            "Ignore paired semantic pixels whose source/render RGB mean "
+            "absolute error exceeds this value."
+        ),
+    )
+    parser.add_argument(
+        "--real_semantic_mismatch_dilation",
+        type=int,
+        default=1,
+        help=(
+            "Dilate source/render mismatch pixels before semantic "
+            "supervision so one-pixel alignment errors are not labels."
+        ),
     )
     parser.add_argument("--output_dir", default="runs/dense_uv_parser")
     parser.add_argument("--resume", default=None, help="Checkpoint to resume; --epochs remains the final epoch number.")
@@ -4595,6 +4823,21 @@ def build_arg_parser():
             "outer components; version 3 additionally separates exact "
             "eye-level head-outer alpha for paired accessories."
         ),
+    )
+    parser.add_argument(
+        "--hierarchical_dense_semantics",
+        dest="hierarchical_dense_semantics",
+        action="store_true",
+        default=False,
+        help=(
+            "Predict physical outer occupancy independently from three "
+            "non-exclusive top/eye/other outer attributes."
+        ),
+    )
+    parser.add_argument(
+        "--no_hierarchical_dense_semantics",
+        dest="hierarchical_dense_semantics",
+        action="store_false",
     )
     parser.add_argument(
         "--predict_head_outer_structure",
@@ -5220,6 +5463,7 @@ def build_arg_parser():
             "semantic_foreground_macro_iou_error",
             "semantic_outer_macro_iou_error",
             "semantic_outer_union_iou_error",
+            "semantic_hierarchical_iou_error",
         ],
         default="loss_hard_uv_color_selection",
     )
@@ -5267,6 +5511,14 @@ def main():
         ):
             if not 0.0 <= getattr(args, name) <= 1.0:
                 raise ValueError(f"--{name} must be in [0, 1].")
+        if not 0.0 <= args.real_semantic_pixel_rgb_tolerance <= 1.0:
+            raise ValueError(
+                "--real_semantic_pixel_rgb_tolerance must be in [0, 1]."
+            )
+        if args.real_semantic_mismatch_dilation < 0:
+            raise ValueError(
+                "--real_semantic_mismatch_dilation must be non-negative."
+            )
     if args.strict_determinism and not args.reproducible:
         raise ValueError("--strict_determinism requires --reproducible.")
     if args.dense_semantic_outer_false_positive_weight < 0.0:
@@ -5508,6 +5760,11 @@ def main():
             raise ValueError(
                 "Semantic-only training requires the five-class "
                 "--dense_semantic_target_version 3 schema."
+            )
+        if not args.hierarchical_dense_semantics:
+            raise ValueError(
+                "Semantic-only training requires "
+                "--hierarchical_dense_semantics."
             )
         if args.lambda_dense_semantics <= 0.0:
             raise ValueError(
@@ -5785,19 +6042,49 @@ def main():
         semantic_masks = tuple(
             mask.to(device) for mask in build_part_layer_masks()
         )
-    val_count = int(len(dataset) * args.val_split)
-    train_count = len(dataset) - val_count
     split_generator = torch.Generator().manual_seed(args.seed)
     train_loader_generator = torch.Generator().manual_seed(args.seed + 1)
     val_loader_generator = torch.Generator().manual_seed(args.seed + 2)
-    if val_count > 0:
-        train_dataset, val_dataset = random_split(
-            dataset,
-            [train_count, val_count],
-            generator=split_generator,
+    train_sampler = None
+    if isinstance(dataset, PairedRenderSkinDataset):
+        semantic_strata = dataset.semantic_strata(
+            alpha_threshold=args.target_alpha_threshold
+        )
+        train_indices, val_indices = stratified_semantic_split(
+            semantic_strata,
+            args.val_split,
+            args.seed,
+        )
+        train_dataset = Subset(dataset, train_indices)
+        val_dataset = Subset(dataset, val_indices) if val_indices else None
+        train_sampler = WeightedRandomSampler(
+            stratified_semantic_sample_weights(
+                semantic_strata, train_indices
+            ),
+            num_samples=len(train_indices),
+            replacement=True,
+            generator=train_loader_generator,
+        )
+        stratum_counts = {}
+        for stratum in semantic_strata:
+            stratum_counts[str(int(stratum))] = (
+                stratum_counts.get(str(int(stratum)), 0) + 1
+            )
+        print(
+            "Paired semantic strata: "
+            + json.dumps(stratum_counts, sort_keys=True)
         )
     else:
-        train_dataset, val_dataset = dataset, None
+        val_count = int(len(dataset) * args.val_split)
+        train_count = len(dataset) - val_count
+        if val_count > 0:
+            train_dataset, val_dataset = random_split(
+                dataset,
+                [train_count, val_count],
+                generator=split_generator,
+            )
+        else:
+            train_dataset, val_dataset = dataset, None
 
     loader_kwargs = {
         "batch_size": args.batch_size,
@@ -5810,7 +6097,8 @@ def main():
         loader_kwargs["prefetch_factor"] = args.prefetch_factor
     train_loader = DataLoader(
         train_dataset,
-        shuffle=True,
+        shuffle=train_sampler is None,
+        sampler=train_sampler,
         generator=train_loader_generator,
         **loader_kwargs,
     )
@@ -5898,6 +6186,7 @@ def main():
             else 0.0
         ),
         dense_semantic_target_version=args.dense_semantic_target_version,
+        hierarchical_dense_semantics=args.hierarchical_dense_semantics,
         predict_confidence=args.semantic_backbone != "none",
         route_role_spatial_prior=(
             geometry_only and args.route_role_spatial_prior
@@ -5967,7 +6256,29 @@ def main():
                 f"checkpoint={initialize_stage!r}, "
                 f"requested={args.training_stage!r}."
             )
-        model.load_state_dict(initialize_checkpoint["model"], strict=True)
+        incompatible = model.load_state_dict(
+            initialize_checkpoint["model"], strict=False
+        )
+        allowed_missing_prefixes = (
+            "semantic_text_prompt_fusion.hierarchical_head.",
+        )
+        disallowed_missing = [
+            key
+            for key in incompatible.missing_keys
+            if not key.startswith(allowed_missing_prefixes)
+        ]
+        if disallowed_missing or incompatible.unexpected_keys:
+            raise ValueError(
+                "Initialization checkpoint is not architecture-compatible: "
+                f"missing={disallowed_missing}, "
+                f"unexpected={incompatible.unexpected_keys}."
+            )
+        if incompatible.missing_keys:
+            print(
+                "Initialized new hierarchical semantic head from the current "
+                "random seed; all established weights came from the base "
+                "checkpoint."
+            )
         print(
             "Initialized model weights from "
             f"{initialize_path} (checkpoint epoch "
@@ -6362,6 +6673,7 @@ def main():
         "dense_semantic_target_version": (
             args.dense_semantic_target_version
         ),
+        "hierarchical_dense_semantics": args.hierarchical_dense_semantics,
         "dense_semantic_outer_false_positive_weight": (
             args.dense_semantic_outer_false_positive_weight
         ),

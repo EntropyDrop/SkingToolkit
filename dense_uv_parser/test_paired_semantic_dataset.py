@@ -10,9 +10,14 @@ from PIL import Image
 from SkingToolkit.dense_uv_parser.losses import (
     dense_semantic_outer_false_positive_loss,
     dense_semantic_outer_union_terms,
+    hierarchical_dense_semantic_terms,
     head_top_accessory_semantic_terms,
 )
 from SkingToolkit.dense_uv_parser.skin_dataset import PairedRenderSkinDataset
+from SkingToolkit.dense_uv_parser.train import (
+    stratified_semantic_sample_weights,
+    stratified_semantic_split,
+)
 
 
 def _write_pair(root: Path, name="sample"):
@@ -182,6 +187,42 @@ class PairedSemanticDatasetTest(unittest.TestCase):
             incorrect_terms["count_dense_semantic_outer_union_fn"].item(),
             8.0,
         )
+
+    def test_hierarchical_attributes_can_overlap(self):
+        outer_logit = torch.full((1, 1, 2, 2), 4.0)
+        attributes = torch.full((1, 3, 2, 2), -4.0)
+        attributes[:, 0, 0, 0] = 4.0
+        attributes[:, 1, 0, 0] = 4.0
+        outer_target = torch.ones(1, 2, 2, dtype=torch.long)
+        attribute_target = torch.zeros(1, 3, 2, 2)
+        attribute_target[:, 0, 0, 0] = 1.0
+        attribute_target[:, 1, 0, 0] = 1.0
+        attribute_target[:, 2, 0, 1:] = 1.0
+        attribute_target[:, 2, 1] = 1.0
+
+        terms = hierarchical_dense_semantic_terms(
+            outer_logit,
+            attributes,
+            outer_target,
+            attribute_target,
+        )
+
+        self.assertEqual(
+            terms["count_dense_semantic_attribute_0_tp"].item(), 1.0
+        )
+        self.assertEqual(
+            terms["count_dense_semantic_attribute_1_tp"].item(), 1.0
+        )
+
+    def test_semantic_split_and_sampling_are_stratified(self):
+        strata = [1] * 8 + [2] * 4 + [3] * 2
+        train, validation = stratified_semantic_split(
+            strata, val_split=0.25, seed=1234
+        )
+        self.assertTrue({strata[index] for index in validation} >= {1, 2, 3})
+        weights = stratified_semantic_sample_weights(strata, train)
+        self.assertEqual(weights.numel(), len(train))
+        self.assertGreater(weights.max().item(), weights.min().item())
 
 
 if __name__ == "__main__":

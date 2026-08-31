@@ -3,7 +3,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
-# Train only the five-class per-pixel semantic classifier.  By default this
+# Train the hierarchical per-pixel semantic classifier. By default this
 # command performs real-domain adaptation on archived *_edited / *_v94_result
 # pairs. Files using the historical *_result suffix are deliberately ignored.
 # If a previous synthetic semantic checkpoint exists it is used only
@@ -16,11 +16,11 @@ export REAL_SEMANTIC_RESULT_SUFFIX="${REAL_SEMANTIC_RESULT_SUFFIX:-_v94_result}"
 export PRIVILEGED_VIEWS=""
 export EPOCHS="${EPOCHS:-24}"
 export LR="${LR:-1e-4}"
-export BEST_METRIC="${BEST_METRIC:-semantic_outer_macro_iou_error}"
+export BEST_METRIC="${BEST_METRIC:-semantic_hierarchical_iou_error}"
 export FEATURE_DROPOUT="${FEATURE_DROPOUT:-0.05}"
 export REPRODUCIBLE="${REPRODUCIBLE:-true}"
 export STRICT_DETERMINISM="${STRICT_DETERMINISM:-false}"
-export BACKGROUND_AUGMENT="${BACKGROUND_AUGMENT:-true}"
+export BACKGROUND_AUGMENT="false"
 
 if [[ -n "$REAL_SEMANTIC_DATA_DIR" && -d "$REAL_SEMANTIC_DATA_DIR" ]]; then
   v94_pair_count="$(find "$REAL_SEMANTIC_DATA_DIR" -type f -name "*${REAL_SEMANTIC_RESULT_SUFFIX}.png" 2>/dev/null | wc -l | tr -d ' ')"
@@ -51,8 +51,11 @@ fi
 export SEMANTIC_BACKBONE="siglip2"
 export SIGLIP_TEXT_PROMPT_FUSION="true"
 export DENSE_SEMANTIC_TARGET_VERSION="3"
+export HIERARCHICAL_DENSE_SEMANTICS="true"
+export REAL_SEMANTIC_PIXEL_RGB_TOLERANCE="${REAL_SEMANTIC_PIXEL_RGB_TOLERANCE:-0.12}"
+export REAL_SEMANTIC_MISMATCH_DILATION="${REAL_SEMANTIC_MISMATCH_DILATION:-1}"
 export LAMBDA_DENSE_SEMANTICS="${LAMBDA_DENSE_SEMANTICS:-1.0}"
-export DENSE_SEMANTIC_OUTER_FALSE_POSITIVE_WEIGHT="${DENSE_SEMANTIC_OUTER_FALSE_POSITIVE_WEIGHT:-0.05}"
+export DENSE_SEMANTIC_OUTER_FALSE_POSITIVE_WEIGHT="${DENSE_SEMANTIC_OUTER_FALSE_POSITIVE_WEIGHT:-0.20}"
 export DENSE_SEMANTIC_OUTER_UNION_WEIGHT="${DENSE_SEMANTIC_OUTER_UNION_WEIGHT:-1.0}"
 export LAMBDA_TEXT_PROMPT_ROUTE="0"
 

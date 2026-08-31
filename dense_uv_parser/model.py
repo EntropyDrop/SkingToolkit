@@ -424,6 +424,7 @@ class TextPromptRouteFusion(nn.Module):
         logit_scale=1.0,
         logit_bias=0.0,
         semantic_target_version=1,
+        hierarchical_semantics=False,
     ):
         super().__init__()
         if raw_feature_dim < 1 or prompt_count < 1:
@@ -435,6 +436,7 @@ class TextPromptRouteFusion(nn.Module):
         self.hidden_channels = int(hidden_channels)
         self.highres_channels = int(highres_channels)
         self.semantic_target_version = int(semantic_target_version)
+        self.hierarchical_semantics = bool(hierarchical_semantics)
         if self.semantic_target_version not in (1, 2, 3):
             raise ValueError("semantic_target_version must be 1, 2, or 3.")
         expected_topology_prompts = {
@@ -482,6 +484,21 @@ class TextPromptRouteFusion(nn.Module):
             nn.Conv2d(hidden_channels, hidden_channels, kernel_size=3, padding=1),
             nn.GELU(),
             nn.Conv2d(hidden_channels, prompt_count, kernel_size=1),
+        )
+        self.hierarchical_head = (
+            nn.Sequential(
+                nn.Conv2d(
+                    combined_channels,
+                    hidden_channels,
+                    kernel_size=3,
+                    padding=1,
+                ),
+                nn.GELU(),
+                nn.Conv2d(hidden_channels, 4, kernel_size=1),
+            )
+            if self.hierarchical_semantics
+            and self.semantic_target_version == 3
+            else None
         )
         self.route_projection = nn.Sequential(
             nn.Conv2d(prompt_count, hidden_channels, kernel_size=1),
@@ -604,7 +621,8 @@ class TextPromptRouteFusion(nn.Module):
             combined = torch.cat([upsampled_spatial, highres_proj], dim=1)
             dense_semantic_logits = self.semantic_head(combined)
         else:
-            dense_semantic_logits = self.semantic_head(upsampled_spatial)
+            combined = upsampled_spatial
+            dense_semantic_logits = self.semantic_head(combined)
 
         if self.semantic_target_version in (2, 3):
             spatial_prompt_similarity = F.interpolate(
@@ -616,8 +634,11 @@ class TextPromptRouteFusion(nn.Module):
             text_gate = torch.tanh(self.semantic_route_scale)
             dense_semantic_logits = (
                 dense_semantic_logits
-                + 0.50 * spatial_prompt_similarity
-                + text_gate * global_residual.unsqueeze(-1).unsqueeze(-1)
+                + text_gate
+                * (
+                    0.20 * spatial_prompt_similarity
+                    + global_residual.unsqueeze(-1).unsqueeze(-1)
+                )
             )
             # Version 2 has two outer classes followed by inner/background;
             # version 3 has three outer classes (top, eye-level, other)
@@ -626,11 +647,9 @@ class TextPromptRouteFusion(nn.Module):
             outer_class_count = (
                 3 if self.semantic_target_version == 3 else 2
             )
-            sem_outer = torch.logsumexp(
-                dense_semantic_logits[:, :outer_class_count],
-                dim=1,
-                keepdim=True,
-            )
+            sem_outer = dense_semantic_logits[
+                :, :outer_class_count
+            ].amax(dim=1, keepdim=True)
             sem_inner = dense_semantic_logits[
                 :, outer_class_count : outer_class_count + 1
             ]
@@ -642,7 +661,15 @@ class TextPromptRouteFusion(nn.Module):
             sem_inner = torch.logsumexp(
                 dense_semantic_logits[:, 8:14], dim=1, keepdim=True
             )
-        sem_delta = (sem_outer - sem_inner).clamp(-10.0, 10.0)
+        hierarchical_outer_logit = None
+        hierarchical_attribute_logits = None
+        if self.hierarchical_head is not None:
+            hierarchical = self.hierarchical_head(combined)
+            hierarchical_outer_logit = hierarchical[:, :1]
+            hierarchical_attribute_logits = hierarchical[:, 1:]
+            sem_delta = hierarchical_outer_logit.clamp(-10.0, 10.0)
+        else:
+            sem_delta = (sem_outer - sem_inner).clamp(-10.0, 10.0)
 
         sem_bias = torch.cat(
             [
@@ -655,11 +682,16 @@ class TextPromptRouteFusion(nn.Module):
 
         projected_route = self.route_projection(dense_semantic_logits)
         if self.semantic_target_version in (2, 3):
-            probabilities = dense_semantic_logits.softmax(dim=1)
-            top_two = probabilities.topk(k=2, dim=1).values
-            confidence_gate = (top_two[:, :1] - top_two[:, 1:2]).clamp(
-                0.0, 1.0
-            )
+            if hierarchical_outer_logit is not None:
+                confidence_gate = torch.tanh(
+                    0.5 * hierarchical_outer_logit.abs()
+                )
+            else:
+                probabilities = dense_semantic_logits.softmax(dim=1)
+                top_two = probabilities.topk(k=2, dim=1).values
+                confidence_gate = (
+                    top_two[:, :1] - top_two[:, 1:2]
+                ).clamp(0.0, 1.0)
             # Exact zero initialization preserves the established parser. The
             # scalar must first learn that calibrated semantic evidence helps
             # before outer/inner log-odds can affect routing.
@@ -682,6 +714,8 @@ class TextPromptRouteFusion(nn.Module):
             global_logits,
             dense_semantic_logits,
             spatial_prompt_similarity,
+            hierarchical_outer_logit,
+            hierarchical_attribute_logits,
         )
 
 
@@ -821,6 +855,7 @@ class DenseUVParserNet(nn.Module):
         semantic_text_logit_scale=1.0,
         semantic_text_logit_bias=0.0,
         dense_semantic_target_version=1,
+        hierarchical_dense_semantics=False,
         predict_confidence=False,
         route_role_spatial_prior=False,
         route_prior_height=32,
@@ -866,6 +901,9 @@ class DenseUVParserNet(nn.Module):
         )
         self.dense_semantic_target_version = int(
             dense_semantic_target_version
+        )
+        self.hierarchical_dense_semantics = bool(
+            hierarchical_dense_semantics
         )
         if self.dense_semantic_target_version not in (1, 2, 3):
             raise ValueError(
@@ -1058,6 +1096,7 @@ class DenseUVParserNet(nn.Module):
                 logit_scale=semantic_text_logit_scale,
                 logit_bias=semantic_text_logit_bias,
                 semantic_target_version=self.dense_semantic_target_version,
+                hierarchical_semantics=self.hierarchical_dense_semantics,
             )
             if self.semantic_text_prompt_count > 0
             else None
@@ -1352,6 +1391,8 @@ class DenseUVParserNet(nn.Module):
         text_prompt_scores = None
         dense_semantic_logits = None
         spatial_prompt_similarity = None
+        dense_semantic_outer_logit = None
+        dense_semantic_attribute_logits = None
         if self.semantic_text_prompt_fusion is not None:
             if semantic_spatial is None:
                 raise ValueError(
@@ -1363,6 +1404,8 @@ class DenseUVParserNet(nn.Module):
                 text_prompt_scores,
                 dense_semantic_logits,
                 spatial_prompt_similarity,
+                dense_semantic_outer_logit,
+                dense_semantic_attribute_logits,
             ) = self.semantic_text_prompt_fusion(
                 semantic_spatial,
                 semantic_global,
@@ -1384,6 +1427,13 @@ class DenseUVParserNet(nn.Module):
             outputs["text_prompt_scores"] = text_prompt_scores
             outputs["dense_semantic_logits"] = dense_semantic_logits
             outputs["spatial_prompt_similarity"] = spatial_prompt_similarity
+            if dense_semantic_outer_logit is not None:
+                outputs["dense_semantic_outer_logit"] = (
+                    dense_semantic_outer_logit
+                )
+                outputs["dense_semantic_attribute_logits"] = (
+                    dense_semantic_attribute_logits
+                )
         if self.route_role_prior is not None:
             selected_prior_raw = self.route_role_prior.index_select(
                 0, view_ids.long()
