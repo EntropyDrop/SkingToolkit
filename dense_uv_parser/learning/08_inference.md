@@ -73,7 +73,7 @@ graph TD
 | :--- | :--- | :--- |
 | `outer_route_confidence_threshold` | `0.60` | 外层预测置信度门槛 |
 | `outer_route_margin_threshold` | `0.30` | 外层预测胜出边际门槛 |
-| `outer_uv_min_source_pixels` | `2` | 外层纹素最少源像素数（保护单视角高频细节） |
+| `outer_uv_min_source_pixels` | `33` | 外层纹素最少源像素数（过滤源投影支持不足的外层杂色） |
 | `hypothesis_render_refine` | `True` | 开启 Analysis-by-Synthesis 连通分量可微渲染假说裁决 |
 | `protect_chin_occlusion` | `True` | 开启下巴/面部防遮挡物理裁决 |
 
@@ -84,4 +84,3 @@ graph TD
 3. 中心得分加权众数取色（`grid_mode`），保留 1 像素高频原色。
 4. 极简内层盲区修复（对称 + 近邻），外层未观测严格透明。
 5. 连通分量可微渲染假说检验（Analysis-by-Synthesis）作为物理终审，彻底根除遮挡面罩与同色穿透假外层。
-

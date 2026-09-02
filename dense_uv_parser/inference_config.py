@@ -34,7 +34,7 @@ PRODUCTION_SPLAT_DEFAULTS = MappingProxyType(
         "outer_route_confidence_threshold": 0.60,
         "outer_route_margin_threshold": 0.30,
         "outer_uv_min_coverage": 0.10,
-        "outer_uv_min_source_pixels": 2,
+        "outer_uv_min_source_pixels": 33,
         "outer_silhouette_consistency": True,
         "outer_silhouette_min_coverage": 0.50,
         "outer_silhouette_dilation": 0,
