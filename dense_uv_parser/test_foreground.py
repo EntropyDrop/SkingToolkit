@@ -23,7 +23,7 @@ class DenseParserForegroundTest(unittest.TestCase):
         self.assertEqual(args.foreground_method, "flood")
         self.assertEqual(args.foreground_flood_tolerance, 0.03)
         self.assertEqual(args.color_aggregation, "grid_mode")
-        self.assertEqual(args.outer_uv_min_source_pixels, 15)
+        self.assertEqual(args.outer_uv_min_source_pixels, 33)
         self.assertEqual(
             args.simple_inpaint_output,
             "outputs/parser_pred_uv_simple_inpainting.png",

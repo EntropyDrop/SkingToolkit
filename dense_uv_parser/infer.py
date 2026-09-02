@@ -803,7 +803,7 @@ def build_arg_parser():
     parser.add_argument(
         "--outer_uv_min_source_pixels",
         type=int,
-        default=15,
+        default=33,
         help="Minimum routed source pixels required to keep an outer UV texel.",
     )
     parser.add_argument(
