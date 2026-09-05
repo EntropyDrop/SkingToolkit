@@ -86,6 +86,8 @@ def image_to_render_tensor(image, view_size, bg_color=(128, 128, 128)):
 def load_parser(checkpoint_path, device):
     checkpoint = torch.load(checkpoint_path, map_location=device)
     checkpoint_args = dict(checkpoint.get("args", {}))
+    if "v101_manifest" in checkpoint:
+        checkpoint_args["_v101_pipeline"] = checkpoint["v101_manifest"]["pipeline"]
     checkpoint_metrics = checkpoint.get("metrics", {})
     checkpoint_metric_source = (
         checkpoint_metrics.get("val")
@@ -168,6 +170,8 @@ def load_parser(checkpoint_path, device):
         ),
         route_prior_logit_cap=model_config.get("route_prior_logit_cap", 1.5),
         route_prior_dropout=model_config.get("route_prior_dropout", 0.0),
+        predict_head_accessories=model_config.get("predict_head_accessories", False),
+        accessory_route_threshold=model_config.get("accessory_route_threshold", 0.90),
         predict_outer_uv_occupancy=model_config.get(
             "predict_outer_uv_occupancy", has_outer_uv_occupancy
         ),

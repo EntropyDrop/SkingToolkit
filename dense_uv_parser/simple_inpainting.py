@@ -99,7 +99,7 @@ def simple_symmetry_nearest_inpaint(uv, alpha_threshold=0.5):
             source_index, used_same_row = _nearest_defined_source(
                 target_index,
                 defined,
-                valid,
+                valid & (layer == 0),
                 part,
                 face,
                 local_v,

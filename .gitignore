@@ -8,3 +8,8 @@ output
 control_imgs
 examples
 target_imgs
+
+# Generated parser datasets and inference artifacts
+dense_uv_parser/cache/
+dense_uv_parser/output_history/
+dense_uv_parser/outputs/

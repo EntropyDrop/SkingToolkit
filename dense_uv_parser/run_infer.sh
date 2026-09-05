@@ -241,11 +241,11 @@ OVERLAY_ALPHA="${OVERLAY_ALPHA:-0.45}"
 echo "Using routing profile: $ROUTING_PROFILE"
 echo "Using grid color aggregation: $COLOR_AGGREGATION"
 if [[ "$PARSER_ONLY" == "true" ]]; then
-  echo "Parser-only mode: deterministic UV repair is disabled."
+  echo "Parser-only mode: deterministic inner-layer UV repair is enabled."
 fi
 
 args=(
-  infer.py
+  run_local.py infer
   --parser_checkpoint "$PARSER_CHECKPOINT"
   --foreground_method "$FOREGROUND_METHOD"
   --foreground_flood_tolerance "$FOREGROUND_FLOOD_TOLERANCE"

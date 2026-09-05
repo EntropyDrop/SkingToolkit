@@ -3480,6 +3480,9 @@ def splat_parser_predictions_to_uv_conditioning(
             fg_threshold=fg_threshold,
             semantic_gate=semantic_gate,
         )
+    from SkingToolkit.dense_uv_parser.accessories import apply_accessory_routing
+    accessory_supported = apply_accessory_routing(
+        routing, canonical_outputs, canonical_observed_foreground, renderer, views)
     raw_foreground = routing["foreground"]
     routing["secondary"] = routing.get(
         "secondary", torch.zeros_like(raw_foreground)
@@ -3600,6 +3603,7 @@ def splat_parser_predictions_to_uv_conditioning(
             )
         outer_occupancy_rescued = occupancy_rescue_trusted & ~trusted
         trusted = trusted | occupancy_rescue_trusted
+    trusted = trusted | accessory_supported
     outer_silhouette_coverage = torch.ones_like(routing["confidence"])
     outer_silhouette_assessed = torch.zeros_like(selected_outer)
     outer_silhouette_rejected = torch.zeros_like(selected_outer)
@@ -3689,7 +3693,7 @@ def splat_parser_predictions_to_uv_conditioning(
             required_coverage,
             outer_required_coverage,
         )
-        trusted = trusted & (~selected_outer | (pixel_coverage >= required_coverage))
+        trusted = trusted & (~selected_outer | (pixel_coverage >= required_coverage) | accessory_supported)
     outer_source_support = torch.zeros_like(routing["flat_uv"])
     outer_source_rejected = torch.zeros_like(selected_outer)
     if outer_uv_min_source_pixels > 1:
@@ -3717,6 +3721,7 @@ def splat_parser_predictions_to_uv_conditioning(
         outer_source_rejected = (
             outer_candidates
             & (outer_source_support < int(outer_uv_min_source_pixels))
+            & ~accessory_supported
         )
         trusted = trusted & ~outer_source_rejected
     routing["raw_foreground"] = raw_foreground
