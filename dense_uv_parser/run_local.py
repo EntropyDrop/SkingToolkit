@@ -1,0 +1,35 @@
+"""Run a toolkit entry point using only this checkout, regardless of its name.
+
+Example: python dense_uv_parser/run_local.py semantic_generalization --help
+"""
+import importlib.machinery
+import runpy
+import sys
+import types
+from pathlib import Path
+
+
+def bind_checkout():
+    root = Path(__file__).resolve().parents[1]
+    existing = sys.modules.get("SkingToolkit")
+    if existing is not None:
+        if list(existing.__path__) != [str(root)]:
+            raise RuntimeError("SkingToolkit was already imported from another checkout")
+    else:
+        package = types.ModuleType("SkingToolkit")
+        package.__path__ = [str(root)]
+        package.__package__ = "SkingToolkit"
+        package.__spec__ = importlib.machinery.ModuleSpec(
+            "SkingToolkit", loader=None, is_package=True
+        )
+        package.__spec__.submodule_search_locations = package.__path__
+        sys.modules["SkingToolkit"] = package
+    return root
+
+
+if __name__ == "__main__":
+    bind_checkout()
+    entry = sys.argv.pop(1) if len(sys.argv) > 1 else "semantic_generalization"
+    if entry not in {"semantic_generalization", "infer", "train", "test_semantic_generalization"}:
+        raise SystemExit("Unsupported local entry point")
+    runpy.run_module(f"SkingToolkit.dense_uv_parser.{entry}", run_name="__main__", alter_sys=True)
