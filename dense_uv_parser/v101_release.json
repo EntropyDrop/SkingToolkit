@@ -441,5 +441,6 @@
       "head_rgb_mae_after": 0.0056191225543424095,
       "scope": "Whole-head colour reconstruction can slightly worsen while layer ownership improves; neither exact source-pixel boundaries nor arbitrary multiple headwear instances are claimed."
     }
-  }
+  },
+  "default_entry_check": "dense_uv_parser/runs/v101_headwear_release_20260906/default_entry_check.json"
 }
