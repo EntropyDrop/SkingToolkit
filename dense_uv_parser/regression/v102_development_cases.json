@@ -1,0 +1,29 @@
+[
+  {
+    "name": "crown",
+    "input": "/home/ds/llms/SKING_DDJ_Dataset/entropydrop_website_generations/SKING_DDJ_v54/1WQEQRUDRLMLVX3E_edited.png",
+    "input_sha256": "6235b3496b12cc1b45358677bf0c3d31118688c226a780ad17046d62a79420ac",
+    "uv": "/home/ds/llms/SKING_DDJ_Dataset/entropydrop_website_generations/SKING_DDJ_v54/1WQEQRUDRLMLVX3E_result_v101.png",
+    "artifact_dir": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/runs/v101_all_edited_20260906T110328Z/artifacts/1WQEQRUDRLMLVX3E_edited_e6b4340b1f5b",
+    "foreground": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/cache/released_foreground/1WQEQRUDRLMLVX3E_edited_da74d8c503c3/probability.png",
+    "directory": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/runs/v102_audit_20260906/crown"
+  },
+  {
+    "name": "nose",
+    "input": "/home/ds/llms/SKING_DDJ_Dataset/entropydrop_website_generations/SKING_DDJ_v54/1ZDZB1UAMS1DEZLD_edited.png",
+    "input_sha256": "c9a1f4ee159aeaa833dc090f763c5a59d4adddb5eed51caf72a7e7a3aae0d869",
+    "uv": "/home/ds/llms/SKING_DDJ_Dataset/entropydrop_website_generations/SKING_DDJ_v54/1ZDZB1UAMS1DEZLD_result_v101.png",
+    "artifact_dir": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/runs/v101_all_edited_20260906T110328Z/artifacts/1ZDZB1UAMS1DEZLD_edited_85f99709975a",
+    "foreground": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/cache/released_foreground/1ZDZB1UAMS1DEZLD_edited_7e2adb41abd1/probability.png",
+    "directory": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/runs/v102_audit_20260906/nose"
+  },
+  {
+    "name": "beard",
+    "input": "/home/ds/llms/SKING_DDJ_Dataset/entropydrop_website_generations/SKING_DDJ_v61/1ZW63H5Z8YNV57MT_edited.png",
+    "input_sha256": "a99b78b156781900b20180c9c58bfff7dc07956dbb04632383404e8e863ddf2c",
+    "uv": "/home/ds/llms/SKING_DDJ_Dataset/entropydrop_website_generations/SKING_DDJ_v61/1ZW63H5Z8YNV57MT_result_v101.png",
+    "artifact_dir": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/runs/v101_all_edited_20260906T110328Z/artifacts/1ZW63H5Z8YNV57MT_edited_deb425d7e8ec",
+    "foreground": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/cache/released_foreground/1ZW63H5Z8YNV57MT_edited_62eeca78f389/probability.png",
+    "directory": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/runs/v102_audit_20260906/beard"
+  }
+]
