@@ -1,0 +1,342 @@
+{
+  "training": {
+    "state": "complete",
+    "version": "v103",
+    "pid": 523400,
+    "step": 6000,
+    "total_steps": 6000,
+    "elapsed_seconds": 1202.3684554100037,
+    "non_head_parent_tensors_unchanged": true,
+    "release_promoted": false
+  },
+  "weights": {
+    "parent": "dense_uv_parser/runs/v102_alignment_release_20260906/parser.pt",
+    "parent_sha256": "5ed960a47bb7610f44b544e709e35cce2a610fb9bf48482e2d8c9926a59dd195",
+    "candidate": "dense_uv_parser/runs/v103_uv_structured_20260906/step_6000.pt",
+    "candidate_sha256": "f061041448dc4fca0af312a2313d5a8bf1d1a619a29d436ed78fc381bf90204d",
+    "frozen_tensors": 386,
+    "changed_frozen_tensors": []
+  },
+  "baseline_beard": {
+    "annotation": "dense_uv_parser/regression/v102_uv_symmetry_review.json",
+    "beard_symmetry": {
+      "inner": {
+        "alpha_mismatched_texels": 0,
+        "rgb_mismatched_texels": 24,
+        "rgb_max_difference": 48
+      },
+      "outer": {
+        "alpha_mismatched_texels": 8,
+        "rgb_mismatched_texels": 20,
+        "rgb_max_difference": 86
+      }
+    },
+    "beard_symmetry_passed": false,
+    "hair_reference_alpha_mismatched_texels": 14,
+    "passed": false,
+    "scope": "Annotated development example; not an independent generalization score."
+  },
+  "accepted_checkpoints": [],
+  "recommendation": "Do not promote v103: automatic UV symmetry fails at every checkpoint. Independently loaded final inference preserves all 17 body UVs. Training-time evaluation differs from fresh inference; do not misattribute that discrepancy to changed body weights. Synthetic progress is not sufficient.",
+  "evaluation_reproducibility": {
+    "training_vs_fresh_body_changed_cases": 11,
+    "training_vs_fresh_body_alpha_changed_cases": 2,
+    "fresh_v102_vs_fresh_v103_body_changed_cases": 0,
+    "interpretation": "Training-time evaluation and independently loaded inference differ slightly. Exact cause is not isolated; use fresh inference for final acceptance."
+  },
+  "final_inference_folder": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/runs/v103_review_20260907/real_v103_fresh_load",
+  "scope": "17 previously used real development cases; not an independent heldout set. UV/color coordinates below are review annotations, not inference rules.",
+  "checkpoints": {
+    "200": {
+      "beard": {
+        "annotation": "dense_uv_parser/regression/v102_uv_symmetry_review.json",
+        "beard_symmetry": {
+          "inner": {
+            "alpha_mismatched_texels": 0,
+            "rgb_mismatched_texels": 24,
+            "rgb_max_difference": 48
+          },
+          "outer": {
+            "alpha_mismatched_texels": 12,
+            "rgb_mismatched_texels": 20,
+            "rgb_max_difference": 86
+          }
+        },
+        "beard_symmetry_passed": false,
+        "hair_reference_alpha_mismatched_texels": 13,
+        "passed": false,
+        "scope": "Annotated development example; not an independent generalization score."
+      },
+      "checks": {
+        "beard_uv_review": false,
+        "body_exact": false,
+        "nose_inner": true,
+        "crown_cap_inner_clear": true,
+        "crown_cap_extension_retained": true,
+        "gold_crown_top_open": true,
+        "phone_no_strong_green_leak": true,
+        "glasses_forehead_clear": true,
+        "brim_continuous": true,
+        "hat_band_inner": false
+      },
+      "body_changed_cases": 11,
+      "body_alpha_changed_cases": 2,
+      "accepted": false
+    },
+    "1000": {
+      "beard": {
+        "annotation": "dense_uv_parser/regression/v102_uv_symmetry_review.json",
+        "beard_symmetry": {
+          "inner": {
+            "alpha_mismatched_texels": 0,
+            "rgb_mismatched_texels": 24,
+            "rgb_max_difference": 49
+          },
+          "outer": {
+            "alpha_mismatched_texels": 12,
+            "rgb_mismatched_texels": 18,
+            "rgb_max_difference": 86
+          }
+        },
+        "beard_symmetry_passed": false,
+        "hair_reference_alpha_mismatched_texels": 11,
+        "passed": false,
+        "scope": "Annotated development example; not an independent generalization score."
+      },
+      "checks": {
+        "beard_uv_review": false,
+        "body_exact": false,
+        "nose_inner": true,
+        "crown_cap_inner_clear": true,
+        "crown_cap_extension_retained": true,
+        "gold_crown_top_open": true,
+        "phone_no_strong_green_leak": true,
+        "glasses_forehead_clear": true,
+        "brim_continuous": true,
+        "hat_band_inner": true
+      },
+      "body_changed_cases": 11,
+      "body_alpha_changed_cases": 2,
+      "accepted": false
+    },
+    "2000": {
+      "beard": {
+        "annotation": "dense_uv_parser/regression/v102_uv_symmetry_review.json",
+        "beard_symmetry": {
+          "inner": {
+            "alpha_mismatched_texels": 0,
+            "rgb_mismatched_texels": 22,
+            "rgb_max_difference": 47
+          },
+          "outer": {
+            "alpha_mismatched_texels": 12,
+            "rgb_mismatched_texels": 20,
+            "rgb_max_difference": 86
+          }
+        },
+        "beard_symmetry_passed": false,
+        "hair_reference_alpha_mismatched_texels": 11,
+        "passed": false,
+        "scope": "Annotated development example; not an independent generalization score."
+      },
+      "checks": {
+        "beard_uv_review": false,
+        "body_exact": false,
+        "nose_inner": true,
+        "crown_cap_inner_clear": true,
+        "crown_cap_extension_retained": true,
+        "gold_crown_top_open": true,
+        "phone_no_strong_green_leak": true,
+        "glasses_forehead_clear": true,
+        "brim_continuous": true,
+        "hat_band_inner": false
+      },
+      "body_changed_cases": 11,
+      "body_alpha_changed_cases": 2,
+      "accepted": false
+    },
+    "3000": {
+      "beard": {
+        "annotation": "dense_uv_parser/regression/v102_uv_symmetry_review.json",
+        "beard_symmetry": {
+          "inner": {
+            "alpha_mismatched_texels": 0,
+            "rgb_mismatched_texels": 22,
+            "rgb_max_difference": 43
+          },
+          "outer": {
+            "alpha_mismatched_texels": 12,
+            "rgb_mismatched_texels": 18,
+            "rgb_max_difference": 86
+          }
+        },
+        "beard_symmetry_passed": false,
+        "hair_reference_alpha_mismatched_texels": 12,
+        "passed": false,
+        "scope": "Annotated development example; not an independent generalization score."
+      },
+      "checks": {
+        "beard_uv_review": false,
+        "body_exact": false,
+        "nose_inner": true,
+        "crown_cap_inner_clear": true,
+        "crown_cap_extension_retained": true,
+        "gold_crown_top_open": true,
+        "phone_no_strong_green_leak": true,
+        "glasses_forehead_clear": true,
+        "brim_continuous": true,
+        "hat_band_inner": false
+      },
+      "body_changed_cases": 11,
+      "body_alpha_changed_cases": 2,
+      "accepted": false
+    },
+    "4000": {
+      "beard": {
+        "annotation": "dense_uv_parser/regression/v102_uv_symmetry_review.json",
+        "beard_symmetry": {
+          "inner": {
+            "alpha_mismatched_texels": 0,
+            "rgb_mismatched_texels": 24,
+            "rgb_max_difference": 40
+          },
+          "outer": {
+            "alpha_mismatched_texels": 12,
+            "rgb_mismatched_texels": 18,
+            "rgb_max_difference": 86
+          }
+        },
+        "beard_symmetry_passed": false,
+        "hair_reference_alpha_mismatched_texels": 11,
+        "passed": false,
+        "scope": "Annotated development example; not an independent generalization score."
+      },
+      "checks": {
+        "beard_uv_review": false,
+        "body_exact": false,
+        "nose_inner": true,
+        "crown_cap_inner_clear": true,
+        "crown_cap_extension_retained": true,
+        "gold_crown_top_open": true,
+        "phone_no_strong_green_leak": true,
+        "glasses_forehead_clear": true,
+        "brim_continuous": true,
+        "hat_band_inner": false
+      },
+      "body_changed_cases": 11,
+      "body_alpha_changed_cases": 2,
+      "accepted": false
+    },
+    "5000": {
+      "beard": {
+        "annotation": "dense_uv_parser/regression/v102_uv_symmetry_review.json",
+        "beard_symmetry": {
+          "inner": {
+            "alpha_mismatched_texels": 0,
+            "rgb_mismatched_texels": 24,
+            "rgb_max_difference": 40
+          },
+          "outer": {
+            "alpha_mismatched_texels": 12,
+            "rgb_mismatched_texels": 18,
+            "rgb_max_difference": 86
+          }
+        },
+        "beard_symmetry_passed": false,
+        "hair_reference_alpha_mismatched_texels": 8,
+        "passed": false,
+        "scope": "Annotated development example; not an independent generalization score."
+      },
+      "checks": {
+        "beard_uv_review": false,
+        "body_exact": false,
+        "nose_inner": true,
+        "crown_cap_inner_clear": true,
+        "crown_cap_extension_retained": true,
+        "gold_crown_top_open": true,
+        "phone_no_strong_green_leak": true,
+        "glasses_forehead_clear": true,
+        "brim_continuous": true,
+        "hat_band_inner": true
+      },
+      "body_changed_cases": 11,
+      "body_alpha_changed_cases": 2,
+      "accepted": false
+    },
+    "6000": {
+      "beard": {
+        "annotation": "dense_uv_parser/regression/v102_uv_symmetry_review.json",
+        "beard_symmetry": {
+          "inner": {
+            "alpha_mismatched_texels": 0,
+            "rgb_mismatched_texels": 24,
+            "rgb_max_difference": 40
+          },
+          "outer": {
+            "alpha_mismatched_texels": 12,
+            "rgb_mismatched_texels": 18,
+            "rgb_max_difference": 86
+          }
+        },
+        "beard_symmetry_passed": false,
+        "hair_reference_alpha_mismatched_texels": 10,
+        "passed": false,
+        "scope": "Annotated development example; not an independent generalization score."
+      },
+      "checks": {
+        "beard_uv_review": false,
+        "body_exact": false,
+        "nose_inner": true,
+        "crown_cap_inner_clear": true,
+        "crown_cap_extension_retained": true,
+        "gold_crown_top_open": true,
+        "phone_no_strong_green_leak": true,
+        "glasses_forehead_clear": true,
+        "brim_continuous": true,
+        "hat_band_inner": true
+      },
+      "body_changed_cases": 11,
+      "body_alpha_changed_cases": 2,
+      "accepted": false
+    },
+    "6000_fresh": {
+      "beard": {
+        "annotation": "dense_uv_parser/regression/v102_uv_symmetry_review.json",
+        "beard_symmetry": {
+          "inner": {
+            "alpha_mismatched_texels": 0,
+            "rgb_mismatched_texels": 24,
+            "rgb_max_difference": 40
+          },
+          "outer": {
+            "alpha_mismatched_texels": 12,
+            "rgb_mismatched_texels": 18,
+            "rgb_max_difference": 86
+          }
+        },
+        "beard_symmetry_passed": false,
+        "hair_reference_alpha_mismatched_texels": 10,
+        "passed": false,
+        "scope": "Annotated development example; not an independent generalization score."
+      },
+      "checks": {
+        "beard_uv_review": false,
+        "body_exact": true,
+        "nose_inner": true,
+        "crown_cap_inner_clear": true,
+        "crown_cap_extension_retained": true,
+        "gold_crown_top_open": true,
+        "phone_no_strong_green_leak": true,
+        "glasses_forehead_clear": true,
+        "brim_continuous": true,
+        "hat_band_inner": true
+      },
+      "body_changed_cases": 0,
+      "body_alpha_changed_cases": 0,
+      "accepted": false
+    }
+  },
+  "full_report": "dense_uv_parser/runs/v103_review_20260907/review.json",
+  "audit_script": "dense_uv_parser/runs/v103_review_20260907/audit.py",
+  "review_status": "rejected_for_release"
+}
