@@ -242,6 +242,12 @@ def load_parser(checkpoint_path, device):
             ),
         )
     model.eval()
+    if 'final_head_uv_state' in checkpoint:
+        from SkingToolkit.dense_uv_parser.final_head_uv import FinalHeadUVDecoder, evaluation_numerics
+        evaluation_numerics()
+        decoder=FinalHeadUVDecoder(**checkpoint.get('final_head_uv_config',{})).to(device)
+        decoder.load_state_dict(checkpoint['final_head_uv_state'],strict=True)
+        model.final_head_uv_decoder=decoder.eval()
     return model, checkpoint_args
 
 

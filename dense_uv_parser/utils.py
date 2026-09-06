@@ -365,7 +365,15 @@ def estimate_solid_background_color(
         ],
         dim=2,
     )
-    background_rgb = corners.median(dim=2).values.view(batch, 3, 1, 1)
+    if torch.are_deterministic_algorithms_enabled():
+        # CUDA median's unused tie indices have no deterministic implementation.
+        # Stable sorting preserves its lower-median values without those indices.
+        ordered = corners.sort(dim=2, stable=True).values
+        median = ordered[:, :, (corners.shape[2] - 1) // 2]
+        median = median.masked_fill(torch.isnan(corners).any(dim=2), float('nan'))
+        background_rgb = median.view(batch, 3, 1, 1)
+    else:
+        background_rgb = corners.median(dim=2).values.view(batch, 3, 1, 1)
     corner_distance = (corners - background_rgb.flatten(2)).abs().amax(dim=1)
     solid_background = (corner_distance <= color_tolerance).float().mean(dim=1) >= min_corner_support
     return background_rgb, solid_background
