@@ -31,7 +31,7 @@ def crop_renderer(renderer, views, height, width):
 
 
 @torch.no_grad()
-def prune_crown_top(uv, target, foreground, renderer, views, crown_uv=None):
+def prune_crown_top(uv, target, foreground, renderer, views, crown_uv=None, protected_top=None):
     """Delete a top cell only when its removal improves rendered semantics.
 
     Only existing outer head-top alpha can change. Hidden or ambiguous cells
@@ -57,6 +57,8 @@ def prune_crown_top(uv, target, foreground, renderer, views, crown_uv=None):
         # Red minus green cancels the equal RGB renderer background, yielding
         # the visible crown contribution, including bilinear/occlusion effects.
         identity = outer if crown_uv is None else (crown_uv[group] | top) & outer
+        protected = torch.zeros_like(top) if protected_top is None else protected_top[group] & top
+        identity = identity & ~protected
         semantic[:, 0] = identity.float()
         sl = slice(group * len(views), (group + 1) * len(views))
         expected = target[sl] * foreground[sl]
@@ -73,7 +75,7 @@ def prune_crown_top(uv, target, foreground, renderer, views, crown_uv=None):
         score = float(objective(semantic))
         record = {'before_loss': score, 'removed': []}
         while True:
-            active = (top & (semantic[0, 3] > .5)).nonzero()
+            active = (top & ~protected & (semantic[0, 3] > .5)).nonzero()
             if not len(active):
                 break
             scores = []
@@ -113,12 +115,26 @@ def reconcile_crown_geometry(conditioning, details, renderer, views):
     uv = torch.stack([simple_inpaint_uv(c[None].cpu())[0] for c in conditioning]).to(conditioning.device)
     families = headwear_uv_families(routing, uv.shape[0], len(views))
     target = outputs['headwear_logits'].float().softmax(1)[:, 6]
+    protected = torch.zeros_like(uv[:, 3], dtype=torch.bool)
+    # A real outer hair shell may share the top plane with a crown. v102 has
+    # an explicit identity for it; do not treat it as erroneous crown material.
+    if 'head_semantics_logits' in outputs:
+        joint = outputs['head_semantics_logits'].float().softmax(1)
+        count = uv.new_zeros(uv.shape[0],4096);votes = torch.zeros_like(count)
+        for vi in range(len(views)):
+            sl = slice(vi,joint.shape[0],len(views))
+            valid = routing['color_foreground'][sl] & (routing['layer'][sl]==1) & (routing['part'][sl]==0)
+            index = routing['flat_uv'][sl].flatten(1)
+            count.scatter_add_(1,index,valid.float().flatten(1))
+            votes.scatter_add_(1,index,(joint[sl,4]*valid).flatten(1))
+        protected = ((votes/count.clamp_min(1)>=.95)&(count>=8)).reshape_as(protected)
     changed = torch.zeros_like(uv[:, 3], dtype=torch.bool)
     records = []
     for group in active.nonzero().flatten().tolist():
         sl = slice(group * len(views), (group + 1) * len(views))
         fixed, record = prune_crown_top(uv[group:group + 1], target[sl], routing['observed_foreground'][sl],
-                                       renderer, views, crown_uv=families[group:group + 1] == 4)
+                                       renderer, views, crown_uv=families[group:group + 1] == 4,
+                                       protected_top=protected[group:group+1])
         changed[group] = (uv[group, 3] > .5) & (fixed[0, 3] <= .5)
         records.append({'group': group, **record[0]})
     result = conditioning.clone()

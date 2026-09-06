@@ -74,7 +74,20 @@ class HeadAccessoryHead(nn.Module):
         s2 = self.enc2(F.avg_pool2d(s1, 2))
         z = self.enc3(F.avg_pool2d(s2, 2))
         z = F.avg_pool2d(z, 2) + self.semantic(semantic_features.to(z.dtype))
-        z = self.context(z.flatten(2).transpose(1, 2)).transpose(1, 2).reshape_as(z)
+        tokens = z.flatten(2).transpose(1, 2)
+        if getattr(self, 'paired_context', False):
+            # Adjacent front/back views of one player exchange semantic evidence.
+            # Never mix players; incomplete groups are an input error.
+            if tokens.shape[0] % 2:
+                raise ValueError('Paired head semantics requires front/back groups')
+            n, length, channels = tokens.shape
+            tokens = tokens.reshape(n//2, 2, length, channels)
+            tokens = tokens + self.view_embedding[None, :, None].to(tokens.dtype)
+            tokens = self.context(tokens.reshape(n//2, 2*length, channels))
+            tokens = tokens.reshape(n, length, channels)
+        else:
+            tokens = self.context(tokens)
+        z = tokens.transpose(1, 2).reshape_as(z)
         z = self.dec2(torch.cat([F.interpolate(z, s2.shape[-2:], mode='bilinear', align_corners=False), s2], 1))
         z = self.dec1(torch.cat([F.interpolate(z, s1.shape[-2:], mode='bilinear', align_corners=False), s1], 1))
         z = self.dec0(torch.cat([F.interpolate(z, s0.shape[-2:], mode='bilinear', align_corners=False), s0], 1))
@@ -196,4 +209,7 @@ def apply_accessory_routing(routing, outputs, foreground, renderer, views, thres
     apply_head_ownership(routing, outputs, foreground, renderer, views)
     from SkingToolkit.dense_uv_parser.headwear import apply_headwear_routing
     apply_headwear_routing(routing, outputs, foreground, renderer, views)
+    if 'head_semantics_logits' in outputs:
+        from SkingToolkit.dense_uv_parser.head_semantics import apply_joint_head_routing
+        apply_joint_head_routing(routing, outputs, foreground, renderer, views)
     return routing['accessory_supported']

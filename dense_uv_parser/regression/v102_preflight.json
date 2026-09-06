@@ -1,0 +1,49 @@
+{
+  "tests": {
+    "test_v102": {
+      "passed": true,
+      "count": 7
+    },
+    "test_crown_geometry": {
+      "passed": true,
+      "count": 5
+    },
+    "test_headwear": {
+      "passed": true,
+      "count": 6
+    },
+    "test_accessories": {
+      "passed": true,
+      "count": 10
+    },
+    "test_affine_routing": {
+      "passed": true,
+      "count": 89
+    },
+    "test_ownership": {
+      "passed": true,
+      "count": 5
+    },
+    "test_semantic_parser": {
+      "passed": true,
+      "count": 14
+    },
+    "test_semantic_generalization": {
+      "passed": true,
+      "count": 5
+    }
+  },
+  "training_smoke": {
+    "state": "complete",
+    "pid": 406660,
+    "step": 2,
+    "total_steps": 2,
+    "elapsed_seconds": 13.165889024734497,
+    "v101_tensors_unchanged": true,
+    "release_promoted": false
+  },
+  "reload_and_real_inference_smoke_cases": 17,
+  "legacy_replay_evaluation_smoke": true,
+  "v101_registry_sha256": "2a65be5739f0b983b990d274940e686004bc976c42a8b415077d33a1c5262f9f",
+  "scope": "Preflight correctness only. The 2-step smoke checkpoint is not a quality candidate or release."
+}

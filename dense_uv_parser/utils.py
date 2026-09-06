@@ -635,6 +635,12 @@ def canonicalize_parser_outputs(outputs):
             canonical[name] = value
         else:
             canonical[name] = canonicalize_tensor(value, affine, mode="bilinear")
+    if 'head_semantics_logits' in canonical:
+        # Marginalize AFTER spatial interpolation. Interpolating independent
+        # projected logits could reintroduce contradictory boundary identities.
+        from SkingToolkit.dense_uv_parser.head_semantics import project_semantics
+        canonical['headwear_logits'] = project_semantics(canonical['head_semantics_logits'], 'headwear')
+        canonical['head_ownership_logits'] = project_semantics(canonical['head_semantics_logits'], 'ownership')
     return canonical
 
 
