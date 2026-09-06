@@ -11,3 +11,9 @@ The 1,600-step pilot achieved about 98% brim recall in both real views but was r
 Final checkpoint admission requires synthetic precision/recall and completeness, the existing stored-layer disagreement guard, glasses precision >= 0.85 and whole-glasses outer recall >= 0.90, both real brim recalls >= 0.90, and both annotated colour-band chroma retention values >= 0.95. The colour metric is specific to this red-band development case; it is not a universal semantic metric.
 
 Synthetic validation uses renderer alpha as foreground, with the same reliable-source filtering and complete rendering pipeline; real validation uses cached predictions from the accepted foreground model. Model selection uses validation, followed by held-out evaluation and full real-image visual review.
+
+## Completed release
+
+The 8,000-step continuation completed; validation selected step 7000. The held-out procedural test achieved precision 0.992704, recall 0.997558, and complete-object rate 0.978571. Fourteen real cases passed final numeric and visual review. The user hat has all 32 circumference texels at outer side row 3 occupied, and the original red band is retained. The img28 purple-background diagnostic is zero. These real images are development checks, not independent test data.
+
+The release is pinned in `v101_release.json`. `batch_infer.sh` automatically runs the paired foreground model; lower-level `batch_accessories` calls with a released checkpoint do the same. Original checkpoints remain in their original directories.

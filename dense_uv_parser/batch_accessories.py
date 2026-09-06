@@ -6,6 +6,7 @@ import io
 import os
 import shutil
 import tempfile
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 import torch
@@ -45,6 +46,17 @@ def main():
     del checkpoint_bytes
     if opt.pipeline is None and args.get('_v101_pipeline'):
         config=args['_v101_pipeline']
+    if opt.foreground_probabilities is None and config.get('foreground_release'):
+        # New checkpoints must use their paired trained foreground model even
+        # when called through the lower-level batch entry point.
+        root=Path(__file__).resolve().parents[1];release=config['foreground_release']
+        delta=root/release['checkpoint']
+        if not release['passed'] or sha(delta)!=release['checkpoint_sha256']:raise ValueError('Foreground release changed')
+        with tempfile.TemporaryDirectory(prefix='foreground-auto-') as temporary:
+            index=Path(temporary)/'predictions.json'
+            subprocess.run(['/home/ds/miniconda3/envs/comfy/bin/python',str(root/'dense_uv_parser/foreground_provider.py'),'--checkpoint',str(delta),'--model-dir',release['model_dir'],'--output-dir',str(root/'dense_uv_parser/cache/released_foreground'),'--result-manifest',str(index),'--inputs',*[str(x.resolve()) for x in cases]],cwd=root,check=True)
+            opt.foreground_probabilities=[Path(x) for x in json.loads(index.read_text())['probabilities']]
+            if len(opt.foreground_probabilities)!=len(cases):raise ValueError('Foreground output count does not match inputs')
     renderer=DifferentiableRenderer(args['mappings_dir']).cuda()
     opt.output_dir.mkdir(parents=True,exist_ok=True)
     sources={p.name:sha(p) for p in Path(__file__).parent.glob('*.py')}
@@ -56,6 +68,11 @@ def main():
         if opt.foreground_probabilities is not None:
             probability_path=opt.foreground_probabilities[case_index]
             probability_bytes=probability_path.read_bytes()
+            sidecar=probability_path.parent/'manifest.json'
+            if sidecar.is_file():
+                provider=json.loads(sidecar.read_text())
+                if provider.get('input_sha256')!=manifest['input_sha256']:raise ValueError('Foreground prediction belongs to different input bytes')
+                manifest['foreground_provider']={k:provider.get(k) for k in ('model_sha256','adaptation_sha256','adaptation_version','provider_sha256')}
             manifest['foreground_probability']={'path':str(probability_path.resolve()),'sha256':hashlib.sha256(probability_bytes).hexdigest(),'threshold':config.get('foreground_probability_threshold',.5),'source_threshold':config.get('foreground_source_threshold',.98),'source_inset':config.get('foreground_source_inset',1)}
         fingerprint=hashlib.sha256(json.dumps(manifest,sort_keys=True).encode()).hexdigest()
         # Include both path/input/checkpoint hashes: same basenames cannot collide.

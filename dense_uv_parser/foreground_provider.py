@@ -37,7 +37,7 @@ def main():
     model_sources={p.name:sha(p) for p in model_path.glob('*.py')}
     provenance={'model_dir':str(model_path),'model_sha256':sha(model_path/'model.safetensors'),
                 'model_code_sha256':model_sources,'config_sha256':sha(model_path/'config.json'),
-                'provider_sha256':sha(__file__),'view_count':opt.view_count,'resolution':1024,
+                'provider_sha256':sha(__file__),'loader_sha256':sha(Path(__file__).with_name('foreground_model.py')),'view_count':opt.view_count,'resolution':1024,
                 'output':'Segmentation confidence, not a calibrated alpha matte','torch':torch.__version__}
     model,trained_metadata=load_foreground_model(model_path,opt.checkpoint)
     if opt.checkpoint:

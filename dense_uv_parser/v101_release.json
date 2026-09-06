@@ -1,0 +1,162 @@
+{
+  "version": "v101",
+  "passed": true,
+  "state": "released after numeric and visual acceptance",
+  "checkpoint": "dense_uv_parser/runs/v101_release_20260906/parser.pt",
+  "checkpoint_sha256": "18fbdc26086b3adb194ffa5fe17e29a9d72dbd7437c0bf87c72fb740a3a54090",
+  "pipeline": "dense_uv_parser/runs/v101_release_20260906/pipeline.json",
+  "pipeline_sha256": "4ee404cb7540719608fd6d20d38273ca7f8fa4a5132f7fd80c84b309255e3db2",
+  "foreground": {
+    "version": "minecraft_foreground_v1",
+    "checkpoint": "dense_uv_parser/runs/foreground_release_800/foreground_step_800.pt",
+    "checkpoint_sha256": "8585a698d38969e6e7562e9c7d8c5f0b5e934e8f0811cf5b8678fcf05734e732",
+    "model_dir": "/home/ds/.cache/huggingface/hub/models--ZhengPeng7--BiRefNet/snapshots/6a62b7dcfa18a3829087877fb16c8006831e4220",
+    "step": 800,
+    "accepted_at_utc": "2026-09-06T05:45:36.930308+00:00",
+    "passed": true,
+    "heldout_images": 256,
+    "heldout_identities": 128,
+    "heldout": {
+      "iou": 0.9967454718444754,
+      "boundary_f1_tolerance_2px": 0.9836169424073569,
+      "boundary_alpha_mae": 0.042490756492937834,
+      "alpha_mae": 0.002159718080974926
+    },
+    "real_development_cases": 14,
+    "real_annotation_recall": 1.0,
+    "img28_purple_diagnostic": 0,
+    "reports": "dense_uv_parser/runs/foreground_release_800",
+    "foreground_threshold": 0.5,
+    "source_threshold": 0.98,
+    "source_inset": 1,
+    "scope": "Accepted foreground model; brim-data training may now proceed. Original v101 weights unchanged."
+  },
+  "training_run": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/runs/dense_uv_parser_v101_retrain_20260906",
+  "completed_steps": 8000,
+  "selected_step": 7000,
+  "frozen_v61_unchanged": true,
+  "validation": {
+    "tp": 587888,
+    "fp": 4308,
+    "fn": 1248,
+    "complete_objects": 115,
+    "objects": 115,
+    "uv_tp": 3234,
+    "uv_fn": 1,
+    "head_rgb_abs": 116968.60815429688,
+    "head_rgb_n": 10711452,
+    "band_rgb_abs": 3257.9371643066406,
+    "band_rgb_n": 129090,
+    "classes": {
+      "1": {
+        "tp": 248807,
+        "fp": 829,
+        "fn": 401
+      },
+      "2": {
+        "tp": 107257,
+        "fp": 794,
+        "fn": 309
+      },
+      "3": {
+        "tp": 231364,
+        "fp": 3145,
+        "fn": 998
+      }
+    },
+    "validation_inputs": "Alternating canonical and stressed images; renderer alpha for synthetic foreground when enabled; frozen learned foreground on real regression",
+    "object_precision": 0.9927253814615431,
+    "object_recall": 0.9978816436272779,
+    "object_iou": 0.9906377012826821,
+    "complete_object_rate": 1.0,
+    "hard_uv_object_recall": 0.9996908809891808,
+    "hat_band_rgb_mae": 0.0252377191440595,
+    "final_head_rgb_mae": 0.010919958204947086,
+    "clean_added_outer_false_positive_rate": 0.027539734856808027,
+    "clean_negative_uv_texels": 13653,
+    "clean_added_wrong_outer": 376,
+    "real_development": {
+      "scope": "development_regression_not_training_or_independent_test",
+      "glasses_mask_precision": 0.8977272727272727,
+      "glasses_mask_recall": 0.8517520215633423,
+      "whole_glasses_outer_recall": 0.9032644629478455,
+      "baseline_whole_glasses_outer_recall": 0.6430069208145142,
+      "left_lens_outer_recall": 0.9988052248954773,
+      "baseline_left_lens_outer_recall": 0.3643966317176819,
+      "right_lens_outer_recall": 0.9904875159263611,
+      "baseline_right_lens_outer_recall": 0.884661078453064,
+      "hat_brim_outer_recall": [
+        0.9826789498329163,
+        0.96304851770401
+      ],
+      "hat_band_chroma_retention": [
+        1.0092843770980835,
+        1.0066639184951782
+      ]
+    }
+  },
+  "heldout": {
+    "tp": 852927,
+    "fp": 6269,
+    "fn": 2088,
+    "complete_objects": 137,
+    "objects": 140,
+    "uv_tp": 4898,
+    "uv_fn": 2,
+    "head_rgb_abs": 120445.73413085938,
+    "head_rgb_n": 10857204,
+    "band_rgb_abs": 3820.223300933838,
+    "band_rgb_n": 225330,
+    "classes": {
+      "1": {
+        "tp": 214299,
+        "fp": 1075,
+        "fn": 738
+      },
+      "2": {
+        "tp": 282494,
+        "fp": 724,
+        "fn": 581
+      },
+      "3": {
+        "tp": 355441,
+        "fp": 5163,
+        "fn": 1462
+      }
+    },
+    "validation_inputs": "Alternating canonical and stressed images; renderer alpha for synthetic foreground when enabled; frozen learned foreground on real regression",
+    "object_precision": 0.9927036438717126,
+    "object_recall": 0.9975579375800424,
+    "object_iou": 0.9902970448771834,
+    "complete_object_rate": 0.9785714285714285,
+    "hard_uv_object_recall": 0.9995918367346939,
+    "hat_band_rgb_mae": 0.016953904499772948,
+    "final_head_rgb_mae": 0.011093623563751716,
+    "clean_added_outer_false_positive_rate": 0.02285438099841193,
+    "clean_negative_uv_texels": 14483,
+    "clean_added_wrong_outer": 331,
+    "real_development": {
+      "scope": "development_regression_not_training_or_independent_test",
+      "glasses_mask_precision": 0.8977272727272727,
+      "glasses_mask_recall": 0.8517520215633423,
+      "whole_glasses_outer_recall": 0.9032644629478455,
+      "baseline_whole_glasses_outer_recall": 0.6430069208145142,
+      "left_lens_outer_recall": 0.9988052248954773,
+      "baseline_left_lens_outer_recall": 0.3643966317176819,
+      "right_lens_outer_recall": 0.9904875159263611,
+      "baseline_right_lens_outer_recall": 0.884661078453064,
+      "hat_brim_outer_recall": [
+        0.9826789498329163,
+        0.96304851770401
+      ],
+      "hat_band_chroma_retention": [
+        1.0092843770980835,
+        1.0066639184951782
+      ]
+    }
+  },
+  "staged_at_utc": "2026-09-06T06:30:17.601438+00:00",
+  "final_batch_checks": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/runs/v101_release_20260906/final_batch_checks.json",
+  "output_history": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v101_retrained_20260906",
+  "released_at_utc": "2026-09-06T06:35:38.051497+00:00"
+}
