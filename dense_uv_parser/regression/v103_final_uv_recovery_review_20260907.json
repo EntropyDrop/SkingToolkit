@@ -1,0 +1,326 @@
+{
+  "scope": "Beard is a training identity. Other 16 real cases are repeatedly used development cases, not independent held-out tests. Landmark coordinates are evaluation annotations only.",
+  "training": {
+    "step": 6000,
+    "state": "complete_with_validation_warnings",
+    "all_6000_updates_retained": true,
+    "checkpoint_decoder_matches_recovery": true,
+    "parent_all_tensors_preserved": true,
+    "optimizer_moments_preserved": true,
+    "checkpoint": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/runs/v103_final_uv_retrain_20260907/training_completed/step_6000.pt",
+    "checkpoint_sha256": "6919f171dc192fa347a590fb5e016878577cf49a52ee8d7736d879502332e466",
+    "git_commit": "7d774304df9da4b5dab5c62c4acf2d6d987cf539",
+    "release_promoted": false,
+    "validation_warning_count": 1
+  },
+  "accepted": false,
+  "release_promoted": false,
+  "final": {
+    "checks": {
+      "beard_training_fit": false,
+      "body_exact": true,
+      "nose_inner": true,
+      "crown_cap_inner_clear": true,
+      "crown_cap_extension_retained": false,
+      "gold_crown_top_open": false,
+      "phone_no_strong_green_leak": true,
+      "glasses_forehead_clear": true,
+      "brim_continuous": false,
+      "hat_band_inner": true
+    },
+    "beard": {
+      "annotation": "dense_uv_parser/regression/v102_uv_symmetry_review.json",
+      "beard_symmetry": {
+        "inner": {
+          "alpha_mismatched_texels": 0,
+          "rgb_mismatched_texels": 22,
+          "rgb_max_difference": 46
+        },
+        "outer": {
+          "alpha_mismatched_texels": 0,
+          "rgb_mismatched_texels": 20,
+          "rgb_max_difference": 21
+        }
+      },
+      "beard_symmetry_passed": false,
+      "hair_reference_alpha_mismatched_texels": 0,
+      "passed": false,
+      "scope": "Annotated development example; not an independent generalization score."
+    },
+    "cases": {
+      "beard": {
+        "base": {},
+        "candidate": {},
+        "body_exact": true
+      },
+      "crown": {
+        "base": {
+          "inner_cap_blue": 0,
+          "outer_cap_blue": 12
+        },
+        "candidate": {
+          "inner_cap_blue": 0,
+          "outer_cap_blue": 11
+        },
+        "body_exact": true
+      },
+      "nose": {
+        "base": {
+          "nose_outer_alpha": 0
+        },
+        "candidate": {
+          "nose_outer_alpha": 0
+        },
+        "body_exact": true
+      },
+      "old_1H6GAQA9BENWNB89_edited": {
+        "base": {},
+        "candidate": {},
+        "body_exact": true
+      },
+      "old_2RSZETA9PCRZHVEU_edited": {
+        "base": {},
+        "candidate": {},
+        "body_exact": true
+      },
+      "old_33TVPML5UL2TKASR_edited": {
+        "base": {},
+        "candidate": {},
+        "body_exact": true
+      },
+      "old_PU418PLGERMFC487_edited": {
+        "base": {
+          "brim_each_face": [
+            8,
+            8,
+            8,
+            8
+          ],
+          "upper_hat_outer_red": 0
+        },
+        "candidate": {
+          "brim_each_face": [
+            7,
+            8,
+            6,
+            0
+          ],
+          "upper_hat_outer_red": 0
+        },
+        "body_exact": true
+      },
+      "old_TWRLRRTHQP2UV368_edited": {
+        "base": {
+          "forehead_outer_alpha": 0
+        },
+        "candidate": {
+          "forehead_outer_alpha": 0
+        },
+        "body_exact": true
+      },
+      "old_img10": {
+        "base": {},
+        "candidate": {},
+        "body_exact": true
+      },
+      "old_img12": {
+        "base": {},
+        "candidate": {},
+        "body_exact": true
+      },
+      "old_img23": {
+        "base": {},
+        "candidate": {},
+        "body_exact": true
+      },
+      "old_img25": {
+        "base": {},
+        "candidate": {},
+        "body_exact": true
+      },
+      "old_img26": {
+        "base": {},
+        "candidate": {},
+        "body_exact": true
+      },
+      "old_img27": {
+        "base": {
+          "inner_strong_green": 0
+        },
+        "candidate": {
+          "inner_strong_green": 0
+        },
+        "body_exact": true
+      },
+      "old_img28": {
+        "base": {},
+        "candidate": {},
+        "body_exact": true
+      },
+      "old_img3": {
+        "base": {},
+        "candidate": {},
+        "body_exact": true
+      },
+      "old_img46": {
+        "base": {
+          "crown_top_cells": 0
+        },
+        "candidate": {
+          "crown_top_cells": 6
+        },
+        "body_exact": true
+      }
+    },
+    "synthetic": {
+      "cases": 32,
+      "metrics": {
+        "base": {
+          "tp": 2321,
+          "fp": 293,
+          "fn": 496,
+          "rgb_sum": 3105.037338256836,
+          "rgb_count": 45315,
+          "outer_iou": 0.7463022508038585,
+          "visible_rgb_mae": 0.06852118146875948
+        },
+        "decoder": {
+          "tp": 2587,
+          "fp": 195,
+          "fn": 230,
+          "rgb_sum": 2263.0736083984375,
+          "rgb_count": 45315,
+          "outer_iou": 0.8588977423638778,
+          "visible_rgb_mae": 0.04994093806462402
+        }
+      },
+      "scope": "Train-disjoint synthetic source identities with actual parser errors; real anchor excluded."
+    },
+    "roundtrip": {
+      "rgba_exact": false,
+      "alpha_exact": true,
+      "base_alpha_exact": true,
+      "body_exact": true,
+      "cached_body_preserved": true,
+      "fresh_body_preserved": true,
+      "evidence_exact": true,
+      "base_rgb_max_delta": 0.0038035959005355835,
+      "final_rgb_max_delta": 0.0038035959005355835,
+      "png_rgb_max_delta": 1,
+      "different_texels": 1,
+      "rgb_float_tolerance": 0.00392156862745098,
+      "rgb_byte_tolerance": 1,
+      "differences": [
+        {
+          "xy": [
+            30,
+            12
+          ],
+          "cached": [
+            39,
+            47,
+            59,
+            255
+          ],
+          "fresh": [
+            39,
+            46,
+            59,
+            255
+          ]
+        }
+      ],
+      "passed": true,
+      "serialized_decoder_exact": true,
+      "fresh_inputs_decoder_exact": true
+    }
+  },
+  "all_checkpoint_checks": {
+    "200": {
+      "beard_training_fit": false,
+      "body_exact": true,
+      "nose_inner": false,
+      "crown_cap_inner_clear": true,
+      "crown_cap_extension_retained": false,
+      "gold_crown_top_open": true,
+      "phone_no_strong_green_leak": true,
+      "glasses_forehead_clear": true,
+      "brim_continuous": true,
+      "hat_band_inner": true
+    },
+    "1000": {
+      "beard_training_fit": false,
+      "body_exact": true,
+      "nose_inner": false,
+      "crown_cap_inner_clear": true,
+      "crown_cap_extension_retained": false,
+      "gold_crown_top_open": true,
+      "phone_no_strong_green_leak": true,
+      "glasses_forehead_clear": true,
+      "brim_continuous": false,
+      "hat_band_inner": true
+    },
+    "2000": {
+      "beard_training_fit": false,
+      "body_exact": true,
+      "nose_inner": true,
+      "crown_cap_inner_clear": true,
+      "crown_cap_extension_retained": false,
+      "gold_crown_top_open": true,
+      "phone_no_strong_green_leak": true,
+      "glasses_forehead_clear": true,
+      "brim_continuous": false,
+      "hat_band_inner": true
+    },
+    "3000": {
+      "beard_training_fit": false,
+      "body_exact": true,
+      "nose_inner": true,
+      "crown_cap_inner_clear": true,
+      "crown_cap_extension_retained": false,
+      "gold_crown_top_open": true,
+      "phone_no_strong_green_leak": true,
+      "glasses_forehead_clear": true,
+      "brim_continuous": false,
+      "hat_band_inner": true
+    },
+    "4000": {
+      "beard_training_fit": false,
+      "body_exact": true,
+      "nose_inner": true,
+      "crown_cap_inner_clear": true,
+      "crown_cap_extension_retained": false,
+      "gold_crown_top_open": true,
+      "phone_no_strong_green_leak": true,
+      "glasses_forehead_clear": true,
+      "brim_continuous": false,
+      "hat_band_inner": true
+    },
+    "5000": {
+      "beard_training_fit": false,
+      "body_exact": true,
+      "nose_inner": true,
+      "crown_cap_inner_clear": true,
+      "crown_cap_extension_retained": false,
+      "gold_crown_top_open": true,
+      "phone_no_strong_green_leak": true,
+      "glasses_forehead_clear": true,
+      "brim_continuous": false,
+      "hat_band_inner": true
+    },
+    "6000": {
+      "beard_training_fit": false,
+      "body_exact": true,
+      "nose_inner": true,
+      "crown_cap_inner_clear": true,
+      "crown_cap_extension_retained": false,
+      "gold_crown_top_open": false,
+      "phone_no_strong_green_leak": true,
+      "glasses_forehead_clear": true,
+      "brim_continuous": false,
+      "hat_band_inner": true
+    }
+  },
+  "run_root": "dense_uv_parser/runs/v103_final_uv_retrain_20260907",
+  "notes": "All 6000 updates retained. Upstream colour instability remains explicitly recorded; real beard material and headwear regressions fail acceptance."
+}
