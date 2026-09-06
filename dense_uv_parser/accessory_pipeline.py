@@ -43,8 +43,15 @@ def run_pipeline(model, renderer, images, config=None, complete=False, outputs=N
         outputs={**outputs,'headphone_routing_mode':'existing_uv','headphone_uv_support':(initial[:,9]>.5).flatten(1)}
     else:outputs={**outputs,'headphone_routing_mode':mode}
     cond,details=splat(outputs)
-    from SkingToolkit.dense_uv_parser.headwear import reconcile_crown_top
-    cond=reconcile_crown_top(cond,details,renderer,views)
+    geometry_mode = config.get('crown_top_geometry_mode', 'legacy_consensus')
+    if geometry_mode == 'rendered_semantics':
+        from SkingToolkit.dense_uv_parser.crown_geometry import reconcile_crown_geometry
+        cond = reconcile_crown_geometry(cond, details, renderer, views)
+    elif geometry_mode == 'legacy_consensus':
+        from SkingToolkit.dense_uv_parser.headwear import reconcile_crown_top
+        cond = reconcile_crown_top(cond, details, renderer, views)
+    else:
+        raise ValueError('Unknown crown top geometry mode: ' + str(geometry_mode))
     result = {'foreground_color_sources':color_sources,'foreground_probability':foreground_probability,'conditioning':cond,'details':details,'outputs':outputs,'foreground':fg}
     if complete:
         result['uv'] = torch.stack([simple_inpaint_uv(c[None].cpu())[0] for c in cond]).to(images.device)

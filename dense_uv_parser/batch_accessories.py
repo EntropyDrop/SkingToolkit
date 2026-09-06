@@ -126,10 +126,15 @@ def main():
             if components is not None:
                 palette=images.new_tensor([[.5,.5,.5],[.2,.8,.8],[.2,.4,1.],[.7,.4,.1],[.9,.2,.5],[1.,.85,.1]])
                 save_image(palette[components.argmax(1)].permute(0,3,1,2).cpu(),scratch/'hat_components.png',nrow=len(config['routing']['views']))
+            if 'crown_geometry' in result['details']:
+                (scratch/'crown_geometry.json').write_text(json.dumps(result['details']['crown_geometry'], indent=2))
+                save_image(result['details']['headwear_removed_top_uv'][:,None].float().cpu(), scratch/'crown_removed_top_uv.png')
             # Exact tensors make pixel-stage regression metrics reproducible.
             if opt.save_tensors:
                 torch.save({'images':images.cpu(),'outputs':{k:v.cpu() if torch.is_tensor(v) else v for k,v in result['outputs'].items()},
-                            'routing':{k:v.cpu() if torch.is_tensor(v) else v for k,v in routing.items()}},scratch/'diagnostics.pt')
+                            'routing':{k:v.cpu() if torch.is_tensor(v) else v for k,v in routing.items()},
+                            'crown_geometry': result['details'].get('crown_geometry'),
+                            'headwear_removed_top_uv': result['details'].get('headwear_removed_top_uv', torch.zeros(0)).cpu()},scratch/'diagnostics.pt')
             manifest.update(fingerprint=fingerprint,complete=True)
             (scratch/'manifest.json').write_text(json.dumps(manifest,indent=2))
             os.replace(scratch,target);print('completed='+str(target),flush=True)
