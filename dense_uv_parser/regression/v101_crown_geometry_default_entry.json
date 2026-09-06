@@ -1,0 +1,15 @@
+{
+  "passed": true,
+  "cases": [
+    {
+      "input": "/home/ds/llms/SkingDataset/DDJ_real2render/test_output/unofficial_prompt1_1K_t41_51_66_71/img46.png",
+      "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v101_crown_geometry_default_smoke_20260906/img46_1f4bee6b7302",
+      "byte_equal": true,
+      "alpha_equal": true,
+      "body_equal": true,
+      "foreground_equal": true,
+      "max_channel_difference": 0,
+      "changed_channels": 0
+    }
+  ]
+}

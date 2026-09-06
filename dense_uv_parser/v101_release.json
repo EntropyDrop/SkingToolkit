@@ -1,10 +1,10 @@
 {
   "version": "v101",
-  "revision": "headwear_component_consistency_20260906",
-  "checkpoint": "dense_uv_parser/runs/v101_headwear_release_20260906/parser.pt",
-  "checkpoint_sha256": "272ce1a24c5bbdf6a2b2518c3a58918a0b40e60a4ca218463ddf23ad8c8e8092",
-  "pipeline": "dense_uv_parser/runs/v101_headwear_release_20260906/pipeline.json",
-  "pipeline_sha256": "55540da8131a4dd042af8aade1723474ae32fb7917dbd1aa9f7bc64b495d7c1d",
+  "revision": "crown_geometry_20260906",
+  "checkpoint": "dense_uv_parser/runs/v101_crown_geometry_release_20260906/parser.pt",
+  "checkpoint_sha256": "a8aa3d8cd51cc6fec28d7c525aa1b012976d7cb1206e8b00c707de76bfb205dc",
+  "pipeline": "dense_uv_parser/runs/v101_crown_geometry_release_20260906/pipeline.json",
+  "pipeline_sha256": "3e14b98437eba9c5189a3344f560e7183f8daad44b9c40c55e15f7e0fda27685",
   "foreground": {
     "version": "minecraft_foreground_v1",
     "checkpoint": "dense_uv_parser/runs/foreground_release_800/foreground_step_800.pt",
@@ -31,301 +31,90 @@
     "scope": "Accepted foreground model; brim-data training may now proceed. Original v101 weights unchanged."
   },
   "passed": true,
-  "code_commit": "b6e07d2295f72df10350eb36e1866f4f494b2774",
-  "released_at_utc": "2026-09-06T08:49:23.732811+00:00",
-  "unit_integration_tests": 129,
-  "acceptance": "dense_uv_parser/runs/v101_headwear_release_20260906/final_checks.json",
-  "output_history": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v101_headwear_consistent_20260906",
-  "previous_release_file": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/runs/v101_headwear_release_20260906/previous_release.json",
+  "code_commit": "28f548a5be37868022cfbafaddbe095895e18210",
+  "released_at_utc": "2026-09-06T09:15:14.839541+00:00",
+  "unit_integration_tests": 134,
+  "acceptance": "dense_uv_parser/runs/v101_crown_geometry_release_20260906/final_checks.json",
+  "output_history": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v101_crown_geometry_20260906",
+  "previous_release_file": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/runs/v101_crown_geometry_release_20260906/previous_release.json",
   "training": {
-    "headwear_decoder_steps": 5400,
-    "whole_object_gate_steps": 1200,
-    "old_released_tensors_frozen": true
+    "steps": 0,
+    "model_tensors_frozen": 386
   },
   "summary": {
     "passed": true,
-    "visual_review": "14 final real images and separate inner/outer layers inspected; crown opening preserved.",
-    "unit_integration_tests": 129,
-    "headwear_test": {
-      "source_indices": "test[192:256] also used for presence-head testing, never gradient training or threshold selection",
-      "identities": 64,
-      "views": 128,
-      "seed": 125101037,
-      "baseline": {
-        "head_abs": 57507.05419921875,
-        "head_n": 10961961,
-        "crown_tp": 311398,
-        "crown_n": 339861,
-        "band_correct": 10093,
-        "band_n": 10115,
-        "crown_pred_tp": 0,
-        "crown_pred_n": 0,
-        "component_counts": {
-          "0": 16370931,
-          "1": 39022,
-          "2": 10115,
-          "3": 0,
-          "4": 0,
-          "5": 17287,
-          "6": 339861
-        },
-        "crown_outer_recall": 0.9162510555786042,
-        "band_layer_accuracy": 0.9978250123578843,
-        "crown_precision": 0.0,
-        "head_rgb_mae": 0.0052460553544405744
+    "unit_integration_tests": 134,
+    "synthetic_geometry": {
+      "count": 32,
+      "with_caps": 16,
+      "source_identity_status": "previously used test identities; new procedural draws; no training",
+      "all_outside_top_equal": true,
+      "before": {
+        "top_tp": 178,
+        "top_fn": 4,
+        "top_fp": 491,
+        "top_tn": 1375,
+        "visible_crown_tp": 494612,
+        "visible_crown_n": 497314,
+        "top_recall": 0.978021978021978,
+        "visible_crown_recall": 0.9945668129190008
       },
-      "candidate": {
-        "head_abs": 61596.602294921875,
-        "head_n": 10961961,
-        "crown_tp": 339601,
-        "crown_n": 339861,
-        "band_correct": 10110,
-        "band_n": 10115,
-        "crown_pred_tp": 339438,
-        "crown_pred_n": 340390,
-        "component_counts": {
-          "0": 16370931,
-          "1": 39022,
-          "2": 10115,
-          "3": 0,
-          "4": 0,
-          "5": 17287,
-          "6": 339861
-        },
-        "crown_outer_recall": 0.9992349813600266,
-        "band_layer_accuracy": 0.9995056846267919,
-        "crown_precision": 0.9972032080848439,
-        "head_rgb_mae": 0.0056191225543424095
+      "after": {
+        "top_tp": 178,
+        "top_fn": 4,
+        "top_fp": 14,
+        "top_tn": 1852,
+        "visible_crown_tp": 494612,
+        "visible_crown_n": 497314,
+        "top_recall": 0.978021978021978,
+        "visible_crown_recall": 0.9945668129190008
       }
-    },
-    "accessory_regression": {
-      "seed": 135101037,
-      "baseline": {
-        "tp": 840015,
-        "fp": 9550,
-        "fn": 2074,
-        "complete_objects": 130,
-        "objects": 130,
-        "uv_tp": 4850,
-        "uv_fn": 3,
-        "head_rgb_abs": 111770.74072265625,
-        "head_rgb_n": 10864482,
-        "band_rgb_abs": 3520.9511070251465,
-        "band_rgb_n": 208956,
-        "classes": {
-          "1": {
-            "tp": 189795,
-            "fp": 469,
-            "fn": 478
-          },
-          "2": {
-            "tp": 260215,
-            "fp": 464,
-            "fn": 425
-          },
-          "3": {
-            "tp": 389505,
-            "fp": 9117,
-            "fn": 1671
-          }
-        },
-        "validation_inputs": "Alternating canonical and stressed images; renderer alpha for synthetic foreground when enabled; frozen learned foreground on real regression",
-        "object_precision": 0.9887589531112981,
-        "object_recall": 0.9975370774348079,
-        "object_iou": 0.9863510243189896,
-        "complete_object_rate": 1.0,
-        "hard_uv_object_recall": 0.9993818256748404,
-        "hat_band_rgb_mae": 0.016850203425721907,
-        "final_head_rgb_mae": 0.010287719260122686,
-        "clean_added_outer_false_positive_rate": 0.024232263964032615,
-        "clean_negative_uv_texels": 13123,
-        "clean_added_wrong_outer": 318,
-        "real_development": {
-          "scope": "development_regression_not_training_or_independent_test",
-          "glasses_mask_precision": 0.8997779892166191,
-          "glasses_mask_recall": 0.8496555855046422,
-          "whole_glasses_outer_recall": 0.8993710875511169,
-          "baseline_whole_glasses_outer_recall": 0.6433063745498657,
-          "left_lens_outer_recall": 0.9964157342910767,
-          "baseline_left_lens_outer_recall": 0.3643966317176819,
-          "right_lens_outer_recall": 0.9797859787940979,
-          "baseline_right_lens_outer_recall": 0.885850191116333,
-          "hat_brim_outer_recall": [
-            0.9826789498329163,
-            0.96304851770401
-          ],
-          "hat_band_chroma_retention": [
-            1.019749641418457,
-            1.03266179561615
-          ]
-        }
-      },
-      "candidate": {
-        "tp": 840076,
-        "fp": 9599,
-        "fn": 2013,
-        "complete_objects": 130,
-        "objects": 130,
-        "uv_tp": 4850,
-        "uv_fn": 3,
-        "head_rgb_abs": 108007.65710449219,
-        "head_rgb_n": 10864482,
-        "band_rgb_abs": 2278.7254524230957,
-        "band_rgb_n": 208956,
-        "classes": {
-          "1": {
-            "tp": 189654,
-            "fp": 323,
-            "fn": 619
-          },
-          "2": {
-            "tp": 260195,
-            "fp": 424,
-            "fn": 445
-          },
-          "3": {
-            "tp": 389505,
-            "fp": 9117,
-            "fn": 1671
-          }
-        },
-        "validation_inputs": "Alternating canonical and stressed images; renderer alpha for synthetic foreground when enabled; frozen learned foreground on real regression",
-        "object_precision": 0.9887027392826669,
-        "object_recall": 0.9976095163337841,
-        "object_iou": 0.9863658992494905,
-        "complete_object_rate": 1.0,
-        "hard_uv_object_recall": 0.9993818256748404,
-        "hat_band_rgb_mae": 0.010905288445524875,
-        "final_head_rgb_mae": 0.009941353587266487,
-        "clean_added_outer_false_positive_rate": 0.02476567857959308,
-        "clean_negative_uv_texels": 13123,
-        "clean_added_wrong_outer": 325,
-        "real_development": {
-          "scope": "development_regression_not_training_or_independent_test",
-          "glasses_mask_precision": 0.8997779892166191,
-          "glasses_mask_recall": 0.8496555855046422,
-          "whole_glasses_outer_recall": 0.8993710875511169,
-          "baseline_whole_glasses_outer_recall": 0.6433063745498657,
-          "left_lens_outer_recall": 0.9964157342910767,
-          "baseline_left_lens_outer_recall": 0.3643966317176819,
-          "right_lens_outer_recall": 0.9797859787940979,
-          "baseline_right_lens_outer_recall": 0.885850191116333,
-          "hat_brim_outer_recall": [
-            0.9890300035476685,
-            0.9890300035476685
-          ],
-          "hat_band_chroma_retention": [
-            0.9768614172935486,
-            1.0221868753433228
-          ]
-        }
-      }
-    },
-    "band_both_layers": {
-      "sampling": "Four independently authored inner bands and four outer bands, selected by GT class before inference; source identities held out from training.",
-      "cases": [
-        {
-          "layer": 0,
-          "seed": 145101055,
-          "band_pixels": 3682,
-          "correct": 3674,
-          "layer_accuracy": 0.9978272914886475
-        },
-        {
-          "layer": 0,
-          "seed": 145102037,
-          "band_pixels": 4486,
-          "correct": 4484,
-          "layer_accuracy": 0.9995541572570801
-        },
-        {
-          "layer": 0,
-          "seed": 145103045,
-          "band_pixels": 4486,
-          "correct": 4486,
-          "layer_accuracy": 1.0
-        },
-        {
-          "layer": 0,
-          "seed": 145104041,
-          "band_pixels": 3682,
-          "correct": 3625,
-          "layer_accuracy": 0.9845193028450012
-        },
-        {
-          "layer": 1,
-          "seed": 145101042,
-          "band_pixels": 5678,
-          "correct": 5678,
-          "layer_accuracy": 1.0
-        },
-        {
-          "layer": 1,
-          "seed": 145102041,
-          "band_pixels": 5678,
-          "correct": 5678,
-          "layer_accuracy": 1.0
-        },
-        {
-          "layer": 1,
-          "seed": 145103038,
-          "band_pixels": 5678,
-          "correct": 5678,
-          "layer_accuracy": 1.0
-        },
-        {
-          "layer": 1,
-          "seed": 145104042,
-          "band_pixels": 5684,
-          "correct": 5684,
-          "layer_accuracy": 1.0
-        }
-      ]
     },
     "real_cases": [
       {
         "name": "1H6GAQA9BENWNB89_edited",
-        "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v101_headwear_consistent_20260906/1H6GAQA9BENWNB89_edited_d459c31b2591",
+        "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v101_crown_geometry_20260906/1H6GAQA9BENWNB89_edited_bf09f7c19287",
         "body_equal": true,
         "foreground_equal": true,
-        "headwear_pixels": 0
+        "alpha_outside_top_equal": true,
+        "rgb_max_change": 0,
+        "changed_channels": 0,
+        "before_top_cells": 7,
+        "after_top_cells": 7
       },
       {
         "name": "2RSZETA9PCRZHVEU_edited",
-        "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v101_headwear_consistent_20260906/2RSZETA9PCRZHVEU_edited_3d56a2249ac8",
+        "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v101_crown_geometry_20260906/2RSZETA9PCRZHVEU_edited_9b2579ff7d83",
         "body_equal": true,
         "foreground_equal": true,
-        "headwear_pixels": 0
+        "alpha_outside_top_equal": true,
+        "rgb_max_change": 0,
+        "changed_channels": 0,
+        "before_top_cells": 3,
+        "after_top_cells": 3
       },
       {
         "name": "33TVPML5UL2TKASR_edited",
-        "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v101_headwear_consistent_20260906/33TVPML5UL2TKASR_edited_b0bc64d882a0",
+        "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v101_crown_geometry_20260906/33TVPML5UL2TKASR_edited_f32f57c012bf",
         "body_equal": true,
         "foreground_equal": true,
-        "headwear_pixels": 0
+        "alpha_outside_top_equal": true,
+        "rgb_max_change": 1,
+        "changed_channels": 1,
+        "before_top_cells": 28,
+        "after_top_cells": 28
       },
       {
         "name": "PU418PLGERMFC487_edited",
-        "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v101_headwear_consistent_20260906/PU418PLGERMFC487_edited_460a96484cd7",
+        "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v101_crown_geometry_20260906/PU418PLGERMFC487_edited_05bea4983434",
         "body_equal": true,
         "foreground_equal": true,
-        "headwear_pixels": 25796,
-        "before_band_inner_recall": [
-          1.0,
-          1.0
-        ],
-        "after_band_inner_recall": [
-          1.0,
-          1.0
-        ],
-        "before_band_chroma_layers": [
-          42.23235294117647,
-          9.405882352941177
-        ],
-        "after_band_chroma_layers": [
-          26.6,
-          0.0
-        ],
+        "alpha_outside_top_equal": true,
+        "rgb_max_change": 0,
+        "changed_channels": 0,
+        "before_top_cells": 0,
+        "after_top_cells": 0,
+        "outer_strong_red": 0,
         "brim_ring": [
           8,
           8,
@@ -335,112 +124,422 @@
       },
       {
         "name": "TWRLRRTHQP2UV368_edited",
-        "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v101_headwear_consistent_20260906/TWRLRRTHQP2UV368_edited_adef16a0e3b5",
+        "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v101_crown_geometry_20260906/TWRLRRTHQP2UV368_edited_e3897ac4b314",
         "body_equal": true,
         "foreground_equal": true,
-        "headwear_pixels": 0,
-        "forehead_outer_alpha": 0,
-        "glasses_outer_recall": 0.8993710875511169
+        "alpha_outside_top_equal": true,
+        "rgb_max_change": 0,
+        "changed_channels": 0,
+        "before_top_cells": 0,
+        "after_top_cells": 0,
+        "forehead_outer_alpha": 0
       },
       {
         "name": "img10",
-        "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v101_headwear_consistent_20260906/img10_61f4e1fd29ed",
+        "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v101_crown_geometry_20260906/img10_5e11a8f78833",
         "body_equal": true,
         "foreground_equal": true,
-        "headwear_pixels": 0
+        "alpha_outside_top_equal": true,
+        "rgb_max_change": 0,
+        "changed_channels": 0,
+        "before_top_cells": 28,
+        "after_top_cells": 28
       },
       {
         "name": "img12",
-        "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v101_headwear_consistent_20260906/img12_44bfaeae4edc",
+        "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v101_crown_geometry_20260906/img12_2a8457b8af4d",
         "body_equal": true,
         "foreground_equal": true,
-        "headwear_pixels": 0
+        "alpha_outside_top_equal": true,
+        "rgb_max_change": 0,
+        "changed_channels": 0,
+        "before_top_cells": 15,
+        "after_top_cells": 15
       },
       {
         "name": "img23",
-        "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v101_headwear_consistent_20260906/img23_927e07e80d1c",
+        "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v101_crown_geometry_20260906/img23_23b6b7ea28f1",
         "body_equal": true,
         "foreground_equal": true,
-        "headwear_pixels": 0
+        "alpha_outside_top_equal": true,
+        "rgb_max_change": 0,
+        "changed_channels": 0,
+        "before_top_cells": 4,
+        "after_top_cells": 4
       },
       {
         "name": "img25",
-        "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v101_headwear_consistent_20260906/img25_4f4bd3c2b4c5",
+        "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v101_crown_geometry_20260906/img25_beeea2b38a0a",
         "body_equal": true,
         "foreground_equal": true,
-        "headwear_pixels": 0
+        "alpha_outside_top_equal": true,
+        "rgb_max_change": 0,
+        "changed_channels": 0,
+        "before_top_cells": 52,
+        "after_top_cells": 52
       },
       {
         "name": "img26",
-        "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v101_headwear_consistent_20260906/img26_4a2e9529ef7a",
+        "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v101_crown_geometry_20260906/img26_45a21043429a",
         "body_equal": true,
         "foreground_equal": true,
-        "headwear_pixels": 0
+        "alpha_outside_top_equal": true,
+        "rgb_max_change": 0,
+        "changed_channels": 0,
+        "before_top_cells": 10,
+        "after_top_cells": 10
       },
       {
         "name": "img27",
-        "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v101_headwear_consistent_20260906/img27_80ef8aff592d",
+        "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v101_crown_geometry_20260906/img27_fdae19ed9661",
         "body_equal": true,
         "foreground_equal": true,
-        "headwear_pixels": 0,
-        "strong_green_inner_texels": 0,
-        "inner_green_excess": 0.5215686274509803
+        "alpha_outside_top_equal": true,
+        "rgb_max_change": 0,
+        "changed_channels": 0,
+        "before_top_cells": 19,
+        "after_top_cells": 19,
+        "strong_green_inner_texels": 0
       },
       {
         "name": "img28",
-        "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v101_headwear_consistent_20260906/img28_c49612ad9537",
+        "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v101_crown_geometry_20260906/img28_853cad2efa75",
         "body_equal": true,
         "foreground_equal": true,
-        "headwear_pixels": 0,
-        "purple_pixels": 0
+        "alpha_outside_top_equal": true,
+        "rgb_max_change": 0,
+        "changed_channels": 0,
+        "before_top_cells": 25,
+        "after_top_cells": 25
       },
       {
         "name": "img3",
-        "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v101_headwear_consistent_20260906/img3_916524fb859c",
+        "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v101_crown_geometry_20260906/img3_d92a054b2843",
         "body_equal": true,
         "foreground_equal": true,
-        "headwear_pixels": 0
+        "alpha_outside_top_equal": true,
+        "rgb_max_change": 1,
+        "changed_channels": 1,
+        "before_top_cells": 0,
+        "after_top_cells": 0
       },
       {
         "name": "img46",
-        "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v101_headwear_consistent_20260906/img46_d55e72215c00",
+        "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v101_crown_geometry_20260906/img46_9b5a1c089bde",
         "body_equal": true,
         "foreground_equal": true,
-        "headwear_pixels": 17020,
-        "before_crown_outer_recall": [
-          0.7444285750389099,
-          0.894428551197052
-        ],
-        "before_exposed_hair_outer_fraction": [
-          0.0,
-          0.0
-        ],
-        "after_crown_outer_recall": [
-          0.9574285745620728,
-          0.9558571577072144
-        ],
-        "after_exposed_hair_outer_fraction": [
-          0.0,
-          0.0
+        "alpha_outside_top_equal": true,
+        "rgb_max_change": 248,
+        "changed_channels": 88,
+        "before_top_cells": 11,
+        "after_top_cells": 0,
+        "inner_gold_texels": 0,
+        "side_wall_uv_equal": false,
+        "geometry": [
+          {
+            "group": 0,
+            "before_loss": 6801.49267578125,
+            "removed": [
+              {
+                "uv": [
+                  40,
+                  5
+                ],
+                "loss_improvement": 186.99853515625
+              },
+              {
+                "uv": [
+                  47,
+                  2
+                ],
+                "loss_improvement": 186.8623046875
+              },
+              {
+                "uv": [
+                  47,
+                  6
+                ],
+                "loss_improvement": 181.16796875
+              },
+              {
+                "uv": [
+                  40,
+                  1
+                ],
+                "loss_improvement": 180.3896484375
+              },
+              {
+                "uv": [
+                  46,
+                  6
+                ],
+                "loss_improvement": 176.9951171875
+              },
+              {
+                "uv": [
+                  41,
+                  1
+                ],
+                "loss_improvement": 176.8408203125
+              },
+              {
+                "uv": [
+                  44,
+                  1
+                ],
+                "loss_improvement": 175.9990234375
+              },
+              {
+                "uv": [
+                  45,
+                  7
+                ],
+                "loss_improvement": 163.998046875
+              },
+              {
+                "uv": [
+                  42,
+                  0
+                ],
+                "loss_improvement": 163.99755859375
+              },
+              {
+                "uv": [
+                  46,
+                  0
+                ],
+                "loss_improvement": 163.99560546875
+              },
+              {
+                "uv": [
+                  41,
+                  7
+                ],
+                "loss_improvement": 163.994140625
+              },
+              {
+                "uv": [
+                  47,
+                  3
+                ],
+                "loss_improvement": 151.265625
+              },
+              {
+                "uv": [
+                  40,
+                  4
+                ],
+                "loss_improvement": 151.18701171875
+              },
+              {
+                "uv": [
+                  41,
+                  3
+                ],
+                "loss_improvement": 148.00439453125
+              },
+              {
+                "uv": [
+                  46,
+                  4
+                ],
+                "loss_improvement": 148.00390625
+              },
+              {
+                "uv": [
+                  43,
+                  6
+                ],
+                "loss_improvement": 130.9990234375
+              },
+              {
+                "uv": [
+                  41,
+                  5
+                ],
+                "loss_improvement": 122.998046875
+              },
+              {
+                "uv": [
+                  46,
+                  2
+                ],
+                "loss_improvement": 122.987060546875
+              },
+              {
+                "uv": [
+                  41,
+                  2
+                ],
+                "loss_improvement": 115.990966796875
+              },
+              {
+                "uv": [
+                  46,
+                  5
+                ],
+                "loss_improvement": 115.91650390625
+              },
+              {
+                "uv": [
+                  40,
+                  2
+                ],
+                "loss_improvement": 113.607421875
+              },
+              {
+                "uv": [
+                  47,
+                  5
+                ],
+                "loss_improvement": 113.59912109375
+              },
+              {
+                "uv": [
+                  44,
+                  0
+                ],
+                "loss_improvement": 112.033203125
+              },
+              {
+                "uv": [
+                  40,
+                  6
+                ],
+                "loss_improvement": 107.99169921875
+              },
+              {
+                "uv": [
+                  47,
+                  1
+                ],
+                "loss_improvement": 107.785400390625
+              },
+              {
+                "uv": [
+                  45,
+                  6
+                ],
+                "loss_improvement": 93.99853515625
+              },
+              {
+                "uv": [
+                  42,
+                  1
+                ],
+                "loss_improvement": 93.998046875
+              },
+              {
+                "uv": [
+                  46,
+                  1
+                ],
+                "loss_improvement": 92.997802734375
+              },
+              {
+                "uv": [
+                  41,
+                  6
+                ],
+                "loss_improvement": 92.996826171875
+              },
+              {
+                "uv": [
+                  43,
+                  7
+                ],
+                "loss_improvement": 87.432861328125
+              },
+              {
+                "uv": [
+                  44,
+                  6
+                ],
+                "loss_improvement": 79.9931640625
+              },
+              {
+                "uv": [
+                  43,
+                  1
+                ],
+                "loss_improvement": 78.99609375
+              },
+              {
+                "uv": [
+                  40,
+                  3
+                ],
+                "loss_improvement": 74.814453125
+              },
+              {
+                "uv": [
+                  43,
+                  0
+                ],
+                "loss_improvement": 68.73583984375
+              },
+              {
+                "uv": [
+                  47,
+                  4
+                ],
+                "loss_improvement": 67.119873046875
+              },
+              {
+                "uv": [
+                  44,
+                  7
+                ],
+                "loss_improvement": 66.632080078125
+              },
+              {
+                "uv": [
+                  40,
+                  7
+                ],
+                "loss_improvement": 65.409912109375
+              },
+              {
+                "uv": [
+                  47,
+                  0
+                ],
+                "loss_improvement": 62.039794921875
+              },
+              {
+                "uv": [
+                  47,
+                  7
+                ],
+                "loss_improvement": 44.404052734375
+              },
+              {
+                "uv": [
+                  40,
+                  0
+                ],
+                "loss_improvement": 44.2042236328125
+              }
+            ],
+            "after_loss": 2004.1109619140625
+          }
         ]
       }
     ],
-    "colour_diagnostics": {
-      "outer_red_hatband_texels": {
-        "before": 22,
-        "after": 0
-      },
-      "inner_gold_crown_texels": {
-        "before": 43,
-        "after": 0
-      },
-      "scope": "Development-image diagnostics only, not learned labels or routing rules."
+    "frozen_model": {
+      "model_tensors": 386,
+      "all_tensors_equal": true,
+      "parent_sha256": "272ce1a24c5bbdf6a2b2518c3a58918a0b40e60a4ca218463ddf23ad8c8e8092",
+      "staged_sha256": "a8aa3d8cd51cc6fec28d7c525aa1b012976d7cb1206e8b00c707de76bfb205dc",
+      "training_steps": 0
     },
-    "tradeoffs": {
-      "head_rgb_mae_before": 0.0052460553544405744,
-      "head_rgb_mae_after": 0.0056191225543424095,
-      "scope": "Whole-head colour reconstruction can slightly worsen while layer ownership improves; neither exact source-pixel boundaries nor arbitrary multiple headwear instances are claimed."
-    }
+    "limitations": [
+      "32 procedural crowns reuse prior test source identities; this is a regression suite, not an untouched generalization estimate.",
+      "14 false top cells and 4 already-missing true top cells remain in the synthetic suite.",
+      "Only unsupported outer head top cells can be removed; missing crown side geometry is not added.",
+      "Two non-crown cases each differ in one colour channel by 1/255; geometry and all body/foreground arrays are unchanged."
+    ]
   },
-  "default_entry_check": "dense_uv_parser/runs/v101_headwear_release_20260906/default_entry_check.json"
+  "staged_entry_check": "dense_uv_parser/runs/v101_crown_geometry_release_20260906/staged_entry_check.json",
+  "default_entry_check": "dense_uv_parser/runs/v101_crown_geometry_release_20260906/default_entry_check.json"
 }

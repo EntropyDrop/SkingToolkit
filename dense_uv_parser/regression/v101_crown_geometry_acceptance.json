@@ -1,0 +1,499 @@
+{
+  "passed": true,
+  "unit_integration_tests": 134,
+  "synthetic_geometry": {
+    "count": 32,
+    "with_caps": 16,
+    "source_identity_status": "previously used test identities; new procedural draws; no training",
+    "all_outside_top_equal": true,
+    "before": {
+      "top_tp": 178,
+      "top_fn": 4,
+      "top_fp": 491,
+      "top_tn": 1375,
+      "visible_crown_tp": 494612,
+      "visible_crown_n": 497314,
+      "top_recall": 0.978021978021978,
+      "visible_crown_recall": 0.9945668129190008
+    },
+    "after": {
+      "top_tp": 178,
+      "top_fn": 4,
+      "top_fp": 14,
+      "top_tn": 1852,
+      "visible_crown_tp": 494612,
+      "visible_crown_n": 497314,
+      "top_recall": 0.978021978021978,
+      "visible_crown_recall": 0.9945668129190008
+    }
+  },
+  "real_cases": [
+    {
+      "name": "1H6GAQA9BENWNB89_edited",
+      "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v101_crown_geometry_20260906/1H6GAQA9BENWNB89_edited_bf09f7c19287",
+      "body_equal": true,
+      "foreground_equal": true,
+      "alpha_outside_top_equal": true,
+      "rgb_max_change": 0,
+      "changed_channels": 0,
+      "before_top_cells": 7,
+      "after_top_cells": 7
+    },
+    {
+      "name": "2RSZETA9PCRZHVEU_edited",
+      "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v101_crown_geometry_20260906/2RSZETA9PCRZHVEU_edited_9b2579ff7d83",
+      "body_equal": true,
+      "foreground_equal": true,
+      "alpha_outside_top_equal": true,
+      "rgb_max_change": 0,
+      "changed_channels": 0,
+      "before_top_cells": 3,
+      "after_top_cells": 3
+    },
+    {
+      "name": "33TVPML5UL2TKASR_edited",
+      "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v101_crown_geometry_20260906/33TVPML5UL2TKASR_edited_f32f57c012bf",
+      "body_equal": true,
+      "foreground_equal": true,
+      "alpha_outside_top_equal": true,
+      "rgb_max_change": 1,
+      "changed_channels": 1,
+      "before_top_cells": 28,
+      "after_top_cells": 28
+    },
+    {
+      "name": "PU418PLGERMFC487_edited",
+      "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v101_crown_geometry_20260906/PU418PLGERMFC487_edited_05bea4983434",
+      "body_equal": true,
+      "foreground_equal": true,
+      "alpha_outside_top_equal": true,
+      "rgb_max_change": 0,
+      "changed_channels": 0,
+      "before_top_cells": 0,
+      "after_top_cells": 0,
+      "outer_strong_red": 0,
+      "brim_ring": [
+        8,
+        8,
+        8,
+        8
+      ]
+    },
+    {
+      "name": "TWRLRRTHQP2UV368_edited",
+      "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v101_crown_geometry_20260906/TWRLRRTHQP2UV368_edited_e3897ac4b314",
+      "body_equal": true,
+      "foreground_equal": true,
+      "alpha_outside_top_equal": true,
+      "rgb_max_change": 0,
+      "changed_channels": 0,
+      "before_top_cells": 0,
+      "after_top_cells": 0,
+      "forehead_outer_alpha": 0
+    },
+    {
+      "name": "img10",
+      "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v101_crown_geometry_20260906/img10_5e11a8f78833",
+      "body_equal": true,
+      "foreground_equal": true,
+      "alpha_outside_top_equal": true,
+      "rgb_max_change": 0,
+      "changed_channels": 0,
+      "before_top_cells": 28,
+      "after_top_cells": 28
+    },
+    {
+      "name": "img12",
+      "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v101_crown_geometry_20260906/img12_2a8457b8af4d",
+      "body_equal": true,
+      "foreground_equal": true,
+      "alpha_outside_top_equal": true,
+      "rgb_max_change": 0,
+      "changed_channels": 0,
+      "before_top_cells": 15,
+      "after_top_cells": 15
+    },
+    {
+      "name": "img23",
+      "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v101_crown_geometry_20260906/img23_23b6b7ea28f1",
+      "body_equal": true,
+      "foreground_equal": true,
+      "alpha_outside_top_equal": true,
+      "rgb_max_change": 0,
+      "changed_channels": 0,
+      "before_top_cells": 4,
+      "after_top_cells": 4
+    },
+    {
+      "name": "img25",
+      "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v101_crown_geometry_20260906/img25_beeea2b38a0a",
+      "body_equal": true,
+      "foreground_equal": true,
+      "alpha_outside_top_equal": true,
+      "rgb_max_change": 0,
+      "changed_channels": 0,
+      "before_top_cells": 52,
+      "after_top_cells": 52
+    },
+    {
+      "name": "img26",
+      "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v101_crown_geometry_20260906/img26_45a21043429a",
+      "body_equal": true,
+      "foreground_equal": true,
+      "alpha_outside_top_equal": true,
+      "rgb_max_change": 0,
+      "changed_channels": 0,
+      "before_top_cells": 10,
+      "after_top_cells": 10
+    },
+    {
+      "name": "img27",
+      "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v101_crown_geometry_20260906/img27_fdae19ed9661",
+      "body_equal": true,
+      "foreground_equal": true,
+      "alpha_outside_top_equal": true,
+      "rgb_max_change": 0,
+      "changed_channels": 0,
+      "before_top_cells": 19,
+      "after_top_cells": 19,
+      "strong_green_inner_texels": 0
+    },
+    {
+      "name": "img28",
+      "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v101_crown_geometry_20260906/img28_853cad2efa75",
+      "body_equal": true,
+      "foreground_equal": true,
+      "alpha_outside_top_equal": true,
+      "rgb_max_change": 0,
+      "changed_channels": 0,
+      "before_top_cells": 25,
+      "after_top_cells": 25
+    },
+    {
+      "name": "img3",
+      "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v101_crown_geometry_20260906/img3_d92a054b2843",
+      "body_equal": true,
+      "foreground_equal": true,
+      "alpha_outside_top_equal": true,
+      "rgb_max_change": 1,
+      "changed_channels": 1,
+      "before_top_cells": 0,
+      "after_top_cells": 0
+    },
+    {
+      "name": "img46",
+      "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v101_crown_geometry_20260906/img46_9b5a1c089bde",
+      "body_equal": true,
+      "foreground_equal": true,
+      "alpha_outside_top_equal": true,
+      "rgb_max_change": 248,
+      "changed_channels": 88,
+      "before_top_cells": 11,
+      "after_top_cells": 0,
+      "inner_gold_texels": 0,
+      "side_wall_uv_equal": false,
+      "geometry": [
+        {
+          "group": 0,
+          "before_loss": 6801.49267578125,
+          "removed": [
+            {
+              "uv": [
+                40,
+                5
+              ],
+              "loss_improvement": 186.99853515625
+            },
+            {
+              "uv": [
+                47,
+                2
+              ],
+              "loss_improvement": 186.8623046875
+            },
+            {
+              "uv": [
+                47,
+                6
+              ],
+              "loss_improvement": 181.16796875
+            },
+            {
+              "uv": [
+                40,
+                1
+              ],
+              "loss_improvement": 180.3896484375
+            },
+            {
+              "uv": [
+                46,
+                6
+              ],
+              "loss_improvement": 176.9951171875
+            },
+            {
+              "uv": [
+                41,
+                1
+              ],
+              "loss_improvement": 176.8408203125
+            },
+            {
+              "uv": [
+                44,
+                1
+              ],
+              "loss_improvement": 175.9990234375
+            },
+            {
+              "uv": [
+                45,
+                7
+              ],
+              "loss_improvement": 163.998046875
+            },
+            {
+              "uv": [
+                42,
+                0
+              ],
+              "loss_improvement": 163.99755859375
+            },
+            {
+              "uv": [
+                46,
+                0
+              ],
+              "loss_improvement": 163.99560546875
+            },
+            {
+              "uv": [
+                41,
+                7
+              ],
+              "loss_improvement": 163.994140625
+            },
+            {
+              "uv": [
+                47,
+                3
+              ],
+              "loss_improvement": 151.265625
+            },
+            {
+              "uv": [
+                40,
+                4
+              ],
+              "loss_improvement": 151.18701171875
+            },
+            {
+              "uv": [
+                41,
+                3
+              ],
+              "loss_improvement": 148.00439453125
+            },
+            {
+              "uv": [
+                46,
+                4
+              ],
+              "loss_improvement": 148.00390625
+            },
+            {
+              "uv": [
+                43,
+                6
+              ],
+              "loss_improvement": 130.9990234375
+            },
+            {
+              "uv": [
+                41,
+                5
+              ],
+              "loss_improvement": 122.998046875
+            },
+            {
+              "uv": [
+                46,
+                2
+              ],
+              "loss_improvement": 122.987060546875
+            },
+            {
+              "uv": [
+                41,
+                2
+              ],
+              "loss_improvement": 115.990966796875
+            },
+            {
+              "uv": [
+                46,
+                5
+              ],
+              "loss_improvement": 115.91650390625
+            },
+            {
+              "uv": [
+                40,
+                2
+              ],
+              "loss_improvement": 113.607421875
+            },
+            {
+              "uv": [
+                47,
+                5
+              ],
+              "loss_improvement": 113.59912109375
+            },
+            {
+              "uv": [
+                44,
+                0
+              ],
+              "loss_improvement": 112.033203125
+            },
+            {
+              "uv": [
+                40,
+                6
+              ],
+              "loss_improvement": 107.99169921875
+            },
+            {
+              "uv": [
+                47,
+                1
+              ],
+              "loss_improvement": 107.785400390625
+            },
+            {
+              "uv": [
+                45,
+                6
+              ],
+              "loss_improvement": 93.99853515625
+            },
+            {
+              "uv": [
+                42,
+                1
+              ],
+              "loss_improvement": 93.998046875
+            },
+            {
+              "uv": [
+                46,
+                1
+              ],
+              "loss_improvement": 92.997802734375
+            },
+            {
+              "uv": [
+                41,
+                6
+              ],
+              "loss_improvement": 92.996826171875
+            },
+            {
+              "uv": [
+                43,
+                7
+              ],
+              "loss_improvement": 87.432861328125
+            },
+            {
+              "uv": [
+                44,
+                6
+              ],
+              "loss_improvement": 79.9931640625
+            },
+            {
+              "uv": [
+                43,
+                1
+              ],
+              "loss_improvement": 78.99609375
+            },
+            {
+              "uv": [
+                40,
+                3
+              ],
+              "loss_improvement": 74.814453125
+            },
+            {
+              "uv": [
+                43,
+                0
+              ],
+              "loss_improvement": 68.73583984375
+            },
+            {
+              "uv": [
+                47,
+                4
+              ],
+              "loss_improvement": 67.119873046875
+            },
+            {
+              "uv": [
+                44,
+                7
+              ],
+              "loss_improvement": 66.632080078125
+            },
+            {
+              "uv": [
+                40,
+                7
+              ],
+              "loss_improvement": 65.409912109375
+            },
+            {
+              "uv": [
+                47,
+                0
+              ],
+              "loss_improvement": 62.039794921875
+            },
+            {
+              "uv": [
+                47,
+                7
+              ],
+              "loss_improvement": 44.404052734375
+            },
+            {
+              "uv": [
+                40,
+                0
+              ],
+              "loss_improvement": 44.2042236328125
+            }
+          ],
+          "after_loss": 2004.1109619140625
+        }
+      ]
+    }
+  ],
+  "frozen_model": {
+    "model_tensors": 386,
+    "all_tensors_equal": true,
+    "parent_sha256": "272ce1a24c5bbdf6a2b2518c3a58918a0b40e60a4ca218463ddf23ad8c8e8092",
+    "staged_sha256": "a8aa3d8cd51cc6fec28d7c525aa1b012976d7cb1206e8b00c707de76bfb205dc",
+    "training_steps": 0
+  },
+  "limitations": [
+    "32 procedural crowns reuse prior test source identities; this is a regression suite, not an untouched generalization estimate.",
+    "14 false top cells and 4 already-missing true top cells remain in the synthetic suite.",
+    "Only unsupported outer head top cells can be removed; missing crown side geometry is not added.",
+    "Two non-crown cases each differ in one colour channel by 1/255; geometry and all body/foreground arrays are unchanged."
+  ]
+}
