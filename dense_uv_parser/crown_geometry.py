@@ -31,10 +31,11 @@ def crop_renderer(renderer, views, height, width):
 
 
 @torch.no_grad()
-def prune_crown_top(uv, target, foreground, renderer, views, crown_uv=None, protected_top=None):
+def prune_crown_top(uv, target, foreground, renderer, views, crown_uv=None, protected_top=None, removable_uv=None, surface_probability=None):
     """Delete a top cell only when its removal improves rendered semantics.
 
-    Only existing outer head-top alpha can change. Hidden or ambiguous cells
+    By default only existing outer head-top alpha can change. A caller may
+    supply other head faces through removable_uv; body/inner alpha is excluded. Hidden or ambiguous cells
     stay unchanged: no sparsity penalty, fixed open-top template, or minimum
     crown thickness. All other geometry and material stay frozen. The binary
     search re-evaluates visibility after each deletion, including secondary
@@ -45,9 +46,20 @@ def prune_crown_top(uv, target, foreground, renderer, views, crown_uv=None, prot
     topology = build_simple_uv_topology()
     outer = (topology.valid & (topology.part == 0) & (topology.layer == 1)).to(uv.device)
     top = outer & (topology.face.to(uv.device) == 4)
+    candidate = top if removable_uv is None else removable_uv.to(uv.device).bool() & outer
     cropped, region = crop_renderer(renderer, views, *target.shape[-2:])
     target = target[..., region[0], region[1]].float()
     foreground = foreground[..., region[0], region[1]].float()
+    normal_uv=None;normal_target=None
+    if surface_probability is not None:
+        # Face normals distinguish a secondary front wall from a spurious
+        # primary side wall even when both have the same material identity.
+        codes=uv.new_tensor([[.5,.5,1.],[.5,.5,0.],[0.,.5,.5],[1.,.5,.5],[.5,1.,.5],[.5,0.,.5]])
+        head=(topology.valid&(topology.part==0)).to(uv.device)
+        face=topology.face.to(uv.device).clamp(0,5)
+        normal_uv=codes[face].permute(2,0,1)*head[None]
+        prob=surface_probability[...,region[0],region[1]].float()
+        normal_target=torch.einsum('nfhw,fc->nchw',prob[:,1:],codes)
     result = uv.clone()
     records = []
     for group in range(uv.shape[0]):
@@ -70,12 +82,17 @@ def prune_crown_top(uv, target, foreground, renderer, views, crown_uv=None, prot
             # The silhouette term also protects crown teeth above bare hair.
             error = (probability - expected[None]).square()
             error += (rendered[:, :, 3] - fg[None]).square()
+            if normal_uv is not None:
+                probe=torch.cat([normal_uv[None].expand(skins.shape[0],-1,-1,-1),skins[:,3:4]],1)
+                nr=torch.stack([cropped.forward_view(probe,view) for view in views],1)
+                n=nr[:,:,:3]-cropped.bg_color[None,None,:,None,None]*(1-nr[:,:,3:4])
+                error += 2*(n-normal_target[None,sl]).square().sum(2)*fg[None]
             return error.sum((1, 2, 3))
 
         score = float(objective(semantic))
         record = {'before_loss': score, 'removed': []}
         while True:
-            active = (top & ~protected & (semantic[0, 3] > .5)).nonzero()
+            active = (candidate & ~protected & (semantic[0, 3] > .5)).nonzero()
             if not len(active):
                 break
             scores = []

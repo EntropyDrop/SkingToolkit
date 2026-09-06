@@ -1,0 +1,210 @@
+{
+  "retained_cheek_alignment": {
+    "inner": {
+      "support_pixels": 39,
+      "beard_probability": 0.9960232377052307
+    },
+    "outer": {
+      "support_pixels": 91,
+      "beard_probability": 0.9996291995048523
+    },
+    "rgb_max_difference": 0.011806368827819824
+  },
+  "scope": "17 real development regressions, not independent heldout evidence. UV coordinates and RGB thresholds below are audit annotations only; inference has no filename or colour-specific overrides.",
+  "checks": {
+    "17_real_cases": true,
+    "body_exact": true,
+    "cheek_hair_fragment_removed": true,
+    "hair_side_corner_removed": true,
+    "mixed_outer_beard_retained": true,
+    "nose_stays_inner": true,
+    "crown_cap_inner_blue_zero": true,
+    "crown_cap_recall_retained": true,
+    "gold_crown_top_open": true,
+    "phone_guard_preserved": true,
+    "glasses_forehead_clear": true,
+    "brim_continuous": true,
+    "red_band_consistent": true,
+    "retained_cheek_is_aligned_beard": true
+  },
+  "cases": {
+    "nose": {
+      "body_exact": true,
+      "before": {
+        "nose_alpha": 0
+      },
+      "after": {
+        "nose_alpha": 0
+      }
+    },
+    "beard": {
+      "body_exact": true,
+      "before": {
+        "reported_cheek_alpha": [
+          255,
+          255
+        ],
+        "reported_upper_side_alpha": 255,
+        "outer_beard_front_count": 0,
+        "head_top_outer": 0
+      },
+      "after": {
+        "reported_cheek_alpha": [
+          0,
+          255
+        ],
+        "reported_upper_side_alpha": 0,
+        "outer_beard_front_count": 10,
+        "head_top_outer": 1
+      }
+    },
+    "old_img26": {
+      "body_exact": true
+    },
+    "old_PU418PLGERMFC487_edited": {
+      "body_exact": true,
+      "before": {
+        "four_face_brim_count": [
+          8,
+          8,
+          8,
+          8
+        ],
+        "upper_hat_outer_red": 0
+      },
+      "after": {
+        "four_face_brim_count": [
+          8,
+          8,
+          8,
+          8
+        ],
+        "upper_hat_outer_red": 0
+      }
+    },
+    "old_img10": {
+      "body_exact": true
+    },
+    "old_img3": {
+      "body_exact": true
+    },
+    "old_img28": {
+      "body_exact": true
+    },
+    "old_img27": {
+      "body_exact": true,
+      "before": {
+        "inner_strong_green": 0,
+        "green_excess": 0.5215686274509803
+      },
+      "after": {
+        "inner_strong_green": 0,
+        "green_excess": 0.5215686274509803
+      }
+    },
+    "old_1H6GAQA9BENWNB89_edited": {
+      "body_exact": true
+    },
+    "old_img25": {
+      "body_exact": true
+    },
+    "old_33TVPML5UL2TKASR_edited": {
+      "body_exact": true
+    },
+    "old_img46": {
+      "body_exact": true,
+      "before": {
+        "crown_top_cells": 0
+      },
+      "after": {
+        "crown_top_cells": 0
+      }
+    },
+    "old_TWRLRRTHQP2UV368_edited": {
+      "body_exact": true,
+      "before": {
+        "forehead_outer_alpha": 0
+      },
+      "after": {
+        "forehead_outer_alpha": 0
+      }
+    },
+    "old_img23": {
+      "body_exact": true
+    },
+    "old_2RSZETA9PCRZHVEU_edited": {
+      "body_exact": true
+    },
+    "old_img12": {
+      "body_exact": true
+    },
+    "crown": {
+      "body_exact": true,
+      "before": {
+        "inner_top_blue": 0,
+        "outer_top_blue": 12
+      },
+      "after": {
+        "inner_top_blue": 0,
+        "outer_top_blue": 12
+      }
+    }
+  },
+  "checkpoint_sha256": "5ed960a47bb7610f44b544e709e35cce2a610fb9bf48482e2d8c9926a59dd195",
+  "passed": true,
+  "tests": {
+    "test_v102_final": 14,
+    "test_affine_routing_final": 89,
+    "test_ownership_final": 5,
+    "test_accessories_final": 10,
+    "test_semantic_generalization_final": 5,
+    "test_crown_geometry_final": 5,
+    "test_headwear_final": 6,
+    "test_semantic_parser_final": 14
+  },
+  "test_count": 148,
+  "frozen_v101_tensors": 386,
+  "standard_exports": [
+    {
+      "name": "crown",
+      "input": "/home/ds/llms/SKING_DDJ_Dataset/entropydrop_website_generations/SKING_DDJ_v54/1WQEQRUDRLMLVX3E_edited.png",
+      "input_sha256": "6235b3496b12cc1b45358677bf0c3d31118688c226a780ad17046d62a79420ac",
+      "artifact": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v102_alignment_20260906/1WQEQRUDRLMLVX3E_edited_83eac262eef3",
+      "target": "/home/ds/llms/SKING_DDJ_Dataset/entropydrop_website_generations/SKING_DDJ_v54/1WQEQRUDRLMLVX3E_result_v102.png",
+      "backup": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/runs/v102_alignment_20260906/baseline/1WQEQRUDRLMLVX3E_result_v102.png",
+      "before_sha256": "8925ea783373700ba759bf67105e8ad47faee223dab7f120a8a257f88aa0b5f0",
+      "after_sha256": "b665b5218a2811246dc9ffd0105ffdf21a939ec1b78464b92e59a8762c899176",
+      "standard_geometry_and_body_exact": true,
+      "head_rgb_max_uint8_delta": 0
+    },
+    {
+      "name": "nose",
+      "input": "/home/ds/llms/SKING_DDJ_Dataset/entropydrop_website_generations/SKING_DDJ_v54/1ZDZB1UAMS1DEZLD_edited.png",
+      "input_sha256": "c9a1f4ee159aeaa833dc090f763c5a59d4adddb5eed51caf72a7e7a3aae0d869",
+      "artifact": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v102_alignment_20260906/1ZDZB1UAMS1DEZLD_edited_678570a2f962",
+      "target": "/home/ds/llms/SKING_DDJ_Dataset/entropydrop_website_generations/SKING_DDJ_v54/1ZDZB1UAMS1DEZLD_result_v102.png",
+      "backup": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/runs/v102_alignment_20260906/baseline/1ZDZB1UAMS1DEZLD_result_v102.png",
+      "before_sha256": "ba01cac76655b65fe1a4d85a7e14f63ab091596ac26fa379f4292ba662f7c019",
+      "after_sha256": "095755f1e82307361ad500267cd494eed39bdf537954cbe324d26aa7100496f2",
+      "standard_geometry_and_body_exact": true,
+      "head_rgb_max_uint8_delta": 0
+    },
+    {
+      "name": "beard",
+      "input": "/home/ds/llms/SKING_DDJ_Dataset/entropydrop_website_generations/SKING_DDJ_v61/1ZW63H5Z8YNV57MT_edited.png",
+      "input_sha256": "a99b78b156781900b20180c9c58bfff7dc07956dbb04632383404e8e863ddf2c",
+      "artifact": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v102_alignment_20260906/1ZW63H5Z8YNV57MT_edited_96a83872c672",
+      "target": "/home/ds/llms/SKING_DDJ_Dataset/entropydrop_website_generations/SKING_DDJ_v61/1ZW63H5Z8YNV57MT_result_v102.png",
+      "backup": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/runs/v102_alignment_20260906/baseline/1ZW63H5Z8YNV57MT_result_v102.png",
+      "before_sha256": "8254af85a3c159ff472b649832d67e45b6ab9951f698a111162b7f07bd2d8696",
+      "after_sha256": "0d09960f4e4074261953a12941e3179897f41e858472909b9001727225912a94",
+      "standard_geometry_and_body_exact": true,
+      "head_rgb_max_uint8_delta": 1
+    }
+  ],
+  "accepted_training_runs": [
+    "/home/ds/llms/SkingToolkitDev/dense_uv_parser/runs/v102_alignment_20260906/training",
+    "/home/ds/llms/SkingToolkitDev/dense_uv_parser/runs/v102_alignment_20260906/training_seams",
+    "/home/ds/llms/SkingToolkitDev/dense_uv_parser/runs/v102_alignment_20260906/training_surface_spatial"
+  ]
+}

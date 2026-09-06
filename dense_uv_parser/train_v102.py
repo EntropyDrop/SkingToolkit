@@ -149,24 +149,29 @@ def main():
     parser.add_argument('--batch-size',type=int,default=6);parser.add_argument('--lr',type=float,default=2e-4)
     parser.add_argument('--eval-every',type=int,default=600);parser.add_argument('--first-eval',type=int,default=200)
     parser.add_argument('--validation-count',type=int,default=96);parser.add_argument('--skip-real',action='store_true')
+    parser.add_argument('--resume-checkpoint',type=Path)
+    parser.add_argument('--seed',type=int,default=1020906)
     opt=parser.parse_args();out=opt.output_dir;out.mkdir(parents=True,exist_ok=False)
     root=Path(__file__).parent;origin=root/'runs/v101_crown_geometry_release_20260906/parser.pt'
     expected='a8aa3d8cd51cc6fec28d7c525aa1b012976d7cb1206e8b00c707de76bfb205dc'
     if hashlib.sha256(origin.read_bytes()).hexdigest()!=expected:raise ValueError('v101 checkpoint hash mismatch')
-    torch.manual_seed(1020906);torch.set_num_threads(4);torch.backends.cudnn.benchmark=True;torch.set_float32_matmul_precision('high')
+    if opt.resume_checkpoint is not None:
+        origin=opt.resume_checkpoint.resolve();expected=hashlib.sha256(origin.read_bytes()).hexdigest()
+    torch.manual_seed(opt.seed);torch.set_num_threads(4);torch.backends.cudnn.benchmark=True;torch.set_float32_matmul_precision('high')
     ckpt=torch.load(origin,map_location='cpu',weights_only=False)
     cfg={k:v for k,v in ckpt['model_config'].items() if k in inspect.signature(DenseUVParserNet).parameters};cfg['predict_head_semantics']=True
     model=DenseUVParserNet(**cfg).cuda();missing,extra=model.load_state_dict(ckpt['model'],strict=False)
     if extra or any(not n.startswith('head_semantics_head.') for n in missing):raise RuntimeError((missing,extra))
-    warm={k.removeprefix('headwear_head.'):v for k,v in ckpt['model'].items() if k.startswith('headwear_head.') and not k.startswith('headwear_head.classifier.')}
-    model.head_semantics_head.load_state_dict(warm,strict=False)
-    with torch.no_grad():
-        target=model.head_semantics_head.classifier
-        for j,k in enumerate([0,None,None,None,None,None,None,None,1,2,3,4,5,6]):
-            if k is not None:
-                target.weight[j].copy_(ckpt['model']['headwear_head.classifier.weight'][k]);target.bias[j].copy_(ckpt['model']['headwear_head.classifier.bias'][k])
-        for j,k in [(1,1),(2,2),(3,1),(6,3),(7,4)]:
-            target.weight[j].copy_(ckpt['model']['ownership_head.classifier.weight'][k]);target.bias[j].copy_(ckpt['model']['ownership_head.classifier.bias'][k])
+    if not ckpt['model_config'].get('predict_head_semantics',False):
+        warm={k.removeprefix('headwear_head.'):v for k,v in ckpt['model'].items() if k.startswith('headwear_head.') and not k.startswith('headwear_head.classifier.')}
+        model.head_semantics_head.load_state_dict(warm,strict=False)
+        with torch.no_grad():
+            target=model.head_semantics_head.classifier
+            for j,k in enumerate([0,None,None,None,None,None,None,None,1,2,3,4,5,6]):
+                if k is not None:
+                    target.weight[j].copy_(ckpt['model']['headwear_head.classifier.weight'][k]);target.bias[j].copy_(ckpt['model']['headwear_head.classifier.bias'][k])
+            for j,k in [(1,1),(2,2),(3,1),(6,3),(7,4)]:
+                target.weight[j].copy_(ckpt['model']['ownership_head.classifier.weight'][k]);target.bias[j].copy_(ckpt['model']['ownership_head.classifier.bias'][k])
     model.requires_grad_(False);model.head_semantics_head.requires_grad_(True)
     attach_semantic_runtime(model,'siglip2','google/siglip2-base-patch16-224','cuda',local_files_only=True)
     renderer=DifferentiableRenderer(ckpt['args']['mappings_dir']).cuda()
@@ -175,9 +180,9 @@ def main():
     if set(split['train'])&(set(split['validation'])|set(split['test'])):raise ValueError('Source identity split overlap')
     real_paths={c['input'] for c in json.loads((root/'regression/v102_development_cases.json').read_text())}
     if real_paths&set(split['train']):raise ValueError('Real development input in training split')
-    train=JointHeadDataset(split['train'],32768,21020906);val=JointHeadDataset(split['validation'],opt.validation_count,31020906,joint_only=True)
+    train=JointHeadDataset(split['train'],32768,opt.seed+20000000);val=JointHeadDataset(split['validation'],opt.validation_count,31020906,joint_only=True)
     optimizer=torch.optim.AdamW(model.head_semantics_head.parameters(),lr=opt.lr,weight_decay=1e-4)
-    manifest={'version':'v102','state':'candidate_not_released','git_commit':subprocess.check_output(['git','rev-parse','HEAD'],cwd=root.parent,text=True).strip(),'parent':str(origin),'parent_sha256':expected,'classes':CLASSES,'options':{k:str(v) if isinstance(v,Path) else v for k,v in vars(opt).items()},'frozen_tensors':len(ckpt['model']),'source_splits_sha256':hashlib.sha256((root/'runs/dense_uv_parser_v101_retrain_20260906/source_splits.json').read_bytes()).hexdigest(),'source_split_counts':{k:len(v) for k,v in split.items()},'trainable_parameters':sum(p.numel() for p in model.head_semantics_head.parameters()),'data':'60% authored joint heads; 20% legacy ownership; 20% legacy headwear/rich hair negatives. No real development image used for gradients.','views':['front_left','back_left'],'validation':'Train-disjoint source identities, reused validation identities with new procedural seeds; not fresh real-world heldout evidence.','source_sha256':{p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in root.glob('*.py')}}
+    manifest={'version':'v102','state':'candidate_not_released','git_commit':subprocess.check_output(['git','rev-parse','HEAD'],cwd=root.parent,text=True).strip(),'parent':str(origin),'parent_sha256':expected,'classes':CLASSES,'options':{k:str(v) if isinstance(v,Path) else v for k,v in vars(opt).items()},'frozen_tensors':sum(not n.startswith('head_semantics_head.') for n in ckpt['model']),'source_splits_sha256':hashlib.sha256((root/'runs/dense_uv_parser_v101_retrain_20260906/source_splits.json').read_bytes()).hexdigest(),'source_split_counts':{k:len(v) for k,v in split.items()},'trainable_parameters':sum(p.numel() for p in model.head_semantics_head.parameters()),'data':'60% authored joint heads including aligned mixed beards and partial hair shells; 20% legacy ownership; 20% legacy headwear/rich hair negatives. No real development image used for gradients.','views':['front_left','back_left'],'validation':'Train-disjoint source identities, reused validation identities with new procedural seeds; not fresh real-world heldout evidence.','source_sha256':{p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in root.glob('*.py')}}
     write_json(out/'config.json',manifest);write_json(out/'pipeline.json',pipeline)
     snapshot=out/'source';snapshot.mkdir()
     for f in root.glob('*.py'):shutil.copy2(f,snapshot/f.name)
@@ -185,7 +190,7 @@ def main():
     def status(state,**extra):
         row={'state':state,'pid':os.getpid(),'step':step,'total_steps':opt.steps,'elapsed_seconds':time.time()-start,**extra};write_json(out/'status.json',row);print(json.dumps(row),flush=True)
     try:
-        status('baseline_validation');baseline=evaluate(model,renderer,val,baseline=True);baseline['legacy_replay']=evaluate_replay(model,renderer,split['validation'],baseline=True);write_json(out/'baseline_validation.json',baseline)
+        status('baseline_validation');baseline=evaluate(model,renderer,val,baseline=opt.resume_checkpoint is None);baseline['legacy_replay']=evaluate_replay(model,renderer,split['validation'],baseline=opt.resume_checkpoint is None);write_json(out/'baseline_validation.json',baseline)
         epoch=0
         while step<opt.steps:
             train.epoch=epoch
@@ -209,6 +214,7 @@ def main():
                 if step==opt.first_eval or step%opt.eval_every==0 or step==opt.steps:
                     status('validation');metrics=evaluate(model,renderer,val);metrics['legacy_replay']=evaluate_replay(model,renderer,split['validation']);write_json(out/f'evaluation_{step}.json',metrics)
                     for name,value in ckpt['model'].items():
+                        if name.startswith('head_semantics_head.'):continue
                         if not torch.equal(value,model.state_dict()[name].cpu()):raise RuntimeError('Frozen v101 tensor changed: '+name)
                     payload={**{k:v for k,v in ckpt.items() if k not in ('model','optimizer')},'model':model.state_dict(),'model_config':{**ckpt['model_config'],'predict_head_semantics':True},'step':step,'v102_manifest':manifest,'v102_metrics':metrics,'inference_pipeline':pipeline}
                     temporary=out/'checkpoint.tmp';torch.save(payload,temporary);temporary.replace(out/f'step_{step}.pt')

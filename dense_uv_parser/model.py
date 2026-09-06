@@ -360,6 +360,7 @@ class DenseUVParserNet(nn.Module):
         predict_head_ownership=False,
         predict_headwear=False,
         predict_head_semantics=False,
+        predict_head_surface=False,
         predict_headwear_presence=False,
         predict_headphone_presence=False,
         accessory_route_threshold=0.90,
@@ -390,9 +391,10 @@ class DenseUVParserNet(nn.Module):
             from SkingToolkit.dense_uv_parser.ownership import HeadOwnershipHead
             self.ownership_head = HeadOwnershipHead(semantic_spatial_feature_dim,self.predict_headphone_presence)
         self.predict_head_semantics = bool(predict_head_semantics)
+        self.predict_head_surface = bool(predict_head_surface)
         if self.predict_head_semantics:
             from SkingToolkit.dense_uv_parser.head_semantics import HeadSemanticsHead
-            self.head_semantics_head = HeadSemanticsHead(semantic_spatial_feature_dim)
+            self.head_semantics_head = HeadSemanticsHead(semantic_spatial_feature_dim,predict_surface=self.predict_head_surface)
         self.geometry_only = bool(geometry_only)
         if layer_classes is None:
             layer_classes = 3 if self.geometry_only else 2
@@ -780,7 +782,9 @@ class DenseUVParserNet(nn.Module):
             else:outputs["head_ownership_logits"] = prediction
         if self.predict_head_semantics:
             from SkingToolkit.dense_uv_parser.head_semantics import project_semantics
-            joint, presence = self.predict_joint_head_semantics(source_images, semantic_foreground)
+            joint_result=self.predict_joint_head_semantics(source_images,semantic_foreground,return_surface=self.predict_head_surface)
+            joint,presence=joint_result[:2]
+            if self.predict_head_surface:outputs['head_surface_logits']=joint_result[2]
             outputs['head_color_ownership_logits'] = outputs['head_ownership_logits']
             outputs['head_semantics_logits'] = joint
             outputs['headwear_logits'] = project_semantics(joint, 'headwear')
@@ -788,12 +792,14 @@ class DenseUVParserNet(nn.Module):
             outputs['headwear_presence_logits'] = presence
         return outputs
 
-    def predict_joint_head_semantics(self, images, foreground=None):
+    def predict_joint_head_semantics(self, images, foreground=None, return_surface=False):
         from SkingToolkit.dense_uv_parser.accessories import head_crop, restore_logits
         crop = head_crop(images, foreground)
         semantic = self._runtime_semantic_features(crop)['raw_spatial']
-        logits, presence = self.head_semantics_head(crop, semantic)
-        return restore_logits(logits, images.shape[-2:]), presence
+        result=self.head_semantics_head(crop,semantic,return_surface=return_surface)
+        logits,presence=result[:2]
+        restored=(restore_logits(logits, images.shape[-2:]),presence)
+        return (*restored,restore_logits(result[2],images.shape[-2:])) if return_surface else restored
 
     def predict_headwear_components(self, images, foreground=None, return_presence=False):
         from SkingToolkit.dense_uv_parser.accessories import head_crop, restore_logits

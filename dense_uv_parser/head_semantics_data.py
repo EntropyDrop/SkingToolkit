@@ -27,7 +27,7 @@ def cap_edges():
     return edges
 
 
-def make_joint_skin(original,seed,kind=None,beard_layer=None):
+def make_joint_skin(original,seed,kind=None,beard_layer=None,partial_hair=None):
     rng=np.random.default_rng(seed+1020906)
     if kind is None:kind=str(rng.choice(['bare','crown','hat','glasses','phones'],p=[.22,.32,.16,.16,.14]))
     uv=original.permute(1,2,0).numpy().copy();uv[:16]=0
@@ -42,6 +42,12 @@ def make_joint_skin(original,seed,kind=None,beard_layer=None):
         tiles=original[:3,8:16,8:16].permute(1,2,0).numpy()
         hair_material=np.clip(.8*hair_material+.2*tiles[rng.permutation(8)],0,1)
     hair_layer=int(rng.random()<(.15 if kind in ('crown','hat') else .35))
+    # Partial shells teach local layer decisions: front fringe can protrude
+    # while the top/back hair remains on the base head.
+    partial_hair=(rng.random()<.45 and kind not in ('crown','hat')) if partial_hair is None else partial_hair
+    if partial_hair:hair_layer=1
+    fringe_depth=int(rng.integers(1,4))
+    fringe_wrap=rng.random()<.3
     depth=int(rng.integers(1,5));fringe=np.maximum(1,depth+rng.integers(-1,2,(1,8)))
     for fi,(x,y) in enumerate(FACES):
         base=np.clip(skin[None,None]+rng.normal(0,.02,(8,8,1)),0,1)
@@ -49,12 +55,20 @@ def make_joint_skin(original,seed,kind=None,beard_layer=None):
         if fi in (1,4):mask=np.ones((8,8),bool)
         elif fi==5:mask=np.zeros((8,8),bool)
         elif fi==0:mask=yy<fringe
-        else:mask=(yy<rng.integers(3,7))|((xx<2)&(yy<7))
+        else:mask=(yy<rng.integers(3,7))|(((xx<2) if fi==2 else (xx>5))&(yy<7))
         # Inner substrate is authored too; an outer hair shell has real support.
         uv[y:y+8,x:x+8,:3][mask]=hair_material[mask];labels[y:y+8,x:x+8][mask]=2
         if hair_layer:
-            uv[y:y+8,x+32:x+40,:3][mask]=hair_material[mask]
-            uv[y:y+8,x+32:x+40,3][mask]=1;labels[y:y+8,x+32:x+40][mask]=4
+            shell=mask.copy()
+            if partial_hair:
+                if fi==0:shell &= yy<fringe_depth
+                elif fi in (2,3):shell &= (yy<fringe_depth)&((xx>=6) if fi==2 else (xx<2))&fringe_wrap
+                elif fi==4:
+                    shell[:]=False
+                    ey,ex,_=cap_edges()[0];shell[ey,ex]=True
+                else:shell[:]=False
+            uv[y:y+8,x+32:x+40,:3][shell]=hair_material[shell]
+            uv[y:y+8,x+32:x+40,3][shell]=1;labels[y:y+8,x+32:x+40][shell]=4
     # Distinct eyebrows/eyes/nose shading remain facial texture, in many palettes.
     eye_y=int(rng.integers(3,5))
     for x in (1,5):
@@ -67,7 +81,8 @@ def make_joint_skin(original,seed,kind=None,beard_layer=None):
         tint=skin*rng.uniform(.6,1.05)+rng.uniform(-.06,.06,3)
         if rng.random()<.5:tint+=np.array([.08,-.04,-.04])
         uv[:,:,:3][nose]=np.clip(tint,0,1);labels[nose]=1
-    layer=int(rng.random()<.22) if beard_layer is None else beard_layer
+    layer=int(rng.choice([0,1,2],p=[.45,.2,.35])) if beard_layer is None else beard_layer
+    if layer not in (0,1,2):raise ValueError('beard_layer must be 0 (inner), 1 (outer), or 2 (aligned mixed)')
     if rng.random()<.72 or beard_layer is not None:
         color=np.clip(hair*rng.uniform(.65,1.5)+rng.uniform(0,.04,3),0,1)
         symmetric=rng.random()<.8
@@ -77,14 +92,26 @@ def make_joint_skin(original,seed,kind=None,beard_layer=None):
         mask[6,3:5]=False
         if not symmetric:mask[:,int(rng.integers(0,3))]=False
         for fi in (0,2,3,5):
-            x,y=FACES[fi];x+=32*layer
+            x,y=FACES[fi]
             if fi==0:m=mask
-            elif fi==5:m=(yy>=2)&(yy<=6)
-            else:m=(yy>=6)&((xx<3) if fi==2 else (xx>4))
+            elif fi==5:m=yy>=5
+            else:
+                # Cube UV sides have opposite horizontal orientation. Match
+                # the actual front seam, not the rear edge of the side face.
+                m=(yy>=6)&((xx>=5) if fi==2 else (xx<3))
+                m[:,7 if fi==2 else 0]=mask[:,0 if fi==2 else 7]
             material=np.clip(color[None,None]*rng.uniform(.8,1.15,(8,8,1)),0,1)
             if symmetric and fi==0:material=(material+material[:,::-1])/2
-            uv[y:y+8,x:x+8,:3][m]=material[m];uv[y:y+8,x:x+8,3][m]=1
-            labels[y:y+8,x:x+8][m]=5 if layer else 3;beard[y:y+8,x:x+8][m]=True
+            # Mixed beards share face-local coordinates and material. Visible
+            # inner beard remains around an outer subset; holes exist in both.
+            masks=[(layer,m)] if layer!=2 else [(0,m),(1,m & ((yy>=7) if fi!=5 else (yy>=5)))]
+            if layer==2 and fi==0:
+                outer=m & ((yy>=7)|((yy==5)&(xx>=2)&(xx<=5)))
+                masks=[(0,m),(1,outer)]
+            for target_layer,selected in masks:
+                tx=x+32*target_layer
+                uv[y:y+8,tx:tx+8,:3][selected]=material[selected];uv[y:y+8,tx:tx+8,3][selected]=1
+                labels[y:y+8,tx:tx+8][selected]=5 if target_layer else 3;beard[y:y+8,tx:tx+8][selected]=True
     # Features covered by authored foreground objects are not visible facial labels.
     if kind=='crown':
         metal=rng.uniform(.05,.98,3)

@@ -68,7 +68,7 @@ class HeadAccessoryHead(nn.Module):
         with torch.no_grad():
             self.classifier.bias[0] = 2.
 
-    def forward(self, crop, semantic_features, return_components=False):
+    def forward(self, crop, semantic_features, return_components=False, return_features=False):
         s0 = self.enc0(crop)
         s1 = self.enc1(F.avg_pool2d(s0, 2))
         s2 = self.enc2(F.avg_pool2d(s1, 2))
@@ -91,6 +91,7 @@ class HeadAccessoryHead(nn.Module):
         z = self.dec2(torch.cat([F.interpolate(z, s2.shape[-2:], mode='bilinear', align_corners=False), s2], 1))
         z = self.dec1(torch.cat([F.interpolate(z, s1.shape[-2:], mode='bilinear', align_corners=False), s1], 1))
         z = self.dec0(torch.cat([F.interpolate(z, s0.shape[-2:], mode='bilinear', align_corners=False), s0], 1))
+        if return_features:return z
         logits=self.classifier(z)
         return (logits,self.components(z)) if return_components and self.components is not None else logits
 
@@ -213,4 +214,6 @@ def apply_accessory_routing(routing, outputs, foreground, renderer, views, thres
         from SkingToolkit.dense_uv_parser.head_semantics import apply_joint_head_routing, apply_beard_component_routing
         apply_joint_head_routing(routing, outputs, foreground, renderer, views)
         apply_beard_component_routing(routing, outputs, foreground, renderer, views)
+        from SkingToolkit.dense_uv_parser.head_semantics import apply_head_surface_routing
+        apply_head_surface_routing(routing, outputs, foreground, renderer, views)
     return routing['accessory_supported']

@@ -1,10 +1,10 @@
 {
   "version": "v102",
-  "revision": "joint_head_semantics_20260906",
+  "revision": "aligned_mixed_beard_faces_20260906",
   "passed": true,
-  "checkpoint": "dense_uv_parser/runs/v102_release_20260906/parser.pt",
-  "checkpoint_sha256": "f2db574dac0b9ce574d129f557ced5c71e80b9b530ee9a03576f2153401a86ef",
-  "pipeline": "dense_uv_parser/runs/v102_release_20260906/pipeline.json",
+  "checkpoint": "dense_uv_parser/runs/v102_alignment_release_20260906/parser.pt",
+  "checkpoint_sha256": "5ed960a47bb7610f44b544e709e35cce2a610fb9bf48482e2d8c9926a59dd195",
+  "pipeline": "dense_uv_parser/runs/v102_alignment_release_20260906/pipeline.json",
   "pipeline_sha256": "64ccd4306022195f20955d5ebf730777babbe214ca38425cd18c7fd84eeb05e0",
   "foreground": {
     "version": "minecraft_foreground_v1",
@@ -31,8 +31,14 @@
     "source_inset": 1,
     "scope": "Accepted foreground model; brim-data training may now proceed. Original v101 weights unchanged."
   },
-  "training_steps": 4800,
-  "training_source_commit": "5013096d8c552bfb6338c39485f22d7a8959e3ac",
-  "validation": "dense_uv_parser/regression/v102_final_validation.json",
-  "default_version": "v101 remains the default; select VERSION=v102 explicitly"
+  "training_steps": 9600,
+  "validation": "dense_uv_parser/regression/v102_alignment_validation.json",
+  "default_version": "v101 remains the default; select VERSION=v102 explicitly",
+  "head_surface_training_steps": 2400,
+  "parent_release_commit": "fcf41bb4be8171265ec9bfba44ae8ec3327024f3",
+  "training_source_manifests": [
+    "dense_uv_parser/runs/v102_alignment_20260906/training/config.json",
+    "dense_uv_parser/runs/v102_alignment_20260906/training_seams/config.json",
+    "dense_uv_parser/runs/v102_alignment_20260906/training_surface_spatial/config.json"
+  ]
 }

@@ -129,10 +129,14 @@ def main():
             if 'crown_geometry' in result['details']:
                 (scratch/'crown_geometry.json').write_text(json.dumps(result['details']['crown_geometry'], indent=2))
                 save_image(result['details']['headwear_removed_top_uv'][:,None].float().cpu(), scratch/'crown_removed_top_uv.png')
+            if 'joint_head_geometry' in result['details']:
+                (scratch/'joint_head_geometry.json').write_text(json.dumps(result['details']['joint_head_geometry'],indent=2))
             # Exact tensors make pixel-stage regression metrics reproducible.
             if opt.save_tensors:
                 torch.save({'images':images.cpu(),'outputs':{k:v.cpu() if torch.is_tensor(v) else v for k,v in result['outputs'].items()},
                             'routing':{k:v.cpu() if torch.is_tensor(v) else v for k,v in routing.items()},
+                            'canonical_outputs':{k:v.cpu() if torch.is_tensor(v) else v for k,v in result['details']['outputs'].items()},
+                            'head_alignment':{k:v.cpu() if torch.is_tensor(v) else v for k,v in result['details'].items() if k in ('joint_head_geometry','joint_head_removed_uv','beard_alignment_removed_uv','beard_alignment_hidden_inner_uv')},
                             'crown_geometry': result['details'].get('crown_geometry'),
                             'headwear_removed_top_uv': result['details'].get('headwear_removed_top_uv', torch.zeros(0)).cpu()},scratch/'diagnostics.pt')
             manifest.update(fingerprint=fingerprint,complete=True)
