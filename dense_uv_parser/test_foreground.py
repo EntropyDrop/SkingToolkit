@@ -8,6 +8,7 @@ from PIL import Image
 
 from SkingToolkit.dense_uv_parser.foreground import (
     build_parser_input,
+    learned_foreground_support,
     save_flood_outputs,
 )
 from SkingToolkit.dense_uv_parser.infer import (
@@ -17,6 +18,17 @@ from SkingToolkit.dense_uv_parser.infer import (
 
 
 class DenseParserForegroundTest(unittest.TestCase):
+    def test_learned_mask_keeps_thin_object_but_separates_uncertain_color(self):
+        p=torch.zeros(1,16,16);p[:,3:13,3:13]=.999
+        p[:,2,3:13]=.7;p[:,6,13:16]=.9
+        fg,sources=learned_foreground_support(p)
+        self.assertTrue(bool(fg[:,6,13:16].all()))
+        self.assertFalse(bool(sources[:,6,13:16].any()))
+        self.assertTrue(bool(sources[:,5:11,5:11].all()))
+        self.assertFalse(bool(sources[:,2].any()))
+        self.assertTrue(bool((~sources|fg).all()))
+        with self.assertRaises(ValueError):learned_foreground_support(p*float('nan'))
+
     def test_production_inference_defaults(self):
         args = build_arg_parser().parse_args(["--parser_checkpoint", "unused.pt"])
 

@@ -34,6 +34,21 @@ class AccessoryTests(unittest.TestCase):
             self.assertTrue(torch.all(topology.part[mask]==0))
         self.assertEqual(kinds,{0,1,2,3})
 
+    def test_authored_hat_band_and_brim_match_across_four_faces(self):
+        original=torch.ones(4,64,64)
+        checked=0
+        for seed in range(60):
+            skin,identity=make_accessory_skin(original,seed)
+            if not (identity==2).any():continue
+            faces=[(40,8),(56,8),(32,8),(48,8)]
+            masks=[identity[y:y+8,x:x+8]==2 for x,y in faces]
+            self.assertTrue(all(torch.equal(masks[0],m) for m in masks[1:]))
+            bottom=int(masks[0].any(1).nonzero()[-1])
+            rows=[skin[:3,y+bottom,x:x+8] for x,y in faces]
+            self.assertTrue(all(torch.equal(rows[0],r) for r in rows[1:]))
+            checked+=1
+        self.assertGreater(checked,5)
+
     def test_outside_head_is_inactive(self):
         logits=restore_logits(torch.randn(2,4,224,224),(512,256))
         self.assertTrue(torch.all(logits[:,:,176:].argmax(1)==0))
@@ -70,6 +85,9 @@ class AccessoryTests(unittest.TestCase):
         self.assertTrue(torch.all(details['routing']['layer'][support]==1))
         self.assertFalse(bool((support&~fg).any()))
         self.assertGreater(int((cond[:,9]>.5).sum()),0)
+        _,no_color=splat_parser_predictions_to_uv_conditioning(images,output,renderer=renderer,observed_foreground=fg,observed_color_support=torch.zeros_like(fg),return_details=True,**cfg)
+        self.assertTrue(torch.equal(no_color['routing']['foreground'],details['routing']['foreground']))
+        self.assertFalse(bool(no_color['routing']['color_foreground'].any()))
         empty=torch.zeros_like(fg)
         _,details=splat_parser_predictions_to_uv_conditioning(images,output,renderer=renderer,observed_foreground=empty,return_details=True,**cfg)
         self.assertFalse(bool(details['routing']['foreground'].any()))

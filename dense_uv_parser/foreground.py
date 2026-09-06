@@ -137,3 +137,24 @@ def save_flood_outputs(
         path.parent.mkdir(parents=True, exist_ok=True)
         save_image(tensor.detach().cpu(), path, nrow=view_count)
     return mask[:, 0]
+
+
+def learned_foreground_support(probability, foreground_threshold=.5, source_threshold=.98, source_inset=1):
+    """Separate object occupancy from confident interior RGB sources.
+
+    Segmentation confidence is not a calibrated alpha matte. Uncertain edge
+    colours are excluded from UV sampling rather than algebraically unmixed.
+    """
+    if probability.dim()!=3 or not torch.isfinite(probability).all():
+        raise ValueError('Expected finite foreground probability (N,H,W)')
+    if probability.min()<0 or probability.max()>1:
+        raise ValueError('Foreground probability must lie in [0,1]')
+    if not 0<=foreground_threshold<=source_threshold<=1 or source_inset<0:
+        raise ValueError('Invalid foreground/source thresholds or inset')
+    foreground=probability>=foreground_threshold
+    interior=foreground
+    for _ in range(source_inset):
+        padded=F.pad(interior[:,None].float(),(1,1,1,1),value=0)
+        interior=(-F.max_pool2d(-padded,3,1)[:,0])>.5
+    sources=interior&(probability>=source_threshold)
+    return foreground,sources

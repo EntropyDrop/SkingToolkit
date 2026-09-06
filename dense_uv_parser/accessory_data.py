@@ -32,8 +32,8 @@ def make_accessory_skin(original, seed):
         uv[10,9:11,:3] = hair
         uv[10,13:15,:3] = hair
 
-    def put(face, mask, color, identity):
-        x, y = faces[face]; x += 32
+    def put(face, mask, color, identity, layer=1):
+        x, y = faces[face]; x += 32*layer
         patch = uv[y:y+8, x:x+8]
         patch[mask, :3] = color[mask] if np.asarray(color).ndim == 3 else color
         patch[mask, 3] = 1
@@ -77,19 +77,31 @@ def make_accessory_skin(original, seed):
             length = int(rng.integers(3,9))
             temple = (yy==bridge_y)&(xx<length)
             put(face,temple,frame_color,1)
-    kind = int(rng.choice([0,2,3], p=[.45,.25,.30])) if not negative else 0
+    kind = int(rng.choice([0,2,3], p=[.35,.40,.25])) if not negative else 0
     if kind:
-        color = rng.uniform(.03,.85,3) if kind==2 else hair
-        put(4, np.ones((8,8),bool), color, kind)
+        color = rng.uniform(.02,.18,3) if (kind==2 and rng.random()<.65) else (rng.uniform(.03,.85,3) if kind==2 else hair)
+        brim_only = kind==2 and rng.random()<.60
+        put(4, np.ones((8,8),bool), color, 0 if brim_only else kind, layer=0 if brim_only else 1)
+        # A hat is authored once in 3D: its band and brim share the same height
+        # and material around the four side faces, including cube seams.
+        crown_depth = int(rng.integers(3,6)) if kind==2 else None
+        band_color = rng.uniform(.03,.95,3)
+        has_band = rng.random()<.75
         for face in (0,1,2,3):
-            depth = int(rng.integers(1,4)) if face==0 else int(rng.integers(2,7))
-            if kind==2: depth = int(rng.integers(1,4))
+            depth = crown_depth if kind==2 else (int(rng.integers(1,4)) if face==0 else int(rng.integers(2,7)))
             mask = yy < depth
             if kind==3:
                 mask |= (yy == depth) & (rng.random((8,8)) > .45)
             tex = np.broadcast_to(color,(8,8,3)).copy()
-            tex += rng.normal(0,.05,(8,8,1))
-            if kind==2 and rng.random()<.6: tex[max(0,depth-1)] = rng.uniform(.05,.9,3)
+            tex += rng.normal(0,.025,(8,8,1))
+            if kind==2 and has_band: tex[depth-2] = band_color
+            if kind==2: tex[depth-1] = color # continuous brim below band
+            if brim_only:
+                # Taller crown at base radius, complete brim at outer radius.
+                # This supplies the visual step seen in top hats; the authored
+                # brim is the outer object, independently of its RGB material.
+                put(face, yy<depth-1, np.clip(tex,0,1), 0, layer=0)
+                mask = yy==depth-1
             put(face, mask, np.clip(tex,0,1), kind)
     return torch.from_numpy(uv).permute(2,0,1).float(), torch.from_numpy(objects)
 

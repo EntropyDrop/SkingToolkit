@@ -3152,6 +3152,7 @@ def splat_parser_predictions_to_uv_conditioning(
     rejected_context_alpha_margin_threshold=0.10,
     include_confidence=False,
     return_details=False,
+    observed_color_support=None,
 ):
     """Route parser outputs to UV, using static mappings for affine-parser checkpoints."""
     if not 0.0 <= route_confidence_threshold <= 1.0:
@@ -3360,6 +3361,12 @@ def splat_parser_predictions_to_uv_conditioning(
         background_tolerance=color_background_tolerance,
         foreground_inset=color_foreground_inset,
     )
+    if observed_color_support is not None:
+        if observed_color_support.shape != observed_foreground.shape:
+            raise ValueError('Observed color support must match observed foreground')
+        safe_source=canonicalize_tensor(observed_color_support[:,None].to(rendered.device,rendered.dtype),routing_outputs['affine'],mode='nearest')[:,0]>.5
+        color_support['rejected'] |= color_support['valid'] & ~safe_source
+        color_support['valid'] &= safe_source
     canonical_outputs = canonicalize_parser_outputs(routing_outputs)
     if "surface" in canonical_outputs and "part" not in canonical_outputs:
         routing = _routing_from_geometry_surface_outputs(

@@ -50,7 +50,11 @@ def uv_structure_loss(logits, labels, renderer, views):
     edge_loss = (difference.square()*visible).sum()/visible.expand_as(difference).sum().clamp_min(1)
     support = count>0
     uv_loss = ((pred-truth).square()*support).sum()/support.expand_as(pred).sum().clamp_min(1)
-    return uv_loss + edge_loss
+    faces=topology.face.flatten().to(p.device)
+    seam = faces[a] != faces[b]
+    seam_valid=visible[:,:,seam]
+    seam_loss=(difference[:,:,seam].square()*seam_valid).sum()/seam_valid.expand_as(difference[:,:,seam]).sum().clamp_min(1)
+    return uv_loss + edge_loss + seam_loss
 
 
 @torch.no_grad()
@@ -185,7 +189,7 @@ def main():
         'train_source_count':len(train_paths),'val_source_count':len(val_paths),'test_source_count':len(test_paths),
         'warm_start_sha256':hashlib.sha256(opt.resume.read_bytes()).hexdigest() if opt.resume else None,
         'training':'Only accessory branch is trainable; v61 body and original route weights are frozen. Warm starts use a fresh optimizer.',
-        'labels':'Authored procedural object identities plus verified inner-layer replay negatives; unlabelled outer pixels ignored. No RGB-derived labels.',
+        'labels':'Authored procedural object identities. Optional stored-inner replay is layer evidence, NOT semantic truth; it can contradict painted-on hats/hair. Set replay-weight=0 for semantic experiments.',
         'real_sample_scope':'TWRLRRTHQP2UV368 is a development regression image, never an independent test.',
         'source_sha256':{f.name:hashlib.sha256(f.read_bytes()).hexdigest() for f in Path(__file__).parent.glob('*.py')},
         'pipeline':config,'classes':['none','glasses','hat','outer_hair']}
@@ -238,7 +242,7 @@ def main():
                     logits=model.predict_accessories(images,fg)
                     valid=torch.zeros_like(fg);y0,y1,x0,x1=head_bounds(*fg.shape[-2:]);valid[:,y0:y1,x0:x1]=True
                     loss=accessory_loss(logits,labels,valid)+.25*uv_structure_loss(logits,labels,renderer,views)
-                    if step%2==0:
+                    if step%2==0 and opt.replay_weight>0:
                         # Only verified INNER head pixels are negative layer evidence.
                         # Unannotated outer texels are ignored, not assigned object IDs.
                         replay_uv=torch.stack([load_skin(train_paths[i]) for i in torch.randint(len(train_paths),(2,)).tolist()]).cuda()

@@ -9,6 +9,9 @@ import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 import torch
+import numpy as np
+from PIL import Image
+import torch.nn.functional as F
 from torchvision.utils import save_image
 from SkingToolkit.dense_uv_parser.infer import load_parser, load_view_images, save_parser_uv
 from SkingToolkit.dense_uv_parser.accessory_pipeline import load_pipeline, run_pipeline
@@ -27,9 +30,12 @@ def main():
     parser.add_argument('--inputs',nargs='+',type=Path)
     parser.add_argument('--pipeline',type=Path)
     parser.add_argument('--save-tensors',action='store_true')
+    parser.add_argument('--foreground-probabilities',type=Path,nargs='+',help='One combined grayscale probability image per input; bypass flood only when explicitly supplied')
     opt=parser.parse_args();torch.set_num_threads(4)
     config=load_pipeline(opt.pipeline)
     cases=opt.inputs or [Path(x) for x in json.loads(Path(__file__).with_name('v101_cases.json').read_text())]
+    if opt.foreground_probabilities is not None and len(opt.foreground_probabilities)!=len(cases):
+        parser.error('Provide exactly one foreground probability image for each input')
     if not all(x.is_file() for x in cases):raise FileNotFoundError([str(x) for x in cases if not x.is_file()])
     # A training job may atomically replace best.pt while inference is starting.
     # Hash and load the same byte snapshot so output provenance stays accurate.
@@ -42,9 +48,15 @@ def main():
     renderer=DifferentiableRenderer(args['mappings_dir']).cuda()
     opt.output_dir.mkdir(parents=True,exist_ok=True)
     sources={p.name:sha(p) for p in Path(__file__).parent.glob('*.py')}
-    common={'checkpoint':str(opt.checkpoint.resolve()),'checkpoint_sha256':checkpoint_sha256,'pipeline':config,'source_sha256':sources}
-    for case in cases:
-        manifest={**common,'input':str(case.resolve()),'input_sha256':sha(case)}
+    common={'checkpoint':str(opt.checkpoint.resolve()),'checkpoint_sha256':checkpoint_sha256,'pipeline':config,'source_sha256':sources,'save_tensors':opt.save_tensors}
+    for case_index,case in enumerate(cases):
+        case_bytes=case.read_bytes()
+        manifest={**common,'input':str(case.resolve()),'input_sha256':hashlib.sha256(case_bytes).hexdigest()}
+        probability_bytes=None
+        if opt.foreground_probabilities is not None:
+            probability_path=opt.foreground_probabilities[case_index]
+            probability_bytes=probability_path.read_bytes()
+            manifest['foreground_probability']={'path':str(probability_path.resolve()),'sha256':hashlib.sha256(probability_bytes).hexdigest(),'threshold':config.get('foreground_probability_threshold',.5),'source_threshold':config.get('foreground_source_threshold',.98),'source_inset':config.get('foreground_source_inset',1)}
         fingerprint=hashlib.sha256(json.dumps(manifest,sort_keys=True).encode()).hexdigest()
         # Include both path/input/checkpoint hashes: same basenames cannot collide.
         target=opt.output_dir/(case.stem+'_'+fingerprint[:12])
@@ -55,8 +67,22 @@ def main():
         if target.exists():raise FileExistsError('Incomplete or conflicting output: '+str(target))
         scratch=Path(tempfile.mkdtemp(prefix='.inference-',dir=opt.output_dir))
         try:
-            images=load_view_images(SimpleNamespace(combined=case),config['routing']['views'],renderer).cuda()
-            result=run_pipeline(model,renderer,images,config,complete=True)
+            images=load_view_images(SimpleNamespace(combined=io.BytesIO(case_bytes)),config['routing']['views'],renderer).cuda()
+            probability=None
+            if probability_bytes is not None:
+                raw=Image.open(io.BytesIO(probability_bytes))
+                if raw.mode not in ('L','F','I;16'):raise ValueError('Foreground probability must be a grayscale image')
+                with Image.open(io.BytesIO(case_bytes)) as source_image:
+                    if raw.size!=source_image.size:raise ValueError('Foreground probability must match original combined image dimensions')
+                p=torch.from_numpy(np.array(raw).astype(np.float32))
+                p=p/(65535. if raw.mode=='I;16' else 255.) if raw.mode!='F' else p
+                if p.shape[1]%len(config['routing']['views']):raise ValueError('Combined width must divide evenly into views')
+                probability=F.interpolate(torch.stack(p.chunk(len(config['routing']['views']),dim=1))[:,None],images.shape[-2:],mode='nearest-exact')[:,0].cuda()
+            result=run_pipeline(model,renderer,images,config,complete=True,foreground_probability=probability)
+            if probability is not None:
+                save_image(probability[:,None].cpu(),scratch/'foreground_probability.png',nrow=len(config['routing']['views']))
+                save_image(result['foreground'][:,None].float().cpu(),scratch/'foreground_mask.png',nrow=len(config['routing']['views']))
+                save_image(result['foreground_color_sources'][:,None].float().cpu(),scratch/'foreground_color_sources.png',nrow=len(config['routing']['views']))
             save_parser_uv(result['conditioning'],scratch/'parser_only_uv.png')
             for name in ('parser_pred_uv_simple_inpainting.png','pred_uv.png'):
                 tensor_to_rgba_image(result['uv'][0]).save(scratch/name)
