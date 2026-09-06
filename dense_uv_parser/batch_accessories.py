@@ -118,6 +118,10 @@ def main():
             if ownership is not None:
                 palette=images.new_tensor([[.5,.5,.5],[1.,.65,.4],[.4,.3,.8],[.1,.9,.5],[1.,.2,.3]])
                 save_image(palette[ownership.argmax(1)].permute(0,3,1,2).cpu(),scratch/'head_ownership.png',nrow=len(config['routing']['views']))
+            headwear=result['outputs'].get('headwear_logits')
+            if headwear is not None:
+                palette=images.new_tensor([[.5,.5,.5],[.1,.8,.8],[.1,.3,1],[.8,.2,.8],[1,.3,.2],[1,1,.1],[.95,.65,.05]])
+                save_image(palette[headwear.argmax(1)].permute(0,3,1,2).cpu(),scratch/'headwear_components.png',nrow=len(config['routing']['views']))
             components=result['outputs'].get('hat_component_logits')
             if components is not None:
                 palette=images.new_tensor([[.5,.5,.5],[.2,.8,.8],[.2,.4,1.],[.7,.4,.1],[.9,.2,.5],[1.,.85,.1]])

@@ -177,6 +177,8 @@ def load_parser(checkpoint_path, device):
         predict_head_accessories=model_config.get("predict_head_accessories", False),
         predict_hat_components=model_config.get("predict_hat_components", False),
         predict_head_ownership=model_config.get("predict_head_ownership", False),
+        predict_headwear=model_config.get("predict_headwear", False),
+        predict_headwear_presence=model_config.get("predict_headwear_presence", False),
         predict_headphone_presence=model_config.get("predict_headphone_presence", False),
         accessory_route_threshold=model_config.get("accessory_route_threshold", 0.90),
         predict_outer_uv_occupancy=model_config.get(

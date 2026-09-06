@@ -4,7 +4,7 @@ from SkingToolkit.dense_uv_parser.uv_topology import build_simple_uv_topology
 from SkingToolkit.dense_uv_parser.accessories import head_bounds
 
 
-def refine_head_material(uv, images, sources, renderer, views, steps=48, ownership=None, inner_exclusion=None, inner_texel_support=None):
+def refine_head_material(uv, images, sources, renderer, views, steps=48, ownership=None, inner_exclusion=None, inner_texel_support=None, headwear_layer=None, headwear_uv=None, headwear_family=None):
     original=uv.detach().float()
     topology=build_simple_uv_topology()
     head=(topology.valid&(topology.part==0)).to(uv.device)[None,None]
@@ -34,6 +34,20 @@ def refine_head_material(uv, images, sources, renderer, views, steps=48, ownersh
             weights[0]=weights[0]*(~accessory[:,None])
         if inner_exclusion is not None:
             weights[0]=weights[0]*(~inner_exclusion[:,None])
+        if headwear_layer is not None:
+            for layer in (0,1):
+                weights[layer] *= ((headwear_layer < 0) | (headwear_layer == layer))[:,None]
+        if headwear_uv is not None and headwear_family is not None:
+            # Only compare like materials. The renderer must see the SAME
+            # semantic component as the source pixel before its RGB may fit it.
+            compatible = torch.zeros_like(valid)
+            for family in range(5):
+                surface = (headwear_uv[:,None] == family) & head
+                probe = torch.cat([surface.expand_as(original[:,:3]).float(), original[:,3:4]],1)
+                contribution = (render(probe)-base).mean(1)
+                compatible |= (headwear_family == family) & (contribution >= .98)
+            for layer in (0,1):
+                weights[layer] *= compatible[:,None]
         denominators=[(w.sum()*3).clamp_min(1) for w in weights]
     if not any(w.any() for w in weights):return original
     def losses(skin):

@@ -3640,9 +3640,17 @@ def splat_parser_predictions_to_uv_conditioning(
                 < float(outer_silhouette_min_coverage)
             )
         )
-        # This is direct input evidence, so it remains a final veto after all
-        # semantic/geometry rescues. Reclassifying to inner would contaminate
-        # inner UV; rejected observations are left unknown instead.
+        # Thin crown teeth need not fill most of a projected square. A learned
+        # whole-object decision plus confident pixel semantics may preserve them;
+        # foreground and valid outer geometry are still mandatory. All other
+        # objects retain the established silhouette veto.
+        crown_rescue = torch.zeros_like(trusted)
+        if 'headwear_presence_logits' in canonical_outputs and 'headwear_supported' in routing:
+            crown_rescue = (routing['headwear_supported'] & (routing['headwear_family']==4)
+                            & (routing['headwear_probability']>=.8)
+                            & canonical_observed_foreground & selected_outer)
+        routing['headwear_silhouette_rescued'] = outer_silhouette_rejected & crown_rescue
+        outer_silhouette_rejected &= ~crown_rescue
         trusted = trusted & ~outer_silhouette_rejected
     outer_uv_coverage = torch.ones_like(routing["confidence"])
     outer_required_coverage = torch.zeros_like(routing["confidence"])
@@ -3770,6 +3778,20 @@ def splat_parser_predictions_to_uv_conditioning(
             boundary_excluded|=conflict
             routing['headphone_colour_rejected']=conflict
         color_foreground &= ~boundary_excluded
+    headwear_layer = routing.get('headwear_layer')
+    if headwear_layer is not None:
+        # A component outside the chosen layer's projected support is unknown;
+        # sampling it into the other layer would duplicate its material.
+        conflict = (headwear_layer >= 0) & (routing['layer'] != headwear_layer) & (routing['part'] == 0)
+        color_foreground &= ~conflict
+        family = routing['headwear_family']
+        boundary = torch.zeros_like(trusted)
+        for component in (1,2,3,4):
+            region = (family == component) & routing['headwear_supported']
+            interior = -F.max_pool2d(-region[:,None].float(),3,1,1)[:,0] > .5
+            boundary |= region & ~interior
+        color_foreground &= ~boundary
+        routing['headwear_color_rejected'] = conflict | boundary
     routing['head_color_boundary_excluded']=boundary_excluded
     routing["color_foreground"] = color_foreground
     routing["color_interior"] = color_support["interior"]

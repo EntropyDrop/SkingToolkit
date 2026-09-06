@@ -30,6 +30,6 @@ def bind_checkout():
 if __name__ == "__main__":
     bind_checkout()
     entry = sys.argv.pop(1) if len(sys.argv) > 1 else "semantic_generalization"
-    if entry not in {"semantic_generalization", "infer", "train", "test_semantic_generalization", "train_accessories", "test_accessories", "batch_accessories", "test_affine_routing", "test_semantic_parser", "test_foreground", "foreground_provider", "prepare_foreground_data", "train_foreground", "test_matting_data", "foreground_batch", "released_inference", "train_ownership", "test_ownership", "train_headphone_presence"}:
+    if entry not in {"semantic_generalization", "infer", "train", "test_semantic_generalization", "train_accessories", "test_accessories", "batch_accessories", "test_affine_routing", "test_semantic_parser", "test_foreground", "foreground_provider", "prepare_foreground_data", "train_foreground", "test_matting_data", "foreground_batch", "released_inference", "train_ownership", "test_ownership", "train_headphone_presence", "train_headwear", "test_headwear", "train_headwear_presence"}:
         raise SystemExit("Unsupported local entry point")
     runpy.run_module(f"SkingToolkit.dense_uv_parser.{entry}", run_name="__main__", alter_sys=True)

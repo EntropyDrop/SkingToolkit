@@ -358,6 +358,8 @@ class DenseUVParserNet(nn.Module):
         predict_head_accessories=False,
         predict_hat_components=False,
         predict_head_ownership=False,
+        predict_headwear=False,
+        predict_headwear_presence=False,
         predict_headphone_presence=False,
         accessory_route_threshold=0.90,
         predict_outer_uv_occupancy=False,
@@ -377,6 +379,11 @@ class DenseUVParserNet(nn.Module):
             from SkingToolkit.dense_uv_parser.accessories import HeadAccessoryHead
             self.accessory_head = HeadAccessoryHead(semantic_spatial_feature_dim, self.predict_hat_components)
         self.predict_headphone_presence = bool(predict_headphone_presence)
+        self.predict_headwear_presence = bool(predict_headwear_presence)
+        self.predict_headwear = bool(predict_headwear)
+        if self.predict_headwear:
+            from SkingToolkit.dense_uv_parser.headwear import HeadwearHead
+            self.headwear_head = HeadwearHead(semantic_spatial_feature_dim,self.predict_headwear_presence)
         self.predict_head_ownership = bool(predict_head_ownership)
         if self.predict_head_ownership:
             from SkingToolkit.dense_uv_parser.ownership import HeadOwnershipHead
@@ -757,12 +764,24 @@ class DenseUVParserNet(nn.Module):
                 outputs["accessory_logits"],outputs["hat_component_logits"]=prediction
             else:outputs["accessory_logits"]=prediction
             outputs["accessory_route_threshold"] = self.accessory_route_threshold
+        if self.predict_headwear:
+            prediction = self.predict_headwear_components(source_images, semantic_foreground,return_presence=self.predict_headwear_presence)
+            if self.predict_headwear_presence:outputs["headwear_logits"],outputs["headwear_presence_logits"]=prediction
+            else:outputs["headwear_logits"]=prediction
         if self.predict_head_ownership:
             prediction = self.predict_ownership(source_images, semantic_foreground, return_presence=self.predict_headphone_presence)
             if self.predict_headphone_presence:
                 outputs["head_ownership_logits"],outputs["headphone_presence_logit"] = prediction
             else:outputs["head_ownership_logits"] = prediction
         return outputs
+
+    def predict_headwear_components(self, images, foreground=None, return_presence=False):
+        from SkingToolkit.dense_uv_parser.accessories import head_crop, restore_logits
+        crop = head_crop(images, foreground)
+        semantic = self._runtime_semantic_features(crop)["raw_spatial"]
+        prediction=self.headwear_head(crop,semantic,return_presence=return_presence)
+        if return_presence:return restore_logits(prediction[0],images.shape[-2:]),prediction[1]
+        return restore_logits(prediction,images.shape[-2:])
 
     def predict_ownership(self, images, foreground=None, return_presence=False):
         from SkingToolkit.dense_uv_parser.accessories import head_crop, restore_logits

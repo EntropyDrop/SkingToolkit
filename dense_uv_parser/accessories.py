@@ -194,4 +194,6 @@ def apply_accessory_routing(routing, outputs, foreground, renderer, views, thres
     routing['accessory_seed'] = seeds
     from SkingToolkit.dense_uv_parser.ownership import apply_head_ownership
     apply_head_ownership(routing, outputs, foreground, renderer, views)
+    from SkingToolkit.dense_uv_parser.headwear import apply_headwear_routing
+    apply_headwear_routing(routing, outputs, foreground, renderer, views)
     return routing['accessory_supported']
