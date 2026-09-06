@@ -192,4 +192,6 @@ def apply_accessory_routing(routing, outputs, foreground, renderer, views, thres
     routing['accessory_probability'] = probability
     routing['accessory_supported'] = support
     routing['accessory_seed'] = seeds
-    return support
+    from SkingToolkit.dense_uv_parser.ownership import apply_head_ownership
+    apply_head_ownership(routing, outputs, foreground, renderer, views)
+    return routing['accessory_supported']

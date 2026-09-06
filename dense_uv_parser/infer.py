@@ -86,7 +86,11 @@ def image_to_render_tensor(image, view_size, bg_color=(128, 128, 128)):
 def load_parser(checkpoint_path, device):
     checkpoint = torch.load(checkpoint_path, map_location=device)
     checkpoint_args = dict(checkpoint.get("args", {}))
-    if "v101_manifest" in checkpoint:
+    if "inference_pipeline" in checkpoint:
+        checkpoint_args["_v101_pipeline"] = checkpoint["inference_pipeline"]
+    elif "ownership_manifest" in checkpoint:
+        checkpoint_args["_v101_pipeline"] = checkpoint["ownership_manifest"]["pipeline"]
+    elif "v101_manifest" in checkpoint:
         checkpoint_args["_v101_pipeline"] = checkpoint["v101_manifest"]["pipeline"]
     checkpoint_metrics = checkpoint.get("metrics", {})
     checkpoint_metric_source = (
@@ -172,6 +176,8 @@ def load_parser(checkpoint_path, device):
         route_prior_dropout=model_config.get("route_prior_dropout", 0.0),
         predict_head_accessories=model_config.get("predict_head_accessories", False),
         predict_hat_components=model_config.get("predict_hat_components", False),
+        predict_head_ownership=model_config.get("predict_head_ownership", False),
+        predict_headphone_presence=model_config.get("predict_headphone_presence", False),
         accessory_route_threshold=model_config.get("accessory_route_threshold", 0.90),
         predict_outer_uv_occupancy=model_config.get(
             "predict_outer_uv_occupancy", has_outer_uv_occupancy

@@ -1,0 +1,108 @@
+{
+  "role": "visually traced development regression only; not gradient training or independent test",
+  "native_view_size": [
+    256,
+    512
+  ],
+  "glasses_forehead": [
+    [
+      122,
+      78
+    ],
+    [
+      193,
+      66
+    ],
+    [
+      193,
+      77
+    ],
+    [
+      122,
+      89
+    ]
+  ],
+  "headphone_core": [
+    [
+      [
+        65,
+        31
+      ],
+      [
+        175,
+        15
+      ],
+      [
+        190,
+        21
+      ],
+      [
+        190,
+        27
+      ],
+      [
+        174,
+        21
+      ],
+      [
+        79,
+        35
+      ],
+      [
+        79,
+        75
+      ],
+      [
+        65,
+        70
+      ]
+    ],
+    [
+      [
+        56,
+        77
+      ],
+      [
+        88,
+        88
+      ],
+      [
+        88,
+        129
+      ],
+      [
+        56,
+        116
+      ]
+    ],
+    [
+      [
+        64,
+        129
+      ],
+      [
+        77,
+        134
+      ],
+      [
+        77,
+        143
+      ],
+      [
+        64,
+        139
+      ]
+    ]
+  ],
+  "notes": "Headphone polygons are conservative object interiors, excluding uncertain black-on-black pad boundaries and green eyes; same visible left ear in the two fixed views. Forehead uses a conservative skin strip above the lenses. Erode masks by one native pixel for scoring.",
+  "sources": {
+    "glasses": {
+      "path": "/home/ds/llms/SKING_DDJ_Dataset/entropydrop_website_generations/SKING_DDJ_v66/TWRLRRTHQP2UV368_edited.png",
+      "sha256": "e1e24ed0ba4efc4e895885fd20966ce2ac93863374c7072d3a751c98af291095"
+    },
+    "headphones": {
+      "path": "/home/ds/llms/SkingDataset/DDJ_real2render/test_output/official_prompt1_1K_t41_50_51_52/img27.png",
+      "sha256": "acbca489cc48e63a16cb02d88184b2ebedc4437a3b531f02c225538c51702c0a"
+    }
+  }
+}

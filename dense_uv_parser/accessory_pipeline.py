@@ -29,14 +29,32 @@ def run_pipeline(model, renderer, images, config=None, complete=False, outputs=N
     if outputs is None:
         outputs = model(actual, view_ids=torch.arange(images.shape[0], device=images.device) % len(views), semantic_foreground=fg)
     outputs = {**outputs, 'accessory_route_threshold':config['accessory_route_threshold']}
-    cond, details = splat_parser_predictions_to_uv_conditioning(
-        images, outputs, renderer=renderer, observed_foreground=fg, observed_color_support=color_sources, return_details=True, **config['routing'])
+    outputs['headphone_presence_threshold']=config.get('headphone_presence_threshold',.9)
+    outputs['headphone_presence_consensus']=config.get('headphone_presence_consensus',False)
+    mode=config.get('headphone_routing_mode','unrestricted')
+    def splat(current):
+        return splat_parser_predictions_to_uv_conditioning(
+            images,current,renderer=renderer,observed_foreground=fg,observed_color_support=color_sources,return_details=True,**config['routing'])
+    if mode=='existing_uv' and 'head_ownership_logits' in outputs:
+        # The new headphone head may recover colour ownership inside geometry
+        # already accepted by v101. It cannot manufacture new outer occupancy.
+        initial,_=splat({**outputs,'headphone_routing_mode':'disabled'})
+        outputs={**outputs,'headphone_routing_mode':'existing_uv','headphone_uv_support':(initial[:,9]>.5).flatten(1)}
+    else:outputs={**outputs,'headphone_routing_mode':mode}
+    cond,details=splat(outputs)
     result = {'foreground_color_sources':color_sources,'foreground_probability':foreground_probability,'conditioning':cond,'details':details,'outputs':outputs,'foreground':fg}
     if complete:
         result['uv'] = torch.stack([simple_inpaint_uv(c[None].cpu())[0] for c in cond]).to(images.device)
+        if config.get('head_semantic_inpaint',False):
+            from SkingToolkit.dense_uv_parser.head_inpainting import repair_hidden_head_material
+            result['uv']=repair_hidden_head_material(result['uv'],cond,details,views)
         if config.get('head_material_refine_steps',0):
             from SkingToolkit.dense_uv_parser.material_refine import refine_head_material
-            result['uv']=refine_head_material(result['uv'],details['rendered'],details['color_source_support'],renderer,views,config['head_material_refine_steps'])
+            if config.get('head_material_refine_mode')!='isolated':
+                from SkingToolkit.dense_uv_parser.material_refine import refine_head_material_legacy
+                result['uv']=refine_head_material_legacy(result['uv'],details['rendered'],details['color_source_support'],renderer,views,config['head_material_refine_steps'])
+            else:
+                result['uv']=refine_head_material(result['uv'],details['rendered'],details['color_source_support'],renderer,views,config['head_material_refine_steps'],ownership=details['outputs'].get('head_ownership_logits'),inner_exclusion=details['routing'].get('head_color_boundary_excluded'),inner_texel_support=cond[:,4]>.5)
         result['render'] = torch.stack([renderer.forward_view(result['uv'], view) for view in views],1).flatten(0,1)
     return result
 

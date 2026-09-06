@@ -114,6 +114,10 @@ def main():
                 palette=images.new_tensor([[.5,.5,.5],[.1,.9,.5],[.95,.6,.1],[.7,.3,.9]])
                 save_image(palette[logits.argmax(1)].permute(0,3,1,2).cpu(),scratch/'accessory_mask.png',nrow=len(config['routing']['views']))
                 save_image((1-logits.softmax(1)[:,:1]).cpu(),scratch/'accessory_probability.png',nrow=len(config['routing']['views']))
+            ownership=result['outputs'].get('head_ownership_logits')
+            if ownership is not None:
+                palette=images.new_tensor([[.5,.5,.5],[1.,.65,.4],[.4,.3,.8],[.1,.9,.5],[1.,.2,.3]])
+                save_image(palette[ownership.argmax(1)].permute(0,3,1,2).cpu(),scratch/'head_ownership.png',nrow=len(config['routing']['views']))
             components=result['outputs'].get('hat_component_logits')
             if components is not None:
                 palette=images.new_tensor([[.5,.5,.5],[.2,.8,.8],[.2,.4,1.],[.7,.4,.1],[.9,.2,.5],[1.,.85,.1]])

@@ -1,0 +1,245 @@
+{
+  "passed": true,
+  "visual_review": "all 14 input/before/after contact sheet cases inspected; no material visible regression",
+  "fresh_test": {
+    "source_indices": "test split indices 64:128; never used for tuning",
+    "procedural_seed": 59101111,
+    "cases": 64,
+    "views": 128,
+    "baseline": {
+      "tp": 1115257,
+      "fp": 12308,
+      "fn": 2485,
+      "complete_objects": 167,
+      "objects": 168,
+      "uv_tp": 6415,
+      "uv_fn": 7,
+      "head_rgb_abs": 128751.36206054688,
+      "head_rgb_n": 10979883,
+      "band_rgb_abs": 4298.84183883667,
+      "band_rgb_n": 243102,
+      "classes": {
+        "1": {
+          "tp": 245976,
+          "fp": 2391,
+          "fn": 641
+        },
+        "2": {
+          "tp": 253501,
+          "fp": 1409,
+          "fn": 760
+        },
+        "3": {
+          "tp": 614859,
+          "fp": 9429,
+          "fn": 2005
+        }
+      },
+      "validation_inputs": "Alternating canonical and stressed images; renderer alpha for synthetic foreground when enabled; frozen learned foreground on real regression",
+      "object_precision": 0.9890844430254575,
+      "object_recall": 0.9977767678050927,
+      "object_iou": 0.9869094287863369,
+      "complete_object_rate": 0.9940476190476191,
+      "hard_uv_object_recall": 0.9989099968857054,
+      "hat_band_rgb_mae": 0.01768328454244173,
+      "final_head_rgb_mae": 0.011726114209099211,
+      "clean_added_outer_false_positive_rate": 0.018232004067698118,
+      "clean_negative_uv_texels": 13767,
+      "clean_added_wrong_outer": 251,
+      "real_development": {
+        "scope": "development_regression_not_training_or_independent_test",
+        "glasses_mask_precision": 0.8976949794758446,
+        "glasses_mask_recall": 0.8514525306978137,
+        "whole_glasses_outer_recall": 0.9029649496078491,
+        "baseline_whole_glasses_outer_recall": 0.6433063745498657,
+        "left_lens_outer_recall": 0.9988052248954773,
+        "baseline_left_lens_outer_recall": 0.3643966317176819,
+        "right_lens_outer_recall": 0.9904875159263611,
+        "baseline_right_lens_outer_recall": 0.885850191116333,
+        "hat_brim_outer_recall": [
+          0.9826789498329163,
+          0.9636258482933044
+        ],
+        "hat_band_chroma_retention": [
+          1.0092843770980835,
+          1.0066639184951782
+        ]
+      }
+    },
+    "candidate": {
+      "tp": 1115257,
+      "fp": 10642,
+      "fn": 2485,
+      "complete_objects": 167,
+      "objects": 168,
+      "uv_tp": 6415,
+      "uv_fn": 7,
+      "head_rgb_abs": 125490.73120117188,
+      "head_rgb_n": 10979883,
+      "band_rgb_abs": 4243.703762054443,
+      "band_rgb_n": 243102,
+      "classes": {
+        "1": {
+          "tp": 245976,
+          "fp": 739,
+          "fn": 641
+        },
+        "2": {
+          "tp": 253501,
+          "fp": 1409,
+          "fn": 760
+        },
+        "3": {
+          "tp": 614859,
+          "fp": 9415,
+          "fn": 2005
+        }
+      },
+      "validation_inputs": "Alternating canonical and stressed images; renderer alpha for synthetic foreground when enabled; frozen learned foreground on real regression",
+      "object_precision": 0.9905479976445489,
+      "object_recall": 0.9977767678050927,
+      "object_iou": 0.988366548976235,
+      "complete_object_rate": 0.9940476190476191,
+      "hard_uv_object_recall": 0.9989099968857054,
+      "hat_band_rgb_mae": 0.017456474081062448,
+      "final_head_rgb_mae": 0.01142915012857349,
+      "clean_added_outer_false_positive_rate": 0.015181230478680904,
+      "clean_negative_uv_texels": 13767,
+      "clean_added_wrong_outer": 209,
+      "real_development": {
+        "scope": "development_regression_not_training_or_independent_test",
+        "glasses_mask_precision": 0.8997779892166191,
+        "glasses_mask_recall": 0.8496555855046422,
+        "whole_glasses_outer_recall": 0.8993710875511169,
+        "baseline_whole_glasses_outer_recall": 0.6433063745498657,
+        "left_lens_outer_recall": 0.9964157342910767,
+        "baseline_left_lens_outer_recall": 0.3643966317176819,
+        "right_lens_outer_recall": 0.9797859787940979,
+        "baseline_right_lens_outer_recall": 0.885850191116333,
+        "hat_brim_outer_recall": [
+          0.9826789498329163,
+          0.9636258482933044
+        ],
+        "hat_band_chroma_retention": [
+          1.019749641418457,
+          1.03266179561615
+        ]
+      }
+    }
+  },
+  "glasses_annotation_tradeoff": {
+    "old_recall": 0.9029649496078491,
+    "new_recall": 0.8993710875511169,
+    "scope": "Approximate development eyewear mask; improved forehead exclusion trades 0.36 percentage points of this broad mask. Not a claim of perfect boundaries."
+  },
+  "cases": [
+    {
+      "case": "1H6GAQA9BENWNB89_edited",
+      "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v101_semantic_fix_20260906/1H6GAQA9BENWNB89_edited_725d6955ca79",
+      "body_uv_unchanged": true,
+      "foreground_unchanged": true
+    },
+    {
+      "case": "2RSZETA9PCRZHVEU_edited",
+      "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v101_semantic_fix_20260906/2RSZETA9PCRZHVEU_edited_5565dee44f6f",
+      "body_uv_unchanged": true,
+      "foreground_unchanged": true
+    },
+    {
+      "case": "33TVPML5UL2TKASR_edited",
+      "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v101_semantic_fix_20260906/33TVPML5UL2TKASR_edited_c0e49a8a02f7",
+      "body_uv_unchanged": true,
+      "foreground_unchanged": true
+    },
+    {
+      "case": "PU418PLGERMFC487_edited",
+      "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v101_semantic_fix_20260906/PU418PLGERMFC487_edited_6f8da2744b73",
+      "body_uv_unchanged": true,
+      "foreground_unchanged": true,
+      "brim_face_texels": [
+        8,
+        8,
+        8,
+        8
+      ]
+    },
+    {
+      "case": "TWRLRRTHQP2UV368_edited",
+      "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v101_semantic_fix_20260906/TWRLRRTHQP2UV368_edited_f8cc7de9d522",
+      "body_uv_unchanged": true,
+      "foreground_unchanged": true,
+      "forehead_outer_fraction": {
+        "before": 0.13754045963287354,
+        "after": 0.0
+      },
+      "forehead_outer_texel_alpha": {
+        "before": 255,
+        "after": 0
+      }
+    },
+    {
+      "case": "img10",
+      "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v101_semantic_fix_20260906/img10_c019991f3eae",
+      "body_uv_unchanged": true,
+      "foreground_unchanged": true
+    },
+    {
+      "case": "img12",
+      "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v101_semantic_fix_20260906/img12_e83789884341",
+      "body_uv_unchanged": true,
+      "foreground_unchanged": true
+    },
+    {
+      "case": "img23",
+      "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v101_semantic_fix_20260906/img23_6b7075ebcef0",
+      "body_uv_unchanged": true,
+      "foreground_unchanged": true
+    },
+    {
+      "case": "img25",
+      "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v101_semantic_fix_20260906/img25_10649b0cfcea",
+      "body_uv_unchanged": true,
+      "foreground_unchanged": true
+    },
+    {
+      "case": "img26",
+      "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v101_semantic_fix_20260906/img26_dfdccb13cda6",
+      "body_uv_unchanged": true,
+      "foreground_unchanged": true
+    },
+    {
+      "case": "img27",
+      "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v101_semantic_fix_20260906/img27_a010dbdab262",
+      "body_uv_unchanged": true,
+      "foreground_unchanged": true,
+      "inner_nonface_green_sum": {
+        "before": 9.537254901960784,
+        "after": 0.5215686274509803
+      },
+      "green_reduction": 0.9453125,
+      "strong_green_texels": {
+        "before": 34,
+        "after": 0
+      }
+    },
+    {
+      "case": "img28",
+      "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v101_semantic_fix_20260906/img28_22cf90d02f49",
+      "body_uv_unchanged": true,
+      "foreground_unchanged": true,
+      "purple_pixels": 0
+    },
+    {
+      "case": "img3",
+      "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v101_semantic_fix_20260906/img3_47d3414d7e8f",
+      "body_uv_unchanged": true,
+      "foreground_unchanged": true
+    },
+    {
+      "case": "img46",
+      "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v101_semantic_fix_20260906/img46_83d44b28fbf4",
+      "body_uv_unchanged": true,
+      "foreground_unchanged": true
+    }
+  ]
+}

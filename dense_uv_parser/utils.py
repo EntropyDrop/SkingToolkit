@@ -3153,6 +3153,7 @@ def splat_parser_predictions_to_uv_conditioning(
     include_confidence=False,
     return_details=False,
     observed_color_support=None,
+    head_color_separation_inset=0,
 ):
     """Route parser outputs to UV, using static mappings for affine-parser checkpoints."""
     if not 0.0 <= route_confidence_threshold <= 1.0:
@@ -3752,6 +3753,24 @@ def splat_parser_predictions_to_uv_conditioning(
     routing["outer_source_rejected"] = outer_source_rejected
     routing["foreground"] = trusted
     color_foreground = trusted & color_support["valid"]
+    boundary_excluded = torch.zeros_like(trusted)
+    if head_color_separation_inset > 0:
+        # A layer boundary is also an RGB mixing boundary. Keep occupancy, but
+        # do not let a thin contaminated inner fringe become an inpainting seed.
+        radius=int(head_color_separation_inset)
+        head_outer=trusted&(routing['layer']==1)&(routing['part']==0)
+        near_outer=F.max_pool2d(head_outer[:,None].float(),2*radius+1,1,radius)[:,0]>.5
+        boundary_excluded=near_outer&(routing['layer']==0)&(routing['part']==0)
+        phone=routing.get('headphone_colour_conflict')
+        if phone is not None:
+            # Compare a semantic accessory observation with nearby accepted outer
+            # geometry; exclude contradictory RGB without inventing outer texels.
+            nearby=F.max_pool2d(head_outer[:,None].float(),17,1,8)[:,0]>.5
+            conflict=phone&nearby&(routing['layer']==0)&(routing['part']==0)
+            boundary_excluded|=conflict
+            routing['headphone_colour_rejected']=conflict
+        color_foreground &= ~boundary_excluded
+    routing['head_color_boundary_excluded']=boundary_excluded
     routing["color_foreground"] = color_foreground
     routing["color_interior"] = color_support["interior"]
     routing["color_background_like"] = color_support["background_like"]
