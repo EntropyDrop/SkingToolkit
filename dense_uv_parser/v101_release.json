@@ -1,11 +1,12 @@
 {
   "version": "v101",
+  "revision": "semantic_layer_isolation_20260906",
   "passed": true,
-  "state": "released after numeric and visual acceptance",
-  "checkpoint": "dense_uv_parser/runs/v101_release_20260906/parser.pt",
-  "checkpoint_sha256": "18fbdc26086b3adb194ffa5fe17e29a9d72dbd7437c0bf87c72fb740a3a54090",
-  "pipeline": "dense_uv_parser/runs/v101_release_20260906/pipeline.json",
-  "pipeline_sha256": "4ee404cb7540719608fd6d20d38273ca7f8fa4a5132f7fd80c84b309255e3db2",
+  "state": "released after fresh numeric comparison and all 14 real-case visual reviews",
+  "checkpoint": "dense_uv_parser/runs/v101_semantic_release_gated_20260906/parser.pt",
+  "checkpoint_sha256": "e5fa4a265e35bb4d514629ec94c9b2442b4718231b8cd841e6665f6e5b397c2d",
+  "pipeline": "dense_uv_parser/runs/v101_semantic_release_gated_20260906/pipeline.json",
+  "pipeline_sha256": "c546062a7322a264ae62400e910ea39097ef3dd4247dc0e60dfcc4b6139c9611",
   "foreground": {
     "version": "minecraft_foreground_v1",
     "checkpoint": "dense_uv_parser/runs/foreground_release_800/foreground_step_800.pt",
@@ -31,132 +32,420 @@
     "source_inset": 1,
     "scope": "Accepted foreground model; brim-data training may now proceed. Original v101 weights unchanged."
   },
-  "training_run": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/runs/dense_uv_parser_v101_retrain_20260906",
-  "completed_steps": 8000,
-  "selected_step": 7000,
-  "frozen_v61_unchanged": true,
-  "validation": {
-    "tp": 587888,
-    "fp": 4308,
-    "fn": 1248,
-    "complete_objects": 115,
-    "objects": 115,
-    "uv_tp": 3234,
-    "uv_fn": 1,
-    "head_rgb_abs": 116968.60815429688,
-    "head_rgb_n": 10711452,
-    "band_rgb_abs": 3257.9371643066406,
-    "band_rgb_n": 129090,
-    "classes": {
-      "1": {
-        "tp": 248807,
-        "fp": 829,
-        "fn": 401
+  "previous_release": {
+    "version": "v101",
+    "passed": true,
+    "state": "released after numeric and visual acceptance",
+    "checkpoint": "dense_uv_parser/runs/v101_release_20260906/parser.pt",
+    "checkpoint_sha256": "18fbdc26086b3adb194ffa5fe17e29a9d72dbd7437c0bf87c72fb740a3a54090",
+    "pipeline": "dense_uv_parser/runs/v101_release_20260906/pipeline.json",
+    "pipeline_sha256": "4ee404cb7540719608fd6d20d38273ca7f8fa4a5132f7fd80c84b309255e3db2",
+    "foreground": {
+      "version": "minecraft_foreground_v1",
+      "checkpoint": "dense_uv_parser/runs/foreground_release_800/foreground_step_800.pt",
+      "checkpoint_sha256": "8585a698d38969e6e7562e9c7d8c5f0b5e934e8f0811cf5b8678fcf05734e732",
+      "model_dir": "/home/ds/.cache/huggingface/hub/models--ZhengPeng7--BiRefNet/snapshots/6a62b7dcfa18a3829087877fb16c8006831e4220",
+      "step": 800,
+      "accepted_at_utc": "2026-09-06T05:45:36.930308+00:00",
+      "passed": true,
+      "heldout_images": 256,
+      "heldout_identities": 128,
+      "heldout": {
+        "iou": 0.9967454718444754,
+        "boundary_f1_tolerance_2px": 0.9836169424073569,
+        "boundary_alpha_mae": 0.042490756492937834,
+        "alpha_mae": 0.002159718080974926
       },
-      "2": {
-        "tp": 107257,
-        "fp": 794,
-        "fn": 309
+      "real_development_cases": 14,
+      "real_annotation_recall": 1.0,
+      "img28_purple_diagnostic": 0,
+      "reports": "dense_uv_parser/runs/foreground_release_800",
+      "foreground_threshold": 0.5,
+      "source_threshold": 0.98,
+      "source_inset": 1,
+      "scope": "Accepted foreground model; brim-data training may now proceed. Original v101 weights unchanged."
+    },
+    "training_run": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/runs/dense_uv_parser_v101_retrain_20260906",
+    "completed_steps": 8000,
+    "selected_step": 7000,
+    "frozen_v61_unchanged": true,
+    "validation": {
+      "tp": 587888,
+      "fp": 4308,
+      "fn": 1248,
+      "complete_objects": 115,
+      "objects": 115,
+      "uv_tp": 3234,
+      "uv_fn": 1,
+      "head_rgb_abs": 116968.60815429688,
+      "head_rgb_n": 10711452,
+      "band_rgb_abs": 3257.9371643066406,
+      "band_rgb_n": 129090,
+      "classes": {
+        "1": {
+          "tp": 248807,
+          "fp": 829,
+          "fn": 401
+        },
+        "2": {
+          "tp": 107257,
+          "fp": 794,
+          "fn": 309
+        },
+        "3": {
+          "tp": 231364,
+          "fp": 3145,
+          "fn": 998
+        }
       },
-      "3": {
-        "tp": 231364,
-        "fp": 3145,
-        "fn": 998
+      "validation_inputs": "Alternating canonical and stressed images; renderer alpha for synthetic foreground when enabled; frozen learned foreground on real regression",
+      "object_precision": 0.9927253814615431,
+      "object_recall": 0.9978816436272779,
+      "object_iou": 0.9906377012826821,
+      "complete_object_rate": 1.0,
+      "hard_uv_object_recall": 0.9996908809891808,
+      "hat_band_rgb_mae": 0.0252377191440595,
+      "final_head_rgb_mae": 0.010919958204947086,
+      "clean_added_outer_false_positive_rate": 0.027539734856808027,
+      "clean_negative_uv_texels": 13653,
+      "clean_added_wrong_outer": 376,
+      "real_development": {
+        "scope": "development_regression_not_training_or_independent_test",
+        "glasses_mask_precision": 0.8977272727272727,
+        "glasses_mask_recall": 0.8517520215633423,
+        "whole_glasses_outer_recall": 0.9032644629478455,
+        "baseline_whole_glasses_outer_recall": 0.6430069208145142,
+        "left_lens_outer_recall": 0.9988052248954773,
+        "baseline_left_lens_outer_recall": 0.3643966317176819,
+        "right_lens_outer_recall": 0.9904875159263611,
+        "baseline_right_lens_outer_recall": 0.884661078453064,
+        "hat_brim_outer_recall": [
+          0.9826789498329163,
+          0.96304851770401
+        ],
+        "hat_band_chroma_retention": [
+          1.0092843770980835,
+          1.0066639184951782
+        ]
       }
     },
-    "validation_inputs": "Alternating canonical and stressed images; renderer alpha for synthetic foreground when enabled; frozen learned foreground on real regression",
-    "object_precision": 0.9927253814615431,
-    "object_recall": 0.9978816436272779,
-    "object_iou": 0.9906377012826821,
-    "complete_object_rate": 1.0,
-    "hard_uv_object_recall": 0.9996908809891808,
-    "hat_band_rgb_mae": 0.0252377191440595,
-    "final_head_rgb_mae": 0.010919958204947086,
-    "clean_added_outer_false_positive_rate": 0.027539734856808027,
-    "clean_negative_uv_texels": 13653,
-    "clean_added_wrong_outer": 376,
-    "real_development": {
-      "scope": "development_regression_not_training_or_independent_test",
-      "glasses_mask_precision": 0.8977272727272727,
-      "glasses_mask_recall": 0.8517520215633423,
-      "whole_glasses_outer_recall": 0.9032644629478455,
-      "baseline_whole_glasses_outer_recall": 0.6430069208145142,
-      "left_lens_outer_recall": 0.9988052248954773,
-      "baseline_left_lens_outer_recall": 0.3643966317176819,
-      "right_lens_outer_recall": 0.9904875159263611,
-      "baseline_right_lens_outer_recall": 0.884661078453064,
-      "hat_brim_outer_recall": [
-        0.9826789498329163,
-        0.96304851770401
-      ],
-      "hat_band_chroma_retention": [
-        1.0092843770980835,
-        1.0066639184951782
-      ]
-    }
-  },
-  "heldout": {
-    "tp": 852927,
-    "fp": 6269,
-    "fn": 2088,
-    "complete_objects": 137,
-    "objects": 140,
-    "uv_tp": 4898,
-    "uv_fn": 2,
-    "head_rgb_abs": 120445.73413085938,
-    "head_rgb_n": 10857204,
-    "band_rgb_abs": 3820.223300933838,
-    "band_rgb_n": 225330,
-    "classes": {
-      "1": {
-        "tp": 214299,
-        "fp": 1075,
-        "fn": 738
+    "heldout": {
+      "tp": 852927,
+      "fp": 6269,
+      "fn": 2088,
+      "complete_objects": 137,
+      "objects": 140,
+      "uv_tp": 4898,
+      "uv_fn": 2,
+      "head_rgb_abs": 120445.73413085938,
+      "head_rgb_n": 10857204,
+      "band_rgb_abs": 3820.223300933838,
+      "band_rgb_n": 225330,
+      "classes": {
+        "1": {
+          "tp": 214299,
+          "fp": 1075,
+          "fn": 738
+        },
+        "2": {
+          "tp": 282494,
+          "fp": 724,
+          "fn": 581
+        },
+        "3": {
+          "tp": 355441,
+          "fp": 5163,
+          "fn": 1462
+        }
       },
-      "2": {
-        "tp": 282494,
-        "fp": 724,
-        "fn": 581
-      },
-      "3": {
-        "tp": 355441,
-        "fp": 5163,
-        "fn": 1462
+      "validation_inputs": "Alternating canonical and stressed images; renderer alpha for synthetic foreground when enabled; frozen learned foreground on real regression",
+      "object_precision": 0.9927036438717126,
+      "object_recall": 0.9975579375800424,
+      "object_iou": 0.9902970448771834,
+      "complete_object_rate": 0.9785714285714285,
+      "hard_uv_object_recall": 0.9995918367346939,
+      "hat_band_rgb_mae": 0.016953904499772948,
+      "final_head_rgb_mae": 0.011093623563751716,
+      "clean_added_outer_false_positive_rate": 0.02285438099841193,
+      "clean_negative_uv_texels": 14483,
+      "clean_added_wrong_outer": 331,
+      "real_development": {
+        "scope": "development_regression_not_training_or_independent_test",
+        "glasses_mask_precision": 0.8977272727272727,
+        "glasses_mask_recall": 0.8517520215633423,
+        "whole_glasses_outer_recall": 0.9032644629478455,
+        "baseline_whole_glasses_outer_recall": 0.6430069208145142,
+        "left_lens_outer_recall": 0.9988052248954773,
+        "baseline_left_lens_outer_recall": 0.3643966317176819,
+        "right_lens_outer_recall": 0.9904875159263611,
+        "baseline_right_lens_outer_recall": 0.884661078453064,
+        "hat_brim_outer_recall": [
+          0.9826789498329163,
+          0.96304851770401
+        ],
+        "hat_band_chroma_retention": [
+          1.0092843770980835,
+          1.0066639184951782
+        ]
       }
     },
-    "validation_inputs": "Alternating canonical and stressed images; renderer alpha for synthetic foreground when enabled; frozen learned foreground on real regression",
-    "object_precision": 0.9927036438717126,
-    "object_recall": 0.9975579375800424,
-    "object_iou": 0.9902970448771834,
-    "complete_object_rate": 0.9785714285714285,
-    "hard_uv_object_recall": 0.9995918367346939,
-    "hat_band_rgb_mae": 0.016953904499772948,
-    "final_head_rgb_mae": 0.011093623563751716,
-    "clean_added_outer_false_positive_rate": 0.02285438099841193,
-    "clean_negative_uv_texels": 14483,
-    "clean_added_wrong_outer": 331,
-    "real_development": {
-      "scope": "development_regression_not_training_or_independent_test",
-      "glasses_mask_precision": 0.8977272727272727,
-      "glasses_mask_recall": 0.8517520215633423,
-      "whole_glasses_outer_recall": 0.9032644629478455,
-      "baseline_whole_glasses_outer_recall": 0.6430069208145142,
-      "left_lens_outer_recall": 0.9988052248954773,
-      "baseline_left_lens_outer_recall": 0.3643966317176819,
-      "right_lens_outer_recall": 0.9904875159263611,
-      "baseline_right_lens_outer_recall": 0.884661078453064,
-      "hat_brim_outer_recall": [
-        0.9826789498329163,
-        0.96304851770401
-      ],
-      "hat_band_chroma_retention": [
-        1.0092843770980835,
-        1.0066639184951782
-      ]
+    "staged_at_utc": "2026-09-06T06:30:17.601438+00:00",
+    "final_batch_checks": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/runs/v101_release_20260906/final_batch_checks.json",
+    "output_history": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v101_retrained_20260906",
+    "released_at_utc": "2026-09-06T06:35:38.051497+00:00"
+  },
+  "ownership_training_run": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/runs/v101_ownership_main_20260906",
+  "ownership_training_steps": 4200,
+  "presence_training_steps": 1200,
+  "selected_main_step": 3000,
+  "released_v101_tensors_unchanged": true,
+  "staged_at_utc": "2026-09-06T07:40:13.799956+00:00",
+  "code_commit": "ea800c4bfc36278a37e951f96ec0dbeac46cede1",
+  "released_at_utc": "2026-09-06T07:51:48.270027+00:00",
+  "unit_integration_tests": 123,
+  "acceptance": "dense_uv_parser/runs/v101_semantic_release_gated_20260906/final_checks.json",
+  "output_history": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v101_semantic_fix_20260906",
+  "fresh_test_metrics": {
+    "source_indices": "test split indices 64:128; never used for tuning",
+    "procedural_seed": 59101111,
+    "cases": 64,
+    "views": 128,
+    "baseline": {
+      "tp": 1115257,
+      "fp": 12308,
+      "fn": 2485,
+      "complete_objects": 167,
+      "objects": 168,
+      "uv_tp": 6415,
+      "uv_fn": 7,
+      "head_rgb_abs": 128751.36206054688,
+      "head_rgb_n": 10979883,
+      "band_rgb_abs": 4298.84183883667,
+      "band_rgb_n": 243102,
+      "classes": {
+        "1": {
+          "tp": 245976,
+          "fp": 2391,
+          "fn": 641
+        },
+        "2": {
+          "tp": 253501,
+          "fp": 1409,
+          "fn": 760
+        },
+        "3": {
+          "tp": 614859,
+          "fp": 9429,
+          "fn": 2005
+        }
+      },
+      "validation_inputs": "Alternating canonical and stressed images; renderer alpha for synthetic foreground when enabled; frozen learned foreground on real regression",
+      "object_precision": 0.9890844430254575,
+      "object_recall": 0.9977767678050927,
+      "object_iou": 0.9869094287863369,
+      "complete_object_rate": 0.9940476190476191,
+      "hard_uv_object_recall": 0.9989099968857054,
+      "hat_band_rgb_mae": 0.01768328454244173,
+      "final_head_rgb_mae": 0.011726114209099211,
+      "clean_added_outer_false_positive_rate": 0.018232004067698118,
+      "clean_negative_uv_texels": 13767,
+      "clean_added_wrong_outer": 251,
+      "real_development": {
+        "scope": "development_regression_not_training_or_independent_test",
+        "glasses_mask_precision": 0.8976949794758446,
+        "glasses_mask_recall": 0.8514525306978137,
+        "whole_glasses_outer_recall": 0.9029649496078491,
+        "baseline_whole_glasses_outer_recall": 0.6433063745498657,
+        "left_lens_outer_recall": 0.9988052248954773,
+        "baseline_left_lens_outer_recall": 0.3643966317176819,
+        "right_lens_outer_recall": 0.9904875159263611,
+        "baseline_right_lens_outer_recall": 0.885850191116333,
+        "hat_brim_outer_recall": [
+          0.9826789498329163,
+          0.9636258482933044
+        ],
+        "hat_band_chroma_retention": [
+          1.0092843770980835,
+          1.0066639184951782
+        ]
+      }
+    },
+    "candidate": {
+      "tp": 1115257,
+      "fp": 10642,
+      "fn": 2485,
+      "complete_objects": 167,
+      "objects": 168,
+      "uv_tp": 6415,
+      "uv_fn": 7,
+      "head_rgb_abs": 125490.73120117188,
+      "head_rgb_n": 10979883,
+      "band_rgb_abs": 4243.703762054443,
+      "band_rgb_n": 243102,
+      "classes": {
+        "1": {
+          "tp": 245976,
+          "fp": 739,
+          "fn": 641
+        },
+        "2": {
+          "tp": 253501,
+          "fp": 1409,
+          "fn": 760
+        },
+        "3": {
+          "tp": 614859,
+          "fp": 9415,
+          "fn": 2005
+        }
+      },
+      "validation_inputs": "Alternating canonical and stressed images; renderer alpha for synthetic foreground when enabled; frozen learned foreground on real regression",
+      "object_precision": 0.9905479976445489,
+      "object_recall": 0.9977767678050927,
+      "object_iou": 0.988366548976235,
+      "complete_object_rate": 0.9940476190476191,
+      "hard_uv_object_recall": 0.9989099968857054,
+      "hat_band_rgb_mae": 0.017456474081062448,
+      "final_head_rgb_mae": 0.01142915012857349,
+      "clean_added_outer_false_positive_rate": 0.015181230478680904,
+      "clean_negative_uv_texels": 13767,
+      "clean_added_wrong_outer": 209,
+      "real_development": {
+        "scope": "development_regression_not_training_or_independent_test",
+        "glasses_mask_precision": 0.8997779892166191,
+        "glasses_mask_recall": 0.8496555855046422,
+        "whole_glasses_outer_recall": 0.8993710875511169,
+        "baseline_whole_glasses_outer_recall": 0.6433063745498657,
+        "left_lens_outer_recall": 0.9964157342910767,
+        "baseline_left_lens_outer_recall": 0.3643966317176819,
+        "right_lens_outer_recall": 0.9797859787940979,
+        "baseline_right_lens_outer_recall": 0.885850191116333,
+        "hat_brim_outer_recall": [
+          0.9826789498329163,
+          0.9636258482933044
+        ],
+        "hat_band_chroma_retention": [
+          1.019749641418457,
+          1.03266179561615
+        ]
+      }
     }
   },
-  "staged_at_utc": "2026-09-06T06:30:17.601438+00:00",
-  "final_batch_checks": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/runs/v101_release_20260906/final_batch_checks.json",
-  "output_history": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v101_retrained_20260906",
-  "released_at_utc": "2026-09-06T06:35:38.051497+00:00"
+  "real_case_checks": [
+    {
+      "case": "1H6GAQA9BENWNB89_edited",
+      "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v101_semantic_fix_20260906/1H6GAQA9BENWNB89_edited_725d6955ca79",
+      "body_uv_unchanged": true,
+      "foreground_unchanged": true
+    },
+    {
+      "case": "2RSZETA9PCRZHVEU_edited",
+      "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v101_semantic_fix_20260906/2RSZETA9PCRZHVEU_edited_5565dee44f6f",
+      "body_uv_unchanged": true,
+      "foreground_unchanged": true
+    },
+    {
+      "case": "33TVPML5UL2TKASR_edited",
+      "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v101_semantic_fix_20260906/33TVPML5UL2TKASR_edited_c0e49a8a02f7",
+      "body_uv_unchanged": true,
+      "foreground_unchanged": true
+    },
+    {
+      "case": "PU418PLGERMFC487_edited",
+      "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v101_semantic_fix_20260906/PU418PLGERMFC487_edited_6f8da2744b73",
+      "body_uv_unchanged": true,
+      "foreground_unchanged": true,
+      "brim_face_texels": [
+        8,
+        8,
+        8,
+        8
+      ]
+    },
+    {
+      "case": "TWRLRRTHQP2UV368_edited",
+      "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v101_semantic_fix_20260906/TWRLRRTHQP2UV368_edited_f8cc7de9d522",
+      "body_uv_unchanged": true,
+      "foreground_unchanged": true,
+      "forehead_outer_fraction": {
+        "before": 0.13754045963287354,
+        "after": 0.0
+      },
+      "forehead_outer_texel_alpha": {
+        "before": 255,
+        "after": 0
+      }
+    },
+    {
+      "case": "img10",
+      "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v101_semantic_fix_20260906/img10_c019991f3eae",
+      "body_uv_unchanged": true,
+      "foreground_unchanged": true
+    },
+    {
+      "case": "img12",
+      "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v101_semantic_fix_20260906/img12_e83789884341",
+      "body_uv_unchanged": true,
+      "foreground_unchanged": true
+    },
+    {
+      "case": "img23",
+      "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v101_semantic_fix_20260906/img23_6b7075ebcef0",
+      "body_uv_unchanged": true,
+      "foreground_unchanged": true
+    },
+    {
+      "case": "img25",
+      "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v101_semantic_fix_20260906/img25_10649b0cfcea",
+      "body_uv_unchanged": true,
+      "foreground_unchanged": true
+    },
+    {
+      "case": "img26",
+      "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v101_semantic_fix_20260906/img26_dfdccb13cda6",
+      "body_uv_unchanged": true,
+      "foreground_unchanged": true
+    },
+    {
+      "case": "img27",
+      "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v101_semantic_fix_20260906/img27_a010dbdab262",
+      "body_uv_unchanged": true,
+      "foreground_unchanged": true,
+      "inner_nonface_green_sum": {
+        "before": 9.537254901960784,
+        "after": 0.5215686274509803
+      },
+      "green_reduction": 0.9453125,
+      "strong_green_texels": {
+        "before": 34,
+        "after": 0
+      }
+    },
+    {
+      "case": "img28",
+      "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v101_semantic_fix_20260906/img28_22cf90d02f49",
+      "body_uv_unchanged": true,
+      "foreground_unchanged": true,
+      "purple_pixels": 0
+    },
+    {
+      "case": "img3",
+      "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v101_semantic_fix_20260906/img3_47d3414d7e8f",
+      "body_uv_unchanged": true,
+      "foreground_unchanged": true
+    },
+    {
+      "case": "img46",
+      "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v101_semantic_fix_20260906/img46_83d44b28fbf4",
+      "body_uv_unchanged": true,
+      "foreground_unchanged": true
+    }
+  ],
+  "glasses_annotation_tradeoff": {
+    "old_recall": 0.9029649496078491,
+    "new_recall": 0.8993710875511169,
+    "scope": "Approximate development eyewear mask; improved forehead exclusion trades 0.36 percentage points of this broad mask. Not a claim of perfect boundaries."
+  },
+  "previous_release_file": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/runs/v101_semantic_release_gated_20260906/previous_release.json",
+  "scope": "New headphone semantics correct colour ownership inside accepted outer UV geometry; unrestricted new headphone occupancy was rejected."
 }
