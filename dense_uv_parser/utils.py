@@ -640,7 +640,11 @@ def canonicalize_parser_outputs(outputs):
         # projected logits could reintroduce contradictory boundary identities.
         from SkingToolkit.dense_uv_parser.head_semantics import project_semantics
         canonical['headwear_logits'] = project_semantics(canonical['head_semantics_logits'], 'headwear')
-        canonical['head_ownership_logits'] = project_semantics(canonical['head_semantics_logits'], 'ownership')
+        ownership = project_semantics(canonical['head_semantics_logits'], 'ownership')
+        phone_expert = canonical.get('joint_phone_expert_accepted')
+        if phone_expert is not None:
+            ownership = torch.where(phone_expert[:,None,None,None], canonical['head_color_ownership_logits'], ownership)
+        canonical['head_ownership_logits'] = ownership
     return canonical
 
 

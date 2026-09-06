@@ -26,6 +26,13 @@ class SemanticTests(unittest.TestCase):
         self.assertTrue(torch.equal(result['headwear_logits'],project_semantics(result['head_semantics_logits'],'headwear')))
         self.assertTrue(torch.all(result['headwear_logits'].softmax(1)[:,6]+result['head_ownership_logits'].softmax(1)[:,1]<=1+1e-6))
 
+    def test_phone_expert_survives_affine_projection(self):
+        from SkingToolkit.dense_uv_parser.utils import canonicalize_parser_outputs
+        joint=torch.randn(2,14,16,16);old=torch.randn(2,5,16,16)
+        result=canonicalize_parser_outputs({'head_semantics_logits':joint,'head_color_ownership_logits':old,'joint_phone_expert_accepted':torch.tensor([True,False]),'affine':torch.zeros(2,3)})
+        self.assertTrue(torch.equal(result['head_ownership_logits'][0],result['head_color_ownership_logits'][0]))
+        self.assertTrue(torch.equal(result['head_ownership_logits'][1],project_semantics(result['head_semantics_logits'],'ownership')[1]))
+
     def test_authored_features_and_layers(self):
         top=build_simple_uv_topology();source=torch.rand(4,64,64);source[3]=1
         feature_counts=[0,0,0];deep_caps=0
@@ -83,6 +90,30 @@ class GeometryTests(unittest.TestCase):
             self.assertTrue(torch.all(s['face'][1][changed]==4))
             self.assertTrue(torch.all(r['layer'][vi][changed]==0))
 
+    def test_beard_component_layer_and_real_asymmetric_hole(self):
+        from SkingToolkit.dense_uv_parser.head_semantics import apply_beard_component_routing
+        h,w=self.static[0]['masks'].shape[-2:];fg=torch.ones(4,h,w,device='cuda',dtype=torch.bool)
+        logits=torch.full((4,14,h,w),-20.,device='cuda');logits[:,0]=20
+        for group,cls in [(0,3),(1,5)]:
+            for vi,s in enumerate(self.static):
+                n=group*2+vi;mask=s['masks'][1]&(s['part'][1]==0)&(s['face'][1]==0)&(s['flat_uv'][1]//64>=14)
+                logits[n,0][mask]=-20;logits[n,cls][mask]=20
+        hole=self.static[0]['masks'][1]&(self.static[0]['flat_uv'][1]==14*64+44)
+        logits[2,:,hole]=-20;logits[2,1][hole]=20
+        routing={k:torch.stack([s[k][0] for s in self.static]*2) for k in ['flat_uv','part','face','texel_center_score']}
+        routing.update(layer=torch.zeros_like(fg,dtype=torch.long),foreground=fg.clone(),accessory_supported=~fg,ownership_inner_supported=~fg,headwear_supported=~fg,headwear_layer=torch.full_like(fg,-1,dtype=torch.long),headwear_family=torch.zeros_like(fg,dtype=torch.long))
+        apply_beard_component_routing(routing,{'head_semantics_logits':logits},fg,self.renderer,self.views)
+        self.assertEqual(routing['beard_component_layers'].tolist(),[0,1])
+        self.assertTrue(routing['beard_inner_uv_veto'][0].any());self.assertFalse(routing['beard_inner_uv_veto'][1].any())
+        self.assertFalse(routing['beard_component_supported'][2][hole].any())
+        self.assertTrue(torch.all(routing['layer'][2][hole]==0))
+        routing['part'].fill_(1)
+        original_layer=routing['layer'].clone()
+        apply_beard_component_routing(routing,{'head_semantics_logits':logits},fg,self.renderer,self.views)
+        self.assertFalse(routing['beard_component_supported'].any())
+        self.assertFalse(routing['beard_inner_uv_veto'].any())
+        self.assertTrue(torch.equal(original_layer,routing['layer']))
+
     def test_rendered_targets_use_visible_surface(self):
         d=make_joint_skin(torch.ones(4,64,64),6,kind='crown',beard_layer=0)
         b={k:v[None].cuda() for k,v in d.items()};b['mode']=torch.tensor([0],device='cuda')
@@ -90,6 +121,22 @@ class GeometryTests(unittest.TestCase):
         self.assertEqual(images.shape,(2,4,512,256));self.assertEqual(modes.tolist(),[0,0])
         self.assertTrue(torch.all(labels[features[:,0]]==1));self.assertTrue(torch.all(labels[features[:,2]]==13))
         self.assertFalse(features[:,2][labels==2].any())
+
+    def test_rendered_hair_solver_removes_false_plate_and_preserves_outer_hair(self):
+        from SkingToolkit.dense_uv_parser.crown_geometry import prune_crown_top
+        found=set()
+        for seed in range(30):
+            d=make_joint_skin(torch.ones(4,64,64),seed,kind='bare')
+            outer=bool((d['labels'][:8,40:48]==4).any())
+            if outer in found:continue
+            found.add(outer);uv=d['uv'][None].cuda();labels=d['labels'][None].cuda()
+            semantic=torch.zeros_like(uv);semantic[:,0]=torch.isin(labels,labels.new_tensor([4,5,6,7,10,11,12,13])).float();semantic[:,3]=uv[:,3]
+            rendered=torch.cat([self.renderer.forward_view(semantic,v) for v in self.views])
+            corrupt=uv.clone();corrupt[:,3,2:6,42:46]=1
+            result,_=prune_crown_top(corrupt,rendered[:,0]-rendered[:,1],rendered[:,3],self.renderer,self.views)
+            self.assertTrue(torch.equal(result[:,3,:8,40:48],uv[:,3,:8,40:48]))
+            if len(found)==2:break
+        self.assertEqual(found,{False,True})
 
     def test_crown_solver_preserves_authored_inward_caps(self):
         from SkingToolkit.dense_uv_parser.crown_geometry import prune_crown_top

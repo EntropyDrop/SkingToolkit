@@ -122,10 +122,10 @@ def real_review(model,renderer,pipeline,out,step):
     for name,folder,source in cases:
         d=torch.load(folder/'diagnostics.pt',map_location='cpu',weights_only=False);images=d['images'].cuda()
         fg=d['foreground'].cuda() if name in ('crown','nose','beard') else cached_real_foreground(images,source,pipeline)
-        outputs={k:v.cuda() if torch.is_tensor(v) else v for k,v in d['outputs'].items()}
-        joint,presence=model.predict_joint_head_semantics(images,fg>=.5)
-        outputs.update(head_semantics_logits=joint,headwear_logits=project_semantics(joint,'headwear'),head_ownership_logits=project_semantics(joint,'ownership'),headwear_presence_logits=presence)
-        result=run_pipeline(model,renderer,images,pipeline,complete=True,outputs=outputs,foreground_probability=fg)
+        # Old regression archives predate the phone/ownership release. Run the
+        # full current model so frozen presence gates cannot go missing.
+        result=run_pipeline(model,renderer,images,pipeline,complete=True,foreground_probability=fg)
+        joint=result['outputs']['head_semantics_logits'];presence=result['outputs']['headwear_presence_logits']
         dest=out/f'real_{step}'/name;dest.mkdir(parents=True,exist_ok=True)
         uv=result['uv'];tensor_to_rgba_image(uv[0]).save(dest/'uv.png');save_image(torch.cat(list(result['render'][:,:3]),2),dest/'render.png')
         for layer in ('inner','outer'):

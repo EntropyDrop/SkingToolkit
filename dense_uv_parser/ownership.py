@@ -29,6 +29,8 @@ def apply_head_ownership(routing,outputs,foreground,renderer,views):
     logits=outputs.get('head_ownership_logits')
     if logits is None:return
     p=logits.float().softmax(1);confidence,identity=p.max(1)
+    colour_p=outputs.get('head_color_ownership_logits',logits).float().softmax(1)
+    phone_confidence,phone_identity=colour_p.max(1)
     old=outputs['accessory_logits'].float().softmax(1)
     # The new head abstains on hats and outer hair. Preserve those established
     # identities; a confident face label can correct geometric false positives.
@@ -50,7 +52,7 @@ def apply_head_ownership(routing,outputs,foreground,renderer,views):
     for vi,view in enumerate(views):
         sl=slice(vi,foreground.shape[0],len(views));static=build_static_surface_routing(renderer,view,foreground.device)
         valid=foreground[sl]&static['masks'][1]&(static['part'][1]==0)
-        support,_=connected_object_support(confidence[sl],(identity[sl]==4).long(),valid,.95,.5)
+        support,_=connected_object_support(phone_confidence[sl],(phone_identity[sl]==4).long(),valid,.95,.5)
         presence=outputs.get('headphone_presence_logit')
         if presence is not None:
             probabilities=presence.sigmoid()
@@ -86,7 +88,7 @@ def apply_head_ownership(routing,outputs,foreground,renderer,views):
         if outputs.get('headphone_presence_consensus',False):
             probability=probability.reshape(-1,len(views)).amin(1).repeat_interleave(len(views))
         present=probability>=outputs.get('headphone_presence_threshold',.9)
-    routing['headphone_colour_conflict']=(p[:,4]>=.5)&present[:,None,None]&foreground
+    routing['headphone_colour_conflict']=(colour_p[:,4]>=.5)&present[:,None,None]&foreground
     routing['ownership_face_cell_veto']=veto
     routing['ownership_outer_supported']=outer
     routing['ownership_inner_supported']=inner

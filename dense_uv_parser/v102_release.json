@@ -1,0 +1,38 @@
+{
+  "version": "v102",
+  "revision": "joint_head_semantics_20260906",
+  "passed": true,
+  "checkpoint": "dense_uv_parser/runs/v102_release_20260906/parser.pt",
+  "checkpoint_sha256": "f2db574dac0b9ce574d129f557ced5c71e80b9b530ee9a03576f2153401a86ef",
+  "pipeline": "dense_uv_parser/runs/v102_release_20260906/pipeline.json",
+  "pipeline_sha256": "64ccd4306022195f20955d5ebf730777babbe214ca38425cd18c7fd84eeb05e0",
+  "foreground": {
+    "version": "minecraft_foreground_v1",
+    "checkpoint": "dense_uv_parser/runs/foreground_release_800/foreground_step_800.pt",
+    "checkpoint_sha256": "8585a698d38969e6e7562e9c7d8c5f0b5e934e8f0811cf5b8678fcf05734e732",
+    "model_dir": "/home/ds/.cache/huggingface/hub/models--ZhengPeng7--BiRefNet/snapshots/6a62b7dcfa18a3829087877fb16c8006831e4220",
+    "step": 800,
+    "accepted_at_utc": "2026-09-06T05:45:36.930308+00:00",
+    "passed": true,
+    "heldout_images": 256,
+    "heldout_identities": 128,
+    "heldout": {
+      "iou": 0.9967454718444754,
+      "boundary_f1_tolerance_2px": 0.9836169424073569,
+      "boundary_alpha_mae": 0.042490756492937834,
+      "alpha_mae": 0.002159718080974926
+    },
+    "real_development_cases": 14,
+    "real_annotation_recall": 1.0,
+    "img28_purple_diagnostic": 0,
+    "reports": "dense_uv_parser/runs/foreground_release_800",
+    "foreground_threshold": 0.5,
+    "source_threshold": 0.98,
+    "source_inset": 1,
+    "scope": "Accepted foreground model; brim-data training may now proceed. Original v101 weights unchanged."
+  },
+  "training_steps": 4800,
+  "training_source_commit": "5013096d8c552bfb6338c39485f22d7a8959e3ac",
+  "validation": "dense_uv_parser/regression/v102_final_validation.json",
+  "default_version": "v101 remains the default; select VERSION=v102 explicitly"
+}

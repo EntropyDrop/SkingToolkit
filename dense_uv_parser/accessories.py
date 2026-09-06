@@ -210,6 +210,7 @@ def apply_accessory_routing(routing, outputs, foreground, renderer, views, thres
     from SkingToolkit.dense_uv_parser.headwear import apply_headwear_routing
     apply_headwear_routing(routing, outputs, foreground, renderer, views)
     if 'head_semantics_logits' in outputs:
-        from SkingToolkit.dense_uv_parser.head_semantics import apply_joint_head_routing
+        from SkingToolkit.dense_uv_parser.head_semantics import apply_joint_head_routing, apply_beard_component_routing
         apply_joint_head_routing(routing, outputs, foreground, renderer, views)
+        apply_beard_component_routing(routing, outputs, foreground, renderer, views)
     return routing['accessory_supported']

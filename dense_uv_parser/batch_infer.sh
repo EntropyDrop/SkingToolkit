@@ -4,7 +4,7 @@ cd "$(dirname "$0")"
 PYTHON_BIN="${PYTHON_BIN:-/home/ds/miniconda3/envs/sking-v61-worker/bin/python}"
 VERSION="${VERSION:-v101}"
 export HF_HUB_OFFLINE=1 HF_HUB_DISABLE_PROGRESS_BARS=1
-if [[ "$VERSION" == "v101" && -z "${CHECKPOINT:-}" && -f "v101_release.json" ]]; then
-  exec "$PYTHON_BIN" run_local.py released_inference --output-dir "${OUTPUT_DIR:-output_history/v101}" "$@"
+if [[ ( "$VERSION" == "v101" || "$VERSION" == "v102" ) && -z "${CHECKPOINT:-}" && -f "${VERSION}_release.json" ]]; then
+  exec "$PYTHON_BIN" run_local.py released_inference --release "${VERSION}_release.json" --output-dir "${OUTPUT_DIR:-output_history/${VERSION}}" "$@"
 fi
 exec "$PYTHON_BIN" run_local.py batch_accessories --checkpoint "${CHECKPOINT:-runs/dense_uv_parser_${VERSION}/best.pt}" --output-dir "${OUTPUT_DIR:-output_history/${VERSION}}" "$@"

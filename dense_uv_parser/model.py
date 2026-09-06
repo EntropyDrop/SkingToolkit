@@ -781,6 +781,7 @@ class DenseUVParserNet(nn.Module):
         if self.predict_head_semantics:
             from SkingToolkit.dense_uv_parser.head_semantics import project_semantics
             joint, presence = self.predict_joint_head_semantics(source_images, semantic_foreground)
+            outputs['head_color_ownership_logits'] = outputs['head_ownership_logits']
             outputs['head_semantics_logits'] = joint
             outputs['headwear_logits'] = project_semantics(joint, 'headwear')
             outputs['head_ownership_logits'] = project_semantics(joint, 'ownership')

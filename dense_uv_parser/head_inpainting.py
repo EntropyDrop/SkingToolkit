@@ -6,7 +6,7 @@ from SkingToolkit.dense_uv_parser.uv_topology import build_simple_uv_topology
 @torch.no_grad()
 def repair_hidden_head_material(uv,conditioning,details,views):
     routing=details['routing'];rejected=routing.get('headphone_colour_rejected')
-    logits=details['outputs'].get('head_ownership_logits')
+    logits=details['outputs'].get('head_color_ownership_logits',details['outputs'].get('head_ownership_logits'))
     if rejected is None or logits is None or not rejected.any():return uv
     topology=build_simple_uv_topology();device=uv.device
     head=(topology.valid&(topology.part==0)&(topology.layer==0)).to(device).flatten()

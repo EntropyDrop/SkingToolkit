@@ -1,0 +1,827 @@
+{
+  "tests": {
+    "test_v102": {
+      "passed": true,
+      "count": 10
+    },
+    "test_crown_geometry": {
+      "passed": true,
+      "count": 5
+    },
+    "test_headwear": {
+      "passed": true,
+      "count": 6
+    },
+    "test_accessories": {
+      "passed": true,
+      "count": 10
+    },
+    "test_affine_routing": {
+      "passed": true,
+      "count": 89
+    },
+    "test_ownership": {
+      "passed": true,
+      "count": 5
+    },
+    "test_semantic_parser": {
+      "passed": true,
+      "count": 14
+    },
+    "test_semantic_generalization": {
+      "passed": true,
+      "count": 5
+    }
+  },
+  "real": {
+    "source_checks": [
+      {
+        "source": "/home/ds/llms/SKING_DDJ_Dataset/entropydrop_website_generations/SKING_DDJ_v54/1WQEQRUDRLMLVX3E_edited.png",
+        "unchanged": true,
+        "v101_unchanged": true
+      },
+      {
+        "source": "/home/ds/llms/SKING_DDJ_Dataset/entropydrop_website_generations/SKING_DDJ_v54/1ZDZB1UAMS1DEZLD_edited.png",
+        "unchanged": true,
+        "v101_unchanged": true
+      },
+      {
+        "source": "/home/ds/llms/SKING_DDJ_Dataset/entropydrop_website_generations/SKING_DDJ_v61/1ZW63H5Z8YNV57MT_edited.png",
+        "unchanged": true,
+        "v101_unchanged": true
+      }
+    ],
+    "cases": {
+      "crown": {
+        "body_exact": true,
+        "before_head_outer": 157,
+        "after_head_outer": 162,
+        "v101": {
+          "inner_top_blue": 5,
+          "outer_top_blue": 4
+        },
+        "v102": {
+          "inner_top_blue": 0,
+          "outer_top_blue": 12
+        }
+      },
+      "nose": {
+        "body_exact": true,
+        "before_head_outer": 103,
+        "after_head_outer": 89,
+        "v101": {
+          "nose_outer_alpha": 255
+        },
+        "v102": {
+          "nose_outer_alpha": 0
+        }
+      },
+      "beard": {
+        "body_exact": true,
+        "before_head_outer": 41,
+        "after_head_outer": 22,
+        "v101": {
+          "head_top_outer_cells": 5,
+          "isolated_corner_alpha": 255
+        },
+        "v102": {
+          "head_top_outer_cells": 0,
+          "isolated_corner_alpha": 0,
+          "lower_front_outer_beard_cells": 0,
+          "beard_layer_asymmetry_cells": 0
+        }
+      },
+      "old_1H6GAQA9BENWNB89_edited": {
+        "body_exact": true,
+        "before_head_outer": 47,
+        "after_head_outer": 44,
+        "v101": {},
+        "v102": {}
+      },
+      "old_2RSZETA9PCRZHVEU_edited": {
+        "body_exact": true,
+        "before_head_outer": 87,
+        "after_head_outer": 100,
+        "v101": {},
+        "v102": {}
+      },
+      "old_33TVPML5UL2TKASR_edited": {
+        "body_exact": true,
+        "before_head_outer": 149,
+        "after_head_outer": 163,
+        "v101": {},
+        "v102": {}
+      },
+      "old_PU418PLGERMFC487_edited": {
+        "body_exact": true,
+        "before_head_outer": 62,
+        "after_head_outer": 60,
+        "v101": {
+          "four_face_brim_count": [
+            8,
+            8,
+            8,
+            8
+          ],
+          "upper_hat_outer_red": 0
+        },
+        "v102": {
+          "four_face_brim_count": [
+            8,
+            8,
+            8,
+            8
+          ],
+          "upper_hat_outer_red": 0
+        }
+      },
+      "old_TWRLRRTHQP2UV368_edited": {
+        "body_exact": true,
+        "before_head_outer": 79,
+        "after_head_outer": 81,
+        "v101": {
+          "forehead_outer_alpha": 0
+        },
+        "v102": {
+          "forehead_outer_alpha": 0
+        }
+      },
+      "old_img10": {
+        "body_exact": true,
+        "before_head_outer": 102,
+        "after_head_outer": 120,
+        "v101": {},
+        "v102": {}
+      },
+      "old_img12": {
+        "body_exact": true,
+        "before_head_outer": 117,
+        "after_head_outer": 121,
+        "v101": {},
+        "v102": {}
+      },
+      "old_img23": {
+        "body_exact": true,
+        "before_head_outer": 42,
+        "after_head_outer": 42,
+        "v101": {},
+        "v102": {}
+      },
+      "old_img25": {
+        "body_exact": true,
+        "before_head_outer": 184,
+        "after_head_outer": 205,
+        "v101": {},
+        "v102": {}
+      },
+      "old_img26": {
+        "body_exact": true,
+        "before_head_outer": 111,
+        "after_head_outer": 133,
+        "v101": {},
+        "v102": {}
+      },
+      "old_img27": {
+        "body_exact": true,
+        "before_head_outer": 142,
+        "after_head_outer": 142,
+        "v101": {
+          "inner_strong_green": 0,
+          "green_excess": 0.5215686274509803
+        },
+        "v102": {
+          "inner_strong_green": 0,
+          "green_excess": 0.5215686274509803
+        }
+      },
+      "old_img28": {
+        "body_exact": true,
+        "before_head_outer": 113,
+        "after_head_outer": 128,
+        "v101": {},
+        "v102": {}
+      },
+      "old_img3": {
+        "body_exact": true,
+        "before_head_outer": 0,
+        "after_head_outer": 0,
+        "v101": {},
+        "v102": {}
+      },
+      "old_img46": {
+        "body_exact": true,
+        "before_head_outer": 160,
+        "after_head_outer": 157,
+        "v101": {
+          "crown_top_cells": 0
+        },
+        "v102": {
+          "crown_top_cells": 0
+        }
+      }
+    },
+    "all_body_exact": true,
+    "all_originals_unchanged": true,
+    "scope": "Real development regressions, not independent heldout validation. Colour thresholds are audit probes only, never inference rules.",
+    "checkpoint_sha256": "f2db574dac0b9ce574d129f557ced5c71e80b9b530ee9a03576f2153401a86ef",
+    "exports": [
+      {
+        "input": "/home/ds/llms/SKING_DDJ_Dataset/entropydrop_website_generations/SKING_DDJ_v54/1WQEQRUDRLMLVX3E_edited.png",
+        "result": "/home/ds/llms/SKING_DDJ_Dataset/entropydrop_website_generations/SKING_DDJ_v54/1WQEQRUDRLMLVX3E_result_v102.png",
+        "sha256": "8925ea783373700ba759bf67105e8ad47faee223dab7f120a8a257f88aa0b5f0",
+        "artifact_dir": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v102_validated_20260906/1WQEQRUDRLMLVX3E_edited_4c564413645f",
+        "standard_entry_matches_review": true
+      },
+      {
+        "input": "/home/ds/llms/SKING_DDJ_Dataset/entropydrop_website_generations/SKING_DDJ_v54/1ZDZB1UAMS1DEZLD_edited.png",
+        "result": "/home/ds/llms/SKING_DDJ_Dataset/entropydrop_website_generations/SKING_DDJ_v54/1ZDZB1UAMS1DEZLD_result_v102.png",
+        "sha256": "ba01cac76655b65fe1a4d85a7e14f63ab091596ac26fa379f4292ba662f7c019",
+        "artifact_dir": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v102_validated_20260906/1ZDZB1UAMS1DEZLD_edited_d6a846942469",
+        "standard_entry_matches_review": true
+      },
+      {
+        "input": "/home/ds/llms/SKING_DDJ_Dataset/entropydrop_website_generations/SKING_DDJ_v61/1ZW63H5Z8YNV57MT_edited.png",
+        "result": "/home/ds/llms/SKING_DDJ_Dataset/entropydrop_website_generations/SKING_DDJ_v61/1ZW63H5Z8YNV57MT_result_v102.png",
+        "sha256": "8254af85a3c159ff472b649832d67e45b6ab9951f698a111162b7f07bd2d8696",
+        "artifact_dir": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v102_validated_20260906/1ZW63H5Z8YNV57MT_edited_ffc1c7f1d4fe",
+        "standard_entry_matches_review": true
+      }
+    ]
+  },
+  "training_status": {
+    "state": "complete",
+    "pid": 416044,
+    "step": 4800,
+    "total_steps": 4800,
+    "elapsed_seconds": 544.7319512367249,
+    "v101_tensors_unchanged": true,
+    "release_promoted": false
+  },
+  "synthetic_semantic_validation": {
+    "baseline": false,
+    "presence": {
+      "tp": 47,
+      "fp": 0,
+      "tn": 145,
+      "fn": 0
+    },
+    "features": {
+      "nose_inner": {
+        "correct": 22843,
+        "pixels": 22921,
+        "accuracy": 0.9965970071113825
+      },
+      "beard_layer": {
+        "correct": 363236,
+        "pixels": 364435,
+        "accuracy": 0.9967099757158341
+      },
+      "crown_cap_outer": {
+        "correct": 93445,
+        "pixels": 94405,
+        "accuracy": 0.9898310470843705
+      }
+    },
+    "metrics": {
+      "joint": {
+        "confusion": [
+          [
+            3020573,
+            1445,
+            215,
+            865,
+            771,
+            613,
+            22,
+            177,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          [
+            732,
+            654350,
+            7524,
+            1604,
+            1292,
+            176,
+            140,
+            389,
+            0,
+            185,
+            0,
+            0,
+            126,
+            324
+          ],
+          [
+            294,
+            7150,
+            1450291,
+            567,
+            1699,
+            181,
+            246,
+            75,
+            0,
+            246,
+            0,
+            0,
+            485,
+            11007
+          ],
+          [
+            280,
+            2426,
+            610,
+            240661,
+            191,
+            0,
+            84,
+            0,
+            0,
+            8,
+            0,
+            0,
+            12,
+            4
+          ],
+          [
+            252,
+            452,
+            574,
+            639,
+            870043,
+            94,
+            274,
+            1008,
+            0,
+            0,
+            0,
+            0,
+            0,
+            6850
+          ],
+          [
+            904,
+            67,
+            60,
+            0,
+            200,
+            118244,
+            563,
+            19,
+            0,
+            0,
+            0,
+            0,
+            28,
+            74
+          ],
+          [
+            99,
+            263,
+            139,
+            57,
+            301,
+            513,
+            92153,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          [
+            134,
+            197,
+            256,
+            9,
+            534,
+            0,
+            0,
+            81277,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            4,
+            10,
+            0,
+            0,
+            0,
+            0,
+            0,
+            169445,
+            2041,
+            0,
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            45,
+            9,
+            0,
+            0,
+            0,
+            0,
+            0,
+            1610,
+            41395,
+            0,
+            0,
+            158,
+            0
+          ],
+          [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            60633,
+            111,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            755,
+            16243,
+            46,
+            0
+          ],
+          [
+            4,
+            20,
+            158,
+            0,
+            0,
+            4,
+            0,
+            0,
+            0,
+            31,
+            0,
+            217,
+            71601,
+            0
+          ],
+          [
+            3,
+            404,
+            1892,
+            2,
+            20,
+            4,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            618226
+          ]
+        ],
+        "precision": [
+          0.9991062879562378,
+          0.9812948703765869,
+          0.9921689033508301,
+          0.9846851825714111,
+          0.9942768812179565,
+          0.9867728352546692,
+          0.9857833385467529,
+          0.9798902869224548,
+          0.9905878305435181,
+          0.9428096413612366,
+          0.9877011775970459,
+          0.9802063703536987,
+          0.9881997108459473,
+          0.9713127613067627
+        ],
+        "recall": [
+          0.998641848564148,
+          0.9812669157981873,
+          0.9850907325744629,
+          0.9852011799812317,
+          0.9884762763977051,
+          0.9840627908706665,
+          0.9853301048278809,
+          0.9862875938415527,
+          0.9880174994468689,
+          0.9578406810760498,
+          0.9981726408004761,
+          0.953004002571106,
+          0.9939751625061035,
+          0.9962533116340637
+        ]
+      },
+      "ownership": {
+        "confusion": [
+          [
+            5001313,
+            3931,
+            2848,
+            837,
+            1188
+          ],
+          [
+            3404,
+            899041,
+            8064,
+            222,
+            387
+          ],
+          [
+            14028,
+            7747,
+            1450145,
+            246,
+            75
+          ],
+          [
+            943,
+            326,
+            139,
+            92117,
+            0
+          ],
+          [
+            678,
+            207,
+            254,
+            0,
+            81268
+          ]
+        ],
+        "precision": [
+          0.9962048530578613,
+          0.9865997433662415,
+          0.9922645092010498,
+          0.9860311150550842,
+          0.9801008105278015
+        ],
+        "recall": [
+          0.9982427358627319,
+          0.9867448806762695,
+          0.9849916100502014,
+          0.9849451780319214,
+          0.9861783385276794
+        ]
+      },
+      "headwear": {
+        "confusion": [
+          [
+            6565174,
+            0,
+            409,
+            0,
+            0,
+            623,
+            18111
+          ],
+          [
+            17,
+            169445,
+            2038,
+            0,
+            0,
+            0,
+            0
+          ],
+          [
+            62,
+            1610,
+            41387,
+            0,
+            0,
+            158,
+            0
+          ],
+          [
+            0,
+            0,
+            0,
+            60633,
+            111,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0,
+            755,
+            16243,
+            46,
+            0
+          ],
+          [
+            197,
+            0,
+            31,
+            0,
+            217,
+            71590,
+            0
+          ],
+          [
+            2385,
+            0,
+            0,
+            0,
+            0,
+            0,
+            618166
+          ]
+        ],
+        "precision": [
+          0.9995948672294617,
+          0.9905878305435181,
+          0.943508505821228,
+          0.9877011775970459,
+          0.9802063703536987,
+          0.988580048084259,
+          0.9715359807014465
+        ],
+        "recall": [
+          0.9970926642417908,
+          0.9880174994468689,
+          0.9576555490493774,
+          0.9981726408004761,
+          0.953004002571106,
+          0.993822455406189,
+          0.996156632900238
+        ]
+      }
+    },
+    "legacy_replay": {
+      "ownership": {
+        "confusion": [
+          [
+            1493376,
+            935,
+            3908,
+            1058,
+            3105
+          ],
+          [
+            412,
+            324013,
+            327,
+            326,
+            0
+          ],
+          [
+            3198,
+            53,
+            493966,
+            48,
+            2133
+          ],
+          [
+            1303,
+            276,
+            57,
+            117853,
+            46
+          ],
+          [
+            725,
+            0,
+            4240,
+            167,
+            71611
+          ]
+        ],
+        "precision": [
+          0.9962388873100281,
+          0.9961140751838684,
+          0.9830208420753479,
+          0.9866138696670532,
+          0.9312829375267029
+        ],
+        "recall": [
+          0.9940055012702942,
+          0.9967238903045654,
+          0.9891229271888733,
+          0.9859288334846497,
+          0.9331274628639221
+        ]
+      },
+      "headwear": {
+        "confusion": [
+          [
+            2453233,
+            0,
+            0,
+            0,
+            0,
+            0,
+            391
+          ],
+          [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          [
+            188,
+            0,
+            0,
+            0,
+            0,
+            0,
+            69324
+          ]
+        ],
+        "precision": [
+          0.9999233484268188,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.9943914413452148
+        ],
+        "recall": [
+          0.9998406171798706,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.9972954392433167
+        ]
+      }
+    }
+  },
+  "validation_scope": "Local regression acceptance, not an untouched real-world generalization benchmark. See V102.md."
+}
