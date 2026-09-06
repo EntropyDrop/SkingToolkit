@@ -40,5 +40,11 @@
     "dense_uv_parser/runs/v102_alignment_20260906/training/config.json",
     "dense_uv_parser/runs/v102_alignment_20260906/training_seams/config.json",
     "dense_uv_parser/runs/v102_alignment_20260906/training_surface_spatial/config.json"
+  ],
+  "known_user_review_failures": [
+    {
+      "review": "dense_uv_parser/regression/v102_uv_symmetry_review.json",
+      "issue": "UV beard symmetry and LiuHai regressed on the annotated example. A reference-guided output is available; checkpoint inference is unchanged."
+    }
   ]
 }

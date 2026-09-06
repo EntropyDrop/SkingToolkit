@@ -1,0 +1,47 @@
+{
+  "input": "/home/ds/llms/SKING_DDJ_Dataset/entropydrop_website_generations/SKING_DDJ_v61/1ZW63H5Z8YNV57MT_edited.png",
+  "input_sha256": "a99b78b156781900b20180c9c58bfff7dc07956dbb04632383404e8e863ddf2c",
+  "automatic_checkpoint": "dense_uv_parser/runs/v102_alignment_release_20260906/parser.pt",
+  "automatic_checkpoint_sha256": "5ed960a47bb7610f44b544e709e35cce2a610fb9bf48482e2d8c9926a59dd195",
+  "automatic_result_status": "fails_user_review_beard_symmetry_and_fringe",
+  "automatic_result": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/runs/v102_uv_symmetry_20260906/before.png",
+  "automatic_result_sha256": "0d09960f4e4074261953a12941e3179897f41e858472909b9001727225912a94",
+  "reference": "/home/ds/llms/SKING_DDJ_Dataset/entropydrop_website_generations/SKING_DDJ_v61/1ZW63H5Z8YNV57MT_result.png",
+  "reference_sha256": "7697f035ff33ea52228d6d654b23accabe9f2c5d4cf5a8768a9b0f480d3a4a60",
+  "expected_uv": "dense_uv_parser/regression/v102_uv_symmetry_expected.png",
+  "beard_scope": "dense_uv_parser/regression/v102_uv_symmetry_beard_scope.png",
+  "hair_scope": "dense_uv_parser/regression/v102_uv_symmetry_hair_scope.png",
+  "before": {
+    "inner": {
+      "alpha_mismatched_texels": 0,
+      "rgb_mismatched_texels": 24,
+      "rgb_max_difference": 48
+    },
+    "outer": {
+      "alpha_mismatched_texels": 8,
+      "rgb_mismatched_texels": 20,
+      "rgb_max_difference": 86
+    }
+  },
+  "corrected": {
+    "inner": {
+      "alpha_mismatched_texels": 0,
+      "rgb_mismatched_texels": 0,
+      "rgb_max_difference": 0
+    },
+    "outer": {
+      "alpha_mismatched_texels": 0,
+      "rgb_mismatched_texels": 0,
+      "rgb_max_difference": 0
+    }
+  },
+  "correction_method": "Explicit user-reference UV correction with annotated beard masks; not automatic parser inference and not training ground truth.",
+  "hair_reference_exact": true,
+  "body_exact": true,
+  "outside_regions_exact": true,
+  "corrected_result": "/home/ds/llms/SKING_DDJ_Dataset/entropydrop_website_generations/SKING_DDJ_v61/1ZW63H5Z8YNV57MT_result_v102.png",
+  "corrected_result_sha256": "c877c2004e0dd0a8836d15914a0c68d65735ce6b8f5e5ba7cfa6b51c02d1f99e",
+  "artifact_dir": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v102_uv_reference_20260906/1ZW63H5Z8YNV57MT_edited",
+  "backup": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/runs/v102_uv_symmetry_20260906/before.png",
+  "tests": 4
+}

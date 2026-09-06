@@ -10,6 +10,7 @@ from SkingToolkit.dense_uv_parser.head_semantics import CLASSES,PROJECTIONS,proj
 from SkingToolkit.dense_uv_parser.head_semantics_data import JointHeadDataset,render_joint_batch
 from SkingToolkit.dense_uv_parser.accessories import head_bounds
 from SkingToolkit.dense_uv_parser.semantic_generalization import appearance_augment,write_json
+from SkingToolkit.dense_uv_parser.uv_reference_repair import evaluate_annotated_review
 from SkingToolkit.renderer import DifferentiableRenderer
 
 
@@ -138,6 +139,11 @@ def real_review(model,renderer,pipeline,out,step):
         torch.save({'uv':uv.cpu(),'conditioning':result['conditioning'].cpu(),'head_semantics_logits':joint.cpu(),'presence':presence.cpu()},dest/'diagnostics.pt')
         if name in ('crown','nose','beard'):
             row['body_exactly_equal_to_v101']=bool(torch.equal(uv.cpu()[:,:,16:],d['uv'][:,:,16:]))
+        # Evaluate the final UV, not just pixel semantics or a front rendering.
+        # Explicit annotations are review-only and never affect model output.
+        import numpy as np
+        uv_review=evaluate_annotated_review(np.array(tensor_to_rgba_image(uv[0])),source)
+        if uv_review is not None:row['annotated_uv_review']=uv_review
         stats[name]=row
     write_json(out/f'real_{step}.json',stats)
     return stats
