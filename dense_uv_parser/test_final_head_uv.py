@@ -120,5 +120,17 @@ class TrainingRecoveryTests(unittest.TestCase):
         large=fresh.clone();large[0,1,12,30]+=.002;self.assertFalse(compare(large)['passed'])
         self.assertFalse(compare(fresh,evidence=evidence+.001)['passed'])
 
+    def test_upstream_warning_keeps_failed_status_and_never_hides_geometry_errors(self):
+        from SkingToolkit.dense_uv_parser.final_uv_training_state import compare_roundtrip,upstream_rgb_warning
+        uv=torch.ones(1,4,64,64)*.5;uv[:,3]=1;fresh=uv.clone();fresh[0,1,12,30]+=.004
+        evidence=torch.zeros(2,25,56,56)
+        report=compare_roundtrip(uv,fresh,uv,fresh,evidence,evidence)
+        report.update(serialized_decoder_exact=True,fresh_inputs_decoder_exact=True)
+        self.assertFalse(report['passed']);self.assertTrue(upstream_rgb_warning(report));self.assertFalse(report['passed'])
+        for key in ('alpha_exact','body_exact','evidence_exact','serialized_decoder_exact','fresh_inputs_decoder_exact'):
+            self.assertFalse(upstream_rgb_warning({**report,key:False}))
+        self.assertFalse(upstream_rgb_warning({**report,'base_rgb_max_delta':0}))
+        self.assertFalse(upstream_rgb_warning({'passed':False,'reason':'non-finite roundtrip tensors'}))
+
 
 if __name__=='__main__':unittest.main()

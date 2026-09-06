@@ -89,3 +89,13 @@ def compare_roundtrip(cached, fresh, cached_base, fresh_base, cached_evidence, f
     exact_fields = ("alpha_exact", "base_alpha_exact", "body_exact", "cached_body_preserved", "fresh_body_preserved", "evidence_exact")
     report["passed"] = all(report[k] for k in exact_fields) and max(report["base_rgb_max_delta"], report["final_rgb_max_delta"]) <= 1 / 255 and report["png_rgb_max_delta"] <= 1
     return report
+
+
+def upstream_rgb_warning(report):
+    """A failed colour stability check rejects the candidate, not learned progress.
+
+    Serialization, identical-input deployment, alpha, body and semantic evidence
+    must still be exact. A numeric failure with unchanged upstream RGB is fatal.
+    """
+    required = ("alpha_exact", "base_alpha_exact", "body_exact", "cached_body_preserved", "fresh_body_preserved", "evidence_exact", "serialized_decoder_exact", "fresh_inputs_decoder_exact")
+    return not report.get("passed", False) and all(report.get(k, False) for k in required) and report.get("base_rgb_max_delta", 0) > 0

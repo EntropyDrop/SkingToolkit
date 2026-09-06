@@ -8,7 +8,7 @@ from SkingToolkit.dense_uv_parser.final_head_uv import FinalHeadUVDecoder,final_
 from SkingToolkit.dense_uv_parser.uv_layout import tensor_to_rgba_image
 from SkingToolkit.dense_uv_parser.uv_reference_repair import evaluate_annotated_review
 from SkingToolkit.renderer import DifferentiableRenderer
-from SkingToolkit.dense_uv_parser.final_uv_training_state import atomic_save,save_recovery,restore_recovery,restore_rng,compare_roundtrip
+from SkingToolkit.dense_uv_parser.final_uv_training_state import atomic_save,save_recovery,restore_recovery,restore_rng,compare_roundtrip,upstream_rgb_warning
 
 
 def load(path):return torch.load(path,map_location='cpu',weights_only=False)
@@ -91,7 +91,15 @@ def main():
     manifest.update(training_signature=signature,resumed_from=str(o.resume.resolve()) if o.resume else None,recovery_format=1)
     write(out/'config.json',manifest);write(out/'pipeline.json',pipeline);snapshot=out/'source';snapshot.mkdir()
     for f in root.glob('*.py'):shutil.copy2(f,snapshot/f.name)
-    step=0;start=time.time()
+    step=0;start=time.time();validation_warnings=[]
+    if o.resume:
+        # Preserve failed stability evidence across retries instead of retrying until green.
+        previous=o.resume.parent/'validation_warnings.json'
+        if previous.exists():validation_warnings.extend(json.loads(previous.read_text()))
+        for report_path in sorted(o.resume.parent.glob('roundtrip_*.json')):
+            report=json.loads(report_path.read_text())
+            if upstream_rgb_warning(report):validation_warnings.append({'report':str(report_path.resolve()),'reason':'upstream_rgb_variation','passed':False})
+    write(out/'validation_warnings.json',validation_warnings)
     if o.resume:step=restore_recovery(o.resume,model,opt,signature)
     def status(state,**extra):
         row={'state':state,'pid':os.getpid(),'step':step,'total_steps':o.steps,'elapsed_seconds':time.time()-start,**extra};write(out/'status.json',row);print(json.dumps(row),flush=True)
@@ -124,11 +132,16 @@ def main():
         roundtrip=compare_roundtrip(expected,result['uv'],anchor['base'],captured['base'],anchor['evidence'],captured['evidence'])
         roundtrip['serialized_decoder_exact']=True;roundtrip['fresh_inputs_decoder_exact']=True
         write(out/f'roundtrip_{step}.json',roundtrip)
-        if not roundtrip['passed']:raise RuntimeError('Full inference geometry/body/evidence or bounded RGB check failed; see roundtrip report')
+        if not roundtrip['passed']:
+            if not upstream_rgb_warning(roundtrip):raise RuntimeError('Full inference geometry/body/evidence check failed; see roundtrip report')
+            validation_warnings.append({'step':step,'report':str(out/f'roundtrip_{step}.json'),'reason':'upstream_rgb_variation','passed':False})
+            write(out/'validation_warnings.json',validation_warnings)
+            status('validation_warning',reason='Upstream RGB stability failed; keep training state, do not accept or release candidate',report=str(out/f'roundtrip_{step}.json'))
         del fresh,result,captured,same_inputs
         status('real_development_review');real=real_review(model,anchors+development,renderer,out,step)
-        write(out/'latest.json',{'step':step,'checkpoint':str(path),'recovery_state':str(out/'training_state_latest.pt'),'parent_all_tensors_preserved':True,'full_inference_roundtrip_exact':roundtrip['rgba_exact'],'full_inference_roundtrip_passed':roundtrip['passed']})
-        status('checkpoint_saved',checkpoint=str(path),validation=metrics,anchor=real['beard'].get('annotated_uv_review'),release_promoted=False)
+        write(out/'latest.json',{'step':step,'checkpoint':str(path),'recovery_state':str(out/'training_state_latest.pt'),'parent_all_tensors_preserved':True,'full_inference_roundtrip_exact':roundtrip['rgba_exact'],'full_inference_roundtrip_passed':roundtrip['passed'],'validation_warning_count':len(validation_warnings),'release_promoted':False})
+        status('checkpoint_saved',checkpoint=str(path),validation=metrics,anchor=real['beard'].get('annotated_uv_review'),release_promoted=False,roundtrip_passed=roundtrip['passed'],validation_warning_count=len(validation_warnings))
+        return roundtrip['passed']
     def checkpoint():
         # Save the recovery state BEFORE validation, including failure-prone full inference.
         saved_rng=save_recovery(out/'training_state_latest.pt',model,opt,step,signature)
@@ -136,8 +149,8 @@ def main():
         path=out/f'step_{step}.pt';atomic_save(payload,path)
         write(out/'recovery.json',{'step':step,'state':str(out/'training_state_latest.pt'),'validation':'pending'})
         try:
-            validate_checkpoint(path,payload)
-            write(out/'recovery.json',{'step':step,'state':str(out/'training_state_latest.pt'),'validation':'passed'})
+            passed=validate_checkpoint(path,payload)
+            write(out/'recovery.json',{'step':step,'state':str(out/'training_state_latest.pt'),'validation':'passed' if passed else 'upstream_rgb_warning'})
         finally:restore_rng(saved_rng)  # Validation must not change subsequent training samples.
     try:
         if o.resume:
@@ -158,7 +171,7 @@ def main():
             if step==o.first_eval or step%o.eval_every==0 or step==o.steps or step==o.stop_after:checkpoint()
             if step==o.stop_after and step<o.steps:
                 status('stopped',recovery_state=str(out/'training_state_latest.pt'));return
-        status('complete',release_promoted=False,parent_all_tensors_preserved=True)
+        status('complete_with_validation_warnings' if validation_warnings else 'complete',release_promoted=False,parent_all_tensors_preserved=True,validation_warning_count=len(validation_warnings))
     except BaseException as e:
         status('failed',error=repr(e));raise
 
