@@ -8,10 +8,12 @@ from SkingToolkit.dense_uv_parser.final_head_uv import FinalHeadUVDecoder,final_
 from SkingToolkit.dense_uv_parser.uv_layout import tensor_to_rgba_image
 from SkingToolkit.dense_uv_parser.uv_reference_repair import evaluate_annotated_review
 from SkingToolkit.renderer import DifferentiableRenderer
+from SkingToolkit.dense_uv_parser.final_uv_training_state import atomic_save,save_recovery,restore_recovery,restore_rng,compare_roundtrip
 
 
 def load(path):return torch.load(path,map_location='cpu',weights_only=False)
-def write(path,value):path.write_text(json.dumps(value,indent=2)+'\n')
+def write(path,value):
+    temporary=path.with_name(path.name+'.tmp');temporary.write_text(json.dumps(value,indent=2)+'\n');temporary.replace(path)
 
 
 def batch(rows,model,augment=False):
@@ -70,7 +72,8 @@ def real_review(model,rows,renderer,out,step):
 
 
 def main():
-    p=argparse.ArgumentParser(description=__doc__);p.add_argument('--cache',type=Path,required=True);p.add_argument('--output-dir',type=Path,required=True);p.add_argument('--steps',type=int,default=6000);p.add_argument('--batch-size',type=int,default=6);p.add_argument('--eval-every',type=int,default=1000);p.add_argument('--first-eval',type=int,default=200);o=p.parse_args()
+    p=argparse.ArgumentParser(description=__doc__);p.add_argument('--cache',type=Path,required=True);p.add_argument('--output-dir',type=Path,required=True);p.add_argument('--steps',type=int,default=6000);p.add_argument('--batch-size',type=int,default=6);p.add_argument('--eval-every',type=int,default=1000);p.add_argument('--first-eval',type=int,default=200);p.add_argument('--resume',type=Path,help='Atomic recovery state, including model, optimizer and RNG; output must be a new directory');p.add_argument('--stop-after',type=int,help='Save and stop cleanly at this step without changing the LR schedule');o=p.parse_args()
+    if min(o.steps,o.batch_size,o.eval_every,o.first_eval)<1 or (o.stop_after is not None and not 1<=o.stop_after<=o.steps):p.error('Invalid positive training limits')
     torch.set_num_threads(4);evaluation_numerics();torch.manual_seed(1032707);random.seed(1032707)
     root=Path(__file__).resolve().parent;out=o.output_dir.resolve();out.mkdir(parents=True,exist_ok=False)
     cache=json.loads((o.cache/'manifest.json').read_text())
@@ -84,15 +87,17 @@ def main():
     config={'width':96,'layers':2};model=FinalHeadUVDecoder(**config).cuda();opt=torch.optim.AdamW(model.parameters(),lr=3e-4,weight_decay=1e-4)
     parent=load(cache['parent']);pipeline=cache['pipeline'];renderer=DifferentiableRenderer(parent['args']['mappings_dir']).cuda()
     manifest={'version':'v103','revision':'final_uv_decoder_20260907','git_commit':subprocess.check_output(['git','rev-parse','HEAD'],cwd=root,text=True).strip(),'parent':cache['parent'],'parent_sha256':cache['parent_sha256'],'cache':str(o.cache.resolve()),'cache_manifest_sha256':hashlib.sha256((o.cache/'manifest.json').read_bytes()).hexdigest(),'decoder_config':config,'trainable_parameters':sum(x.numel() for x in model.parameters()),'steps':o.steps,'real_training_identities':[r['metadata'] for r in anchors],'real_development_identities':[r['metadata'] for r in development],'validation_scope':'The beard identity is now training data. Only remaining real cases and train-disjoint synthetic identities assess transfer. No automatic release.','source_sha256':{f.name:hashlib.sha256(f.read_bytes()).hexdigest() for f in root.glob('*.py')}}
+    signature={k:manifest[k] for k in ('parent_sha256','cache_manifest_sha256','decoder_config','steps')};signature['batch_size']=o.batch_size
+    manifest.update(training_signature=signature,resumed_from=str(o.resume.resolve()) if o.resume else None,recovery_format=1)
     write(out/'config.json',manifest);write(out/'pipeline.json',pipeline);snapshot=out/'source';snapshot.mkdir()
     for f in root.glob('*.py'):shutil.copy2(f,snapshot/f.name)
     step=0;start=time.time()
+    if o.resume:step=restore_recovery(o.resume,model,opt,signature)
     def status(state,**extra):
         row={'state':state,'pid':os.getpid(),'step':step,'total_steps':o.steps,'elapsed_seconds':time.time()-start,**extra};write(out/'status.json',row);print(json.dumps(row),flush=True)
-    def checkpoint():
+    def validate_checkpoint(path,payload):
         status('validation');metrics=evaluate(model,validation);write(out/f'evaluation_{step}.json',metrics)
-        payload={**parent,'step':step,'parent_checkpoint_step':parent.get('step'),'final_head_uv_state':{k:v.detach().cpu() for k,v in model.state_dict().items()},'final_head_uv_config':config,'final_head_uv_manifest':manifest,'final_head_uv_step':step,'final_head_uv_metrics':metrics,'inference_pipeline':pipeline}
-        path=out/f'step_{step}.pt';torch.save(payload,out/'checkpoint.tmp');(out/'checkpoint.tmp').replace(path)
+        payload['final_head_uv_metrics']=metrics;atomic_save(payload,path)
         # In-memory and loaded decoder run exactly the same discrete output path.
         reloaded=load(path)
         for name,value in parent['model'].items():
@@ -107,21 +112,38 @@ def main():
         status('full_inference_roundtrip')
         from SkingToolkit.dense_uv_parser.infer import load_parser
         from SkingToolkit.dense_uv_parser.accessory_pipeline import run_pipeline
-        fresh,_=load_parser(path,torch.device('cuda'));sample=load(o.cache/'anchor_input.pt')
-        with torch.no_grad():result=run_pipeline(fresh,renderer,sample['images'].cuda(),pipeline,complete=True,foreground_probability=sample['foreground'].cuda())
-        left=np.array(tensor_to_rgba_image(expected[0]));right=np.array(tensor_to_rgba_image(result['uv'][0]))
-        if not np.array_equal(left,right):
-            from SkingToolkit.dense_uv_parser.final_head_uv import image_evidence
-            actual_evidence=image_evidence(result['details']['rendered'],result['details']['routing']['observed_foreground'],result['details']['outputs'])
-            write(out/f'roundtrip_failure_{step}.json',{'differences':[{'xy':[int(x),int(y)],'cached':left[y,x].tolist(),'fresh':right[y,x].tolist()} for y,x in np.argwhere((left!=right).any(2))],'evidence_max_delta':float((actual_evidence-anchor['evidence']).abs().max())})
-            raise RuntimeError('Full inference roundtrip differs from cached evaluation by '+str(int((left!=right).any(2).sum()))+' texels')
-        del fresh,result
+        fresh,_=load_parser(path,torch.device('cuda'));sample=load(o.cache/'anchor_input.pt');captured={}
+        def capture(module,args):captured.update(base=args[0].detach().clone(),evidence=args[1].detach().clone())
+        handle=fresh.final_head_uv_decoder.register_forward_pre_hook(capture)
+        try:
+            with torch.no_grad():result=run_pipeline(fresh,renderer,sample['images'].cuda(),pipeline,complete=True,foreground_probability=sample['foreground'].cuda())
+        finally:handle.remove()
+        # Check deployment and the in-memory decoder on IDENTICAL inputs exactly.
+        with torch.no_grad():same_inputs=model(captured['base'],captured['evidence'])['uv']
+        if not torch.equal(same_inputs,result['uv']):raise RuntimeError('Full inference decoder differs on identical inputs')
+        roundtrip=compare_roundtrip(expected,result['uv'],anchor['base'],captured['base'],anchor['evidence'],captured['evidence'])
+        roundtrip['serialized_decoder_exact']=True;roundtrip['fresh_inputs_decoder_exact']=True
+        write(out/f'roundtrip_{step}.json',roundtrip)
+        if not roundtrip['passed']:raise RuntimeError('Full inference geometry/body/evidence or bounded RGB check failed; see roundtrip report')
+        del fresh,result,captured,same_inputs
         status('real_development_review');real=real_review(model,anchors+development,renderer,out,step)
-        torch.save({'optimizer':opt.state_dict(),'step':step,'torch_rng':torch.get_rng_state(),'cuda_rng':torch.cuda.get_rng_state_all(),'python_rng':random.getstate()},out/'optimizer_latest.pt')
-        write(out/'latest.json',{'step':step,'checkpoint':str(path),'parent_all_tensors_preserved':True,'full_inference_roundtrip_exact':True})
+        write(out/'latest.json',{'step':step,'checkpoint':str(path),'recovery_state':str(out/'training_state_latest.pt'),'parent_all_tensors_preserved':True,'full_inference_roundtrip_exact':roundtrip['rgba_exact'],'full_inference_roundtrip_passed':roundtrip['passed']})
         status('checkpoint_saved',checkpoint=str(path),validation=metrics,anchor=real['beard'].get('annotated_uv_review'),release_promoted=False)
+    def checkpoint():
+        # Save the recovery state BEFORE validation, including failure-prone full inference.
+        saved_rng=save_recovery(out/'training_state_latest.pt',model,opt,step,signature)
+        payload={**parent,'step':step,'parent_checkpoint_step':parent.get('step'),'final_head_uv_state':{k:v.detach().cpu() for k,v in model.state_dict().items()},'final_head_uv_config':config,'final_head_uv_manifest':manifest,'final_head_uv_step':step,'inference_pipeline':pipeline}
+        path=out/f'step_{step}.pt';atomic_save(payload,path)
+        write(out/'recovery.json',{'step':step,'state':str(out/'training_state_latest.pt'),'validation':'pending'})
+        try:
+            validate_checkpoint(path,payload)
+            write(out/'recovery.json',{'step':step,'state':str(out/'training_state_latest.pt'),'validation':'passed'})
+        finally:restore_rng(saved_rng)  # Validation must not change subsequent training samples.
     try:
-        status('baseline_validation');write(out/'baseline_validation.json',evaluate(model,validation))
+        if o.resume:
+            status('resumed',from_state=str(o.resume));checkpoint()
+        else:
+            status('baseline_validation');write(out/'baseline_validation.json',evaluate(model,validation))
         while step<o.steps:
             model.train();rows=random.choices(train,k=o.batch_size)
             if step%4==0:rows[-1]=random.choice(anchors)
@@ -133,7 +155,9 @@ def main():
             opt.step();step+=1
             for group in opt.param_groups:group['lr']=3e-4*(.1+.9*(1+math.cos(math.pi*step/o.steps))/2)
             if step==1 or step%50==0:status('training',loss=float(loss.detach()),**{k:float(v) for k,v in metrics.items()})
-            if step==o.first_eval or step%o.eval_every==0 or step==o.steps:checkpoint()
+            if step==o.first_eval or step%o.eval_every==0 or step==o.steps or step==o.stop_after:checkpoint()
+            if step==o.stop_after and step<o.steps:
+                status('stopped',recovery_state=str(out/'training_state_latest.pt'));return
         status('complete',release_promoted=False,parent_all_tensors_preserved=True)
     except BaseException as e:
         status('failed',error=repr(e));raise

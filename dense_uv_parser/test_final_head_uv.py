@@ -1,5 +1,10 @@
 import io
+import random
+import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
+import numpy as np
 import torch
 from SkingToolkit.dense_uv_parser.final_head_uv import FinalHeadUVDecoder,final_uv_loss,evaluation_numerics
 
@@ -70,6 +75,50 @@ class FinalHeadTests(unittest.TestCase):
             new=estimate_solid_background_color(images)
             self.assertTrue(torch.allclose(old[0],new[0],rtol=0,atol=0,equal_nan=True))
             self.assertTrue(torch.equal(old[1],new[1]))
+
+
+class TrainingRecoveryTests(unittest.TestCase):
+    def test_optimizer_and_random_stream_resume_exactly(self):
+        from SkingToolkit.dense_uv_parser.final_uv_training_state import save_recovery,restore_recovery
+        torch.manual_seed(5);random.seed(5);np.random.seed(5)
+        device='cuda' if torch.cuda.is_available() else 'cpu'
+        model=torch.nn.Linear(3,2).to(device);opt=torch.optim.AdamW(model.parameters(),lr=.001)
+        def step():
+            opt.zero_grad();x=torch.rand(5,3,device=device)+random.random()+np.random.rand()
+            model(x).square().sum().backward();opt.step()
+        step()
+        with tempfile.TemporaryDirectory() as folder:
+            path=Path(folder)/'state.pt';save_recovery(path,model,opt,1,{'steps':10})
+            step();expected={k:v.clone() for k,v in model.state_dict().items()}
+            expected_moments=[v['exp_avg'].clone() for v in opt.state.values()]
+            torch.rand(20,device=device);random.random();np.random.rand()
+            self.assertEqual(restore_recovery(path,model,opt,{'steps':10}),1)
+            step()
+            for k,v in model.state_dict().items():self.assertTrue(torch.equal(v,expected[k]))
+            for a,b in zip(expected_moments,opt.state.values()):self.assertTrue(torch.equal(a,b['exp_avg']))
+            with self.assertRaises(ValueError):restore_recovery(path,model,opt,{'steps':11})
+
+    def test_failed_write_retains_previous_recovery(self):
+        from SkingToolkit.dense_uv_parser.final_uv_training_state import atomic_save
+        with tempfile.TemporaryDirectory() as folder:
+            path=Path(folder)/'state.pt';atomic_save({'step':1},path);before=path.read_bytes()
+            def interrupted(value,destination):
+                Path(destination).write_bytes(b'incomplete');raise OSError('disk write interrupted')
+            with patch('torch.save',side_effect=interrupted):
+                with self.assertRaises(OSError):atomic_save({'step':2},path)
+            self.assertEqual(path.read_bytes(),before)
+
+    def test_roundtrip_reports_bounded_rgb_but_rejects_geometry_and_body(self):
+        from SkingToolkit.dense_uv_parser.final_uv_training_state import compare_roundtrip
+        uv=torch.zeros(1,4,64,64);uv[:,3]=1;uv[:,:3]=.5;evidence=torch.zeros(2,25,56,56)
+        fresh=uv.clone();fresh[0,1,12,30]+=.003
+        def compare(other,**kwargs):
+            return compare_roundtrip(uv,other,uv,kwargs.get('base',other),evidence,kwargs.get('evidence',evidence))
+        report=compare(fresh);self.assertTrue(report['passed']);self.assertFalse(report['rgba_exact']);self.assertEqual(report['png_rgb_max_delta'],1)
+        alpha=fresh.clone();alpha[0,3,12,40]=0;self.assertFalse(compare(alpha)['passed'])
+        body=fresh.clone();body[0,1,20,10]+=.00001;self.assertFalse(compare(body)['passed'])
+        large=fresh.clone();large[0,1,12,30]+=.002;self.assertFalse(compare(large)['passed'])
+        self.assertFalse(compare(fresh,evidence=evidence+.001)['passed'])
 
 
 if __name__=='__main__':unittest.main()
