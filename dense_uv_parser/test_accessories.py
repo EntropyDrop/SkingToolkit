@@ -38,16 +38,30 @@ class AccessoryTests(unittest.TestCase):
         original=torch.ones(4,64,64)
         checked=0
         for seed in range(60):
-            skin,identity=make_accessory_skin(original,seed)
-            if not (identity==2).any():continue
+            skin,identity,components=make_accessory_skin(original,seed,return_components=True)
+            if not (components==5).any():continue
             faces=[(40,8),(56,8),(32,8),(48,8)]
-            masks=[identity[y:y+8,x:x+8]==2 for x,y in faces]
+            masks=[components[y:y+8,x:x+8]==5 for x,y in faces]
+            if not all(int(m.sum())==8 for m in masks):continue
             self.assertTrue(all(torch.equal(masks[0],m) for m in masks[1:]))
             bottom=int(masks[0].any(1).nonzero()[-1])
             rows=[skin[:3,y+bottom,x:x+8] for x,y in faces]
             self.assertTrue(all(torch.equal(rows[0],r) for r in rows[1:]))
             checked+=1
         self.assertGreater(checked,5)
+
+    def test_hat_components_distinguish_inner_band_from_outer_brim(self):
+        topology=build_simple_uv_topology();seen=set()
+        for seed in range(80):
+            uv,objects,parts=make_accessory_skin(torch.ones(4,64,64),seed,return_components=True)
+            seen.update(parts.unique().tolist())
+            inner=(parts==1)|(parts==2);outer=parts>=3
+            self.assertTrue(bool((topology.layer[inner]==0).all()))
+            self.assertTrue(bool((objects[inner]==0).all()))
+            self.assertTrue(bool((topology.layer[outer]==1).all()))
+            self.assertTrue(bool((objects[outer]==2).all()))
+            self.assertTrue(bool((uv[3][parts>0]==1).all()))
+        self.assertEqual(seen,set(range(6)))
 
     def test_outside_head_is_inactive(self):
         logits=restore_logits(torch.randn(2,4,224,224),(512,256))
@@ -65,6 +79,50 @@ class AccessoryTests(unittest.TestCase):
         topology=build_simple_uv_topology()
         self.assertEqual(int((fixed[3][topology.layer==0]>.5).sum()),0)
         self.assertTrue(torch.equal(fixed[:,8,40],uv[:,8,40]))
+
+    @unittest.skipUnless(torch.cuda.is_available(),'CUDA renderer integration')
+    def test_material_fit_reduces_visible_error_without_changing_alpha_or_body(self):
+        from SkingToolkit.dense_uv_parser.material_refine import refine_head_material
+        renderer=DifferentiableRenderer('/home/ds/llms/github/differentiable_minecraft_renderer/mappings_256x512').cuda()
+        topology=build_simple_uv_topology();head=(topology.valid&(topology.part==0)).cuda()
+        target=torch.ones(1,4,64,64,device='cuda');target[:,:3]=.35
+        target[0,:3,head]=torch.tensor([.9,.1,.2],device='cuda')[:,None]
+        initial=target.clone();initial[0,:3,head]=.3
+        views=['front_left','back_left']
+        render=lambda skin:torch.stack([renderer.forward_view(skin,v) for v in views],1).flatten(0,1)
+        images=render(target);source=images[:,3]>.99
+        fitted=refine_head_material(initial,images,source,renderer,views,steps=10)
+        self.assertTrue(torch.equal(initial[:,3],fitted[:,3]))
+        self.assertTrue(torch.equal(initial[:,:,~head],fitted[:,:,~head]))
+        before=(render(initial)[:,:3]-images[:,:3]).square().mean()
+        after=(render(fitted)[:,:3]-images[:,:3]).square().mean()
+        self.assertLess(float(after),float(before)*.15)
+        empty=refine_head_material(initial,images,torch.zeros_like(source),renderer,views,steps=2)
+        self.assertTrue(torch.equal(empty,initial))
+
+    @unittest.skipUnless(torch.cuda.is_available(),'CUDA renderer integration')
+    def test_learned_inner_band_corrects_outer_route_without_colour_rules(self):
+        from SkingToolkit.dense_uv_parser.utils import build_static_surface_routing
+        renderer=DifferentiableRenderer('/home/ds/llms/github/differentiable_minecraft_renderer/mappings_256x512').cuda()
+        cfg=load_pipeline()['routing'];views=cfg['views']
+        for seed in range(100):
+            uv,objects,parts=make_accessory_skin(torch.ones(4,64,64),seed,return_components=True)
+            if (parts==2).any():break
+        images,labels,fg,parts=render_accessories(uv[None].cuda(),objects[None].cuda(),renderer,views,parts[None].cuda())
+        n,h,w=fg.shape
+        layer=torch.full((n,3,h,w),-12.,device='cuda');layer[:,1]=12.
+        accessory=torch.full((n,4,h,w),-12.,device='cuda');accessory[:,0]=12.
+        component=torch.nn.functional.one_hot(parts,6).permute(0,3,1,2).float()*24-12
+        outputs={'layer':layer,'foreground':torch.where(fg[:,None],12.,-12.),'affine':torch.zeros(n,3,device='cuda'),
+                 'accessory_logits':accessory,'hat_component_logits':component}
+        _,detail=splat_parser_predictions_to_uv_conditioning(images,outputs,renderer=renderer,observed_foreground=fg,return_details=True,**cfg)
+        route=detail['routing'];support=route['hat_inner_supported']
+        self.assertGreater(int(support.sum()),0)
+        self.assertTrue(bool((route['layer'][support]==0).all()))
+        self.assertFalse(bool((support&~fg).any()))
+        for vi,view in enumerate(views):
+            static=build_static_surface_routing(renderer,view,images.device)
+            self.assertTrue(torch.equal(route['flat_uv'][vi][support[vi]],static['flat_uv'][0][support[vi]]))
 
     @unittest.skipUnless(torch.cuda.is_available(),'CUDA renderer integration')
     def test_semantic_evidence_rescues_inner_without_background_leak(self):

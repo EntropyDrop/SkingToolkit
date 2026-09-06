@@ -3864,6 +3864,7 @@ def splat_parser_predictions_to_uv_conditioning(
     if return_details:
         return conditioning, {
             "rendered": canonical_rendered,
+            "color_source_support": color_support["valid"],
             "outputs": canonical_outputs,
             "routing": routing,
             "alignment": alignment,

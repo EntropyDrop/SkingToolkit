@@ -34,5 +34,26 @@ def run_pipeline(model, renderer, images, config=None, complete=False, outputs=N
     result = {'foreground_color_sources':color_sources,'foreground_probability':foreground_probability,'conditioning':cond,'details':details,'outputs':outputs,'foreground':fg}
     if complete:
         result['uv'] = torch.stack([simple_inpaint_uv(c[None].cpu())[0] for c in cond]).to(images.device)
+        if config.get('head_material_refine_steps',0):
+            from SkingToolkit.dense_uv_parser.material_refine import refine_head_material
+            result['uv']=refine_head_material(result['uv'],details['rendered'],details['color_source_support'],renderer,views,config['head_material_refine_steps'])
         result['render'] = torch.stack([renderer.forward_view(result['uv'], view) for view in views],1).flatten(0,1)
     return result
+
+
+def cached_real_foreground(images, source, config):
+    """Load verified learned foreground for real development evaluation."""
+    import hashlib
+    import numpy as np
+    from PIL import Image
+    import torch.nn.functional as F
+    cache=config.get('foreground_cache')
+    if cache is None:return None
+    source=Path(source).resolve();entry=cache.get(str(source))
+    if entry is None:raise ValueError('Missing learned foreground for '+str(source))
+    data=Path(entry['probability']).read_bytes()
+    if hashlib.sha256(source.read_bytes()).hexdigest()!=entry['input_sha256'] or hashlib.sha256(data).hexdigest()!=entry['probability_sha256']:
+        raise ValueError('Learned foreground cache changed')
+    import io
+    p=torch.from_numpy(np.array(Image.open(io.BytesIO(data))).copy()).float().to(images.device)/255.
+    return F.interpolate(torch.stack(p.chunk(len(config['routing']['views']),1))[:,None],images.shape[-2:],mode='nearest-exact')[:,0]

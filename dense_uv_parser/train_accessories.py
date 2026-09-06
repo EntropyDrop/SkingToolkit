@@ -61,7 +61,7 @@ def uv_structure_loss(logits, labels, renderer, views):
 def evaluate(model, renderer, dataset, config, output_dir, step, clean_paths, max_batches=None):
     model.eval()
     views = config['routing']['views']
-    totals = {k:0 for k in ('tp','fp','fn','complete_objects','objects','uv_tp','uv_fn','head_rgb_abs','head_rgb_n')}
+    totals = {k:0 for k in ('tp','fp','fn','complete_objects','objects','uv_tp','uv_fn','head_rgb_abs','head_rgb_n','band_rgb_abs','band_rgb_n')}
     per_class = {str(k):{'tp':0,'fp':0,'fn':0} for k in (1,2,3)}
     visible_uv = torch.zeros(4096,dtype=torch.bool,device='cuda')
     for view in views:
@@ -72,10 +72,10 @@ def evaluate(model, renderer, dataset, config, output_dir, step, clean_paths, ma
     for bi,batch in enumerate(loader):
         if max_batches is not None and bi>=max_batches: break
         uv,objects = batch['uv'].cuda(),batch['objects'].cuda()
-        images,labels,fg = render_accessories(uv,objects,renderer,views)
+        images,labels,fg,components = render_accessories(uv,objects,renderer,views,batch['components'].cuda())
         if bi%2:
             images=appearance_augment(images,fg[:,None],strength=1.25,generator=stress_rng)
-        result = run_pipeline(model,renderer,images,config,complete=True)
+        result = run_pipeline(model,renderer,images,config,complete=True,foreground_probability=images[:,3] if config.get('synthetic_alpha_foreground') else None)
         logits = result['outputs']['accessory_logits']
         cls = logits.argmax(1); confidence=logits.softmax(1).amax(1)
         pred = result['details']['routing']['accessory_supported']
@@ -94,6 +94,9 @@ def evaluate(model, renderer, dataset, config, output_dir, step, clean_paths, ma
         headmask=torch.zeros_like(fg); y0,y1,x0,x1=head_bounds(*fg.shape[-2:]);headmask[:,y0:y1,x0:x1]=fg[:,y0:y1,x0:x1]
         totals['head_rgb_abs']+=float((abs(result['render'][:,:3]-images[:,:3])*headmask[:,None]).sum())
         totals['head_rgb_n']+=int(headmask.sum())*3
+        band=(components==2)|(components==4)
+        totals['band_rgb_abs']+=float((abs(result['render'][:,:3]-images[:,:3])*band[:,None]).sum())
+        totals['band_rgb_n']+=int(band.sum())*3
         if bi==0:
             save_image(images[:8,:3].cpu(),output_dir/f'validation_{step}_input.png',nrow=4)
             save_image(result['render'][:8,:3].cpu(),output_dir/f'validation_{step}_render.png',nrow=4)
@@ -105,20 +108,21 @@ def evaluate(model, renderer, dataset, config, output_dir, step, clean_paths, ma
     for start in range(0,len(clean_paths),4):
         uv=torch.stack([load_skin(path) for path in clean_paths[start:start+4]]).cuda()
         images=torch.stack([renderer.forward_view(uv,v) for v in views],1).flatten(0,1)
-        result=run_pipeline(model,renderer,images,config)
-        base_outputs={k:v for k,v in result['outputs'].items() if k!='accessory_logits'}
-        baseline=run_pipeline(model,renderer,images,config,outputs=base_outputs)
+        result=run_pipeline(model,renderer,images,config,foreground_probability=images[:,3] if config.get('synthetic_alpha_foreground') else None)
+        base_outputs={k:v for k,v in result['outputs'].items() if k not in ('accessory_logits','hat_component_logits')}
+        baseline=run_pipeline(model,renderer,images,config,outputs=base_outputs,foreground_probability=images[:,3] if config.get('synthetic_alpha_foreground') else None)
         topology=build_simple_uv_topology()
         head_outer=(topology.valid&(topology.layer==1)&(topology.part==0)).cuda()
         negative=(uv[:,3]<.5)&head_outer&visible_uv.reshape(64,64)
         new=(result['conditioning'][:,9]>.5)&~(baseline['conditioning'][:,9]>.5)
         inner_pixels+=int(negative.sum());added_wrong+=int((new&negative).sum())
-    metrics={**totals,'classes':per_class,'validation_inputs':'Alternating canonical and appearance-stressed batches; full production pipeline',
+    metrics={**totals,'classes':per_class,'validation_inputs':'Alternating canonical and stressed images; renderer alpha for synthetic foreground when enabled; frozen learned foreground on real regression',
         'object_precision':totals['tp']/max(1,totals['tp']+totals['fp']),
         'object_recall':totals['tp']/max(1,totals['tp']+totals['fn']),
         'object_iou':totals['tp']/max(1,totals['tp']+totals['fp']+totals['fn']),
         'complete_object_rate':totals['complete_objects']/max(1,totals['objects']),
         'hard_uv_object_recall':totals['uv_tp']/max(1,totals['uv_tp']+totals['uv_fn']),
+        'hat_band_rgb_mae':totals['band_rgb_abs']/max(1,totals['band_rgb_n']),
         'final_head_rgb_mae':totals['head_rgb_abs']/max(1,totals['head_rgb_n']),
         'clean_added_outer_false_positive_rate':added_wrong/max(1,inner_pixels),
         'clean_negative_uv_texels':inner_pixels,'clean_added_wrong_outer':added_wrong}
@@ -137,6 +141,7 @@ def main():
     parser.add_argument('--val-samples',type=int,default=64)
     parser.add_argument('--clean-samples',type=int,default=32)
     parser.add_argument('--resume',type=Path)
+    parser.add_argument('--hat-components',action='store_true')
     parser.add_argument('--evaluate-only',action='store_true')
     parser.add_argument('--lr',type=float,default=2e-4)
     parser.add_argument('--pipeline',type=Path)
@@ -154,11 +159,13 @@ def main():
     ckpt=torch.load(origin,map_location='cpu',weights_only=False)
     kwargs={k:v for k,v in ckpt['model_config'].items() if k in inspect.signature(DenseUVParserNet).parameters}
     kwargs['predict_head_accessories']=True
+    kwargs['predict_hat_components']=opt.hat_components
     model=DenseUVParserNet(**kwargs).cuda()
     missing,extra=model.load_state_dict(ckpt['model'],strict=False)
     if extra or any(not k.startswith('accessory_head.') for k in missing): raise RuntimeError((missing,extra))
     if opt.resume:
-        model.load_state_dict(torch.load(opt.resume,map_location='cuda',weights_only=False)['model'],strict=True)
+        missing,extra=model.load_state_dict(torch.load(opt.resume,map_location='cuda',weights_only=False)['model'],strict=False)
+        if extra or any(not k.startswith('accessory_head.components.') for k in missing):raise ValueError((missing,extra))
     for name,value in ckpt['model'].items():
         if not torch.equal(model.state_dict()[name].cpu(),value):
             raise ValueError('Warm start changed frozen v61 weights: '+name)
@@ -192,7 +199,7 @@ def main():
         'labels':'Authored procedural object identities. Optional stored-inner replay is layer evidence, NOT semantic truth; it can contradict painted-on hats/hair. Set replay-weight=0 for semantic experiments.',
         'real_sample_scope':'TWRLRRTHQP2UV368 is a development regression image, never an independent test.',
         'source_sha256':{f.name:hashlib.sha256(f.read_bytes()).hexdigest() for f in Path(__file__).parent.glob('*.py')},
-        'pipeline':config,'classes':['none','glasses','hat','outer_hair']}
+        'pipeline':config,'classes':['none','glasses','hat','outer_hair'],'hat_components':['none','inner_crown','inner_band','outer_crown','outer_band','outer_brim'] if opt.hat_components else None}
     write_json(opt.output_dir/'config.json',manifest)
     snapshot=opt.output_dir/'source';snapshot.mkdir()
     for f in Path(__file__).parent.glob('*.py'): shutil.copy2(f,snapshot/f.name)
@@ -202,7 +209,7 @@ def main():
     start=time.time();best=-float('inf');step=0;epoch=0
     def save(name,metrics):
         args={**ckpt['args'],'siglip_local_files_only':True,'outer_uv_min_source_pixels':30,'mappings_dir':mappings_dir,'views':views}
-        config_model={**ckpt['model_config'],'predict_head_accessories':True,'accessory_route_threshold':config['accessory_route_threshold']}
+        config_model={**ckpt['model_config'],'predict_head_accessories':True,'predict_hat_components':opt.hat_components,'accessory_route_threshold':config['accessory_route_threshold']}
         payload={'model':model.state_dict(),'model_config':config_model,'args':args,'epoch':epoch,'step':step,
                  'metrics':{'val':metrics},'v101_manifest':manifest,'optimizer':optimizer.state_dict()}
         temp=opt.output_dir/(name+'.tmp');torch.save(payload,temp);os.replace(temp,opt.output_dir/name)
@@ -212,7 +219,8 @@ def main():
                 and metrics['complete_object_rate']>=.25
                 and metrics['clean_added_outer_false_positive_rate']<=.03
                 and real['glasses_mask_precision']>=.85
-                and real['whole_glasses_outer_recall']>=max(.90,real['baseline_whole_glasses_outer_recall']+.15))
+                and real['whole_glasses_outer_recall']>=max(.90,real['baseline_whole_glasses_outer_recall']+.15)
+                and (not opt.hat_components or (min(real['hat_brim_outer_recall'])>=.90 and min(real['hat_band_chroma_retention'])>=.95)))
     try:
         if opt.evaluate_only:
             metrics=evaluate(model,renderer,val,config,opt.output_dir,'calibrated',val_paths[:opt.clean_samples])
@@ -235,13 +243,20 @@ def main():
             for batch in loader:
                 if step>=opt.steps: break
                 model.eval();model.accessory_head.train()
-                images,labels,fg=render_accessories(batch['uv'].cuda(non_blocking=True),batch['objects'].cuda(non_blocking=True),renderer,views)
+                images,labels,fg,components=render_accessories(batch['uv'].cuda(non_blocking=True),batch['objects'].cuda(non_blocking=True),renderer,views,batch['components'].cuda(non_blocking=True))
                 if step%2==0: images=appearance_augment(images,fg[:,None],strength=1.25)
                 optimizer.zero_grad(set_to_none=True)
                 with torch.autocast('cuda',dtype=torch.bfloat16):
-                    logits=model.predict_accessories(images,fg)
+                    prediction=model.predict_accessories(images,fg,return_components=opt.hat_components)
+                    logits,component_logits=prediction if opt.hat_components else (prediction,None)
                     valid=torch.zeros_like(fg);y0,y1,x0,x1=head_bounds(*fg.shape[-2:]);valid[:,y0:y1,x0:x1]=True
                     loss=accessory_loss(logits,labels,valid)+.25*uv_structure_loss(logits,labels,renderer,views)
+                    if component_logits is not None:
+                        ce=F.cross_entropy(component_logits.float(),components.masked_fill(~valid,-100),weight=images.new_tensor([1.,1.5,3.,1.5,3.,4.]))
+                        cp=component_logits.float().softmax(1)*valid[:,None]
+                        cg=F.one_hot(components,6).permute(0,3,1,2).float()*valid[:,None]
+                        dice=1-(2*(cp*cg).sum((2,3))+1)/(cp.sum((2,3))+cg.sum((2,3))+1)
+                        loss=loss+ce+.5*dice[:,1:].mean()
                     if step%2==0 and opt.replay_weight>0:
                         # Only verified INNER head pixels are negative layer evidence.
                         # Unannotated outer texels are ignored, not assigned object IDs.
@@ -279,6 +294,8 @@ def main():
                     with (opt.output_dir/'metrics.jsonl').open('a') as f:f.write(json.dumps(record)+'\n')
                     print('evaluation='+json.dumps(record),flush=True)
             epoch+=1
+        for name,value in ckpt['model'].items():
+            if not torch.equal(model.state_dict()[name].cpu(),value):raise RuntimeError('Frozen v61 parameter changed: '+name)
         selected=opt.output_dir/'best.pt'
         if selected.exists():
             model.load_state_dict(torch.load(selected,map_location='cuda',weights_only=False)['model'])

@@ -1,0 +1,174 @@
+{
+  "foreground_flood_tolerance": 0.09,
+  "foreground_background": "adaptive",
+  "routing": {
+    "views": [
+      "front_left",
+      "back_left"
+    ],
+    "group_size": 2,
+    "fg_threshold": 0.5,
+    "bg_color": [
+      128,
+      128,
+      128
+    ],
+    "semantic_gate": true,
+    "affine_refine": false,
+    "affine_refine_translation_px": 0.0,
+    "affine_refine_scale": 0.0,
+    "route_confidence_threshold": 0.0,
+    "route_margin_threshold": 0.0,
+    "outer_route_confidence_threshold": 0.8,
+    "outer_route_margin_threshold": 0.55,
+    "outer_uv_min_coverage": 0.25,
+    "outer_uv_min_source_pixels": 30,
+    "outer_silhouette_consistency": true,
+    "outer_silhouette_min_coverage": 0.5,
+    "outer_silhouette_dilation": 0,
+    "outer_silhouette_min_pixels": 4,
+    "outer_geometry_rescue": true,
+    "outer_semantic_rescue": true,
+    "outer_semantic_presence_threshold": 0.8,
+    "outer_semantic_coverage_threshold": 0.2,
+    "outer_rescue_confidence_threshold": 0.6,
+    "outer_rescue_margin_threshold": 0.25,
+    "outer_rescue_min_coverage": 0.1,
+    "color_aggregation": "grid_mode",
+    "geometry_route_texel_consensus": true,
+    "geometry_route_texel_consensus_weight": 0.6,
+    "geometry_route_preserve_outer_confidence": 0.8,
+    "geometry_route_preserve_outer_margin": 0.35,
+    "geometry_route_consensus_outer_confidence": 0.7,
+    "geometry_route_consensus_outer_margin": 0.2,
+    "geometry_cross_view_outer_consistency": false,
+    "geometry_cross_view_outer_weight": 0.5,
+    "geometry_cross_view_outer_positive_confidence": 0.7,
+    "geometry_cross_view_outer_positive_margin": 0.2,
+    "geometry_cross_view_outer_negative_confidence": 0.7,
+    "geometry_cross_view_outer_negative_margin": 0.2,
+    "geometry_cross_view_outer_background_max_coverage": 0.25,
+    "geometry_cross_view_outer_min_views": 2,
+    "outer_uv_occupancy": false,
+    "outer_uv_occupancy_blend_weight": 0.0,
+    "outer_uv_occupancy_gate_threshold": 0.15,
+    "outer_uv_occupancy_rescue_threshold": 0.7,
+    "outer_uv_occupancy_rescue_route_threshold": 0.3,
+    "outer_uv_component_routing": false,
+    "outer_uv_component_seed_threshold": 0.8,
+    "outer_uv_component_grow_threshold": 0.5,
+    "outer_uv_component_min_size": 2,
+    "background_color_tolerance": 0.25,
+    "color_background_tolerance": 0.031372549,
+    "color_foreground_inset": 1,
+    "reject_semantic_fallback": true,
+    "include_rejected_context": false,
+    "include_confidence": false
+  },
+  "accessory_route_threshold": 0.9,
+  "foreground_cache": {
+    "/home/ds/llms/SKING_DDJ_Dataset/entropydrop_website_generations/SKING_DDJ_v66/2RSZETA9PCRZHVEU_edited.png": {
+      "probability": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/runs/foreground_release_800/real14/2RSZETA9PCRZHVEU_edited_93e85ffdacf7/probability.png",
+      "probability_sha256": "c8c416b4d2a6fad550e0ba819a964140405457259a36e41f6768257259877153",
+      "input_sha256": "ee549af57a7737c590bc0c37db55225863c68a43d75e7fe05daf3cfc1dba25bc"
+    },
+    "/home/ds/llms/SkingDataset/DDJ_real2render/test_output/official_prompt1_1K_t41_50_51_52/img10.png": {
+      "probability": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/runs/foreground_release_800/real14/img10_af466711311b/probability.png",
+      "probability_sha256": "e8f4f14e16c9e3228a5447a0e695b308d242be01aff09e933ff050d01419665a",
+      "input_sha256": "9cf0535c066042a9b9e0281ffbdf8b5cb7252692bbc85f48e43458d5395417df"
+    },
+    "/home/ds/llms/SkingDataset/DDJ_real2render/test_output/official_prompt1_1K_t41_50_51_52/img27.png": {
+      "probability": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/runs/foreground_release_800/real14/img27_103c88cafbd0/probability.png",
+      "probability_sha256": "908255b88bc86de049010dd9c86ea51b94316f297ee8bf173d583c67f9dec1ae",
+      "input_sha256": "acbca489cc48e63a16cb02d88184b2ebedc4437a3b531f02c225538c51702c0a"
+    },
+    "/home/ds/llms/SKING_DDJ_Dataset/entropydrop_website_generations/SKING_DDJ_v66/33TVPML5UL2TKASR_edited.png": {
+      "probability": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/runs/foreground_release_800/real14/33TVPML5UL2TKASR_edited_f42a39aefb22/probability.png",
+      "probability_sha256": "995de749e9b93188a2642445facc7daa47ad32a7de66420cfc725bce495465b3",
+      "input_sha256": "bd326acbe65ce1c2761cc73bb5bd3e45c58428a458f4cbea3fa3050da829d11e"
+    },
+    "/home/ds/llms/SKING_DDJ_Dataset/entropydrop_website_generations/SKING_DDJ_v66/TWRLRRTHQP2UV368_edited.png": {
+      "probability": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/runs/foreground_release_800/real14/TWRLRRTHQP2UV368_edited_b3a292aeaa1c/probability.png",
+      "probability_sha256": "b786198e6ba71e377882454f1d4ec90902abf702245f8d70af322da5d5a9bc8b",
+      "input_sha256": "e1e24ed0ba4efc4e895885fd20966ce2ac93863374c7072d3a751c98af291095"
+    },
+    "/home/ds/llms/SkingDataset/DDJ_real2render/test_output/official_prompt1_1K_t41_50_51_52/img12.png": {
+      "probability": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/runs/foreground_release_800/real14/img12_fded6718b337/probability.png",
+      "probability_sha256": "24be91519e57c7b0011f3464f230c911cd9f9fd723d30b55aca7fe7d3516e585",
+      "input_sha256": "48e7e7416529eadbd99a5461739ebbfd2e0c2926fff6349cc11bbf69d40bf927"
+    },
+    "/home/ds/llms/SKING_DDJ_Dataset/entropydrop_website_generations/SKING_DDJ_v54/1H6GAQA9BENWNB89_edited.png": {
+      "probability": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/runs/foreground_release_800/real14/1H6GAQA9BENWNB89_edited_f8e569ed1e3b/probability.png",
+      "probability_sha256": "76f1329c207d47242bbbbba2af54c4ee4677279823e87ed384aeba06cadc514c",
+      "input_sha256": "b74739b8167ac5828d1805adb64d91b80e34226468a27880180c96b0dc2a2cef"
+    },
+    "/home/ds/llms/SkingDataset/DDJ_real2render/test_output/official_prompt1_1K_t41_50_51_52/img3.png": {
+      "probability": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/runs/foreground_release_800/real14/img3_12c1dac5ad6c/probability.png",
+      "probability_sha256": "73b05ae82c88b037790a54217275bb99a00bc60c8a7345c4a43516ec021c786f",
+      "input_sha256": "a25eb7d1f9a8ed6dd548407e01f78d7f38465e061aee9b1e7303be893524e47d"
+    },
+    "/home/ds/llms/SkingDataset/DDJ_real2render/test_output/official_prompt1_1K_t41_50_51_52/img28.png": {
+      "probability": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/runs/foreground_release_800/real14/img28_850a574fae17/probability.png",
+      "probability_sha256": "b18761ebe5d54932c85782bbdab523345ca0bdbe626ca30d3ea73dde4d2abad8",
+      "input_sha256": "a1d83098a226f7353ea8e5b2840177e3a1241d3f719d9284e3e49074bde3aaf0"
+    },
+    "/home/ds/llms/SkingDataset/DDJ_real2render/test_output/unofficial_prompt1_1K_t41_51_66_71/img46.png": {
+      "probability": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/runs/foreground_release_800/real14/img46_d0bee3c77777/probability.png",
+      "probability_sha256": "62df72fb9d9d3f1dac9ed798d146769b252047b189ac91b715a536f165db0ff4",
+      "input_sha256": "2c2b3d2278564426f5017d43f3132c6553b928b1ddc93f695556ed70308073ff"
+    },
+    "/home/ds/llms/SkingDataset/DDJ_real2render/test_output/official_prompt1_1K_t41_50_51_52/img25.png": {
+      "probability": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/runs/foreground_release_800/real14/img25_c1099cb448ae/probability.png",
+      "probability_sha256": "de3754a331f7b72061cf95841ea7bc1cc46f65ffc725cbd72a76173aa1fade63",
+      "input_sha256": "c85818793397add3e3464ba28c71ef01add5c3326c850f1ebfd09f68087b7cbf"
+    },
+    "/home/ds/llms/SkingDataset/DDJ_real2render/test_output/official_prompt1_1K_t41_50_51_52/img26.png": {
+      "probability": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/runs/foreground_release_800/real14/img26_a5915f7f3b19/probability.png",
+      "probability_sha256": "ef7e5aab3a5c6a26d5bf28e9fc3012398cca384f8559bf7811c21b5466f91e3f",
+      "input_sha256": "365dbe5c5dcfac24ba0d80e09ba13bb04148c43df217fcb000cb88eb18f04524"
+    },
+    "/home/ds/llms/SkingDataset/DDJ_real2render/test_output/official_prompt1_1K_t41_50_51_52/img23.png": {
+      "probability": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/runs/foreground_release_800/real14/img23_25d3868b4730/probability.png",
+      "probability_sha256": "b6e54946f9208ad73e2a23383cff816741d10ca5dd709a45c27d684ef6c288d0",
+      "input_sha256": "65cb7b996a6ca5ed9c33b0128516fde70a85e949c285a319fa7eefb7a5774ec3"
+    },
+    "/home/ds/llms/SKING_DDJ_Dataset/entropydrop_website_generations/SKING_DDJ_v54/PU418PLGERMFC487_edited.png": {
+      "probability": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/runs/foreground_release_800/real14/PU418PLGERMFC487_edited_47b3d5cd4be7/probability.png",
+      "probability_sha256": "f1057bb0b18887c6c96f1e2183c6542372790e2343605a739f444bcf06e17412",
+      "input_sha256": "479a62295b51356eb4b74a0999f39cf3ce804a9f8b97f1c22add642026e1c8a7"
+    }
+  },
+  "foreground_release": {
+    "version": "minecraft_foreground_v1",
+    "checkpoint": "dense_uv_parser/runs/foreground_release_800/foreground_step_800.pt",
+    "checkpoint_sha256": "8585a698d38969e6e7562e9c7d8c5f0b5e934e8f0811cf5b8678fcf05734e732",
+    "model_dir": "/home/ds/.cache/huggingface/hub/models--ZhengPeng7--BiRefNet/snapshots/6a62b7dcfa18a3829087877fb16c8006831e4220",
+    "step": 800,
+    "accepted_at_utc": "2026-09-06T05:45:36.930308+00:00",
+    "passed": true,
+    "heldout_images": 256,
+    "heldout_identities": 128,
+    "heldout": {
+      "iou": 0.9967454718444754,
+      "boundary_f1_tolerance_2px": 0.9836169424073569,
+      "boundary_alpha_mae": 0.042490756492937834,
+      "alpha_mae": 0.002159718080974926
+    },
+    "real_development_cases": 14,
+    "real_annotation_recall": 1.0,
+    "img28_purple_diagnostic": 0,
+    "reports": "dense_uv_parser/runs/foreground_release_800",
+    "foreground_threshold": 0.5,
+    "source_threshold": 0.98,
+    "source_inset": 1,
+    "scope": "Accepted foreground model; brim-data training may now proceed. Original v101 weights unchanged."
+  },
+  "synthetic_alpha_foreground": true,
+  "hat_development": {
+    "input": "/home/ds/llms/SKING_DDJ_Dataset/entropydrop_website_generations/SKING_DDJ_v54/PU418PLGERMFC487_edited.png",
+    "input_sha256": "479a62295b51356eb4b74a0999f39cf3ce804a9f8b97f1c22add642026e1c8a7",
+    "brim_mask": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/runs/v101_hat_audit_20260906/hat_brim_development_mask.png",
+    "role": "manually traced development image; never gradient training"
+  },
+  "head_material_refine_steps": 48
+}

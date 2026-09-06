@@ -171,6 +171,7 @@ def load_parser(checkpoint_path, device):
         route_prior_logit_cap=model_config.get("route_prior_logit_cap", 1.5),
         route_prior_dropout=model_config.get("route_prior_dropout", 0.0),
         predict_head_accessories=model_config.get("predict_head_accessories", False),
+        predict_hat_components=model_config.get("predict_hat_components", False),
         accessory_route_threshold=model_config.get("accessory_route_threshold", 0.90),
         predict_outer_uv_occupancy=model_config.get(
             "predict_outer_uv_occupancy", has_outer_uv_occupancy

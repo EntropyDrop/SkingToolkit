@@ -34,7 +34,7 @@ def restore_logits(logits, size):
     y0, y1, x0, x1 = head_bounds(h, w)
     patch = F.interpolate(logits, (y1-y0, x1-x0), mode='bilinear', align_corners=False)
     # Outside the crop the new branch is exactly inactive.
-    prior = logits.new_tensor([0., -20., -20., -20.])[None, :, None, None]
+    prior = logits.new_tensor([0.]+[-20.]*(logits.shape[1]-1))[None, :, None, None]
     return F.pad(patch-prior, (x0, w-x1, y0, h-y1)) + prior
 
 
@@ -45,7 +45,7 @@ def block(cin, cout):
 
 
 class HeadAccessoryHead(nn.Module):
-    def __init__(self, semantic_dim=768):
+    def __init__(self, semantic_dim=768, predict_hat_components=False):
         super().__init__()
         self.enc0 = block(4, 24)
         self.enc1 = block(24, 48)
@@ -59,11 +59,16 @@ class HeadAccessoryHead(nn.Module):
         self.dec1 = block(144, 48)
         self.dec0 = block(72, 24)
         self.classifier = nn.Conv2d(24, 4, 1)
+        self.components = nn.Conv2d(24,6,1) if predict_hat_components else None
+        if self.components is not None:
+            nn.init.zeros_(self.components.weight)
+            nn.init.constant_(self.components.bias,-2.)
+            with torch.no_grad():self.components.bias[0]=2.
         nn.init.constant_(self.classifier.bias, -2.)
         with torch.no_grad():
             self.classifier.bias[0] = 2.
 
-    def forward(self, crop, semantic_features):
+    def forward(self, crop, semantic_features, return_components=False):
         s0 = self.enc0(crop)
         s1 = self.enc1(F.avg_pool2d(s0, 2))
         s2 = self.enc2(F.avg_pool2d(s1, 2))
@@ -73,7 +78,8 @@ class HeadAccessoryHead(nn.Module):
         z = self.dec2(torch.cat([F.interpolate(z, s2.shape[-2:], mode='bilinear', align_corners=False), s2], 1))
         z = self.dec1(torch.cat([F.interpolate(z, s1.shape[-2:], mode='bilinear', align_corners=False), s1], 1))
         z = self.dec0(torch.cat([F.interpolate(z, s0.shape[-2:], mode='bilinear', align_corners=False), s0], 1))
-        return self.classifier(z)
+        logits=self.classifier(z)
+        return (logits,self.components(z)) if return_components and self.components is not None else logits
 
 
 def accessory_loss(logits, labels, valid=None):
@@ -161,6 +167,27 @@ def apply_accessory_routing(routing, outputs, foreground, renderer, views, thres
         for name, value in [('confidence_margin', margin), ('confidence_margin_ratio', margin/probability[sl].clamp_min(1e-6))]:
             if name in routing:
                 routing[name][sl] = torch.where(accepted, value, routing[name][sl])
+    # Learned inner crown/band evidence can also correct an old outer route.
+    # This is restricted to explicitly trained components; no RGB rule is used.
+    inner_support=torch.zeros_like(foreground)
+    component_logits=outputs.get('hat_component_logits')
+    if component_logits is not None:
+        cp,ci=component_logits.float().softmax(1).max(1)
+        candidate=((ci==1)|(ci==2))&(cp>=.95)&(identity==0)&foreground
+        for vi,view in enumerate(views):
+            sl=slice(vi,foreground.shape[0],len(views))
+            static=build_static_surface_routing(renderer,view,foreground.device)
+            accepted=candidate[sl]&static['masks'][0]&(static['part'][0]==0)
+            inner_support[sl]=accepted
+            for name,value in [('layer',0),('foreground',True),('surface',0),('secondary',False),('secondary_routed',False),('semantic_fallback',False)]:
+                if name in routing:routing[name][sl]=torch.where(accepted,torch.full_like(routing[name][sl],value),routing[name][sl])
+            for name in ('flat_uv','part','face','texel_center_score'):
+                if name in routing:routing[name][sl]=torch.where(accepted,static[name][0],routing[name][sl])
+            routing['confidence'][sl]=torch.where(accepted,cp[sl],routing['confidence'][sl])
+            cm=(2*cp[sl]-1).clamp_min(0)
+            for name,value in [('confidence_margin',cm),('confidence_margin_ratio',cm/cp[sl].clamp_min(1e-6))]:
+                if name in routing:routing[name][sl]=torch.where(accepted,value,routing[name][sl])
+    routing['hat_inner_supported']=inner_support
     routing['accessory_identity'] = identity
     routing['accessory_probability'] = probability
     routing['accessory_supported'] = support

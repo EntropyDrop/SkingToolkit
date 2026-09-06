@@ -356,6 +356,7 @@ class DenseUVParserNet(nn.Module):
         route_prior_logit_cap=1.5,
         route_prior_dropout=0.10,
         predict_head_accessories=False,
+        predict_hat_components=False,
         accessory_route_threshold=0.90,
         predict_outer_uv_occupancy=False,
         outer_uv_feature_channels=32,
@@ -368,10 +369,11 @@ class DenseUVParserNet(nn.Module):
         self.accessory_route_threshold = float(accessory_route_threshold)
         if not 0.5 <= self.accessory_route_threshold <= 1.:
             raise ValueError("Accessory seed confidence must lie in [0.5, 1]")
+        self.predict_hat_components = bool(predict_hat_components)
         self.predict_head_accessories = bool(predict_head_accessories)
         if self.predict_head_accessories:
             from SkingToolkit.dense_uv_parser.accessories import HeadAccessoryHead
-            self.accessory_head = HeadAccessoryHead(semantic_spatial_feature_dim)
+            self.accessory_head = HeadAccessoryHead(semantic_spatial_feature_dim, self.predict_hat_components)
         self.geometry_only = bool(geometry_only)
         if layer_classes is None:
             layer_classes = 3 if self.geometry_only else 2
@@ -743,15 +745,19 @@ class DenseUVParserNet(nn.Module):
             if self.surface_classes > 0:
                 outputs["surface"] = self.surface(x)
         if self.predict_head_accessories:
-            outputs["accessory_logits"] = self.predict_accessories(source_images, semantic_foreground)
+            prediction=self.predict_accessories(source_images,semantic_foreground,return_components=self.predict_hat_components)
+            if self.predict_hat_components:
+                outputs["accessory_logits"],outputs["hat_component_logits"]=prediction
+            else:outputs["accessory_logits"]=prediction
             outputs["accessory_route_threshold"] = self.accessory_route_threshold
         return outputs
 
-    def predict_accessories(self, images, foreground=None):
+    def predict_accessories(self, images, foreground=None, return_components=False):
         from SkingToolkit.dense_uv_parser.accessories import head_crop, restore_logits
         crop = head_crop(images, foreground)
         semantic = self._runtime_semantic_features(crop)["raw_spatial"]
-        logits = self.accessory_head(crop, semantic)
+        logits = self.accessory_head(crop, semantic, return_components=return_components)
+        if isinstance(logits,tuple):return tuple(restore_logits(x,images.shape[-2:]) for x in logits)
         return restore_logits(logits, images.shape[-2:])
 
     def predict_projected_outer_uv_occupancy(

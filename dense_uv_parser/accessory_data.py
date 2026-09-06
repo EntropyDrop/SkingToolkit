@@ -5,10 +5,11 @@ from torch.utils.data import Dataset
 from SkingToolkit.dense_uv_parser.skin_dataset import load_skin
 
 
-def make_accessory_skin(original, seed):
+def make_accessory_skin(original, seed, return_components=False):
     rng = np.random.default_rng(seed)
     uv = original.permute(1, 2, 0).numpy().copy()
     objects = np.zeros((64, 64), dtype=np.int64)
+    components = np.zeros((64,64),dtype=np.int64) # none, inner crown/band, outer crown/band, brim
     # All six head faces are authored together. Body pixels remain the source skin.
     uv[:16, :32] = 0
     uv[:16, 32:] = 0
@@ -32,12 +33,13 @@ def make_accessory_skin(original, seed):
         uv[10,9:11,:3] = hair
         uv[10,13:15,:3] = hair
 
-    def put(face, mask, color, identity, layer=1):
+    def put(face, mask, color, identity, layer=1, component=0):
         x, y = faces[face]; x += 32*layer
         patch = uv[y:y+8, x:x+8]
         patch[mask, :3] = color[mask] if np.asarray(color).ndim == 3 else color
         patch[mask, 3] = 1
         objects[y:y+8, x:x+8][mask] = identity
+        components[y:y+8, x:x+8][mask] = component
 
     yy, xx = np.mgrid[:8,:8]
     negative = rng.random() < .18
@@ -78,31 +80,40 @@ def make_accessory_skin(original, seed):
             temple = (yy==bridge_y)&(xx<length)
             put(face,temple,frame_color,1)
     kind = int(rng.choice([0,2,3], p=[.35,.40,.25])) if not negative else 0
-    if kind:
-        color = rng.uniform(.02,.18,3) if (kind==2 and rng.random()<.65) else (rng.uniform(.03,.85,3) if kind==2 else hair)
-        brim_only = kind==2 and rng.random()<.60
-        put(4, np.ones((8,8),bool), color, 0 if brim_only else kind, layer=0 if brim_only else 1)
-        # A hat is authored once in 3D: its band and brim share the same height
-        # and material around the four side faces, including cube seams.
-        crown_depth = int(rng.integers(3,6)) if kind==2 else None
-        band_color = rng.uniform(.03,.95,3)
-        has_band = rng.random()<.75
+    if kind==2:
+        # Geometry and material are independent variables. A whole hat can have
+        # an inner crown/band and an extruded brim; the band is not background.
+        color = rng.uniform(.02,.17,3) if rng.random()<.65 else rng.uniform(.05,.85,3)
+        depth = int(rng.integers(2,6))
+        stepped = rng.random()<.70
+        variant = int(rng.choice(3,p=[.75,.15,.10])) # full ring, front visor, partial/asymmetric
+        band_color = rng.uniform(.04,.95,3)
+        if rng.random()<.3: band_color=np.array([rng.uniform(.5,.95),rng.uniform(.02,.12),rng.uniform(.02,.12)])
+        if rng.random()<.2: band_color=color*rng.uniform(.7,1.2)
+        has_band = rng.random()<.85
+        crown_layer=0 if stepped else 1
+        crown_component=1 if stepped else 3
+        band_component=2 if stepped else 4
+        put(4,np.ones((8,8),bool),color,0 if stepped else 2,layer=crown_layer,component=crown_component)
         for face in (0,1,2,3):
-            depth = crown_depth if kind==2 else (int(rng.integers(1,4)) if face==0 else int(rng.integers(2,7)))
-            mask = yy < depth
-            if kind==3:
-                mask |= (yy == depth) & (rng.random((8,8)) > .45)
-            tex = np.broadcast_to(color,(8,8,3)).copy()
-            tex += rng.normal(0,.025,(8,8,1))
-            if kind==2 and has_band: tex[depth-2] = band_color
-            if kind==2: tex[depth-1] = color # continuous brim below band
-            if brim_only:
-                # Taller crown at base radius, complete brim at outer radius.
-                # This supplies the visual step seen in top hats; the authored
-                # brim is the outer object, independently of its RGB material.
-                put(face, yy<depth-1, np.clip(tex,0,1), 0, layer=0)
-                mask = yy==depth-1
-            put(face, mask, np.clip(tex,0,1), kind)
+            tex=np.clip(np.broadcast_to(color,(8,8,3))+rng.normal(0,.02,(8,8,1)),0,1)
+            crown=yy<depth-1
+            put(face,crown,tex,0 if stepped else 2,layer=crown_layer,component=crown_component)
+            if has_band:
+                put(face,yy==depth-2,np.clip(band_color,0,1),0 if stepped else 2,layer=crown_layer,component=band_component)
+            brim=yy==depth-1
+            if variant==1 and face!=0: brim[:]=False
+            if variant==2 and face in (1,3): brim &= xx<5
+            put(face,brim,color,2,component=5)
+    elif kind==3:
+        put(4,np.ones((8,8),bool),hair,3)
+        for face in (0,1,2,3):
+            depth=int(rng.integers(1,4)) if face==0 else int(rng.integers(2,7))
+            mask=(yy<depth)|((yy==depth)&(rng.random((8,8))>.45))
+            tex=np.clip(np.broadcast_to(hair,(8,8,3))+rng.normal(0,.025,(8,8,1)),0,1)
+            put(face,mask,tex,3)
+    if return_components:
+        return torch.from_numpy(uv).permute(2,0,1).float(),torch.from_numpy(objects),torch.from_numpy(components)
     return torch.from_numpy(uv).permute(2,0,1).float(), torch.from_numpy(objects)
 
 
@@ -115,13 +126,13 @@ class AccessoryDataset(Dataset):
     def __getitem__(self, index):
         seed = self.seed + index*104729 + self.epoch*self.count*104729
         source = load_skin(self.paths[(index + self.epoch*self.count) % len(self.paths)])
-        uv, objects = make_accessory_skin(source, seed)
-        return {'uv':uv,'objects':objects,'seed':seed}
+        uv, objects, components = make_accessory_skin(source, seed, return_components=True)
+        return {'uv':uv,'objects':objects,'components':components,'seed':seed}
 
 
-def render_accessories(uv, objects, renderer, views):
+def render_accessories(uv, objects, renderer, views, components=None):
     from SkingToolkit.dense_uv_parser.utils import build_dense_parser_batch
-    images, labels, foregrounds = [], [], []
+    images, labels, foregrounds, parts = [], [], [], []
     for view in views:
         rendered, target = build_dense_parser_batch(uv, renderer, view)
         xy = (target['uv']*63).round().long().clamp(0,63)
@@ -129,6 +140,9 @@ def render_accessories(uv, objects, renderer, views):
         identity = objects.flatten(1).gather(1,flat.flatten(1)).reshape_as(flat)
         identity = identity.masked_fill((target['layer'] != 1) | (target['foreground'][:,0] < .5), 0)
         images.append(rendered);labels.append(identity);foregrounds.append(target['foreground'][:,0].bool())
+        if components is not None:
+            part=components.flatten(1).gather(1,flat.flatten(1)).reshape_as(flat)
+            parts.append(part.masked_fill(target['foreground'][:,0]<.5,0))
     b = uv.shape[0]
-    return (torch.stack(images,1).flatten(0,1), torch.stack(labels,1).flatten(0,1),
-            torch.stack(foregrounds,1).flatten(0,1))
+    result=(torch.stack(images,1).flatten(0,1),torch.stack(labels,1).flatten(0,1),torch.stack(foregrounds,1).flatten(0,1))
+    return result+(torch.stack(parts,1).flatten(0,1),) if components is not None else result

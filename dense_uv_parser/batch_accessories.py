@@ -97,6 +97,10 @@ def main():
                 palette=images.new_tensor([[.5,.5,.5],[.1,.9,.5],[.95,.6,.1],[.7,.3,.9]])
                 save_image(palette[logits.argmax(1)].permute(0,3,1,2).cpu(),scratch/'accessory_mask.png',nrow=len(config['routing']['views']))
                 save_image((1-logits.softmax(1)[:,:1]).cpu(),scratch/'accessory_probability.png',nrow=len(config['routing']['views']))
+            components=result['outputs'].get('hat_component_logits')
+            if components is not None:
+                palette=images.new_tensor([[.5,.5,.5],[.2,.8,.8],[.2,.4,1.],[.7,.4,.1],[.9,.2,.5],[1.,.85,.1]])
+                save_image(palette[components.argmax(1)].permute(0,3,1,2).cpu(),scratch/'hat_components.png',nrow=len(config['routing']['views']))
             # Exact tensors make pixel-stage regression metrics reproducible.
             if opt.save_tensors:
                 torch.save({'images':images.cpu(),'outputs':{k:v.cpu() if torch.is_tensor(v) else v for k,v in result['outputs'].items()},
