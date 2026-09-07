@@ -17,7 +17,10 @@ def refine_final_head_uv(model,result,renderer,views,steps):
         return
     # Visibility is recomputed using FINAL alpha. Pre-edit texel support would
     # freeze newly exposed inner hair to its old, formerly hidden skin colour.
-    fitted=refine_head_material(original,images,sources,renderer,views,steps=steps)
+    outputs=details.get('outputs',{});routing=details.get('routing',{})
+    fitted=refine_head_material(original,images,sources,renderer,views,steps=steps,
+        ownership=outputs.get('head_color_ownership_logits',outputs.get('head_ownership_logits')),
+        inner_exclusion=routing.get('head_color_boundary_excluded'))
     if not torch.equal(original[:,3],fitted[:,3]) or not torch.equal(original[:,:,16:],fitted[:,:,16:]):
         raise RuntimeError('Material fitting changed geometry or body')
     values=fitted.flatten(2)[:,:,decoder.ids].transpose(1,2)

@@ -36,6 +36,15 @@ class FinalHeadMaterialTests(unittest.TestCase):
         self.result['details']['color_source_support'].zero_()
         refine_final_head_uv(self.model,self.result,self.renderer,['front'],32)
         self.assertTrue(torch.equal(self.result['uv'],self.uv))
+    def test_accessory_sources_do_not_repaint_inner_material(self):
+        ownership=torch.zeros(1,5,32,32);ownership[:,3]=20
+        self.result['details']['outputs']={'head_color_ownership_logits':ownership}
+        self.result['final_head_uv']['layer_link_logits'].fill_(-20)
+        refine_final_head_uv(self.model,self.result,self.renderer,['front'],32)
+        after=self.result['uv'].flatten(2)
+        self.assertTrue(self.result['final_head_material_refit']['accepted'])
+        self.assertTrue(torch.equal(after[:,:3,self.decoder.ids[:2]],self.uv.flatten(2)[:,:3,self.decoder.ids[:2]]))
+        self.assertLess(float(after[:,:3,self.decoder.ids[2:]].mean()),.3)
     def test_worse_fit_is_rejected(self):
         candidate=self.uv.clone();candidate[:,:3]=.95
         with patch('SkingToolkit.dense_uv_parser.final_head_material.refine_head_material',return_value=candidate):
