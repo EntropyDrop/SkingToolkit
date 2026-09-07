@@ -94,6 +94,7 @@ def real_review(model,rows,renderer,out,step):
 
 def main():
     p=argparse.ArgumentParser(description=__doc__)
+    p.add_argument('--mask-unknown-relations',action='store_true')
     p.add_argument('--version',choices=['v103','v104'],default='v103');p.add_argument('--topology-context',action='store_true');p.add_argument('--boundary-loss-weight',type=float,default=0.)
     p.add_argument('--cache',type=Path,required=True);p.add_argument('--output-dir',type=Path,required=True)
     p.add_argument('--steps',type=int,default=6000);p.add_argument('--batch-size',type=int,default=6)
@@ -110,7 +111,7 @@ def main():
     o=p.parse_args()
     if min(o.steps,o.batch_size,o.eval_every,o.first_eval,o.anchor_every)<1 or (o.stop_after is not None and not 1<=o.stop_after<=o.steps):p.error('Invalid positive training limits')
     if o.boundary_loss_weight<0:p.error('boundary-loss-weight must be nonnegative')
-    if (o.topology_context or o.boundary_loss_weight) and o.decoder_revision!=2:p.error('Topology training requires revision 2')
+    if (o.topology_context or o.boundary_loss_weight or o.mask_unknown_relations) and o.decoder_revision!=2:p.error('Topology training requires revision 2')
     if o.edit_risk_weight<0:p.error("edit-risk-weight must be nonnegative")
     if o.paired_every<0 or (o.paired_every and o.batch_size<4):p.error('Paired replay requires batch-size >= 4 and nonnegative interval')
     if o.learning_rate<=0 or (o.resume and o.init_checkpoint):p.error('Use positive LR and either resume or weight initialization')
@@ -141,6 +142,7 @@ def main():
     if o.semantic_geometry:config['semantic_geometry']=True
     if o.edit_risk_weight:config['edit_risk_weight']=o.edit_risk_weight
     if o.topology_context:config['topology_context']=True
+    if o.mask_unknown_relations:config['mask_unknown_relations']=True
     if o.boundary_loss_weight:config['boundary_loss_weight']=o.boundary_loss_weight
     model=FinalHeadUVDecoder(**config).cuda()
     if o.init_checkpoint:

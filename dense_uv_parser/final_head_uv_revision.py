@@ -152,9 +152,10 @@ def masked_mean(value,mask):
     return (value*mask).sum()/mask.sum().clamp_min(1)
 
 
-def balanced_bce(logits,target,positive_weight=1.):
+def balanced_bce(logits,target,positive_weight=1.,mask=None):
     loss=F.binary_cross_entropy_with_logits(logits,target.float(),reduction='none')
-    return masked_mean(loss,~target)+positive_weight*masked_mean(loss,target)
+    valid=torch.ones_like(target,dtype=torch.bool) if mask is None else mask
+    return masked_mean(loss,~target&valid)+positive_weight*masked_mean(loss,target&valid)
 
 
 def relation_targets(model,truth,classes,symmetric):
@@ -185,7 +186,17 @@ def revision_loss(model,prediction,base,target,labels,symmetric):
     classes=labels.flatten(1)[:,model.ids];known=classes>=0
     semantic=F.cross_entropy(prediction['semantic_logits'][known],classes[known]) if known.any() else color*0
     mirror,layer=relation_targets(model,truth,classes,symmetric)
-    relation=balanced_bce(prediction['mirror_link_logits'],mirror)+balanced_bce(prediction['layer_link_logits'],layer)
+    # Unknown native semantic labels do not mean that a beard relation is absent.
+    mirror_known=layer_known=None
+    if model.mask_unknown_relations:
+        # Different visible target colours are a valid negative even without
+        # semantic labels. Equal colours alone do not establish a beard link.
+        target_rgb=truth[:,:,:3]
+        mirror_conflict=visible&visible[:,model.mirror]&((target_rgb-target_rgb[:,model.mirror]).abs().amax(2)>=.5/255)
+        layer_conflict=visible&visible[:,model.other]&((target_rgb-target_rgb[:,model.other]).abs().amax(2)>=.5/255)
+        mirror_known=(known&known[:,model.mirror])|mirror_conflict
+        layer_known=(known&known[:,model.other])|layer_conflict
+    relation=balanced_bce(prediction['mirror_link_logits'],mirror,mask=mirror_known)+balanced_bce(prediction['layer_link_logits'],layer,mask=layer_known)
     # Shared RGB is trained against target colors; pair losses remain useful while links learn.
     rgb=prediction['proposed_rgb'];symmetry=masked_mean((rgb-rgb[:,model.mirror]).abs().mean(2),mirror)
     alignment=masked_mean((rgb-rgb[:,model.other]).abs().mean(2),layer)

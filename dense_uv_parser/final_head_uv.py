@@ -24,12 +24,13 @@ def image_evidence(images, foreground, outputs):
 
 
 class FinalHeadUVDecoder(nn.Module):
-    def __init__(self, width=96, layers=2, revision=1, mappings_dir=None, robust_edits=False, semantic_geometry=False, edit_threshold=.5, edit_risk_weight=0., topology_context=False, boundary_loss_weight=0.):
+    def __init__(self, width=96, layers=2, revision=1, mappings_dir=None, robust_edits=False, semantic_geometry=False, edit_threshold=.5, edit_risk_weight=0., topology_context=False, boundary_loss_weight=0., mask_unknown_relations=False):
         super().__init__()
         if revision not in (1,2):raise ValueError('Unknown final head decoder revision')
         self.revision=revision
-        if (topology_context or boundary_loss_weight) and revision!=2:raise ValueError("Topology context requires revision 2")
+        if (topology_context or boundary_loss_weight or mask_unknown_relations) and revision!=2:raise ValueError("Topology context requires revision 2")
         if boundary_loss_weight<0:raise ValueError("Boundary loss weight must be nonnegative")
+        self.mask_unknown_relations=mask_unknown_relations
         self.topology_context=topology_context;self.boundary_loss_weight=float(boundary_loss_weight)
         if robust_edits and revision!=2:raise ValueError('Robust editing requires revision 2')
         self.robust_edits=robust_edits

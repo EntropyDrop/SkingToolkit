@@ -10,11 +10,11 @@ try:
   if s.get('state')=='failed':raise RuntimeError('Preparation failed: '+s.get('error',''))
   if s.get('state')=='complete':break
   time.sleep(20)
- assert json.loads((run/'smoke/status.json').read_text())['state']=='complete'
+ assert json.loads((run/'smoke_relations_v2/status.json').read_text())['state']=='complete'
  # The preparation was started from v103-compatible code at 9b7adc5, before
  # optional v104 modules were added. Its frozen parent runs without a decoder.
  mp=run/'cache/manifest.json';m=json.loads(mp.read_text());m['source_sha256_at_completion']=m.pop('source_sha256');m['preparation_runtime_base_commit']='9b7adc5';m['preparation_runtime_note']='Frozen v102 parent under v103 deployed pipeline; prepare_v104.py was the sole uncommitted preparation change at launch. Optional final decoder changes during preparation do not run in this parent.';mp.write_text(json.dumps(m,indent=2)+'\n')
- args=[py,'dense_uv_parser/run_local.py','train_final_head_uv','--version','v104','--cache',str(run/'cache'),'--output-dir',str(run/'training'),'--steps','6000','--first-eval','200','--eval-every','1000','--batch-size','8','--decoder-revision','2','--robust-edits','--semantic-geometry','--edit-risk-weight','5','--topology-context','--boundary-loss-weight','.5','--paired-every','4','--anchor-every','2','--native-fraction','.7','--learning-rate','0.00008','--init-checkpoint',str(root/'dense_uv_parser/runs/v103_generalization_20260907/candidate_risk_1000_beard_protected/parser.pt')]
+ args=[py,'dense_uv_parser/run_local.py','train_final_head_uv','--version','v104','--cache',str(run/'cache'),'--output-dir',str(run/'training'),'--steps','6000','--first-eval','200','--eval-every','1000','--batch-size','8','--decoder-revision','2','--robust-edits','--semantic-geometry','--edit-risk-weight','5','--topology-context','--mask-unknown-relations','--boundary-loss-weight','.5','--paired-every','4','--anchor-every','2','--native-fraction','.7','--learning-rate','0.00008','--init-checkpoint',str(root/'dense_uv_parser/runs/v103_generalization_20260907/candidate_risk_1000_beard_protected/parser.pt')]
  (run/'training_command.json').write_text(json.dumps(args,indent=2)+'\n');status('training_started',command=args)
  env=dict(os.environ,OMP_NUM_THREADS='4',MKL_NUM_THREADS='4',HF_HUB_DISABLE_PROGRESS_BARS='1',CUBLAS_WORKSPACE_CONFIG=':4096:8',PYTHONUNBUFFERED='1')
  with (run/'training.log').open('w') as log:subprocess.run(args,cwd=root,env=env,stdout=log,stderr=subprocess.STDOUT,check=True)

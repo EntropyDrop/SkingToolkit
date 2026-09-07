@@ -55,6 +55,26 @@ class TopologyTests(unittest.TestCase):
    changed=(result[:,3]!=source[:,3]);changed_total+=int(changed.sum())
    self.assertLessEqual(int(changed.flatten(1).sum(1).max()),32)
   self.assertGreater(changed_total,20)
+ def test_unknown_native_labels_do_not_supervise_absent_material_relations(self):
+  m=self.model;m.mask_unknown_relations=True
+  self.uv[:,:3]=.2*self.uv[:,3:4]
+  p=m(self.uv,self.evidence);labels=torch.full((1,64,64),-100,dtype=torch.long)
+  loss,metrics=final_uv_loss(m,p,self.uv,self.uv,labels,torch.tensor([False]));loss.backward()
+  self.assertEqual(float(metrics['relations']),0.)
+  self.assertEqual(float(m.mirror_link.bias.grad.abs().sum()),0.)
+  self.assertEqual(float(m.layer_link.bias.grad.abs().sum()),0.)
+  m.zero_grad();m.mask_unknown_relations=False;p=m(self.uv,self.evidence)
+  _,legacy=final_uv_loss(m,p,self.uv,self.uv,labels,torch.tensor([False]));self.assertGreater(float(legacy['relations']),0.)
+  m.mask_unknown_relations=True;labels[:,8:16,:32]=3;labels[:,8:16,32:]=5
+  p=m(self.uv,self.evidence);_,known=final_uv_loss(m,p,self.uv,self.uv,labels,torch.tensor([True]));self.assertGreater(float(known['relations']),0.)
+
+ def test_visible_colour_conflict_remains_a_known_negative_without_semantics(self):
+  m=self.model;m.mask_unknown_relations=True
+  uv=torch.ones_like(self.uv);uv[:,:3]=.2;uv[:,:3,8,40]=.8
+  prediction=m(uv,self.evidence);loss,metrics=final_uv_loss(m,prediction,uv,uv,torch.full((1,64,64),-100,dtype=torch.long),torch.tensor([False]));loss.backward()
+  self.assertGreater(float(metrics["relations"]),0.)
+  self.assertGreater(float(m.layer_link.bias.grad),0.)
+
  def test_checkpoint_reload_preserves_learned_adapter(self):
   m=self.model
   with torch.no_grad():m.topology_adapter.message[-1].weight.normal_(0,.01)
