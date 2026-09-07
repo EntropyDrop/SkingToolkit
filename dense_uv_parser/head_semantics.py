@@ -203,7 +203,9 @@ def apply_head_surface_routing(routing,outputs,foreground,renderer,views):
     from SkingToolkit.dense_uv_parser.utils import build_static_surface_routing
     sp=outputs['head_surface_logits'].float().softmax(1);confidence,face=sp.max(1)
     jp=outputs['head_semantics_logits'].float().softmax(1);identity=jp.argmax(1)
-    family=torch.isin(identity,identity.new_tensor([2,3,4,5]))
+    scope=outputs.get('head_surface_routing_scope','hair_and_beard')
+    if scope not in ('hair_and_beard','beard'):raise ValueError('Unknown head surface routing scope: '+scope)
+    family=torch.isin(identity,identity.new_tensor([3,5] if scope=='beard' else [2,3,4,5]))
     outer=(identity==4)|(identity==5)
     valid=foreground&(routing['part']==0)&family&(jp.amax(1)>=.8)&(confidence>=.8)&(face>0)
     phone=outputs.get('joint_phone_expert_accepted')

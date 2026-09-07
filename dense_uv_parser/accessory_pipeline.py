@@ -29,6 +29,9 @@ def run_pipeline(model, renderer, images, config=None, complete=False, outputs=N
     if outputs is None:
         outputs = model(actual, view_ids=torch.arange(images.shape[0], device=images.device) % len(views), semantic_foreground=fg)
     outputs = {**outputs, 'accessory_route_threshold':config['accessory_route_threshold']}
+    surface_scope=config.get('head_surface_routing_scope','hair_and_beard')
+    if surface_scope not in ('hair_and_beard','beard'):raise ValueError('Unknown head surface routing scope: '+surface_scope)
+    outputs['head_surface_routing_scope']=surface_scope
     outputs['headwear_presence_threshold']=config.get('headwear_presence_threshold',.95)
     outputs['headphone_presence_threshold']=config.get('headphone_presence_threshold',.9)
     outputs['headphone_presence_consensus']=config.get('headphone_presence_consensus',False)
