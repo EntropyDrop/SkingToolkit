@@ -98,16 +98,18 @@ def main():
     p.add_argument('--stop-after',type=int,help='Save and stop without changing the total LR schedule')
     p.add_argument('--decoder-revision',type=int,choices=[1,2],default=1);p.add_argument('--anchor-every',type=int,default=4)
     p.add_argument('--robust-edits',action='store_true');p.add_argument('--init-checkpoint',type=Path)
+    p.add_argument('--edit-risk-weight',type=float,default=0.,help='Per-cell cost of damaging a correct texel; zero retains legacy separately balanced loss')
     p.add_argument('--paired-every',type=int,default=0,help='Sample a bare/glasses/phones triplet every N steps and supervise its occupancy differences')
     p.add_argument('--semantic-geometry',action='store_true',help='Joint categorical absence/material prediction for final outer head UV')
     p.add_argument('--learning-rate',type=float,default=3e-4)
     p.add_argument('--native-fraction',type=float,default=0.,help='Fraction of synthetic batch slots replaying unaltered source head textures')
     o=p.parse_args()
     if min(o.steps,o.batch_size,o.eval_every,o.first_eval,o.anchor_every)<1 or (o.stop_after is not None and not 1<=o.stop_after<=o.steps):p.error('Invalid positive training limits')
+    if o.edit_risk_weight<0:p.error("edit-risk-weight must be nonnegative")
     if o.paired_every<0 or (o.paired_every and o.batch_size<4):p.error('Paired replay requires batch-size >= 4 and nonnegative interval')
     if o.learning_rate<=0 or (o.resume and o.init_checkpoint):p.error('Use positive LR and either resume or weight initialization')
     if not 0<=o.native_fraction<=1:p.error('native-fraction must be in [0,1]')
-    if (o.robust_edits or o.init_checkpoint or o.semantic_geometry) and o.decoder_revision!=2:p.error('These options require decoder revision 2')
+    if (o.robust_edits or o.init_checkpoint or o.semantic_geometry or o.edit_risk_weight) and o.decoder_revision!=2:p.error('These options require decoder revision 2')
     torch.set_num_threads(4);evaluation_numerics();torch.manual_seed(1032707);random.seed(1032707)
     root=Path(__file__).resolve().parent;out=o.output_dir.resolve();out.mkdir(parents=True,exist_ok=False)
     cache=json.loads((o.cache/'manifest.json').read_text())
@@ -131,6 +133,7 @@ def main():
     if o.decoder_revision==2:config.update(revision=2,mappings_dir=parent['args']['mappings_dir'])
     if o.robust_edits:config['robust_edits']=True
     if o.semantic_geometry:config['semantic_geometry']=True
+    if o.edit_risk_weight:config['edit_risk_weight']=o.edit_risk_weight
     model=FinalHeadUVDecoder(**config).cuda()
     if o.init_checkpoint:
         initial=load(o.init_checkpoint)

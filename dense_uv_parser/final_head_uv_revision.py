@@ -133,7 +133,7 @@ def decode_revision(model,features,uv):
         joint_alpha=torch.logsumexp(semantic_logits[:,:,1:],2)-semantic_logits[:,:,0]
         alpha_logits=torch.where(model.outer[None],joint_alpha,alpha_logits)
     edit_logits=torch.where(uv[:,:,3]>.5,-alpha_logits,alpha_logits)
-    edit_p=edit_logits.sigmoid();change=(edit_p>=.5).float()+(edit_p-edit_p.detach())
+    edit_p=edit_logits.sigmoid();change=(edit_p>=model.edit_threshold).float()+(edit_p-edit_p.detach())
     alpha=torch.where(model.outer[None],uv[:,:,3]+(1-2*uv[:,:,3])*change,uv[:,:,3])
     gate_logits=model.color_gate(features).squeeze(2);gate_p=gate_logits.sigmoid()
     gate=(gate_p>=.5).float()+(gate_p-gate_p.detach())
@@ -172,6 +172,8 @@ def revision_loss(model,prediction,base,target,labels,symmetric):
     error=F.binary_cross_entropy_with_logits(prediction['edit_logits'],need_edit.float(),reduction='none')
     preserve=masked_mean(error,outer&~need_edit);correct=masked_mean(error,outer&need_edit)
     occupancy=(5 if model.robust_edits else 2)*preserve+correct
+    if model.edit_risk_weight:
+        occupancy=cell_edit_risk(error,outer,need_edit,model.edit_risk_weight)
     changed=((truth[:,:,:3]-initial[:,:,:3]).abs().amax(2)>1/255)&visible
     gate=balanced_bce(prediction['color_gate_logits'],changed)
     color=masked_mean((prediction['proposed_rgb']-truth[:,:,:3]).abs().mean(2),visible)
@@ -200,3 +202,9 @@ def paired_occupancy_loss(model,prediction,target):
     p=prediction['alpha_probability'][:3,model.outer]
     delta=truth[1:]-truth[:1];error=(p[1:]-p[:1]-delta).abs()
     return masked_mean(error,delta!=0)+masked_mean(error,delta==0)
+
+
+def cell_edit_risk(error,outer,need_edit,preserve_weight):
+    """Expected per-texel cost, without renormalizing rare edits separately."""
+    weight=torch.where(need_edit,torch.ones_like(error),torch.full_like(error,preserve_weight))
+    return masked_mean(error*weight,outer)

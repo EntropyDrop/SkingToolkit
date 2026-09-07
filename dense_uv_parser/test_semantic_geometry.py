@@ -44,6 +44,22 @@ class SemanticGeometryTests(unittest.TestCase):
   self.assertEqual(float(paired_occupancy_loss(m,{'alpha_probability':truth},target)),0)
   p=truth.clone();i=m.ids.tolist().index(12*64+45);p[1,i]=.8;p.requires_grad_()
   loss=paired_occupancy_loss(m,{'alpha_probability':p},target);self.assertGreater(float(loss.detach()),0);loss.backward();self.assertGreater(float(p.grad[1,i]),0)
+ def test_keep_cost_does_not_depend_on_the_prevalence_of_errors(self):
+  from SkingToolkit.dense_uv_parser.final_head_uv_revision import cell_edit_risk
+  for count in [2,20,200]:
+   error=torch.ones(1,count,requires_grad=True);needs=torch.zeros(1,count,dtype=torch.bool);needs[:,0]=True
+   loss=cell_edit_risk(error,torch.ones_like(needs),needs,5);loss.backward()
+   self.assertAlmostEqual(float(error.grad[0,1]/error.grad[0,0]),5.,places=5)
+ def test_calibration_preserves_uncertain_edits_and_body(self):
+  m=FinalHeadUVDecoder(**self.config,edit_threshold=.95).eval()
+  with torch.no_grad():m.edit.bias.fill_(2.)
+  uv=torch.zeros(1,4,64,64);uv[:,3,16:]=1
+  result=m(uv,torch.rand(2,25,56,56))['uv']
+  self.assertTrue(torch.equal(result,uv))
+  with torch.no_grad():m.edit.bias.fill_(4.)
+  result=m(uv,torch.rand(2,25,56,56))['uv']
+  self.assertTrue(bool((result.flatten(2)[:,3,m.ids[m.outer]]==1).all()))
+  self.assertTrue(torch.equal(result[:,:,16:],uv[:,:,16:]))
  def test_counterfactuals_change_only_the_added_accessory(self):
   original=torch.ones(4,64,64);original[:3]=.2
   for seed in [17,88,111]:

@@ -24,7 +24,7 @@ def image_evidence(images, foreground, outputs):
 
 
 class FinalHeadUVDecoder(nn.Module):
-    def __init__(self, width=96, layers=2, revision=1, mappings_dir=None, robust_edits=False, semantic_geometry=False):
+    def __init__(self, width=96, layers=2, revision=1, mappings_dir=None, robust_edits=False, semantic_geometry=False, edit_threshold=.5, edit_risk_weight=0.):
         super().__init__()
         if revision not in (1,2):raise ValueError('Unknown final head decoder revision')
         self.revision=revision
@@ -32,6 +32,9 @@ class FinalHeadUVDecoder(nn.Module):
         self.robust_edits=robust_edits
         if semantic_geometry and revision!=2:raise ValueError("Semantic geometry requires revision 2")
         self.semantic_geometry=semantic_geometry
+        if not .5<=edit_threshold<1 or edit_risk_weight<0:raise ValueError("Invalid edit calibration/risk setting")
+        if revision!=2 and (edit_threshold!=.5 or edit_risk_weight):raise ValueError("Edit calibration/risk requires revision 2")
+        self.edit_threshold=float(edit_threshold);self.edit_risk_weight=float(edit_risk_weight)
         t=build_simple_uv_topology()
         ids=torch.nonzero((t.valid&(t.part==0)).reshape(-1)).flatten()
         node=torch.full((4096,),-1,dtype=torch.long);node[ids]=torch.arange(len(ids))
