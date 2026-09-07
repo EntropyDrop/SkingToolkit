@@ -52,6 +52,36 @@ class FinalHeadMaterialTests(unittest.TestCase):
             candidate[:,:,16:]=self.uv[:,:,16:]
             refine_final_head_uv(self.model,self.result,self.renderer,['front'],32)
         self.assertFalse(self.result['final_head_material_refit']['accepted']);self.assertTrue(torch.equal(self.result['uv'],self.uv))
+    def test_partial_accessory_footprint_preserves_only_affected_inner_cell(self):
+        y0,y1,x0,x1=head_bounds(32,32)
+        ownership=torch.full((1,5,32,32),-20.);ownership[:,1]=20
+        ownership[:,:,y0,x0]=-20;ownership[:,3,y0,x0]=20
+        self.result['details']['outputs']={'head_color_ownership_logits':ownership}
+        for links in self.result['final_head_uv'].values():links.fill_(-20)
+        refine_final_head_uv(self.model,self.result,self.renderer,['front'],32,protect_inner_footprints=True)
+        rgb=self.result['uv'].flatten(2)[:,:3,self.decoder.ids]
+        self.assertTrue(torch.equal(rgb[:,:,0],self.uv.flatten(2)[:,:3,self.decoder.ids[0]]))
+        # One classified pixel protects its entire UV footprint; unrelated
+        # newly exposed inner hair and outer material still follow the source.
+        self.assertLess(float(rgb[:,:,1:].mean()),.3)
+        self.assertTrue(torch.equal(self.result['uv'][:,3],self.uv[:,3]))
+        self.assertTrue(torch.equal(self.result['uv'][:,:,16:],self.uv[:,:,16:]))
+    def test_partial_footprint_without_protection_reproduces_contamination(self):
+        y0,y1,x0,x1=head_bounds(32,32)
+        excluded=torch.zeros(1,32,32,dtype=torch.bool);excluded[:,y0,x0]=True
+        self.result['details']['routing']={'head_color_boundary_excluded':excluded}
+        for links in self.result['final_head_uv'].values():links.fill_(-20)
+        refine_final_head_uv(self.model,self.result,self.renderer,['front'],32)
+        self.assertLess(float(self.result['uv'].flatten(2)[:,:3,self.decoder.ids[0]].mean()),.3)
+    def test_boundary_footprint_also_protects_inner_cell(self):
+        y0,y1,x0,x1=head_bounds(32,32)
+        excluded=torch.zeros(1,32,32,dtype=torch.bool);excluded[:,y0,x0]=True
+        self.result['details']['routing']={'head_color_boundary_excluded':excluded}
+        for links in self.result['final_head_uv'].values():links.fill_(-20)
+        refine_final_head_uv(self.model,self.result,self.renderer,['front'],32,protect_inner_footprints=True)
+        rgb=self.result['uv'].flatten(2)[:,:3,self.decoder.ids]
+        self.assertTrue(torch.equal(rgb[:,:,0],self.uv.flatten(2)[:,:3,self.decoder.ids[0]]))
+        self.assertLess(float(rgb[:,:,1:].mean()),.3)
     def test_geometry_and_body_changes_fail(self):
         for channel,y in [(3,8),(0,20)]:
             candidate=self.uv.clone();candidate[:,channel,y,8]=0

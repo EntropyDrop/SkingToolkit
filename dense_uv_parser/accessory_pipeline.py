@@ -98,7 +98,8 @@ def run_pipeline(model, renderer, images, config=None, complete=False, outputs=N
             apply_final_head_uv(model,result)
             if config.get('final_head_material_refine_steps',0):
                 from SkingToolkit.dense_uv_parser.final_head_material import refine_final_head_uv
-                refine_final_head_uv(model,result,renderer,views,config['final_head_material_refine_steps'])
+                refine_final_head_uv(model,result,renderer,views,config['final_head_material_refine_steps'],
+                    protect_inner_footprints=config.get('final_head_material_protect_inner_footprints',False))
         result['render'] = torch.stack([renderer.forward_view(result['uv'], view) for view in views],1).flatten(0,1)
     return result
 

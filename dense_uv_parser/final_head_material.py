@@ -5,7 +5,7 @@ from SkingToolkit.dense_uv_parser.material_refine import refine_head_material
 from SkingToolkit.dense_uv_parser.final_head_uv_revision import tie_material
 
 
-def refine_final_head_uv(model,result,renderer,views,steps):
+def refine_final_head_uv(model,result,renderer,views,steps,protect_inner_footprints=False):
     decoder=model.final_head_uv_decoder
     if decoder.revision!=2:raise ValueError('Final material refit requires revision 2 relations')
     original=result['uv'];details=result['details'];relations=result['final_head_uv']
@@ -20,7 +20,8 @@ def refine_final_head_uv(model,result,renderer,views,steps):
     outputs=details.get('outputs',{});routing=details.get('routing',{})
     fitted=refine_head_material(original,images,sources,renderer,views,steps=steps,
         ownership=outputs.get('head_color_ownership_logits',outputs.get('head_ownership_logits')),
-        inner_exclusion=routing.get('head_color_boundary_excluded'))
+        inner_exclusion=routing.get('head_color_boundary_excluded'),
+        protect_inner_footprints=protect_inner_footprints)
     if not torch.equal(original[:,3],fitted[:,3]) or not torch.equal(original[:,:,16:],fitted[:,:,16:]):
         raise RuntimeError('Material fitting changed geometry or body')
     values=fitted.flatten(2)[:,:,decoder.ids].transpose(1,2)
