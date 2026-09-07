@@ -37,7 +37,7 @@ def init_revision(model,mappings_dir):
     if not mappings_dir:raise ValueError('Revision 2 requires renderer mappings')
     width=model.query.out_features
     model.register_buffer('projection',head_projection(model.ids,mappings_dir))
-    model.local_query=nn.Linear(52,width)
+    model.local_query=nn.Linear(102 if model.robust_edits else 52,width)
     model.edit=nn.Linear(width,1)
     nn.init.zeros_(model.edit.weight);nn.init.constant_(model.edit.bias,-4.)
     model.mirror_link=nn.Linear(width,1);model.layer_link=nn.Linear(width,1)
@@ -59,8 +59,41 @@ def local_queries(model,evidence):
     b=evidence.shape[0]//2
     # Matrix rows are normalized candidate footprints, so missing views stay zero.
     local=torch.einsum('vkp,bvcp->bkvc',model.projection,evidence.reshape(b,2,25,3136)).flatten(2)
+    if model.robust_edits:
+        neighborhood=F.avg_pool2d(evidence,5,stride=1,padding=2)
+        context=torch.einsum('vkp,bvcp->bkvc',model.projection,neighborhood.reshape(b,2,25,3136)).flatten(2)
+        local=torch.cat([local,context],2)
     visible=(model.projection.sum(2)>0).T[None].expand(b,-1,-1).to(local.dtype)
     return model.local_query(torch.cat([local,visible],2))
+
+
+def warp_head_evidence(evidence,theta):
+    """Move RGB, foreground and semantic evidence together within each camera."""
+    offset=torch.zeros(1,25,1,1,device=evidence.device,dtype=evidence.dtype);offset[:,:3]=.5
+    grid=F.affine_grid(theta,evidence.shape,align_corners=False)
+    return F.grid_sample(evidence-offset,grid,align_corners=False,padding_mode='zeros')+offset
+
+
+def augment_local_evidence(evidence):
+    n=len(evidence)
+    theta=torch.zeros(n,2,3,device=evidence.device)
+    scale=torch.empty(n,2,device=evidence.device).uniform_(.96,1.04)
+    theta[:,0,0]=scale[:,0];theta[:,1,1]=scale[:,1]
+    theta[:,:,2]=torch.empty(n,2,device=evidence.device).uniform_(-.07,.07)
+    evidence=warp_head_evidence(evidence,theta)
+    # Sometimes semantics are uninformative; keep RGB/foreground as alternate evidence.
+    keep=(torch.rand(n,1,1,1,device=evidence.device)>.15).to(evidence.dtype)
+    evidence[:,4:]*=keep
+    return evidence
+
+
+def initialize_revision(model,checkpoint):
+    state=dict(checkpoint['final_head_uv_state'])
+    if model.robust_edits and state['local_query.weight'].shape[1]==52:
+        old=state['local_query.weight'];expanded=torch.zeros_like(model.local_query.weight,device='cpu')
+        expanded[:,:50]=old[:,:50];expanded[:,-2:]=old[:,-2:]
+        state['local_query.weight']=expanded
+    model.load_state_dict(state,strict=True)
 
 
 def tie_material(model,rgb,alpha,mirror_logits,layer_logits):
@@ -123,7 +156,7 @@ def revision_loss(model,prediction,base,target,labels,symmetric):
     need_edit=(initial[:,:,3]>.5)!=visible
     error=F.binary_cross_entropy_with_logits(prediction['edit_logits'],need_edit.float(),reduction='none')
     preserve=masked_mean(error,outer&~need_edit);correct=masked_mean(error,outer&need_edit)
-    occupancy=2*preserve+correct
+    occupancy=(5 if model.robust_edits else 2)*preserve+correct
     changed=((truth[:,:,:3]-initial[:,:,:3]).abs().amax(2)>1/255)&visible
     gate=balanced_bce(prediction['color_gate_logits'],changed)
     color=masked_mean((prediction['proposed_rgb']-truth[:,:,:3]).abs().mean(2),visible)

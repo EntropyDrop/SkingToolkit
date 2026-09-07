@@ -20,7 +20,7 @@ def batch(rows,model,augment=False):
     result={k:torch.cat([r[k] for r in rows]).cuda() for k in ('base','target','evidence','labels','symmetric')}
     if augment and model.revision==2:
         # Correct-input examples teach the editor to retain already correct UV.
-        identity=torch.rand(len(rows),device='cuda')<.25
+        identity=torch.rand(len(rows),device='cuda')<(.5 if model.robust_edits else .25)
         result['base'][identity]=result['target'][identity]
     if augment:
         b=result['base'].shape[0]
@@ -41,6 +41,9 @@ def batch(rows,model,augment=False):
             substrate=uv[:,:3,ids-32]
             uv[:,:3,ids]=torch.where((selected&~current)[:,None],substrate,rgb)
             uv[:,:3,ids]*=uv[:,3:4,ids]
+        if model.robust_edits and random.random()<.65:
+            from SkingToolkit.dense_uv_parser.final_head_uv_revision import augment_local_evidence
+            result['evidence']=augment_local_evidence(result['evidence'])
     return result
 
 
@@ -82,8 +85,19 @@ def real_review(model,rows,renderer,out,step):
 
 
 def main():
-    p=argparse.ArgumentParser(description=__doc__);p.add_argument('--cache',type=Path,required=True);p.add_argument('--output-dir',type=Path,required=True);p.add_argument('--steps',type=int,default=6000);p.add_argument('--batch-size',type=int,default=6);p.add_argument('--eval-every',type=int,default=1000);p.add_argument('--first-eval',type=int,default=200);p.add_argument('--resume',type=Path,help='Atomic recovery state, including model, optimizer and RNG; output must be a new directory');p.add_argument('--stop-after',type=int,help='Save and stop cleanly at this step without changing the LR schedule');p.add_argument('--decoder-revision',type=int,choices=[1,2],default=1);p.add_argument('--anchor-every',type=int,default=4);o=p.parse_args()
+    p=argparse.ArgumentParser(description=__doc__)
+    p.add_argument('--cache',type=Path,required=True);p.add_argument('--output-dir',type=Path,required=True)
+    p.add_argument('--steps',type=int,default=6000);p.add_argument('--batch-size',type=int,default=6)
+    p.add_argument('--eval-every',type=int,default=1000);p.add_argument('--first-eval',type=int,default=200)
+    p.add_argument('--resume',type=Path,help='Atomic model/optimizer/RNG recovery; output must be a new directory')
+    p.add_argument('--stop-after',type=int,help='Save and stop without changing the total LR schedule')
+    p.add_argument('--decoder-revision',type=int,choices=[1,2],default=1);p.add_argument('--anchor-every',type=int,default=4)
+    p.add_argument('--robust-edits',action='store_true');p.add_argument('--init-checkpoint',type=Path)
+    p.add_argument('--learning-rate',type=float,default=3e-4)
+    o=p.parse_args()
     if min(o.steps,o.batch_size,o.eval_every,o.first_eval,o.anchor_every)<1 or (o.stop_after is not None and not 1<=o.stop_after<=o.steps):p.error('Invalid positive training limits')
+    if o.learning_rate<=0 or (o.resume and o.init_checkpoint):p.error('Use positive LR and either resume or weight initialization')
+    if (o.robust_edits or o.init_checkpoint) and o.decoder_revision!=2:p.error('These options require decoder revision 2')
     torch.set_num_threads(4);evaluation_numerics();torch.manual_seed(1032707);random.seed(1032707)
     root=Path(__file__).resolve().parent;out=o.output_dir.resolve();out.mkdir(parents=True,exist_ok=False)
     cache=json.loads((o.cache/'manifest.json').read_text())
@@ -96,11 +110,22 @@ def main():
     if {r['metadata']['input_sha256'] for r in anchors}&{r['metadata']['input_sha256'] for r in development}:raise ValueError('Real training/development overlap')
     parent=load(cache['parent']);pipeline=cache['pipeline'];config={'width':96,'layers':2}
     if o.decoder_revision==2:config.update(revision=2,mappings_dir=parent['args']['mappings_dir'])
-    model=FinalHeadUVDecoder(**config).cuda();opt=torch.optim.AdamW(model.parameters(),lr=3e-4,weight_decay=1e-4)
+    if o.robust_edits:config['robust_edits']=True
+    model=FinalHeadUVDecoder(**config).cuda()
+    if o.init_checkpoint:
+        initial=load(o.init_checkpoint)
+        if initial['final_head_uv_manifest']['parent_sha256']!=cache['parent_sha256']:raise ValueError('Initialization parent mismatch')
+        from SkingToolkit.dense_uv_parser.final_head_uv_revision import initialize_revision
+        initialize_revision(model,initial);del initial
+    opt=torch.optim.AdamW(model.parameters(),lr=o.learning_rate,weight_decay=1e-4)
     renderer=DifferentiableRenderer(parent['args']['mappings_dir']).cuda()
     manifest={'version':'v103','revision':'final_uv_decoder_20260907','git_commit':subprocess.check_output(['git','rev-parse','HEAD'],cwd=root,text=True).strip(),'parent':cache['parent'],'parent_sha256':cache['parent_sha256'],'cache':str(o.cache.resolve()),'cache_manifest_sha256':hashlib.sha256((o.cache/'manifest.json').read_bytes()).hexdigest(),'decoder_config':config,'trainable_parameters':sum(x.numel() for x in model.parameters()),'steps':o.steps,'real_training_identities':[r['metadata'] for r in anchors],'real_development_identities':[r['metadata'] for r in development],'validation_scope':'The beard identity is now training data. Only remaining real cases and train-disjoint synthetic identities assess transfer. No automatic release.','source_sha256':{f.name:hashlib.sha256(f.read_bytes()).hexdigest() for f in root.glob('*.py')}}
     signature={k:manifest[k] for k in ('parent_sha256','cache_manifest_sha256','decoder_config','steps')};signature['batch_size']=o.batch_size
     if o.decoder_revision==2:manifest['revision']='local_evidence_relations_20260907'
+    if o.robust_edits:manifest['revision']='local_context_preservation_20260907'
+    if o.learning_rate!=3e-4:signature['learning_rate']=o.learning_rate
+    manifest['learning_rate']=o.learning_rate
+    manifest['weight_initialization']={'checkpoint':str(o.init_checkpoint.resolve()),'sha256':hashlib.sha256(o.init_checkpoint.read_bytes()).hexdigest(),'optimizer_restored':False} if o.init_checkpoint else None
     if o.decoder_revision==2 or o.anchor_every!=4:signature['anchor_every']=o.anchor_every
     manifest.update(training_signature=signature,resumed_from=str(o.resume.resolve()) if o.resume else None,recovery_format=1)
     write(out/'config.json',manifest);write(out/'pipeline.json',pipeline);snapshot=out/'source';snapshot.mkdir()
@@ -181,7 +206,7 @@ def main():
             loss.backward();grad=torch.nn.utils.clip_grad_norm_(model.parameters(),1.)
             if not torch.isfinite(grad):raise RuntimeError('Non-finite final UV gradient')
             opt.step();step+=1
-            for group in opt.param_groups:group['lr']=3e-4*(.1+.9*(1+math.cos(math.pi*step/o.steps))/2)
+            for group in opt.param_groups:group['lr']=o.learning_rate*(.1+.9*(1+math.cos(math.pi*step/o.steps))/2)
             if step==1 or step%50==0:status('training',loss=float(loss.detach()),**{k:float(v) for k,v in metrics.items()})
             if step==o.first_eval or step%o.eval_every==0 or step==o.steps or step==o.stop_after:checkpoint()
             if step==o.stop_after and step<o.steps:

@@ -69,4 +69,34 @@ class RevisionTests(unittest.TestCase):
         restored=FinalHeadUVDecoder(**self.config).eval();restored.load_state_dict(torch.load(stream,weights_only=True))
         with torch.no_grad():self.assertTrue(torch.equal(self.model(self.uv,self.evidence)['uv'],restored(self.uv,self.evidence)['uv']))
 
+    def test_context_initialization_preserves_learned_input_weights(self):
+        from SkingToolkit.dense_uv_parser.final_head_uv_revision import initialize_revision,local_queries
+        context=FinalHeadUVDecoder(**self.config,robust_edits=True).eval()
+        initialize_revision(context,{'final_head_uv_state':self.model.state_dict()})
+        self.assertTrue(torch.equal(context.local_query.weight[:,50:100],torch.zeros_like(context.local_query.weight[:,50:100])))
+        with torch.no_grad():
+            self.assertTrue(torch.allclose(local_queries(self.model,self.evidence),local_queries(context,self.evidence),atol=1e-6,rtol=1e-6))
+            self.assertTrue(torch.equal(context(self.uv,self.evidence)['uv'],self.uv))
+
+    def test_pose_augmentation_moves_rgb_and_semantics_together(self):
+        from SkingToolkit.dense_uv_parser.final_head_uv_revision import warp_head_evidence
+        evidence=torch.zeros(2,25,56,56);evidence[:,:3]=.5
+        evidence[:,0,28,28]=1.;evidence[:,3:5,28,28]=1.
+        theta=torch.tensor([[[1.,0.,.1],[0.,1.,0.]],[[1.,0.,-.1],[0.,1.,0.]]])
+        moved=warp_head_evidence(evidence,theta)
+        for view in range(2):
+            self.assertEqual(int(moved[view,0].argmax()),int(moved[view,3].argmax()))
+            self.assertEqual(int(moved[view,3].argmax()),int(moved[view,4].argmax()))
+        self.assertNotEqual(int(moved[0,3].argmax()),int(moved[1,3].argmax()))
+
+    def test_both_hat_layers_support_both_brim_styles(self):
+        from SkingToolkit.dense_uv_parser.prepare_head_uv_revision import author
+        original=torch.ones(4,64,64);original[:3]=.4
+        for family,body_class in [('inner_hat_ring',8),('outer_hat_ring',10)]:
+            for ring_required in (True,False):
+                item=author(original,30307001,family,ring_required)
+                labels=item['labels'];self.assertTrue(bool((labels==body_class).any()))
+                ring=any(all(bool((labels[y,x:x+8]==12).all()) for x in (32,40,48,56)) for y in range(8,16))
+                self.assertEqual(ring,ring_required)
+
 if __name__=='__main__':unittest.main()
