@@ -99,9 +99,11 @@ def main():
     p.add_argument('--decoder-revision',type=int,choices=[1,2],default=1);p.add_argument('--anchor-every',type=int,default=4)
     p.add_argument('--robust-edits',action='store_true');p.add_argument('--init-checkpoint',type=Path)
     p.add_argument('--learning-rate',type=float,default=3e-4)
+    p.add_argument('--native-fraction',type=float,default=0.,help='Fraction of synthetic batch slots replaying unaltered source head textures')
     o=p.parse_args()
     if min(o.steps,o.batch_size,o.eval_every,o.first_eval,o.anchor_every)<1 or (o.stop_after is not None and not 1<=o.stop_after<=o.steps):p.error('Invalid positive training limits')
     if o.learning_rate<=0 or (o.resume and o.init_checkpoint):p.error('Use positive LR and either resume or weight initialization')
+    if not 0<=o.native_fraction<=1:p.error('native-fraction must be in [0,1]')
     if (o.robust_edits or o.init_checkpoint) and o.decoder_revision!=2:p.error('These options require decoder revision 2')
     torch.set_num_threads(4);evaluation_numerics();torch.manual_seed(1032707);random.seed(1032707)
     root=Path(__file__).resolve().parent;out=o.output_dir.resolve();out.mkdir(parents=True,exist_ok=False)
@@ -109,6 +111,9 @@ def main():
     if not cache.get('complete'):raise ValueError('Incomplete cache')
     if hashlib.sha256(Path(cache['parent']).read_bytes()).hexdigest()!=cache['parent_sha256']:raise ValueError('Parent changed')
     train=[load(x) for x in cache['splits']['train']];validation=[load(x) for x in cache['splits']['validation']]
+    native=[r for r in train if r['metadata'].get('family')=='native_texture']
+    authored=[r for r in train if r['metadata'].get('family')!='native_texture']
+    if o.native_fraction and (not native or not authored):raise ValueError('Native replay requires both native and authored training sources')
     anchors=[load(x) for x in cache['real_training']];development=[load(x) for x in cache['real_development']]
     train_sources={r['metadata']['source'] for r in train};val_sources={r['metadata']['source'] for r in validation}
     if train_sources&val_sources:raise ValueError('Source leakage')
@@ -133,6 +138,8 @@ def main():
     manifest['learning_rate']=o.learning_rate
     manifest['weight_initialization']={'checkpoint':str(o.init_checkpoint.resolve()),'sha256':hashlib.sha256(o.init_checkpoint.read_bytes()).hexdigest(),'optimizer_restored':False} if o.init_checkpoint else None
     if o.decoder_revision==2 or o.anchor_every!=4:signature['anchor_every']=o.anchor_every
+    if o.native_fraction:signature['native_fraction']=o.native_fraction
+    manifest['native_fraction']=o.native_fraction
     manifest.update(training_signature=signature,resumed_from=str(o.resume.resolve()) if o.resume else None,recovery_format=1)
     write(out/'config.json',manifest);write(out/'pipeline.json',pipeline);snapshot=out/'source';snapshot.mkdir()
     for f in root.glob('*.py'):shutil.copy2(f,snapshot/f.name)
@@ -204,6 +211,10 @@ def main():
             status('baseline_validation');write(out/'baseline_validation.json',evaluate(model,validation))
         while step<o.steps:
             model.train();rows=random.choices(train,k=o.batch_size)
+            if o.native_fraction:
+                # Reserve the final slot for optional real training annotations.
+                count=round((o.batch_size-1)*o.native_fraction)
+                rows=random.choices(native,k=count)+random.choices(authored,k=o.batch_size-count)
             if step%o.anchor_every==0:rows[-1]=random.choice(anchors)
             augment=step%2==1 if model.revision==1 else random.random()<.75
             b=batch(rows,model,augment=augment);opt.zero_grad(set_to_none=True)
