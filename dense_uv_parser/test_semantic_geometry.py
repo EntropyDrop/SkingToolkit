@@ -28,6 +28,8 @@ class SemanticGeometryTests(unittest.TestCase):
    m.edit.bias.fill_(3);m.semantic.bias.fill_(-20);m.semantic.bias[0]=20
    p=decode_revision(m,features,uv)
    self.assertEqual(int(p['alpha'][:,m.outer].sum()),0)
+   m.semantic.bias.fill_(-20);m.semantic.bias[1]=20
+   self.assertEqual(int(decode_revision(m,features,uv)['alpha'][:,m.outer].sum()),0)
    uv[:,:,3]=1;m.semantic.bias.fill_(-20);m.semantic.bias[4]=20
    p=decode_revision(m,features,uv)
    self.assertTrue(bool((p['alpha'][:,m.outer]==1).all()))

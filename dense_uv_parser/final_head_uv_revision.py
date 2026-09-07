@@ -124,7 +124,12 @@ def decode_revision(model,features,uv):
         # UV class zero denotes absent outer support (source-image class zero
         # still means abstention). The edit prior shifts all occupied classes
         # together; occupancy and semantic supervision both train this score.
-        semantic_logits=torch.cat([semantic_logits[:,:,:1],semantic_logits[:,:,1:]+torch.where(model.outer[None],alpha_logits,torch.zeros_like(alpha_logits))[:,:,None]],2)
+        occupied=(4,5,6,7,10,11,12,13);inner=(1,2,3,8,9)
+        joint=semantic_logits.clone()
+        joint[:,:,0]=torch.logsumexp(semantic_logits[:,:,(0,*inner)],2)
+        joint[:,:,inner]=-1e4
+        joint[:,:,occupied]=semantic_logits[:,:,occupied]+alpha_logits[:,:,None]
+        semantic_logits=torch.where(model.outer[None,:,None],joint,semantic_logits)
         joint_alpha=torch.logsumexp(semantic_logits[:,:,1:],2)-semantic_logits[:,:,0]
         alpha_logits=torch.where(model.outer[None],joint_alpha,alpha_logits)
     edit_logits=torch.where(uv[:,:,3]>.5,-alpha_logits,alpha_logits)
