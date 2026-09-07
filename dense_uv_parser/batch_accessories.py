@@ -96,6 +96,8 @@ def main():
                 if p.shape[1]%len(config['routing']['views']):raise ValueError('Combined width must divide evenly into views')
                 probability=F.interpolate(torch.stack(p.chunk(len(config['routing']['views']),dim=1))[:,None],images.shape[-2:],mode='nearest-exact')[:,0].cuda()
             result=run_pipeline(model,renderer,images,config,complete=True,foreground_probability=probability)
+            if 'final_head_material_refit' in result:
+                (scratch/'final_head_material_refit.json').write_text(json.dumps(result['final_head_material_refit'],indent=2))
             if probability is not None:
                 save_image(probability[:,None].cpu(),scratch/'foreground_probability.png',nrow=len(config['routing']['views']))
                 save_image(result['foreground'][:,None].float().cpu(),scratch/'foreground_mask.png',nrow=len(config['routing']['views']))

@@ -91,6 +91,9 @@ def run_pipeline(model, renderer, images, config=None, complete=False, outputs=N
         if getattr(model,'final_head_uv_decoder',None) is not None:
             from SkingToolkit.dense_uv_parser.final_head_uv import apply_final_head_uv
             apply_final_head_uv(model,result)
+            if config.get('final_head_material_refine_steps',0):
+                from SkingToolkit.dense_uv_parser.final_head_material import refine_final_head_uv
+                refine_final_head_uv(model,result,renderer,views,config['final_head_material_refine_steps'])
         result['render'] = torch.stack([renderer.forward_view(result['uv'], view) for view in views],1).flatten(0,1)
     return result
 

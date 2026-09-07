@@ -122,4 +122,6 @@ def apply_final_head_uv(model,result):
     evidence=image_evidence(details['rendered'],details['routing']['observed_foreground'],details['outputs'])
     before=result['uv'];prediction=decoder(before,evidence);result['uv']=prediction['uv']
     result['final_head_uv']={'alpha_probability':prediction['alpha_probability'],'color_gate_probability':prediction['color_gate_logits'].sigmoid()}
+    if decoder.revision==2:
+        result['final_head_uv'].update({k:prediction[k] for k in ('mirror_link_logits','layer_link_logits')})
     if not torch.equal(before[:,:,16:],result['uv'][:,:,16:]):raise RuntimeError('Final head decoder modified body UV')
