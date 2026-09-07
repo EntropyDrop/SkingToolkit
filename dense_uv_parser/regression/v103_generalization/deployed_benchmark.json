@@ -1,0 +1,886 @@
+{
+  "scope": "56 train-disjoint synthetic images from 40 source identities; same raw renders, ground-truth foreground, full geometry pipeline including its initial RGB fit. Final RGB-only refit omitted because it cannot change alpha. These validation identities have been used for calibration/development, not independent real-world performance estimation.",
+  "checkpoints": {
+    "old_v103": {
+      "path": "dense_uv_parser/runs/v103_semantic_revision_20260907/candidate_final_material_guarded/parser.pt",
+      "sha256": "b2f29411596ef62858c08a30b1a76d0597c9b0423e509f2c84cd81174d5ecda7"
+    },
+    "candidate": {
+      "path": "dense_uv_parser/runs/v103_generalization_20260907/candidate_risk_1000_beard/parser.pt",
+      "sha256": "dcd521d2bbd01e824834cb30bfbf60a849e18a314e586d85fa74bbd2fb6bb297"
+    }
+  },
+  "rows": [
+    {
+      "source_sha256": "f66f415cc0a09b3ea3db81e9c848a6ba1dc0650929fd809659e4720b22cfd804",
+      "family": "native_texture",
+      "cohort": "native",
+      "old_v103": {
+        "tp": 115,
+        "fp": 36,
+        "fn": 12
+      },
+      "candidate": {
+        "tp": 123,
+        "fp": 43,
+        "fn": 4
+      }
+    },
+    {
+      "source_sha256": "61f69fc2a3fec2072d5fb1d2be72d7bff0cff0ce21e8b532e8bf37d5e1f054d4",
+      "family": "native_texture",
+      "cohort": "native",
+      "old_v103": {
+        "tp": 330,
+        "fp": 11,
+        "fn": 10
+      },
+      "candidate": {
+        "tp": 313,
+        "fp": 5,
+        "fn": 27
+      }
+    },
+    {
+      "source_sha256": "fb10269e3a8e343977e99c642e2a0fa73077ac8a0b9ed5d65eaa4c86dae9be41",
+      "family": "native_texture",
+      "cohort": "native",
+      "old_v103": {
+        "tp": 18,
+        "fp": 2,
+        "fn": 0
+      },
+      "candidate": {
+        "tp": 18,
+        "fp": 4,
+        "fn": 0
+      }
+    },
+    {
+      "source_sha256": "f0c795dd93567ffe812a824f32f206146fa93bd2fa0d2857283a4f4d4da0054d",
+      "family": "native_texture",
+      "cohort": "native",
+      "old_v103": {
+        "tp": 30,
+        "fp": 38,
+        "fn": 6
+      },
+      "candidate": {
+        "tp": 36,
+        "fp": 4,
+        "fn": 0
+      }
+    },
+    {
+      "source_sha256": "90443b1a6372e2a62fc52a760b52588b4649f84297dd46eee3933eaa478b86e5",
+      "family": "native_texture",
+      "cohort": "native",
+      "old_v103": {
+        "tp": 57,
+        "fp": 7,
+        "fn": 41
+      },
+      "candidate": {
+        "tp": 84,
+        "fp": 0,
+        "fn": 14
+      }
+    },
+    {
+      "source_sha256": "7e1f298955b3457b1774894cdbd5571805757ff0eb0c3ee502e0f4731ae48f56",
+      "family": "native_texture",
+      "cohort": "native",
+      "old_v103": {
+        "tp": 296,
+        "fp": 0,
+        "fn": 84
+      },
+      "candidate": {
+        "tp": 316,
+        "fp": 1,
+        "fn": 64
+      }
+    },
+    {
+      "source_sha256": "1d33720b90d18daf068da851d210d1fbedf87383fb270adb1cf0f62eeb123b94",
+      "family": "native_texture",
+      "cohort": "native",
+      "old_v103": {
+        "tp": 202,
+        "fp": 6,
+        "fn": 35
+      },
+      "candidate": {
+        "tp": 225,
+        "fp": 4,
+        "fn": 12
+      }
+    },
+    {
+      "source_sha256": "1d0c465c4e80f6105b59b78be3d73e676aa671b5b12ec66347f40db5e51d5258",
+      "family": "native_texture",
+      "cohort": "native",
+      "old_v103": {
+        "tp": 27,
+        "fp": 0,
+        "fn": 51
+      },
+      "candidate": {
+        "tp": 49,
+        "fp": 0,
+        "fn": 29
+      }
+    },
+    {
+      "source_sha256": "6238e23d04a5c70d81ee5a32366b5d33fae1abc09bf0a32641dcd84d2bcab504",
+      "family": "native_texture",
+      "cohort": "native",
+      "old_v103": {
+        "tp": 34,
+        "fp": 6,
+        "fn": 32
+      },
+      "candidate": {
+        "tp": 61,
+        "fp": 7,
+        "fn": 5
+      }
+    },
+    {
+      "source_sha256": "ecce086f5728f351047d35e2d2fca4e06de931a8c4a03bb31d1caecfe7919fda",
+      "family": "native_texture",
+      "cohort": "native",
+      "old_v103": {
+        "tp": 232,
+        "fp": 41,
+        "fn": 72
+      },
+      "candidate": {
+        "tp": 273,
+        "fp": 62,
+        "fn": 31
+      }
+    },
+    {
+      "source_sha256": "7210e3f1a13673566ca9223e606327182e826c549ae653349a8325e4f128df18",
+      "family": "native_texture",
+      "cohort": "native",
+      "old_v103": {
+        "tp": 129,
+        "fp": 93,
+        "fn": 51
+      },
+      "candidate": {
+        "tp": 139,
+        "fp": 21,
+        "fn": 41
+      }
+    },
+    {
+      "source_sha256": "0a92f563fe9312af7e2f6af4eb62d530f46ca1193448e2479ba87fa33a24eae4",
+      "family": "native_texture",
+      "cohort": "native",
+      "old_v103": {
+        "tp": 50,
+        "fp": 6,
+        "fn": 0
+      },
+      "candidate": {
+        "tp": 50,
+        "fp": 0,
+        "fn": 0
+      }
+    },
+    {
+      "source_sha256": "bfce5fd3d02b0c1de2613264aa3e791e30331c2dbdf0c9307a16986bff23764c",
+      "family": "native_texture",
+      "cohort": "native",
+      "old_v103": {
+        "tp": 95,
+        "fp": 8,
+        "fn": 52
+      },
+      "candidate": {
+        "tp": 119,
+        "fp": 24,
+        "fn": 28
+      }
+    },
+    {
+      "source_sha256": "e499ae15a8bcb8e3ceb1c819d3c2486b2de03d4f75b80a9d5ef2318e0b27c7c7",
+      "family": "native_texture",
+      "cohort": "native",
+      "old_v103": {
+        "tp": 12,
+        "fp": 0,
+        "fn": 8
+      },
+      "candidate": {
+        "tp": 17,
+        "fp": 2,
+        "fn": 3
+      }
+    },
+    {
+      "source_sha256": "3958eab8c4d1399dd983407326c5586d484a5ed5b744ca08814076abf46d84e5",
+      "family": "native_texture",
+      "cohort": "native",
+      "old_v103": {
+        "tp": 18,
+        "fp": 3,
+        "fn": 8
+      },
+      "candidate": {
+        "tp": 26,
+        "fp": 1,
+        "fn": 0
+      }
+    },
+    {
+      "source_sha256": "ed0061eac587e6ab5f1aa2bba0e411fb72218e1e3493a13e7c39c8502f467af3",
+      "family": "native_texture",
+      "cohort": "native",
+      "old_v103": {
+        "tp": 127,
+        "fp": 29,
+        "fn": 35
+      },
+      "candidate": {
+        "tp": 121,
+        "fp": 8,
+        "fn": 41
+      }
+    },
+    {
+      "source_sha256": "cfeb1dbaaa24cd497d75ed5e93f5d6c38b0c4772b5bb5196c406a994ed9af8d8",
+      "family": "native_texture",
+      "cohort": "native",
+      "old_v103": {
+        "tp": 0,
+        "fp": 0,
+        "fn": 0
+      },
+      "candidate": {
+        "tp": 0,
+        "fp": 0,
+        "fn": 0
+      }
+    },
+    {
+      "source_sha256": "5ad3117bb28dcc5d71daa513cff007196a3dc3fc44c3a9c2f442b599e3181ec3",
+      "family": "native_texture",
+      "cohort": "native",
+      "old_v103": {
+        "tp": 331,
+        "fp": 0,
+        "fn": 53
+      },
+      "candidate": {
+        "tp": 335,
+        "fp": 0,
+        "fn": 49
+      }
+    },
+    {
+      "source_sha256": "5618f99dedcf979b0b29f92bfe23c5978b53ec57968cd416d45eab73ab8915be",
+      "family": "native_texture",
+      "cohort": "native",
+      "old_v103": {
+        "tp": 14,
+        "fp": 0,
+        "fn": 10
+      },
+      "candidate": {
+        "tp": 13,
+        "fp": 0,
+        "fn": 11
+      }
+    },
+    {
+      "source_sha256": "1ac4246330e0c982cb4746c8a82fa1ca34f6f97ee3ddf21f12fefdaf919e4eda",
+      "family": "native_texture",
+      "cohort": "native",
+      "old_v103": {
+        "tp": 19,
+        "fp": 4,
+        "fn": 5
+      },
+      "candidate": {
+        "tp": 20,
+        "fp": 1,
+        "fn": 4
+      }
+    },
+    {
+      "source_sha256": "0d6392a3576adeb2c667b81bbbc5a4641f2e69f88dbb178cb7e179c204cb5c14",
+      "family": "native_texture",
+      "cohort": "native",
+      "old_v103": {
+        "tp": 18,
+        "fp": 35,
+        "fn": 1
+      },
+      "candidate": {
+        "tp": 15,
+        "fp": 0,
+        "fn": 4
+      }
+    },
+    {
+      "source_sha256": "6d998d6d150ecb4e9ee27dc428199d8a0cdd65afcd81169641e456445c5fb094",
+      "family": "native_texture",
+      "cohort": "native",
+      "old_v103": {
+        "tp": 21,
+        "fp": 5,
+        "fn": 60
+      },
+      "candidate": {
+        "tp": 73,
+        "fp": 3,
+        "fn": 8
+      }
+    },
+    {
+      "source_sha256": "86e94657cbf996baa15f6c1fd89217b27bbb01fe0489edc1d8c40f74a4dd4660",
+      "family": "native_texture",
+      "cohort": "native",
+      "old_v103": {
+        "tp": 31,
+        "fp": 12,
+        "fn": 69
+      },
+      "candidate": {
+        "tp": 80,
+        "fp": 3,
+        "fn": 20
+      }
+    },
+    {
+      "source_sha256": "dc52e70ae143c9577da0a15300386f32a8f43bfd002b18e16cf0684c4e7ecab0",
+      "family": "native_texture",
+      "cohort": "native",
+      "old_v103": {
+        "tp": 109,
+        "fp": 69,
+        "fn": 20
+      },
+      "candidate": {
+        "tp": 125,
+        "fp": 54,
+        "fn": 4
+      }
+    },
+    {
+      "source_sha256": "3e37f3dabd974404c4e014457ba96459debf37c7ad307bbc9c94f83cc3a8e91c",
+      "family": "native_texture",
+      "cohort": "native",
+      "old_v103": {
+        "tp": 33,
+        "fp": 43,
+        "fn": 43
+      },
+      "candidate": {
+        "tp": 65,
+        "fp": 17,
+        "fn": 11
+      }
+    },
+    {
+      "source_sha256": "61ce4e73fcd2e85a2f4b04715e80bf489d1b5be09f391cc4eefb806595706c58",
+      "family": "native_texture",
+      "cohort": "native",
+      "old_v103": {
+        "tp": 320,
+        "fp": 46,
+        "fn": 7
+      },
+      "candidate": {
+        "tp": 321,
+        "fp": 26,
+        "fn": 6
+      }
+    },
+    {
+      "source_sha256": "1f8525cabcf4e39bda5a1cb5a4444ff0d7369d76b40fa5f7af8edf706ee55bae",
+      "family": "native_texture",
+      "cohort": "native",
+      "old_v103": {
+        "tp": 125,
+        "fp": 45,
+        "fn": 30
+      },
+      "candidate": {
+        "tp": 128,
+        "fp": 10,
+        "fn": 27
+      }
+    },
+    {
+      "source_sha256": "d3efedbbc947cfcfa432456bc0ffc509cfcfd58e503c8047917ba513950d3dd2",
+      "family": "native_texture",
+      "cohort": "native",
+      "old_v103": {
+        "tp": 69,
+        "fp": 24,
+        "fn": 21
+      },
+      "candidate": {
+        "tp": 82,
+        "fp": 8,
+        "fn": 8
+      }
+    },
+    {
+      "source_sha256": "c0d1559b85c02d8a9c8c989b1ba351469fc6497368c8120a8c5bb8d6af2850ac",
+      "family": "native_texture",
+      "cohort": "native",
+      "old_v103": {
+        "tp": 4,
+        "fp": 1,
+        "fn": 13
+      },
+      "candidate": {
+        "tp": 16,
+        "fp": 0,
+        "fn": 1
+      }
+    },
+    {
+      "source_sha256": "90df91258f2f7a97f41d5646647827eed6930fa72cbf3b317ebcf14d13a9ff47",
+      "family": "native_texture",
+      "cohort": "native",
+      "old_v103": {
+        "tp": 98,
+        "fp": 4,
+        "fn": 41
+      },
+      "candidate": {
+        "tp": 129,
+        "fp": 5,
+        "fn": 10
+      }
+    },
+    {
+      "source_sha256": "351dcde0e3273edda66cad8e93e156fb8e45d105ea19a0f49342a115a4a2c88a",
+      "family": "native_texture",
+      "cohort": "native",
+      "old_v103": {
+        "tp": 0,
+        "fp": 0,
+        "fn": 1
+      },
+      "candidate": {
+        "tp": 0,
+        "fp": 0,
+        "fn": 1
+      }
+    },
+    {
+      "source_sha256": "84556f0432e340f02f460ebe8c788c4352336de8e1255c03bf40921083df1db7",
+      "family": "native_texture",
+      "cohort": "native",
+      "old_v103": {
+        "tp": 369,
+        "fp": 0,
+        "fn": 15
+      },
+      "candidate": {
+        "tp": 378,
+        "fp": 0,
+        "fn": 6
+      }
+    },
+    {
+      "source_sha256": "947496c6ed8f25029fad397e52dbd6ce34a457e771294dfc3dfe093a9f1287c4",
+      "family": "paired_bare",
+      "cohort": "paired",
+      "old_v103": {
+        "tp": 0,
+        "fp": 0,
+        "fn": 0
+      },
+      "candidate": {
+        "tp": 0,
+        "fp": 0,
+        "fn": 0
+      }
+    },
+    {
+      "source_sha256": "947496c6ed8f25029fad397e52dbd6ce34a457e771294dfc3dfe093a9f1287c4",
+      "family": "paired_glasses",
+      "cohort": "paired",
+      "old_v103": {
+        "tp": 24,
+        "fp": 0,
+        "fn": 0
+      },
+      "candidate": {
+        "tp": 24,
+        "fp": 1,
+        "fn": 0
+      }
+    },
+    {
+      "source_sha256": "947496c6ed8f25029fad397e52dbd6ce34a457e771294dfc3dfe093a9f1287c4",
+      "family": "paired_phones",
+      "cohort": "paired",
+      "old_v103": {
+        "tp": 65,
+        "fp": 0,
+        "fn": 0
+      },
+      "candidate": {
+        "tp": 65,
+        "fp": 0,
+        "fn": 0
+      }
+    },
+    {
+      "source_sha256": "f32d75b94322fa6b01985d5bf3468a7bdf141b3667ec8a3b863463a780e593b9",
+      "family": "paired_bare",
+      "cohort": "paired",
+      "old_v103": {
+        "tp": 0,
+        "fp": 0,
+        "fn": 0
+      },
+      "candidate": {
+        "tp": 0,
+        "fp": 0,
+        "fn": 0
+      }
+    },
+    {
+      "source_sha256": "f32d75b94322fa6b01985d5bf3468a7bdf141b3667ec8a3b863463a780e593b9",
+      "family": "paired_glasses",
+      "cohort": "paired",
+      "old_v103": {
+        "tp": 36,
+        "fp": 0,
+        "fn": 0
+      },
+      "candidate": {
+        "tp": 36,
+        "fp": 0,
+        "fn": 0
+      }
+    },
+    {
+      "source_sha256": "f32d75b94322fa6b01985d5bf3468a7bdf141b3667ec8a3b863463a780e593b9",
+      "family": "paired_phones",
+      "cohort": "paired",
+      "old_v103": {
+        "tp": 68,
+        "fp": 0,
+        "fn": 0
+      },
+      "candidate": {
+        "tp": 68,
+        "fp": 0,
+        "fn": 0
+      }
+    },
+    {
+      "source_sha256": "c37623e6358c5deb825eb48b1176c0a1e0d5772dac1705da95a3771f3c004eea",
+      "family": "paired_bare",
+      "cohort": "paired",
+      "old_v103": {
+        "tp": 0,
+        "fp": 0,
+        "fn": 0
+      },
+      "candidate": {
+        "tp": 0,
+        "fp": 0,
+        "fn": 0
+      }
+    },
+    {
+      "source_sha256": "c37623e6358c5deb825eb48b1176c0a1e0d5772dac1705da95a3771f3c004eea",
+      "family": "paired_glasses",
+      "cohort": "paired",
+      "old_v103": {
+        "tp": 25,
+        "fp": 0,
+        "fn": 0
+      },
+      "candidate": {
+        "tp": 25,
+        "fp": 1,
+        "fn": 0
+      }
+    },
+    {
+      "source_sha256": "c37623e6358c5deb825eb48b1176c0a1e0d5772dac1705da95a3771f3c004eea",
+      "family": "paired_phones",
+      "cohort": "paired",
+      "old_v103": {
+        "tp": 46,
+        "fp": 0,
+        "fn": 0
+      },
+      "candidate": {
+        "tp": 46,
+        "fp": 1,
+        "fn": 0
+      }
+    },
+    {
+      "source_sha256": "e486cef0db8b1b166ab5382033bee43a0d45b51880c5f9ae4b8b1e28dd6a0860",
+      "family": "paired_bare",
+      "cohort": "paired",
+      "old_v103": {
+        "tp": 42,
+        "fp": 0,
+        "fn": 0
+      },
+      "candidate": {
+        "tp": 42,
+        "fp": 0,
+        "fn": 0
+      }
+    },
+    {
+      "source_sha256": "e486cef0db8b1b166ab5382033bee43a0d45b51880c5f9ae4b8b1e28dd6a0860",
+      "family": "paired_glasses",
+      "cohort": "paired",
+      "old_v103": {
+        "tp": 49,
+        "fp": 2,
+        "fn": 0
+      },
+      "candidate": {
+        "tp": 49,
+        "fp": 2,
+        "fn": 0
+      }
+    },
+    {
+      "source_sha256": "e486cef0db8b1b166ab5382033bee43a0d45b51880c5f9ae4b8b1e28dd6a0860",
+      "family": "paired_phones",
+      "cohort": "paired",
+      "old_v103": {
+        "tp": 110,
+        "fp": 2,
+        "fn": 0
+      },
+      "candidate": {
+        "tp": 110,
+        "fp": 0,
+        "fn": 0
+      }
+    },
+    {
+      "source_sha256": "ca217161b8e68cefc4cdc92c721c9d24e7d5050a72f541e5ce23f605ea545d7b",
+      "family": "paired_bare",
+      "cohort": "paired",
+      "old_v103": {
+        "tp": 0,
+        "fp": 0,
+        "fn": 0
+      },
+      "candidate": {
+        "tp": 0,
+        "fp": 0,
+        "fn": 0
+      }
+    },
+    {
+      "source_sha256": "ca217161b8e68cefc4cdc92c721c9d24e7d5050a72f541e5ce23f605ea545d7b",
+      "family": "paired_glasses",
+      "cohort": "paired",
+      "old_v103": {
+        "tp": 22,
+        "fp": 0,
+        "fn": 1
+      },
+      "candidate": {
+        "tp": 22,
+        "fp": 0,
+        "fn": 1
+      }
+    },
+    {
+      "source_sha256": "ca217161b8e68cefc4cdc92c721c9d24e7d5050a72f541e5ce23f605ea545d7b",
+      "family": "paired_phones",
+      "cohort": "paired",
+      "old_v103": {
+        "tp": 50,
+        "fp": 0,
+        "fn": 0
+      },
+      "candidate": {
+        "tp": 50,
+        "fp": 0,
+        "fn": 0
+      }
+    },
+    {
+      "source_sha256": "a76b89fff21df642eb668d03fb11160121b50f424218aa196cbfc3d4ad8970d3",
+      "family": "paired_bare",
+      "cohort": "paired",
+      "old_v103": {
+        "tp": 16,
+        "fp": 0,
+        "fn": 0
+      },
+      "candidate": {
+        "tp": 16,
+        "fp": 0,
+        "fn": 0
+      }
+    },
+    {
+      "source_sha256": "a76b89fff21df642eb668d03fb11160121b50f424218aa196cbfc3d4ad8970d3",
+      "family": "paired_glasses",
+      "cohort": "paired",
+      "old_v103": {
+        "tp": 34,
+        "fp": 0,
+        "fn": 0
+      },
+      "candidate": {
+        "tp": 34,
+        "fp": 3,
+        "fn": 0
+      }
+    },
+    {
+      "source_sha256": "a76b89fff21df642eb668d03fb11160121b50f424218aa196cbfc3d4ad8970d3",
+      "family": "paired_phones",
+      "cohort": "paired",
+      "old_v103": {
+        "tp": 65,
+        "fp": 0,
+        "fn": 0
+      },
+      "candidate": {
+        "tp": 65,
+        "fp": 1,
+        "fn": 0
+      }
+    },
+    {
+      "source_sha256": "802d51217a49b81f4c2499260384c501b1fd1465b3ce2e30e952d707969b271f",
+      "family": "paired_bare",
+      "cohort": "paired",
+      "old_v103": {
+        "tp": 62,
+        "fp": 0,
+        "fn": 0
+      },
+      "candidate": {
+        "tp": 62,
+        "fp": 0,
+        "fn": 0
+      }
+    },
+    {
+      "source_sha256": "802d51217a49b81f4c2499260384c501b1fd1465b3ce2e30e952d707969b271f",
+      "family": "paired_glasses",
+      "cohort": "paired",
+      "old_v103": {
+        "tp": 82,
+        "fp": 0,
+        "fn": 0
+      },
+      "candidate": {
+        "tp": 82,
+        "fp": 0,
+        "fn": 0
+      }
+    },
+    {
+      "source_sha256": "802d51217a49b81f4c2499260384c501b1fd1465b3ce2e30e952d707969b271f",
+      "family": "paired_phones",
+      "cohort": "paired",
+      "old_v103": {
+        "tp": 123,
+        "fp": 0,
+        "fn": 0
+      },
+      "candidate": {
+        "tp": 123,
+        "fp": 0,
+        "fn": 0
+      }
+    },
+    {
+      "source_sha256": "15b99ae95f1ff344afeff28d700ecece9ca7958604242f22654c2aefeb718f71",
+      "family": "paired_bare",
+      "cohort": "paired",
+      "old_v103": {
+        "tp": 60,
+        "fp": 3,
+        "fn": 6
+      },
+      "candidate": {
+        "tp": 66,
+        "fp": 1,
+        "fn": 0
+      }
+    },
+    {
+      "source_sha256": "15b99ae95f1ff344afeff28d700ecece9ca7958604242f22654c2aefeb718f71",
+      "family": "paired_glasses",
+      "cohort": "paired",
+      "old_v103": {
+        "tp": 89,
+        "fp": 2,
+        "fn": 0
+      },
+      "candidate": {
+        "tp": 89,
+        "fp": 1,
+        "fn": 0
+      }
+    },
+    {
+      "source_sha256": "15b99ae95f1ff344afeff28d700ecece9ca7958604242f22654c2aefeb718f71",
+      "family": "paired_phones",
+      "cohort": "paired",
+      "old_v103": {
+        "tp": 129,
+        "fp": 1,
+        "fn": 0
+      },
+      "candidate": {
+        "tp": 129,
+        "fp": 0,
+        "fn": 0
+      }
+    }
+  ],
+  "cohorts": {
+    "native": {
+      "old_v103": {
+        "tp": 3333,
+        "fp": 574,
+        "fn": 886,
+        "iou": 0.695389109117463
+      },
+      "candidate": {
+        "tp": 3750,
+        "fp": 313,
+        "fn": 469,
+        "iou": 0.8274492497793469
+      }
+    },
+    "paired": {
+      "old_v103": {
+        "tp": 1197,
+        "fp": 10,
+        "fn": 7,
+        "iou": 0.985996705107084
+      },
+      "candidate": {
+        "tp": 1203,
+        "fp": 11,
+        "fn": 1,
+        "iou": 0.9901234567901235
+      }
+    }
+  },
+  "elapsed_seconds": 553.1611957550049
+}

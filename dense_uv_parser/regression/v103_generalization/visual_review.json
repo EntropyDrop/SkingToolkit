@@ -1,0 +1,23 @@
+{
+  "reviewer": "assistant_visual_review",
+  "pages": [
+    "/home/ds/llms/SkingToolkitDev/dense_uv_parser/runs/v103_generalization_20260907/candidate_risk_1000_beard_protected/visual_review/page_01.png",
+    "/home/ds/llms/SkingToolkitDev/dense_uv_parser/runs/v103_generalization_20260907/candidate_risk_1000_beard_protected/visual_review/page_02.png",
+    "/home/ds/llms/SkingToolkitDev/dense_uv_parser/runs/v103_generalization_20260907/candidate_risk_1000_beard_protected/visual_review/page_03.png",
+    "/home/ds/llms/SkingToolkitDev/dense_uv_parser/runs/v103_generalization_20260907/candidate_risk_1000_beard_protected/visual_review/page_04.png",
+    "/home/ds/llms/SkingToolkitDev/dense_uv_parser/runs/v103_generalization_20260907/candidate_risk_1000_beard_protected/visual_review/page_05.png",
+    "/home/ds/llms/SkingToolkitDev/dense_uv_parser/runs/v103_generalization_20260907/candidate_risk_1000_beard_protected/visual_review/page_06.png",
+    "/home/ds/llms/SkingToolkitDev/dense_uv_parser/runs/v103_generalization_20260907/candidate_risk_1000_beard_protected/visual_review/page_07.png",
+    "/home/ds/llms/SkingToolkitDev/dense_uv_parser/runs/v103_generalization_20260907/candidate_risk_1000_beard_protected/visual_review/page_08.png",
+    "/home/ds/llms/SkingToolkitDev/dense_uv_parser/runs/v103_generalization_20260907/candidate_risk_1000_beard_protected/visual_review/page_09.png",
+    "/home/ds/llms/SkingToolkitDev/dense_uv_parser/runs/v103_generalization_20260907/candidate_risk_1000_beard_protected/visual_review/page_10.png",
+    "/home/ds/llms/SkingToolkitDev/dense_uv_parser/runs/v103_generalization_20260907/candidate_risk_1000_beard_protected/visual_review/page_11.png"
+  ],
+  "scope": "31 original/previous/new front and back head comparisons; bodies are byte-identical to previous outputs. No independent per-UV ground truth for all real cases.",
+  "observed_regressions": "No new material or accessory regression observed after footprint protection.",
+  "remaining_limitations": [
+    "Some sparse top cells and blurred hat lettering remain in additional cases.",
+    "Hair feedback differs from v101 by 19 cells; v101 is a reference, not ground truth.",
+    "Development set is repeatedly reviewed; synthetic benchmark is not an independent real-world generalization estimate."
+  ]
+}

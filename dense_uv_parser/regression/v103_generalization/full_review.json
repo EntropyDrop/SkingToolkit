@@ -1,0 +1,853 @@
+{
+  "checkpoint": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/runs/v103_generalization_20260907/candidate_risk_1000_beard_protected/parser.pt",
+  "checkpoint_sha256": "c2753056f05d0772aa38ad6fe37aaa14c4c90034d4886ed2d75bd1c0644d3165",
+  "cases": {
+    "beard": {
+      "name": "beard",
+      "input": "/home/ds/llms/SKING_DDJ_Dataset/entropydrop_website_generations/SKING_DDJ_v61/1ZW63H5Z8YNV57MT_edited.png",
+      "input_sha256": "a99b78b156781900b20180c9c58bfff7dc07956dbb04632383404e8e863ddf2c",
+      "probability": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/cache/released_foreground/1ZW63H5Z8YNV57MT_edited_62eeca78f389/probability.png",
+      "role": "real_training",
+      "old_output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v103_final_material_guarded_20260907/1ZW63H5Z8YNV57MT_edited_7bf05406b74e",
+      "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v103_generalization_risk_1000_beard_protected_20260907/1ZW63H5Z8YNV57MT_edited_46d5872718f8",
+      "body_exact_to_old": true,
+      "outer_head": 44,
+      "material_fit": {
+        "steps": 64,
+        "accepted": true,
+        "source_mse_before": 0.007806158158928156,
+        "source_mse_after_proposed": 0.007720442954450846,
+        "source_mse_final": 0.007720442954450846,
+        "confident_source_pixels": 54423,
+        "alpha_exact": true,
+        "body_exact": true,
+        "learned_material_links_preserved": true
+      },
+      "beard": {
+        "annotation": "dense_uv_parser/regression/v102_uv_symmetry_review.json",
+        "beard_symmetry": {
+          "inner": {
+            "alpha_mismatched_texels": 0,
+            "rgb_mismatched_texels": 0,
+            "rgb_max_difference": 0
+          },
+          "outer": {
+            "alpha_mismatched_texels": 0,
+            "rgb_mismatched_texels": 0,
+            "rgb_max_difference": 0
+          }
+        },
+        "beard_symmetry_passed": true,
+        "hair_reference_alpha_mismatched_texels": 0,
+        "passed": true,
+        "scope": "Annotated development example; not an independent generalization score."
+      },
+      "layer_alignment": {
+        "pairs": 20,
+        "support_mismatches": 0,
+        "rgb_mismatches": 0
+      },
+      "repeat": {
+        "alpha_exact": true,
+        "body_exact": true,
+        "rgb_max_delta": 0
+      }
+    },
+    "crown": {
+      "name": "crown",
+      "input": "/home/ds/llms/SKING_DDJ_Dataset/entropydrop_website_generations/SKING_DDJ_v54/1WQEQRUDRLMLVX3E_edited.png",
+      "input_sha256": "6235b3496b12cc1b45358677bf0c3d31118688c226a780ad17046d62a79420ac",
+      "probability": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/cache/released_foreground/1WQEQRUDRLMLVX3E_edited_da74d8c503c3/probability.png",
+      "role": "real_training",
+      "old_output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v103_final_material_guarded_20260907/1WQEQRUDRLMLVX3E_edited_c964b685e031",
+      "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v103_generalization_risk_1000_beard_protected_20260907/1WQEQRUDRLMLVX3E_edited_854d8a03638d",
+      "body_exact_to_old": true,
+      "outer_head": 162,
+      "material_fit": {
+        "steps": 64,
+        "accepted": true,
+        "source_mse_before": 0.006595720537006855,
+        "source_mse_after_proposed": 0.006471864879131317,
+        "source_mse_final": 0.006471864879131317,
+        "confident_source_pixels": 56750,
+        "alpha_exact": true,
+        "body_exact": true,
+        "learned_material_links_preserved": true
+      },
+      "repeat": {
+        "alpha_exact": true,
+        "body_exact": true,
+        "rgb_max_delta": 0
+      }
+    },
+    "old_PU418PLGERMFC487_edited": {
+      "name": "old_PU418PLGERMFC487_edited",
+      "input": "/home/ds/llms/SKING_DDJ_Dataset/entropydrop_website_generations/SKING_DDJ_v54/PU418PLGERMFC487_edited.png",
+      "input_sha256": "479a62295b51356eb4b74a0999f39cf3ce804a9f8b97f1c22add642026e1c8a7",
+      "probability": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/cache/released_foreground/PU418PLGERMFC487_edited_d93db6c26576/probability.png",
+      "role": "real_training",
+      "old_output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v103_final_material_guarded_20260907/PU418PLGERMFC487_edited_296c72284515",
+      "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v103_generalization_risk_1000_beard_protected_20260907/PU418PLGERMFC487_edited_517001c61b09",
+      "body_exact_to_old": true,
+      "outer_head": 55,
+      "material_fit": {
+        "steps": 64,
+        "accepted": true,
+        "source_mse_before": 0.005976070649921894,
+        "source_mse_after_proposed": 0.005768246483057737,
+        "source_mse_final": 0.005768246483057737,
+        "confident_source_pixels": 53521,
+        "alpha_exact": true,
+        "body_exact": true,
+        "learned_material_links_preserved": true
+      },
+      "repeat": {
+        "alpha_exact": true,
+        "body_exact": true,
+        "rgb_max_delta": 1
+      }
+    },
+    "nose": {
+      "name": "nose",
+      "input": "/home/ds/llms/SKING_DDJ_Dataset/entropydrop_website_generations/SKING_DDJ_v54/1ZDZB1UAMS1DEZLD_edited.png",
+      "input_sha256": "c9a1f4ee159aeaa833dc090f763c5a59d4adddb5eed51caf72a7e7a3aae0d869",
+      "probability": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/cache/released_foreground/1ZDZB1UAMS1DEZLD_edited_7e2adb41abd1/probability.png",
+      "role": "real_development",
+      "old_output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v103_final_material_guarded_20260907/1ZDZB1UAMS1DEZLD_edited_059ef6f9eda0",
+      "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v103_generalization_risk_1000_beard_protected_20260907/1ZDZB1UAMS1DEZLD_edited_fc9eb219c51c",
+      "body_exact_to_old": true,
+      "outer_head": 85,
+      "material_fit": {
+        "steps": 64,
+        "accepted": true,
+        "source_mse_before": 0.013723124749958515,
+        "source_mse_after_proposed": 0.009347637183964252,
+        "source_mse_final": 0.009347637183964252,
+        "confident_source_pixels": 56269,
+        "alpha_exact": true,
+        "body_exact": true,
+        "learned_material_links_preserved": true
+      },
+      "repeat": {
+        "alpha_exact": true,
+        "body_exact": true,
+        "rgb_max_delta": 1
+      }
+    },
+    "old_1H6GAQA9BENWNB89_edited": {
+      "name": "old_1H6GAQA9BENWNB89_edited",
+      "input": "/home/ds/llms/SKING_DDJ_Dataset/entropydrop_website_generations/SKING_DDJ_v54/1H6GAQA9BENWNB89_edited.png",
+      "input_sha256": "b74739b8167ac5828d1805adb64d91b80e34226468a27880180c96b0dc2a2cef",
+      "probability": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/cache/released_foreground/1H6GAQA9BENWNB89_edited_6c52778386a2/probability.png",
+      "role": "real_development",
+      "old_output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v103_final_material_guarded_20260907/1H6GAQA9BENWNB89_edited_cdc6501392ab",
+      "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v103_generalization_risk_1000_beard_protected_20260907/1H6GAQA9BENWNB89_edited_6544cbceef2e",
+      "body_exact_to_old": true,
+      "outer_head": 26,
+      "material_fit": {
+        "steps": 64,
+        "accepted": true,
+        "source_mse_before": 0.0029701462481170893,
+        "source_mse_after_proposed": 0.0029623745940625668,
+        "source_mse_final": 0.0029623745940625668,
+        "confident_source_pixels": 53725,
+        "alpha_exact": true,
+        "body_exact": true,
+        "learned_material_links_preserved": true
+      },
+      "repeat": {
+        "alpha_exact": true,
+        "body_exact": true,
+        "rgb_max_delta": 0
+      }
+    },
+    "old_2RSZETA9PCRZHVEU_edited": {
+      "name": "old_2RSZETA9PCRZHVEU_edited",
+      "input": "/home/ds/llms/SKING_DDJ_Dataset/entropydrop_website_generations/SKING_DDJ_v66/2RSZETA9PCRZHVEU_edited.png",
+      "input_sha256": "ee549af57a7737c590bc0c37db55225863c68a43d75e7fe05daf3cfc1dba25bc",
+      "probability": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/cache/released_foreground/2RSZETA9PCRZHVEU_edited_c2cd5c27b9f4/probability.png",
+      "role": "real_development",
+      "old_output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v103_final_material_guarded_20260907/2RSZETA9PCRZHVEU_edited_96ae363aadd4",
+      "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v103_generalization_risk_1000_beard_protected_20260907/2RSZETA9PCRZHVEU_edited_bd89e863e7be",
+      "body_exact_to_old": true,
+      "outer_head": 101,
+      "material_fit": {
+        "steps": 64,
+        "accepted": true,
+        "source_mse_before": 0.0014618876157328486,
+        "source_mse_after_proposed": 0.0014499868266284466,
+        "source_mse_final": 0.0014499868266284466,
+        "confident_source_pixels": 55409,
+        "alpha_exact": true,
+        "body_exact": true,
+        "learned_material_links_preserved": true
+      },
+      "repeat": {
+        "alpha_exact": true,
+        "body_exact": true,
+        "rgb_max_delta": 0
+      }
+    },
+    "old_33TVPML5UL2TKASR_edited": {
+      "name": "old_33TVPML5UL2TKASR_edited",
+      "input": "/home/ds/llms/SKING_DDJ_Dataset/entropydrop_website_generations/SKING_DDJ_v66/33TVPML5UL2TKASR_edited.png",
+      "input_sha256": "bd326acbe65ce1c2761cc73bb5bd3e45c58428a458f4cbea3fa3050da829d11e",
+      "probability": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/cache/released_foreground/33TVPML5UL2TKASR_edited_d0f54eb1a0b7/probability.png",
+      "role": "real_development",
+      "old_output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v103_final_material_guarded_20260907/33TVPML5UL2TKASR_edited_ff6835a1734b",
+      "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v103_generalization_risk_1000_beard_protected_20260907/33TVPML5UL2TKASR_edited_d45cd8f7803e",
+      "body_exact_to_old": true,
+      "outer_head": 171,
+      "material_fit": {
+        "steps": 64,
+        "accepted": true,
+        "source_mse_before": 0.003228208515793085,
+        "source_mse_after_proposed": 0.003219480626285076,
+        "source_mse_final": 0.003219480626285076,
+        "confident_source_pixels": 57194,
+        "alpha_exact": true,
+        "body_exact": true,
+        "learned_material_links_preserved": true
+      },
+      "repeat": {
+        "alpha_exact": true,
+        "body_exact": true,
+        "rgb_max_delta": 1
+      }
+    },
+    "old_TWRLRRTHQP2UV368_edited": {
+      "name": "old_TWRLRRTHQP2UV368_edited",
+      "input": "/home/ds/llms/SKING_DDJ_Dataset/entropydrop_website_generations/SKING_DDJ_v66/TWRLRRTHQP2UV368_edited.png",
+      "input_sha256": "e1e24ed0ba4efc4e895885fd20966ce2ac93863374c7072d3a751c98af291095",
+      "probability": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/cache/released_foreground/TWRLRRTHQP2UV368_edited_852b363b3dff/probability.png",
+      "role": "real_development",
+      "old_output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v103_final_material_guarded_20260907/TWRLRRTHQP2UV368_edited_9b527d635631",
+      "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v103_generalization_risk_1000_beard_protected_20260907/TWRLRRTHQP2UV368_edited_fad6c7846344",
+      "body_exact_to_old": true,
+      "outer_head": 57,
+      "material_fit": {
+        "steps": 64,
+        "accepted": true,
+        "source_mse_before": 0.006405442953109741,
+        "source_mse_after_proposed": 0.006247082259505987,
+        "source_mse_final": 0.006247082259505987,
+        "confident_source_pixels": 54015,
+        "alpha_exact": true,
+        "body_exact": true,
+        "learned_material_links_preserved": true
+      },
+      "repeat": {
+        "alpha_exact": true,
+        "body_exact": true,
+        "rgb_max_delta": 0
+      }
+    },
+    "old_img10": {
+      "name": "old_img10",
+      "input": "/home/ds/llms/SkingDataset/DDJ_real2render/test_output/official_prompt1_1K_t41_50_51_52/img10.png",
+      "input_sha256": "9cf0535c066042a9b9e0281ffbdf8b5cb7252692bbc85f48e43458d5395417df",
+      "probability": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/cache/released_foreground/img10_bb55be3b573c/probability.png",
+      "role": "real_development",
+      "old_output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v103_final_material_guarded_20260907/img10_7bcf15c7ccb7",
+      "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v103_generalization_risk_1000_beard_protected_20260907/img10_1d59133d90d8",
+      "body_exact_to_old": true,
+      "outer_head": 142,
+      "material_fit": {
+        "steps": 64,
+        "accepted": true,
+        "source_mse_before": 0.006047940347343683,
+        "source_mse_after_proposed": 0.006010470911860466,
+        "source_mse_final": 0.006010470911860466,
+        "confident_source_pixels": 54719,
+        "alpha_exact": true,
+        "body_exact": true,
+        "learned_material_links_preserved": true
+      },
+      "repeat": {
+        "alpha_exact": true,
+        "body_exact": true,
+        "rgb_max_delta": 0
+      }
+    },
+    "old_img12": {
+      "name": "old_img12",
+      "input": "/home/ds/llms/SkingDataset/DDJ_real2render/test_output/official_prompt1_1K_t41_50_51_52/img12.png",
+      "input_sha256": "48e7e7416529eadbd99a5461739ebbfd2e0c2926fff6349cc11bbf69d40bf927",
+      "probability": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/cache/released_foreground/img12_a028d34ee9ac/probability.png",
+      "role": "real_development",
+      "old_output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v103_final_material_guarded_20260907/img12_467787c4b5b2",
+      "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v103_generalization_risk_1000_beard_protected_20260907/img12_5ad62d693f53",
+      "body_exact_to_old": true,
+      "outer_head": 132,
+      "material_fit": {
+        "steps": 64,
+        "accepted": true,
+        "source_mse_before": 0.002456008456647396,
+        "source_mse_after_proposed": 0.0024474533274769783,
+        "source_mse_final": 0.0024474533274769783,
+        "confident_source_pixels": 56378,
+        "alpha_exact": true,
+        "body_exact": true,
+        "learned_material_links_preserved": true
+      },
+      "repeat": {
+        "alpha_exact": true,
+        "body_exact": true,
+        "rgb_max_delta": 0
+      }
+    },
+    "old_img23": {
+      "name": "old_img23",
+      "input": "/home/ds/llms/SkingDataset/DDJ_real2render/test_output/official_prompt1_1K_t41_50_51_52/img23.png",
+      "input_sha256": "65cb7b996a6ca5ed9c33b0128516fde70a85e949c285a319fa7eefb7a5774ec3",
+      "probability": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/cache/released_foreground/img23_505b2b065573/probability.png",
+      "role": "real_development",
+      "old_output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v103_final_material_guarded_20260907/img23_7d7381250b45",
+      "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v103_generalization_risk_1000_beard_protected_20260907/img23_59d9439bcf7f",
+      "body_exact_to_old": true,
+      "outer_head": 41,
+      "material_fit": {
+        "steps": 64,
+        "accepted": true,
+        "source_mse_before": 0.0011493657948449254,
+        "source_mse_after_proposed": 0.000987592968158424,
+        "source_mse_final": 0.000987592968158424,
+        "confident_source_pixels": 54454,
+        "alpha_exact": true,
+        "body_exact": true,
+        "learned_material_links_preserved": true
+      },
+      "repeat": {
+        "alpha_exact": true,
+        "body_exact": true,
+        "rgb_max_delta": 1
+      }
+    },
+    "old_img25": {
+      "name": "old_img25",
+      "input": "/home/ds/llms/SkingDataset/DDJ_real2render/test_output/official_prompt1_1K_t41_50_51_52/img25.png",
+      "input_sha256": "c85818793397add3e3464ba28c71ef01add5c3326c850f1ebfd09f68087b7cbf",
+      "probability": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/cache/released_foreground/img25_586b700ebfc4/probability.png",
+      "role": "real_development",
+      "old_output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v103_final_material_guarded_20260907/img25_0a44faba2f03",
+      "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v103_generalization_risk_1000_beard_protected_20260907/img25_fe6232ce1651",
+      "body_exact_to_old": true,
+      "outer_head": 192,
+      "material_fit": {
+        "steps": 64,
+        "accepted": true,
+        "source_mse_before": 0.0031200163066387177,
+        "source_mse_after_proposed": 0.0026354461442679167,
+        "source_mse_final": 0.0026354461442679167,
+        "confident_source_pixels": 58041,
+        "alpha_exact": true,
+        "body_exact": true,
+        "learned_material_links_preserved": true
+      },
+      "repeat": {
+        "alpha_exact": true,
+        "body_exact": true,
+        "rgb_max_delta": 0
+      }
+    },
+    "old_img26": {
+      "name": "old_img26",
+      "input": "/home/ds/llms/SkingDataset/DDJ_real2render/test_output/official_prompt1_1K_t41_50_51_52/img26.png",
+      "input_sha256": "365dbe5c5dcfac24ba0d80e09ba13bb04148c43df217fcb000cb88eb18f04524",
+      "probability": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/cache/released_foreground/img26_8910023357b8/probability.png",
+      "role": "real_development",
+      "old_output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v103_final_material_guarded_20260907/img26_43bd8babf8a9",
+      "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v103_generalization_risk_1000_beard_protected_20260907/img26_379c5898db28",
+      "body_exact_to_old": true,
+      "outer_head": 118,
+      "material_fit": {
+        "steps": 64,
+        "accepted": true,
+        "source_mse_before": 0.004701810888946056,
+        "source_mse_after_proposed": 0.004666607361286879,
+        "source_mse_final": 0.004666607361286879,
+        "confident_source_pixels": 57003,
+        "alpha_exact": true,
+        "body_exact": true,
+        "learned_material_links_preserved": true
+      },
+      "repeat": {
+        "alpha_exact": true,
+        "body_exact": true,
+        "rgb_max_delta": 0
+      }
+    },
+    "old_img27": {
+      "name": "old_img27",
+      "input": "/home/ds/llms/SkingDataset/DDJ_real2render/test_output/official_prompt1_1K_t41_50_51_52/img27.png",
+      "input_sha256": "acbca489cc48e63a16cb02d88184b2ebedc4437a3b531f02c225538c51702c0a",
+      "probability": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/cache/released_foreground/img27_c7b9fafc5b71/probability.png",
+      "role": "real_development",
+      "old_output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v103_final_material_guarded_20260907/img27_3e307f385aca",
+      "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v103_generalization_risk_1000_beard_protected_20260907/img27_bc4658300cd4",
+      "body_exact_to_old": true,
+      "outer_head": 147,
+      "material_fit": {
+        "steps": 64,
+        "accepted": true,
+        "source_mse_before": 0.0023855334147810936,
+        "source_mse_after_proposed": 0.001945064403116703,
+        "source_mse_final": 0.001945064403116703,
+        "confident_source_pixels": 55822,
+        "alpha_exact": true,
+        "body_exact": true,
+        "learned_material_links_preserved": true
+      },
+      "repeat": {
+        "alpha_exact": true,
+        "body_exact": true,
+        "rgb_max_delta": 0
+      }
+    },
+    "old_img28": {
+      "name": "old_img28",
+      "input": "/home/ds/llms/SkingDataset/DDJ_real2render/test_output/official_prompt1_1K_t41_50_51_52/img28.png",
+      "input_sha256": "a1d83098a226f7353ea8e5b2840177e3a1241d3f719d9284e3e49074bde3aaf0",
+      "probability": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/cache/released_foreground/img28_37e9149a830c/probability.png",
+      "role": "real_development",
+      "old_output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v103_final_material_guarded_20260907/img28_cdcb05cd9ed1",
+      "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v103_generalization_risk_1000_beard_protected_20260907/img28_78e723e9abf3",
+      "body_exact_to_old": true,
+      "outer_head": 109,
+      "material_fit": {
+        "steps": 64,
+        "accepted": true,
+        "source_mse_before": 0.0014165303437039256,
+        "source_mse_after_proposed": 0.0007372520631179214,
+        "source_mse_final": 0.0007372520631179214,
+        "confident_source_pixels": 56999,
+        "alpha_exact": true,
+        "body_exact": true,
+        "learned_material_links_preserved": true
+      },
+      "repeat": {
+        "alpha_exact": true,
+        "body_exact": true,
+        "rgb_max_delta": 0
+      }
+    },
+    "old_img3": {
+      "name": "old_img3",
+      "input": "/home/ds/llms/SkingDataset/DDJ_real2render/test_output/official_prompt1_1K_t41_50_51_52/img3.png",
+      "input_sha256": "a25eb7d1f9a8ed6dd548407e01f78d7f38465e061aee9b1e7303be893524e47d",
+      "probability": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/cache/released_foreground/img3_c36c3e08ca85/probability.png",
+      "role": "real_development",
+      "old_output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v103_final_material_guarded_20260907/img3_d1e4f620ef66",
+      "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v103_generalization_risk_1000_beard_protected_20260907/img3_b0287f7aeacb",
+      "body_exact_to_old": true,
+      "outer_head": 0,
+      "material_fit": {
+        "steps": 64,
+        "accepted": true,
+        "source_mse_before": 0.0017035043565556407,
+        "source_mse_after_proposed": 0.0016574646579101682,
+        "source_mse_final": 0.0016574646579101682,
+        "confident_source_pixels": 52388,
+        "alpha_exact": true,
+        "body_exact": true,
+        "learned_material_links_preserved": true
+      },
+      "repeat": {
+        "alpha_exact": true,
+        "body_exact": true,
+        "rgb_max_delta": 0
+      }
+    },
+    "old_img46": {
+      "name": "old_img46",
+      "input": "/home/ds/llms/SkingDataset/DDJ_real2render/test_output/unofficial_prompt1_1K_t41_51_66_71/img46.png",
+      "input_sha256": "2c2b3d2278564426f5017d43f3132c6553b928b1ddc93f695556ed70308073ff",
+      "probability": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/cache/released_foreground/img46_cec526dddb5d/probability.png",
+      "role": "real_development",
+      "old_output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v103_final_material_guarded_20260907/img46_ed45769ecb64",
+      "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v103_generalization_risk_1000_beard_protected_20260907/img46_7c6c61599126",
+      "body_exact_to_old": true,
+      "outer_head": 149,
+      "material_fit": {
+        "steps": 64,
+        "accepted": true,
+        "source_mse_before": 0.009457766078412533,
+        "source_mse_after_proposed": 0.008534851484000683,
+        "source_mse_final": 0.008534851484000683,
+        "confident_source_pixels": 57368,
+        "alpha_exact": true,
+        "body_exact": true,
+        "learned_material_links_preserved": true
+      },
+      "repeat": {
+        "alpha_exact": true,
+        "body_exact": true,
+        "rgb_max_delta": 0
+      }
+    },
+    "99LBZPR14PEYLZ69": {
+      "name": "99LBZPR14PEYLZ69",
+      "input": "/home/ds/llms/SKING_DDJ_Dataset/entropydrop_website_generations/SKING_DDJ_v54/99LBZPR14PEYLZ69_edited.png",
+      "input_sha256": "e5a73483cc9860092c9d7953d0da4ee7b4a7d4a4634ea6892854a7893cb58c93",
+      "probability": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/cache/released_foreground/99LBZPR14PEYLZ69_edited_e778c294e2b3/probability.png",
+      "role": "real_development",
+      "old_output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/runs/v103_all_edited_20260907T040559Z/artifacts/99LBZPR14PEYLZ69_edited_fe3796498bf2",
+      "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v103_generalization_risk_1000_beard_protected_20260907/99LBZPR14PEYLZ69_edited_76c5703859f4",
+      "body_exact_to_old": true,
+      "outer_head": 100,
+      "material_fit": {
+        "steps": 64,
+        "accepted": true,
+        "source_mse_before": 0.0008236152934841812,
+        "source_mse_after_proposed": 0.0008169456850737333,
+        "source_mse_final": 0.0008169456850737333,
+        "confident_source_pixels": 53985,
+        "alpha_exact": true,
+        "body_exact": true,
+        "learned_material_links_preserved": true
+      },
+      "eye_outer_cells": {
+        "before": 3,
+        "after": 0
+      },
+      "repeat": {
+        "alpha_exact": true,
+        "body_exact": true,
+        "rgb_max_delta": 1
+      }
+    },
+    "254NJBPVUEM759NA": {
+      "name": "254NJBPVUEM759NA",
+      "input": "/home/ds/llms/SKING_DDJ_Dataset/entropydrop_website_generations/SKING_DDJ_v54/254NJBPVUEM759NA_edited.png",
+      "input_sha256": "a7510b83c2a4b188042b9f2f38584791b348d4a5578d1d76df43f42414e0b1d8",
+      "probability": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/cache/released_foreground/254NJBPVUEM759NA_edited_422ff4564e09/probability.png",
+      "role": "real_development",
+      "old_output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/runs/v103_all_edited_20260907T040559Z/artifacts/254NJBPVUEM759NA_edited_6f6aaaf44b02",
+      "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v103_generalization_risk_1000_beard_protected_20260907/254NJBPVUEM759NA_edited_cd132c7a6a68",
+      "body_exact_to_old": true,
+      "outer_head": 77,
+      "material_fit": {
+        "steps": 64,
+        "accepted": true,
+        "source_mse_before": 0.0014008090365678072,
+        "source_mse_after_proposed": 0.0013744801981374621,
+        "source_mse_final": 0.0013744801981374621,
+        "confident_source_pixels": 56387,
+        "alpha_exact": true,
+        "body_exact": true,
+        "learned_material_links_preserved": true
+      },
+      "v101_hair_reference": {
+        "reference_cells": 96,
+        "retained_before": 42,
+        "retained_after": 77,
+        "extra_before": 16,
+        "extra_after": 0,
+        "scope": "v101 support comparison, not ground truth."
+      },
+      "repeat": {
+        "alpha_exact": true,
+        "body_exact": true,
+        "rgb_max_delta": 0
+      }
+    },
+    "DPDD99DNBMGPXTGD_edited": {
+      "name": "DPDD99DNBMGPXTGD_edited",
+      "input": "/home/ds/llms/SKING_DDJ_Dataset/entropydrop_website_generations/SKING_DDJ_v54/DPDD99DNBMGPXTGD_edited.png",
+      "input_sha256": "4e5ca8c76c5d8f7a7f54662c3a9cd5ac211045af15506908d92249e47daba0dd",
+      "probability": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/cache/released_foreground/DPDD99DNBMGPXTGD_edited_0dcb0ae0a14a/probability.png",
+      "role": "extra_development",
+      "old_output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/runs/v103_all_edited_20260907T040559Z/artifacts/DPDD99DNBMGPXTGD_edited_5d6f9af85eee",
+      "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v103_generalization_risk_1000_beard_protected_20260907/DPDD99DNBMGPXTGD_edited_0a99b395a4ca",
+      "body_exact_to_old": true,
+      "outer_head": 121,
+      "material_fit": {
+        "steps": 64,
+        "accepted": true,
+        "source_mse_before": 0.012349402531981468,
+        "source_mse_after_proposed": 0.011837255209684372,
+        "source_mse_final": 0.011837255209684372,
+        "confident_source_pixels": 54814,
+        "alpha_exact": true,
+        "body_exact": true,
+        "learned_material_links_preserved": true
+      }
+    },
+    "YDGPNSFCWGB7PLQD_edited": {
+      "name": "YDGPNSFCWGB7PLQD_edited",
+      "input": "/home/ds/llms/SKING_DDJ_Dataset/entropydrop_website_generations/SKING_DDJ_v54/YDGPNSFCWGB7PLQD_edited.png",
+      "input_sha256": "6c719a7159d9897c6a80a0eab015c5a153027e47b9378de98b1a93f706e0eb67",
+      "probability": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/cache/released_foreground/YDGPNSFCWGB7PLQD_edited_e624319001f9/probability.png",
+      "role": "extra_development",
+      "old_output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/runs/v103_all_edited_20260907T040559Z/artifacts/YDGPNSFCWGB7PLQD_edited_02f154be1e22",
+      "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v103_generalization_risk_1000_beard_protected_20260907/YDGPNSFCWGB7PLQD_edited_3d95895429e5",
+      "body_exact_to_old": true,
+      "outer_head": 65,
+      "material_fit": {
+        "steps": 64,
+        "accepted": true,
+        "source_mse_before": 0.006053714547306299,
+        "source_mse_after_proposed": 0.006033162586390972,
+        "source_mse_final": 0.006033162586390972,
+        "confident_source_pixels": 56598,
+        "alpha_exact": true,
+        "body_exact": true,
+        "learned_material_links_preserved": true
+      }
+    },
+    "BY8AR36KFUFYY5EV_edited": {
+      "name": "BY8AR36KFUFYY5EV_edited",
+      "input": "/home/ds/llms/SKING_DDJ_Dataset/entropydrop_website_generations/SKING_DDJ_v54/BY8AR36KFUFYY5EV_edited.png",
+      "input_sha256": "3f8a3886dc3f8075d334bc5ffd50b7ef2d2701216aa4fafc594990b2f73735d7",
+      "probability": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/cache/released_foreground/BY8AR36KFUFYY5EV_edited_187240d539e5/probability.png",
+      "role": "extra_development",
+      "old_output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/runs/v103_all_edited_20260907T040559Z/artifacts/BY8AR36KFUFYY5EV_edited_761483a6afaa",
+      "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v103_generalization_risk_1000_beard_protected_20260907/BY8AR36KFUFYY5EV_edited_261c083dd818",
+      "body_exact_to_old": true,
+      "outer_head": 85,
+      "material_fit": {
+        "steps": 64,
+        "accepted": true,
+        "source_mse_before": 0.00230827322229743,
+        "source_mse_after_proposed": 0.002280009211972356,
+        "source_mse_final": 0.002280009211972356,
+        "confident_source_pixels": 55040,
+        "alpha_exact": true,
+        "body_exact": true,
+        "learned_material_links_preserved": true
+      }
+    },
+    "V2C3ZGW9S15EXCJU_edited": {
+      "name": "V2C3ZGW9S15EXCJU_edited",
+      "input": "/home/ds/llms/SKING_DDJ_Dataset/entropydrop_website_generations/SKING_DDJ_v54/V2C3ZGW9S15EXCJU_edited.png",
+      "input_sha256": "b6e9e9e04a94bc45c95d913a7c0cb8c202c7dc0db0c38c5a3df3c398df842359",
+      "probability": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/cache/released_foreground/V2C3ZGW9S15EXCJU_edited_aa4ae0ad9768/probability.png",
+      "role": "extra_development",
+      "old_output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/runs/v103_all_edited_20260907T040559Z/artifacts/V2C3ZGW9S15EXCJU_edited_529365768636",
+      "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v103_generalization_risk_1000_beard_protected_20260907/V2C3ZGW9S15EXCJU_edited_223dddec0d5d",
+      "body_exact_to_old": true,
+      "outer_head": 131,
+      "material_fit": {
+        "steps": 64,
+        "accepted": true,
+        "source_mse_before": 0.009721457958221436,
+        "source_mse_after_proposed": 0.009708442725241184,
+        "source_mse_final": 0.009708442725241184,
+        "confident_source_pixels": 56126,
+        "alpha_exact": true,
+        "body_exact": true,
+        "learned_material_links_preserved": true
+      }
+    },
+    "583DH4E35WESJSDD_edited": {
+      "name": "583DH4E35WESJSDD_edited",
+      "input": "/home/ds/llms/SKING_DDJ_Dataset/entropydrop_website_generations/SKING_DDJ_v54/583DH4E35WESJSDD_edited.png",
+      "input_sha256": "89171bd50ab9e65826a20d1cbd76bcf59d7806643868c2f2c2decf4c46d5a12d",
+      "probability": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/cache/released_foreground/583DH4E35WESJSDD_edited_361bd7a2ce2f/probability.png",
+      "role": "extra_development",
+      "old_output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/runs/v103_all_edited_20260907T040559Z/artifacts/583DH4E35WESJSDD_edited_beafe26fb7e9",
+      "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v103_generalization_risk_1000_beard_protected_20260907/583DH4E35WESJSDD_edited_e27951ae34f0",
+      "body_exact_to_old": true,
+      "outer_head": 143,
+      "material_fit": {
+        "steps": 64,
+        "accepted": true,
+        "source_mse_before": 0.007771495264023542,
+        "source_mse_after_proposed": 0.007768803276121616,
+        "source_mse_final": 0.007768803276121616,
+        "confident_source_pixels": 57196,
+        "alpha_exact": true,
+        "body_exact": true,
+        "learned_material_links_preserved": true
+      }
+    },
+    "PR2JPLM6K9VJNM2L_edited": {
+      "name": "PR2JPLM6K9VJNM2L_edited",
+      "input": "/home/ds/llms/SKING_DDJ_Dataset/entropydrop_website_generations/SKING_DDJ_v54/PR2JPLM6K9VJNM2L_edited.png",
+      "input_sha256": "3f8f79caca256156588eee8df32ee8109861db6e2a75ec80fb50b5af9dd6e7cc",
+      "probability": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/cache/released_foreground/PR2JPLM6K9VJNM2L_edited_033adc105a73/probability.png",
+      "role": "extra_development",
+      "old_output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/runs/v103_all_edited_20260907T040559Z/artifacts/PR2JPLM6K9VJNM2L_edited_4270902695e1",
+      "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v103_generalization_risk_1000_beard_protected_20260907/PR2JPLM6K9VJNM2L_edited_73a1b63f9e1f",
+      "body_exact_to_old": true,
+      "outer_head": 82,
+      "material_fit": {
+        "steps": 64,
+        "accepted": true,
+        "source_mse_before": 0.002461072988808155,
+        "source_mse_after_proposed": 0.002451175358146429,
+        "source_mse_final": 0.002451175358146429,
+        "confident_source_pixels": 55235,
+        "alpha_exact": true,
+        "body_exact": true,
+        "learned_material_links_preserved": true
+      }
+    },
+    "88PNT2PN1B8M7KHM_edited": {
+      "name": "88PNT2PN1B8M7KHM_edited",
+      "input": "/home/ds/llms/SKING_DDJ_Dataset/entropydrop_website_generations/SKING_DDJ_v54/88PNT2PN1B8M7KHM_edited.png",
+      "input_sha256": "36f12b5e38d5d779a69f17e17290825df6e21bf5f137a7335bdfd6516629f05d",
+      "probability": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/cache/released_foreground/88PNT2PN1B8M7KHM_edited_5aa858c11ffb/probability.png",
+      "role": "extra_development",
+      "old_output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/runs/v103_all_edited_20260907T040559Z/artifacts/88PNT2PN1B8M7KHM_edited_967fa7d25acf",
+      "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v103_generalization_risk_1000_beard_protected_20260907/88PNT2PN1B8M7KHM_edited_5467c328b8f9",
+      "body_exact_to_old": true,
+      "outer_head": 134,
+      "material_fit": {
+        "steps": 64,
+        "accepted": true,
+        "source_mse_before": 0.0033648875541985035,
+        "source_mse_after_proposed": 0.0032718561124056578,
+        "source_mse_final": 0.0032718561124056578,
+        "confident_source_pixels": 56767,
+        "alpha_exact": true,
+        "body_exact": true,
+        "learned_material_links_preserved": true
+      }
+    },
+    "XWLVAKKPMKSHNM46_edited": {
+      "name": "XWLVAKKPMKSHNM46_edited",
+      "input": "/home/ds/llms/SKING_DDJ_Dataset/entropydrop_website_generations/SKING_DDJ_v54/XWLVAKKPMKSHNM46_edited.png",
+      "input_sha256": "335ec929560a60367df2eb9c3f9c11ed98d46795cc35991891df6ab7325a994a",
+      "probability": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/cache/released_foreground/XWLVAKKPMKSHNM46_edited_288a33d2c884/probability.png",
+      "role": "extra_development",
+      "old_output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/runs/v103_all_edited_20260907T040559Z/artifacts/XWLVAKKPMKSHNM46_edited_9f62c44d843c",
+      "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v103_generalization_risk_1000_beard_protected_20260907/XWLVAKKPMKSHNM46_edited_85e359d8add6",
+      "body_exact_to_old": true,
+      "outer_head": 105,
+      "material_fit": {
+        "steps": 64,
+        "accepted": true,
+        "source_mse_before": 0.004213785286992788,
+        "source_mse_after_proposed": 0.0024762058164924383,
+        "source_mse_final": 0.0024762058164924383,
+        "confident_source_pixels": 55473,
+        "alpha_exact": true,
+        "body_exact": true,
+        "learned_material_links_preserved": true
+      }
+    },
+    "QHMMT6HK3EY64HRA_edited": {
+      "name": "QHMMT6HK3EY64HRA_edited",
+      "input": "/home/ds/llms/SKING_DDJ_Dataset/entropydrop_website_generations/SKING_DDJ_v54/QHMMT6HK3EY64HRA_edited.png",
+      "input_sha256": "59b555363d73da4de6be0d60746843c253bf921f6e067861603a2a968e75aeef",
+      "probability": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/cache/released_foreground/QHMMT6HK3EY64HRA_edited_0864a7d2e388/probability.png",
+      "role": "extra_development",
+      "old_output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/runs/v103_all_edited_20260907T040559Z/artifacts/QHMMT6HK3EY64HRA_edited_ba554f64e5e3",
+      "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v103_generalization_risk_1000_beard_protected_20260907/QHMMT6HK3EY64HRA_edited_bca5c3278d04",
+      "body_exact_to_old": true,
+      "outer_head": 44,
+      "material_fit": {
+        "steps": 64,
+        "accepted": true,
+        "source_mse_before": 0.0031658923253417015,
+        "source_mse_after_proposed": 0.0030489000491797924,
+        "source_mse_final": 0.0030489000491797924,
+        "confident_source_pixels": 54428,
+        "alpha_exact": true,
+        "body_exact": true,
+        "learned_material_links_preserved": true
+      }
+    },
+    "1QWEVMY3VLAP654D_edited": {
+      "name": "1QWEVMY3VLAP654D_edited",
+      "input": "/home/ds/llms/SKING_DDJ_Dataset/entropydrop_website_generations/SKING_DDJ_v54/1QWEVMY3VLAP654D_edited.png",
+      "input_sha256": "f74cae21a6a0ae4dd1fd6c2e4d9bf34f3ddaa92ac8c24595007fdcf88843d89f",
+      "probability": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/cache/released_foreground/1QWEVMY3VLAP654D_edited_508be562fabe/probability.png",
+      "role": "extra_development",
+      "old_output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/runs/v103_all_edited_20260907T040559Z/artifacts/1QWEVMY3VLAP654D_edited_db0d0376400b",
+      "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v103_generalization_risk_1000_beard_protected_20260907/1QWEVMY3VLAP654D_edited_9178da55ca31",
+      "body_exact_to_old": true,
+      "outer_head": 45,
+      "material_fit": {
+        "steps": 64,
+        "accepted": true,
+        "source_mse_before": 0.0028562513180077076,
+        "source_mse_after_proposed": 0.0028315528761595488,
+        "source_mse_final": 0.0028315528761595488,
+        "confident_source_pixels": 54538,
+        "alpha_exact": true,
+        "body_exact": true,
+        "learned_material_links_preserved": true
+      }
+    },
+    "QBZP39KGRGG1CEEN_edited": {
+      "name": "QBZP39KGRGG1CEEN_edited",
+      "input": "/home/ds/llms/SKING_DDJ_Dataset/entropydrop_website_generations/SKING_DDJ_v54/QBZP39KGRGG1CEEN_edited.png",
+      "input_sha256": "7f5fb5aa6e9de98df9724c014b5eafb87eddd057a3e2a1d82a21ef79745b8563",
+      "probability": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/cache/released_foreground/QBZP39KGRGG1CEEN_edited_46ed2d4b8bb8/probability.png",
+      "role": "extra_development",
+      "old_output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/runs/v103_all_edited_20260907T040559Z/artifacts/QBZP39KGRGG1CEEN_edited_60b26b618ab8",
+      "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v103_generalization_risk_1000_beard_protected_20260907/QBZP39KGRGG1CEEN_edited_03318635e819",
+      "body_exact_to_old": true,
+      "outer_head": 77,
+      "material_fit": {
+        "steps": 64,
+        "accepted": true,
+        "source_mse_before": 0.0014568717451766133,
+        "source_mse_after_proposed": 0.0014549670740962029,
+        "source_mse_final": 0.0014549670740962029,
+        "confident_source_pixels": 55187,
+        "alpha_exact": true,
+        "body_exact": true,
+        "learned_material_links_preserved": true
+      }
+    },
+    "62LS53Y5Q1DWGKQY_edited": {
+      "name": "62LS53Y5Q1DWGKQY_edited",
+      "input": "/home/ds/llms/SKING_DDJ_Dataset/entropydrop_website_generations/SKING_DDJ_v54/62LS53Y5Q1DWGKQY_edited.png",
+      "input_sha256": "96def81cfd761324a5aa2cf8de46e1136447a798792cb706a7102dbd3f31560d",
+      "probability": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/cache/released_foreground/62LS53Y5Q1DWGKQY_edited_cd7cb91e5e92/probability.png",
+      "role": "extra_development",
+      "old_output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/runs/v103_all_edited_20260907T040559Z/artifacts/62LS53Y5Q1DWGKQY_edited_10601672f266",
+      "output": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/output_history/v103_generalization_risk_1000_beard_protected_20260907/62LS53Y5Q1DWGKQY_edited_1f6c8dbb9582",
+      "body_exact_to_old": true,
+      "outer_head": 29,
+      "material_fit": {
+        "steps": 64,
+        "accepted": true,
+        "source_mse_before": 0.0016938942717388272,
+        "source_mse_after_proposed": 0.0016725122695788741,
+        "source_mse_final": 0.0016725122695788741,
+        "confident_source_pixels": 54195,
+        "alpha_exact": true,
+        "body_exact": true,
+        "learned_material_links_preserved": true
+      }
+    }
+  },
+  "scope": "3 real training identities are fit checks; 28 real development images have no gradients. Includes the 2 feedback images and 12 additional fixed selections. Whole-image review is required alongside scoped checks.",
+  "release_promoted": false,
+  "landmarks": {
+    "nose_outer_alpha": 0,
+    "crown_inner_blue": 0,
+    "crown_outer_cap_blue": 12,
+    "gold_crown_top_cells": 0,
+    "phone_inner_green": 0,
+    "glasses_forehead_outer_alpha": 0,
+    "brim_each_face": [
+      8,
+      8,
+      8,
+      8
+    ],
+    "hat_outer_upper_red": 0
+  },
+  "checks": {
+    "body_all_exact": true,
+    "beard_review": true,
+    "beard_layer_alignment": true,
+    "nose": true,
+    "blue_crown": true,
+    "gold_crown": true,
+    "phone": true,
+    "glasses": true,
+    "brim": true,
+    "eye_false_protrusions": true,
+    "hair_reference_recovery": true,
+    "material_fit_preserves_geometry_and_body": true,
+    "repeat_stability": true
+  },
+  "repeat_count": 19,
+  "scoped_checks_passed": true
+}
