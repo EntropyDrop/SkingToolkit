@@ -93,6 +93,9 @@ def initialize_revision(model,checkpoint):
         old=state['local_query.weight'];expanded=torch.zeros_like(model.local_query.weight,device='cpu')
         expanded[:,:50]=old[:,:50];expanded[:,-2:]=old[:,-2:]
         state['local_query.weight']=expanded
+    if model.topology_context:
+        for k,v in model.state_dict().items():
+            if k.startswith("topology_adapter.") and k not in state:state[k]=v.detach().cpu()
     model.load_state_dict(state,strict=True)
 
 
@@ -189,7 +192,11 @@ def revision_loss(model,prediction,base,target,labels,symmetric):
     left,right=model.edges;p=prediction['alpha_probability']
     seam=F.smooth_l1_loss(p[:,left]-p[:,right],alpha[:,left]-alpha[:,right])
     total=4*occupancy+8*color+2*raw+2*keep_color+.4*gate+.4*semantic+relation+symmetry+alignment+.3*seam
-    return total,{k:v.detach() for k,v in dict(occupancy=occupancy,preserve=preserve,correct=correct,color=color,color_gate=gate,relations=relation,symmetry=symmetry,alignment=alignment,empty_outer_cells=(~visible&outer).sum()).items()}
+    boundary=total*0
+    if model.boundary_loss_weight:
+        from SkingToolkit.dense_uv_parser.head_topology_context import supervised_boundary_loss
+        boundary=supervised_boundary_loss(p,alpha,model.edges);total=total+model.boundary_loss_weight*boundary
+    return total,{k:v.detach() for k,v in dict(occupancy=occupancy,boundary=boundary,preserve=preserve,correct=correct,color=color,color_gate=gate,relations=relation,symmetry=symmetry,alignment=alignment,empty_outer_cells=(~visible&outer).sum()).items()}
 
 
 def paired_occupancy_loss(model,prediction,target):

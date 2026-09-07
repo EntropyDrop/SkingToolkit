@@ -41,6 +41,9 @@ def batch(rows,model,augment=False):
             substrate=uv[:,:3,ids-32]
             uv[:,:3,ids]=torch.where((selected&~current)[:,None],substrate,rgb)
             uv[:,:3,ids]*=uv[:,3:4,ids]
+        if model.topology_context and random.random()<.5:
+            from SkingToolkit.dense_uv_parser.head_topology_context import augment_connected_uv
+            result["base"]=augment_connected_uv(result["base"],model)
         if model.robust_edits and random.random()<.65:
             from SkingToolkit.dense_uv_parser.final_head_uv_revision import augment_local_evidence
             result['evidence']=augment_local_evidence(result['evidence'])
@@ -91,6 +94,7 @@ def real_review(model,rows,renderer,out,step):
 
 def main():
     p=argparse.ArgumentParser(description=__doc__)
+    p.add_argument('--version',choices=['v103','v104'],default='v103');p.add_argument('--topology-context',action='store_true');p.add_argument('--boundary-loss-weight',type=float,default=0.)
     p.add_argument('--cache',type=Path,required=True);p.add_argument('--output-dir',type=Path,required=True)
     p.add_argument('--steps',type=int,default=6000);p.add_argument('--batch-size',type=int,default=6)
     p.add_argument('--eval-every',type=int,default=1000);p.add_argument('--first-eval',type=int,default=200)
@@ -105,6 +109,8 @@ def main():
     p.add_argument('--native-fraction',type=float,default=0.,help='Fraction of synthetic batch slots replaying unaltered source head textures')
     o=p.parse_args()
     if min(o.steps,o.batch_size,o.eval_every,o.first_eval,o.anchor_every)<1 or (o.stop_after is not None and not 1<=o.stop_after<=o.steps):p.error('Invalid positive training limits')
+    if o.boundary_loss_weight<0:p.error('boundary-loss-weight must be nonnegative')
+    if (o.topology_context or o.boundary_loss_weight) and o.decoder_revision!=2:p.error('Topology training requires revision 2')
     if o.edit_risk_weight<0:p.error("edit-risk-weight must be nonnegative")
     if o.paired_every<0 or (o.paired_every and o.batch_size<4):p.error('Paired replay requires batch-size >= 4 and nonnegative interval')
     if o.learning_rate<=0 or (o.resume and o.init_checkpoint):p.error('Use positive LR and either resume or weight initialization')
@@ -129,11 +135,13 @@ def main():
     train_sources={r['metadata']['source'] for r in train};val_sources={r['metadata']['source'] for r in validation}
     if train_sources&val_sources:raise ValueError('Source leakage')
     if {r['metadata']['input_sha256'] for r in anchors}&{r['metadata']['input_sha256'] for r in development}:raise ValueError('Real training/development overlap')
-    parent=load(cache['parent']);pipeline=cache['pipeline'];config={'width':96,'layers':2}
+    parent=load(cache['parent']);pipeline=dict(cache['pipeline']);pipeline['version']=o.version;config={'width':96,'layers':2}
     if o.decoder_revision==2:config.update(revision=2,mappings_dir=parent['args']['mappings_dir'])
     if o.robust_edits:config['robust_edits']=True
     if o.semantic_geometry:config['semantic_geometry']=True
     if o.edit_risk_weight:config['edit_risk_weight']=o.edit_risk_weight
+    if o.topology_context:config['topology_context']=True
+    if o.boundary_loss_weight:config['boundary_loss_weight']=o.boundary_loss_weight
     model=FinalHeadUVDecoder(**config).cuda()
     if o.init_checkpoint:
         initial=load(o.init_checkpoint)
@@ -142,11 +150,12 @@ def main():
         initialize_revision(model,initial);del initial
     opt=torch.optim.AdamW(model.parameters(),lr=o.learning_rate,weight_decay=1e-4)
     renderer=DifferentiableRenderer(parent['args']['mappings_dir']).cuda()
-    manifest={'version':'v103','revision':'final_uv_decoder_20260907','git_commit':subprocess.check_output(['git','rev-parse','HEAD'],cwd=root,text=True).strip(),'parent':cache['parent'],'parent_sha256':cache['parent_sha256'],'cache':str(o.cache.resolve()),'cache_manifest_sha256':hashlib.sha256((o.cache/'manifest.json').read_bytes()).hexdigest(),'decoder_config':config,'trainable_parameters':sum(x.numel() for x in model.parameters()),'steps':o.steps,'real_training_identities':[r['metadata'] for r in anchors],'real_development_identities':[r['metadata'] for r in development],'validation_scope':'The beard identity is now training data. Only remaining real cases and train-disjoint synthetic identities assess transfer. No automatic release.','source_sha256':{f.name:hashlib.sha256(f.read_bytes()).hexdigest() for f in root.glob('*.py')}}
+    manifest={'version':o.version,'revision':'final_uv_decoder_20260907','git_commit':subprocess.check_output(['git','rev-parse','HEAD'],cwd=root,text=True).strip(),'parent':cache['parent'],'parent_sha256':cache['parent_sha256'],'cache':str(o.cache.resolve()),'cache_manifest_sha256':hashlib.sha256((o.cache/'manifest.json').read_bytes()).hexdigest(),'decoder_config':config,'trainable_parameters':sum(x.numel() for x in model.parameters()),'steps':o.steps,'real_training_identities':[r['metadata'] for r in anchors],'real_development_identities':[r['metadata'] for r in development],'validation_scope':'The beard identity is now training data. Only remaining real cases and train-disjoint synthetic identities assess transfer. No automatic release.','source_sha256':{f.name:hashlib.sha256(f.read_bytes()).hexdigest() for f in root.glob('*.py')}}
     signature={k:manifest[k] for k in ('parent_sha256','cache_manifest_sha256','decoder_config','steps')};signature['batch_size']=o.batch_size
     if o.decoder_revision==2:manifest['revision']='local_evidence_relations_20260907'
     if o.robust_edits:manifest['revision']='local_context_preservation_20260907'
     if o.semantic_geometry:manifest['revision']='joint_semantic_geometry_20260907'
+    if o.topology_context:manifest['revision']='learned_cube_neighborhood_20260907'
     manifest['validation_scope']='Explicit real training identities are fit checks only. Remaining real cases have no gradient use; synthetic validation sources are disjoint. No automatic release.'
     if o.learning_rate!=3e-4:signature['learning_rate']=o.learning_rate
     manifest['learning_rate']=o.learning_rate

@@ -24,10 +24,13 @@ def image_evidence(images, foreground, outputs):
 
 
 class FinalHeadUVDecoder(nn.Module):
-    def __init__(self, width=96, layers=2, revision=1, mappings_dir=None, robust_edits=False, semantic_geometry=False, edit_threshold=.5, edit_risk_weight=0.):
+    def __init__(self, width=96, layers=2, revision=1, mappings_dir=None, robust_edits=False, semantic_geometry=False, edit_threshold=.5, edit_risk_weight=0., topology_context=False, boundary_loss_weight=0.):
         super().__init__()
         if revision not in (1,2):raise ValueError('Unknown final head decoder revision')
         self.revision=revision
+        if (topology_context or boundary_loss_weight) and revision!=2:raise ValueError("Topology context requires revision 2")
+        if boundary_loss_weight<0:raise ValueError("Boundary loss weight must be nonnegative")
+        self.topology_context=topology_context;self.boundary_loss_weight=float(boundary_loss_weight)
         if robust_edits and revision!=2:raise ValueError('Robust editing requires revision 2')
         self.robust_edits=robust_edits
         if semantic_geometry and revision!=2:raise ValueError("Semantic geometry requires revision 2")
@@ -57,6 +60,9 @@ class FinalHeadUVDecoder(nn.Module):
         if self.revision==2:
             from SkingToolkit.dense_uv_parser.final_head_uv_revision import init_revision
             init_revision(self,mappings_dir)
+        if self.topology_context:
+            from SkingToolkit.dense_uv_parser.head_topology_context import HeadTopologyContext
+            self.topology_adapter=HeadTopologyContext(width,self.edges,self.other,self.geometry)
 
     def forward(self, base_uv, evidence):
         b=base_uv.shape[0]
@@ -73,6 +79,7 @@ class FinalHeadUVDecoder(nn.Module):
         image=self.image_encoder(torch.cat([evidence,position,view],1))
         memory=image.flatten(2).transpose(1,2).reshape(b,-1,query.shape[-1])
         features=self.decoder(query,memory)
+        if self.topology_context:features=self.topology_adapter(features)
         if self.revision==2:
             from SkingToolkit.dense_uv_parser.final_head_uv_revision import decode_revision
             prediction=decode_revision(self,features,uv)
