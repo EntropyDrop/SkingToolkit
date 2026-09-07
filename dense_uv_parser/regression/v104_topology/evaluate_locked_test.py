@@ -20,12 +20,12 @@ for name,path in paths.items():
  for start in range(0,len(rows),8):
   group=rows[start:start+8];base=torch.cat([r['base'] for r in group]).cuda();evidence=torch.cat([r['evidence'] for r in group]).cuda()
   with torch.no_grad():pred=model(base,evidence)['uv'][:,3].cpu()>.5
-  ids=model.ids[model.outer].cpu();faces=model.geometry[model.outer,5:11].argmax(1).cpu()
+  ids=model.ids[model.outer].cpu();faces=model.geometry[model.outer,5:11].argmax(1).cpu();observable=(model.projection.sum((0,2))>0)[model.outer].cpu()
   for i,row in enumerate(group):
    a=pred[i].flatten()[ids];b=(row['target'][0,3].flatten()[ids]>.5);cohort='native' if row['metadata']['family']=='native_texture' else 'paired'
-   for key,mask in [(cohort,torch.ones_like(a))]+[(cohort+'_face_'+str(f),faces==f) for f in range(6)]:
+   for key,mask in [(cohort,torch.ones_like(a)),(cohort+'_view_covered',observable),(cohort+'_unobserved',~observable)]+[(cohort+'_face_'+str(f),faces==f) for f in range(6)]:
     s=stats.setdefault(key,{'tp':0,'fp':0,'fn':0});s['tp']+=int((a&b&mask).sum());s['fp']+=int((a&~b&mask).sum());s['fn']+=int((~a&b&mask).sum())
    details.append({'source':row['metadata']['normalized_uv_sha256'],'variant':row['metadata']['variant'],'tp':int((a&b).sum()),'fp':int((a&~b).sum()),'fn':int((~a&b).sum())})
  for s in stats.values():s['iou']=s['tp']/max(1,s['tp']+s['fp']+s['fn'])
  report['models'][name]={'checkpoint_sha256':sha(path),'cohorts':stats,'cases':details};del model,c
-(run/'locked_test_report.json').write_text(json.dumps(report,indent=2)+'\n');print(json.dumps({k:{g:v['cohorts'][g] for g in ('native','paired')} for k,v in report['models'].items()},indent=2))
+(run/'locked_test_report.json').write_text(json.dumps(report,indent=2)+'\n');print(json.dumps({k:{g:v['cohorts'][g] for g in ('native','paired','native_view_covered','paired_view_covered')} for k,v in report['models'].items()},indent=2))
