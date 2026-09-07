@@ -1,0 +1,142 @@
+"""Local image evidence, explicit edit decisions and learned material relations."""
+from pathlib import Path
+import torch
+from torch import nn
+import torch.nn.functional as F
+from SkingToolkit.dense_uv_parser.accessories import head_bounds
+
+
+def head_projection(ids, mappings_dir):
+    """Project candidate UV cells, never target UV labels, onto the two cameras.
+
+    Both possible layers get a footprint, including cells currently absent.
+    Visibility and semantic contradictions remain input features for the model.
+    """
+    node=torch.full((4096,),-1,dtype=torch.long);node[ids.cpu()]=torch.arange(len(ids))
+    matrices=[]
+    for view in ('front_left','back_left'):
+        data=torch.load(Path(mappings_dir)/f'{view}_mapping.pt',map_location='cpu',weights_only=False)
+        h,w=data['inner_mask'].shape;y0,y1,x0,x1=head_bounds(h,w)
+        yy,xx=torch.meshgrid(torch.arange(y0,y1),torch.arange(x0,x1),indexing='ij')
+        cell_y=((yy-y0+.5)*56/(y1-y0)).long().clamp(0,55)
+        cell_x=((xx-x0+.5)*56/(x1-x0)).long().clamp(0,55)
+        bins=(cell_y*56+cell_x).flatten();matrix=torch.zeros(len(ids)*56*56)
+        for layer in ('inner','outer'):
+            xy=data[f'{layer}_uv_map'][y0:y1,x0:x1].round().long().clamp(0,63)
+            active=data[f'{layer}_mask'][y0:y1,x0:x1].bool().flatten()
+            nodes=node[(xy[:,:,1]*64+xy[:,:,0]).flatten()];active &= nodes>=0
+            indices=nodes[active]*3136+bins[active]
+            matrix.scatter_add_(0,indices,torch.ones(len(indices)))
+        matrix=matrix.reshape(len(ids),3136)
+        matrix=matrix/matrix.sum(1,keepdim=True).clamp_min(1)
+        matrices.append(matrix)
+    return torch.stack(matrices)
+
+
+def init_revision(model,mappings_dir):
+    if not mappings_dir:raise ValueError('Revision 2 requires renderer mappings')
+    width=model.query.out_features
+    model.register_buffer('projection',head_projection(model.ids,mappings_dir))
+    model.local_query=nn.Linear(52,width)
+    model.edit=nn.Linear(width,1)
+    nn.init.zeros_(model.edit.weight);nn.init.constant_(model.edit.bias,-4.)
+    model.mirror_link=nn.Linear(width,1);model.layer_link=nn.Linear(width,1)
+    for module in (model.mirror_link,model.layer_link):
+        nn.init.zeros_(module.weight);nn.init.constant_(module.bias,-4.)
+    seen=set();orbits=[]
+    for i in range(len(model.ids)):
+        if i in seen:continue
+        orbit=[i,int(model.mirror[i]),int(model.other[i]),int(model.mirror[model.other[i]])]
+        assert len(set(orbit))==4
+        seen.update(orbit);orbits.append(orbit)
+    orbits=torch.tensor(orbits,dtype=torch.long)
+    orbit_id=torch.empty(len(model.ids),dtype=torch.long);slot=torch.empty_like(orbit_id)
+    for j,orbit in enumerate(orbits):orbit_id[orbit]=j;slot[orbit]=torch.arange(4)
+    for name,value in [('material_orbits',orbits),('material_orbit_id',orbit_id),('material_slot',slot)]:model.register_buffer(name,value,persistent=False)
+
+
+def local_queries(model,evidence):
+    b=evidence.shape[0]//2
+    # Matrix rows are normalized candidate footprints, so missing views stay zero.
+    local=torch.einsum('vkp,bvcp->bkvc',model.projection,evidence.reshape(b,2,25,3136)).flatten(2)
+    visible=(model.projection.sum(2)>0).T[None].expand(b,-1,-1).to(local.dtype)
+    return model.local_query(torch.cat([local,visible],2))
+
+
+def tie_material(model,rgb,alpha,mirror_logits,layer_logits):
+    """Share RGB only in connected groups selected by learned pair relations.
+
+    Graph closure uses canonical four-cell orbits. Every member sums colours in
+    the same order, giving exact pair equality, including mixed inner/outer groups.
+    """
+    ids=model.material_orbits;b=rgb.shape[0];count=len(ids)
+    mirror=(mirror_logits[:,ids].sigmoid()>=.5)
+    layer=(layer_logits[:,ids].sigmoid()>=.5)
+    active=(alpha[:,ids]>.5)
+    graph=torch.eye(4,device=rgb.device,dtype=torch.bool)[None,None].expand(b,count,-1,-1).clone()
+    for left,right,accepted in ((0,1,mirror[:,:,0]),(2,3,mirror[:,:,2]),(0,2,layer[:,:,0]),(1,3,layer[:,:,1])):
+        connection=accepted&active[:,:,left]&active[:,:,right]
+        graph[:,:,left,right]=connection;graph[:,:,right,left]=connection
+    for _ in range(2):graph=graph|(graph[:,:,:,:,None]&graph[:,:,None,:,:]).any(3)
+    weight=graph.to(rgb.dtype);grouped=torch.matmul(weight,rgb[:,ids])/weight.sum(3,keepdim=True)
+    return grouped[:,model.material_orbit_id,model.material_slot]
+
+
+def decode_revision(model,features,uv):
+    edit_logits=model.edit(features).squeeze(2)
+    edit_p=edit_logits.sigmoid();change=(edit_p>=.5).float()+(edit_p-edit_p.detach())
+    alpha=torch.where(model.outer[None],uv[:,:,3]+(1-2*uv[:,:,3])*change,uv[:,:,3])
+    alpha_logits=torch.where(uv[:,:,3]>.5,-edit_logits,edit_logits)
+    gate_logits=model.color_gate(features).squeeze(2);gate_p=gate_logits.sigmoid()
+    gate=(gate_p>=.5).float()+(gate_p-gate_p.detach())
+    delta=model.color_delta(features).tanh();raw=(uv[:,:,:3]+delta).clamp(0,1)
+    proposed=(uv[:,:,:3]+gate[:,:,None]*delta).clamp(0,1)
+    mirror=model.mirror_link(features).squeeze(2);mirror=(mirror+mirror[:,model.mirror])/2
+    layer=model.layer_link(features).squeeze(2);layer=(layer+layer[:,model.other])/2
+    rgb=tie_material(model,proposed,alpha,mirror,layer)
+    return {'alpha':alpha,'alpha_logits':alpha_logits,'alpha_probability':alpha_logits.sigmoid(),'edit_logits':edit_logits,'proposed_rgb':rgb,'untied_rgb':proposed,'raw_rgb':raw,'color_gate_logits':gate_logits,'mirror_link_logits':mirror,'layer_link_logits':layer,'semantic_logits':model.semantic(features)}
+
+
+def masked_mean(value,mask):
+    return (value*mask).sum()/mask.sum().clamp_min(1)
+
+
+def balanced_bce(logits,target,positive_weight=1.):
+    loss=F.binary_cross_entropy_with_logits(logits,target.float(),reduction='none')
+    return masked_mean(loss,~target)+positive_weight*masked_mean(loss,target)
+
+
+def relation_targets(model,truth,classes,symmetric):
+    visible=truth[:,:,3]>.5;rgb=truth[:,:,:3]
+    same_mirror=(rgb-rgb[:,model.mirror]).abs().amax(2)<.5/255
+    eligible=torch.isin(classes,classes.new_tensor([1,3,5]))&(classes==classes[:,model.mirror])
+    mirror=symmetric[:,None]&eligible&visible&visible[:,model.mirror]&same_mirror
+    mixed=(((classes==3)&(classes[:,model.other]==5))|((classes==5)&(classes[:,model.other]==3)))
+    layer=mixed&visible&visible[:,model.other]&((rgb-rgb[:,model.other]).abs().amax(2)<.5/255)
+    return mirror,layer
+
+
+def revision_loss(model,prediction,base,target,labels,symmetric):
+    truth=target.flatten(2)[:,:,model.ids].transpose(1,2)
+    initial=base.flatten(2)[:,:,model.ids].transpose(1,2)
+    alpha=truth[:,:,3];visible=alpha>.5;outer=model.outer[None].expand_as(visible)
+    need_edit=(initial[:,:,3]>.5)!=visible
+    error=F.binary_cross_entropy_with_logits(prediction['edit_logits'],need_edit.float(),reduction='none')
+    preserve=masked_mean(error,outer&~need_edit);correct=masked_mean(error,outer&need_edit)
+    occupancy=2*preserve+correct
+    changed=((truth[:,:,:3]-initial[:,:,:3]).abs().amax(2)>1/255)&visible
+    gate=balanced_bce(prediction['color_gate_logits'],changed)
+    color=masked_mean((prediction['proposed_rgb']-truth[:,:,:3]).abs().mean(2),visible)
+    raw=masked_mean((prediction['raw_rgb']-truth[:,:,:3]).abs().mean(2),changed)
+    keep_color=masked_mean((prediction['proposed_rgb']-initial[:,:,:3]).abs().mean(2),visible&~changed)
+    classes=labels.flatten(1)[:,model.ids];known=classes>=0
+    semantic=F.cross_entropy(prediction['semantic_logits'][known],classes[known]) if known.any() else color*0
+    mirror,layer=relation_targets(model,truth,classes,symmetric)
+    relation=balanced_bce(prediction['mirror_link_logits'],mirror)+balanced_bce(prediction['layer_link_logits'],layer)
+    # Shared RGB is trained against target colors; pair losses remain useful while links learn.
+    rgb=prediction['proposed_rgb'];symmetry=masked_mean((rgb-rgb[:,model.mirror]).abs().mean(2),mirror)
+    alignment=masked_mean((rgb-rgb[:,model.other]).abs().mean(2),layer)
+    left,right=model.edges;p=prediction['alpha_probability']
+    seam=F.smooth_l1_loss(p[:,left]-p[:,right],alpha[:,left]-alpha[:,right])
+    total=4*occupancy+8*color+2*raw+2*keep_color+.4*gate+.4*semantic+relation+symmetry+alignment+.3*seam
+    return total,{k:v.detach() for k,v in dict(occupancy=occupancy,preserve=preserve,correct=correct,color=color,color_gate=gate,relations=relation,symmetry=symmetry,alignment=alignment,empty_outer_cells=(~visible&outer).sum()).items()}

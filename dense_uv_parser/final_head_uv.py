@@ -24,8 +24,10 @@ def image_evidence(images, foreground, outputs):
 
 
 class FinalHeadUVDecoder(nn.Module):
-    def __init__(self, width=96, layers=2):
+    def __init__(self, width=96, layers=2, revision=1, mappings_dir=None):
         super().__init__()
+        if revision not in (1,2):raise ValueError('Unknown final head decoder revision')
+        self.revision=revision
         t=build_simple_uv_topology()
         ids=torch.nonzero((t.valid&(t.part==0)).reshape(-1)).flatten()
         node=torch.full((4096,),-1,dtype=torch.long);node[ids]=torch.arange(len(ids))
@@ -45,6 +47,9 @@ class FinalHeadUVDecoder(nn.Module):
         for module in (self.alpha,self.color_delta):
             nn.init.zeros_(module.weight);nn.init.zeros_(module.bias)
         nn.init.zeros_(self.color_gate.weight);nn.init.constant_(self.color_gate.bias,-2.)
+        if self.revision==2:
+            from SkingToolkit.dense_uv_parser.final_head_uv_revision import init_revision
+            init_revision(self,mappings_dir)
 
     def forward(self, base_uv, evidence):
         b=base_uv.shape[0]
@@ -52,12 +57,22 @@ class FinalHeadUVDecoder(nn.Module):
         uv=base_uv.flatten(2)[:,:,self.ids].transpose(1,2)
         geometry=self.geometry[None].expand(b,-1,-1)
         query=self.query(torch.cat([uv,uv[:,self.mirror],uv[:,self.other],geometry],2))+self.uv_position
+        if self.revision==2:
+            from SkingToolkit.dense_uv_parser.final_head_uv_revision import local_queries
+            query=query+local_queries(self,evidence)
         y,x=torch.meshgrid(torch.linspace(-1,1,56,device=evidence.device),torch.linspace(-1,1,56,device=evidence.device),indexing='ij')
         position=torch.stack([x,y])[None].expand(b*2,-1,-1,-1)
         view=(torch.arange(b*2,device=evidence.device)%2).float()[:,None,None,None].expand(-1,1,56,56)
         image=self.image_encoder(torch.cat([evidence,position,view],1))
         memory=image.flatten(2).transpose(1,2).reshape(b,-1,query.shape[-1])
         features=self.decoder(query,memory)
+        if self.revision==2:
+            from SkingToolkit.dense_uv_parser.final_head_uv_revision import decode_revision
+            prediction=decode_revision(self,features,uv)
+            values=torch.cat([prediction['proposed_rgb']*prediction['alpha'][:,:,None],prediction['alpha'][:,:,None]],2)
+            result=base_uv.flatten(2).clone();result[:,:,self.ids]=values.transpose(1,2)
+            prediction['uv']=result.reshape_as(base_uv)
+            return prediction
         alpha_logits=(uv[:,:,3]*2-1)*2+self.alpha(features).squeeze(2)
         probability=alpha_logits.sigmoid();alpha=(probability>=.5).float()-probability.detach()+probability
         alpha=torch.where(self.outer[None],alpha,uv[:,:,3])
@@ -71,6 +86,9 @@ class FinalHeadUVDecoder(nn.Module):
 
 
 def final_uv_loss(model,prediction,base,target,labels,symmetric):
+    if model.revision==2:
+        from SkingToolkit.dense_uv_parser.final_head_uv_revision import revision_loss
+        return revision_loss(model,prediction,base,target,labels,symmetric)
     truth=target.flatten(2)[:,:,model.ids].transpose(1,2)
     initial=base.flatten(2)[:,:,model.ids].transpose(1,2)
     alpha=truth[:,:,3];outer=model.outer[None].expand_as(alpha);weight=torch.where(alpha>.5,3.,1.)
