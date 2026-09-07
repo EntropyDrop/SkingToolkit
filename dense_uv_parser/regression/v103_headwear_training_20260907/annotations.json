@@ -1,0 +1,37 @@
+{
+  "scope": "Partial user-directed geometry labels plus explicit copy-consistency targets. No file-name/identity lookup is used at inference.",
+  "items": [
+    {
+      "input": "/home/ds/llms/SKING_DDJ_Dataset/entropydrop_website_generations/SKING_DDJ_v54/1WQEQRUDRLMLVX3E_edited.png",
+      "input_sha256": "6235b3496b12cc1b45358677bf0c3d31118688c226a780ad17046d62a79420ac",
+      "kind": "explicit_partial_uv_training_annotation",
+      "name": "crown",
+      "training_role": true,
+      "geometry_annotation": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/regression/v103_headwear_training_20260907/crown_scope.png",
+      "copy_target": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/regression/v103_headwear_training_20260907/crown_copy_target.png",
+      "annotation_description": "Preserve the 12 reviewed blue outer-top crown cells and transparent gaps. Other colours in this region remain semantically unlabelled.",
+      "unlabelled_policy": "Outside reviewed scope, the previous v102 UV is a copy-consistency target, not newly claimed human ground truth.",
+      "warning": "This identity has moved into training; it is no longer a gradient-free development example.",
+      "scope_sha256": "269663d65615201223774d9b7e81ddb417e60511c4ae060a2ada19f62b54f9ef",
+      "target_sha256": "b665b5218a2811246dc9ffd0105ffdf21a939ec1b78464b92e59a8762c899176",
+      "source_cache": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/runs/v103_final_uv_retrain_20260907/cache/real/crown.pt",
+      "scoped_texels": 64
+    },
+    {
+      "input": "/home/ds/llms/SKING_DDJ_Dataset/entropydrop_website_generations/SKING_DDJ_v54/PU418PLGERMFC487_edited.png",
+      "input_sha256": "479a62295b51356eb4b74a0999f39cf3ce804a9f8b97f1c22add642026e1c8a7",
+      "kind": "explicit_partial_uv_training_annotation",
+      "name": "old_PU418PLGERMFC487_edited",
+      "training_role": true,
+      "geometry_annotation": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/regression/v103_headwear_training_20260907/old_PU418PLGERMFC487_edited_scope.png",
+      "copy_target": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/regression/v103_headwear_training_20260907/old_PU418PLGERMFC487_edited_copy_target.png",
+      "annotation_description": "The user explicitly requires the brim to continue around all four head faces: outer row 11, columns 32 through 63.",
+      "unlabelled_policy": "Outside reviewed scope, the previous v102 UV is a copy-consistency target, not newly claimed human ground truth.",
+      "warning": "This identity has moved into training; it is no longer a gradient-free development example.",
+      "scope_sha256": "4e2e164697ef0b174aea2db434277b786ca30d2128d142a8bf1b202dc7a8cf2b",
+      "target_sha256": "4f779c4724292b5005aa47d62603847b0f4e38687ee5e89eab8e7c2f0f8678f5",
+      "source_cache": "/home/ds/llms/SkingToolkitDev/dense_uv_parser/runs/v103_final_uv_retrain_20260907/cache/real/old_PU418PLGERMFC487_edited.pt",
+      "scoped_texels": 32
+    }
+  ]
+}

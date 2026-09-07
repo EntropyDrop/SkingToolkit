@@ -77,7 +77,12 @@ def real_review(model,rows,renderer,out,step):
         image=tensor_to_rgba_image(uv[0]);image.save(folder/'uv.png')
         render=torch.cat([renderer.forward_view(uv,v) for v in ('front_left','back_left')])
         save_image(torch.cat(list(render[:,:3]),2),folder/'render.png')
-        record={'role':'training_fit_not_generalization' if name=='beard' else 'development_no_gradients','body_exact':bool(torch.equal(uv[:,:,16:],b['base'][:,:,16:])),'head_alpha_changes':int(((uv[:,3,:16]>.5)!=(b['base'][:,3,:16]>.5)).sum())}
+        is_training=row['metadata'].get('kind')=='explicit_partial_uv_training_annotation'
+        record={'role':'training_fit_not_generalization' if is_training else 'development_no_gradients','body_exact':bool(torch.equal(uv[:,:,16:],b['base'][:,:,16:])),'head_alpha_changes':int(((uv[:,3,:16]>.5)!=(b['base'][:,3,:16]>.5)).sum())}
+        if row['metadata'].get('geometry_annotation'):
+            scope=torch.from_numpy(np.array(Image.open(row['metadata']['geometry_annotation']).convert('L'))>127).to(uv.device)
+            errors=int((((uv[0,3]>.5)!=(b['target'][0,3]>.5))&scope).sum())
+            record.update(scoped_geometry_mismatched_texels=errors,scoped_geometry_passed=errors==0)
         if name=='beard':record['annotated_uv_review']=evaluate_annotated_review(np.array(image),row['metadata']['input'])
         report[name]=record
     write(out/f'real_{step}.json',report)
@@ -123,6 +128,7 @@ def main():
     signature={k:manifest[k] for k in ('parent_sha256','cache_manifest_sha256','decoder_config','steps')};signature['batch_size']=o.batch_size
     if o.decoder_revision==2:manifest['revision']='local_evidence_relations_20260907'
     if o.robust_edits:manifest['revision']='local_context_preservation_20260907'
+    manifest['validation_scope']='Explicit real training identities are fit checks only. Remaining real cases have no gradient use; synthetic validation sources are disjoint. No automatic release.'
     if o.learning_rate!=3e-4:signature['learning_rate']=o.learning_rate
     manifest['learning_rate']=o.learning_rate
     manifest['weight_initialization']={'checkpoint':str(o.init_checkpoint.resolve()),'sha256':hashlib.sha256(o.init_checkpoint.read_bytes()).hexdigest(),'optimizer_restored':False} if o.init_checkpoint else None
