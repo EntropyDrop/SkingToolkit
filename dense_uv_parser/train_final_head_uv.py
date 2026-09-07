@@ -98,13 +98,16 @@ def main():
     p.add_argument('--stop-after',type=int,help='Save and stop without changing the total LR schedule')
     p.add_argument('--decoder-revision',type=int,choices=[1,2],default=1);p.add_argument('--anchor-every',type=int,default=4)
     p.add_argument('--robust-edits',action='store_true');p.add_argument('--init-checkpoint',type=Path)
+    p.add_argument('--paired-every',type=int,default=0,help='Sample a bare/glasses/phones triplet every N steps and supervise its occupancy differences')
+    p.add_argument('--semantic-geometry',action='store_true',help='Joint categorical absence/material prediction for final outer head UV')
     p.add_argument('--learning-rate',type=float,default=3e-4)
     p.add_argument('--native-fraction',type=float,default=0.,help='Fraction of synthetic batch slots replaying unaltered source head textures')
     o=p.parse_args()
     if min(o.steps,o.batch_size,o.eval_every,o.first_eval,o.anchor_every)<1 or (o.stop_after is not None and not 1<=o.stop_after<=o.steps):p.error('Invalid positive training limits')
+    if o.paired_every<0 or (o.paired_every and o.batch_size<4):p.error('Paired replay requires batch-size >= 4 and nonnegative interval')
     if o.learning_rate<=0 or (o.resume and o.init_checkpoint):p.error('Use positive LR and either resume or weight initialization')
     if not 0<=o.native_fraction<=1:p.error('native-fraction must be in [0,1]')
-    if (o.robust_edits or o.init_checkpoint) and o.decoder_revision!=2:p.error('These options require decoder revision 2')
+    if (o.robust_edits or o.init_checkpoint or o.semantic_geometry) and o.decoder_revision!=2:p.error('These options require decoder revision 2')
     torch.set_num_threads(4);evaluation_numerics();torch.manual_seed(1032707);random.seed(1032707)
     root=Path(__file__).resolve().parent;out=o.output_dir.resolve();out.mkdir(parents=True,exist_ok=False)
     cache=json.loads((o.cache/'manifest.json').read_text())
@@ -114,6 +117,12 @@ def main():
     native=[r for r in train if r['metadata'].get('family')=='native_texture']
     authored=[r for r in train if r['metadata'].get('family')!='native_texture']
     if o.native_fraction and (not native or not authored):raise ValueError('Native replay requires both native and authored training sources')
+    pairs={}
+    for r in train:
+        if str(r['metadata'].get('family','')).startswith('paired_'):
+            pairs.setdefault(r['metadata']['pair_id'],{})[r['metadata']['variant']]=r
+    pairs=[list(p[k] for k in ('bare','glasses','phones')) for p in pairs.values() if set(p)=={'bare','glasses','phones'}]
+    if o.paired_every and not pairs:raise ValueError('No complete training counterfactual groups')
     anchors=[load(x) for x in cache['real_training']];development=[load(x) for x in cache['real_development']]
     train_sources={r['metadata']['source'] for r in train};val_sources={r['metadata']['source'] for r in validation}
     if train_sources&val_sources:raise ValueError('Source leakage')
@@ -121,6 +130,7 @@ def main():
     parent=load(cache['parent']);pipeline=cache['pipeline'];config={'width':96,'layers':2}
     if o.decoder_revision==2:config.update(revision=2,mappings_dir=parent['args']['mappings_dir'])
     if o.robust_edits:config['robust_edits']=True
+    if o.semantic_geometry:config['semantic_geometry']=True
     model=FinalHeadUVDecoder(**config).cuda()
     if o.init_checkpoint:
         initial=load(o.init_checkpoint)
@@ -133,6 +143,7 @@ def main():
     signature={k:manifest[k] for k in ('parent_sha256','cache_manifest_sha256','decoder_config','steps')};signature['batch_size']=o.batch_size
     if o.decoder_revision==2:manifest['revision']='local_evidence_relations_20260907'
     if o.robust_edits:manifest['revision']='local_context_preservation_20260907'
+    if o.semantic_geometry:manifest['revision']='joint_semantic_geometry_20260907'
     manifest['validation_scope']='Explicit real training identities are fit checks only. Remaining real cases have no gradient use; synthetic validation sources are disjoint. No automatic release.'
     if o.learning_rate!=3e-4:signature['learning_rate']=o.learning_rate
     manifest['learning_rate']=o.learning_rate
@@ -140,6 +151,8 @@ def main():
     if o.decoder_revision==2 or o.anchor_every!=4:signature['anchor_every']=o.anchor_every
     if o.native_fraction:signature['native_fraction']=o.native_fraction
     manifest['native_fraction']=o.native_fraction
+    if o.paired_every:signature['paired_every']=o.paired_every
+    manifest['paired_every']=o.paired_every;manifest['paired_training_identities']=len(pairs)
     manifest.update(training_signature=signature,resumed_from=str(o.resume.resolve()) if o.resume else None,recovery_format=1)
     write(out/'config.json',manifest);write(out/'pipeline.json',pipeline);snapshot=out/'source';snapshot.mkdir()
     for f in root.glob('*.py'):shutil.copy2(f,snapshot/f.name)
@@ -215,10 +228,15 @@ def main():
                 # Reserve the final slot for optional real training annotations.
                 count=round((o.batch_size-1)*o.native_fraction)
                 rows=random.choices(native,k=count)+random.choices(authored,k=o.batch_size-count)
+            paired_step=bool(o.paired_every and step%o.paired_every==0)
+            if paired_step:rows[:3]=random.choice(pairs)
             if step%o.anchor_every==0:rows[-1]=random.choice(anchors)
             augment=step%2==1 if model.revision==1 else random.random()<.75
             b=batch(rows,model,augment=augment);opt.zero_grad(set_to_none=True)
             prediction=model(b['base'],b['evidence']);loss,metrics=final_uv_loss(model,prediction,b['base'],b['target'],b['labels'],b['symmetric'])
+            if paired_step:
+                from SkingToolkit.dense_uv_parser.final_head_uv_revision import paired_occupancy_loss
+                paired_loss=paired_occupancy_loss(model,prediction,b['target']);loss=loss+4*paired_loss;metrics['paired_occupancy']=paired_loss.detach()
             if not torch.isfinite(loss):raise RuntimeError('Non-finite final UV loss')
             loss.backward();grad=torch.nn.utils.clip_grad_norm_(model.parameters(),1.)
             if not torch.isfinite(grad):raise RuntimeError('Non-finite final UV gradient')

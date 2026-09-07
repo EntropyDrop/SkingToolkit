@@ -24,12 +24,14 @@ def image_evidence(images, foreground, outputs):
 
 
 class FinalHeadUVDecoder(nn.Module):
-    def __init__(self, width=96, layers=2, revision=1, mappings_dir=None, robust_edits=False):
+    def __init__(self, width=96, layers=2, revision=1, mappings_dir=None, robust_edits=False, semantic_geometry=False):
         super().__init__()
         if revision not in (1,2):raise ValueError('Unknown final head decoder revision')
         self.revision=revision
         if robust_edits and revision!=2:raise ValueError('Robust editing requires revision 2')
         self.robust_edits=robust_edits
+        if semantic_geometry and revision!=2:raise ValueError("Semantic geometry requires revision 2")
+        self.semantic_geometry=semantic_geometry
         t=build_simple_uv_topology()
         ids=torch.nonzero((t.valid&(t.part==0)).reshape(-1)).flatten()
         node=torch.full((4096,),-1,dtype=torch.long);node[ids]=torch.arange(len(ids))

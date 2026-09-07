@@ -116,10 +116,20 @@ def tie_material(model,rgb,alpha,mirror_logits,layer_logits):
 
 
 def decode_revision(model,features,uv):
-    edit_logits=model.edit(features).squeeze(2)
+    raw_edit_logits=model.edit(features).squeeze(2)
+    semantic_logits=model.semantic(features)
+    alpha_logits=torch.where(uv[:,:,3]>.5,-raw_edit_logits,raw_edit_logits)
+    if model.semantic_geometry:
+        # A single categorical distribution decides absence and outer material.
+        # UV class zero denotes absent outer support (source-image class zero
+        # still means abstention). The edit prior shifts all occupied classes
+        # together; occupancy and semantic supervision both train this score.
+        semantic_logits=torch.cat([semantic_logits[:,:,:1],semantic_logits[:,:,1:]+torch.where(model.outer[None],alpha_logits,torch.zeros_like(alpha_logits))[:,:,None]],2)
+        joint_alpha=torch.logsumexp(semantic_logits[:,:,1:],2)-semantic_logits[:,:,0]
+        alpha_logits=torch.where(model.outer[None],joint_alpha,alpha_logits)
+    edit_logits=torch.where(uv[:,:,3]>.5,-alpha_logits,alpha_logits)
     edit_p=edit_logits.sigmoid();change=(edit_p>=.5).float()+(edit_p-edit_p.detach())
     alpha=torch.where(model.outer[None],uv[:,:,3]+(1-2*uv[:,:,3])*change,uv[:,:,3])
-    alpha_logits=torch.where(uv[:,:,3]>.5,-edit_logits,edit_logits)
     gate_logits=model.color_gate(features).squeeze(2);gate_p=gate_logits.sigmoid()
     gate=(gate_p>=.5).float()+(gate_p-gate_p.detach())
     delta=model.color_delta(features).tanh();raw=(uv[:,:,:3]+delta).clamp(0,1)
@@ -127,7 +137,7 @@ def decode_revision(model,features,uv):
     mirror=model.mirror_link(features).squeeze(2);mirror=(mirror+mirror[:,model.mirror])/2
     layer=model.layer_link(features).squeeze(2);layer=(layer+layer[:,model.other])/2
     rgb=tie_material(model,proposed,alpha,mirror,layer)
-    return {'alpha':alpha,'alpha_logits':alpha_logits,'alpha_probability':alpha_logits.sigmoid(),'edit_logits':edit_logits,'proposed_rgb':rgb,'untied_rgb':proposed,'raw_rgb':raw,'color_gate_logits':gate_logits,'mirror_link_logits':mirror,'layer_link_logits':layer,'semantic_logits':model.semantic(features)}
+    return {'alpha':alpha,'alpha_logits':alpha_logits,'alpha_probability':alpha_logits.sigmoid(),'edit_logits':edit_logits,'proposed_rgb':rgb,'untied_rgb':proposed,'raw_rgb':raw,'color_gate_logits':gate_logits,'mirror_link_logits':mirror,'layer_link_logits':layer,'semantic_logits':semantic_logits}
 
 
 def masked_mean(value,mask):
@@ -173,3 +183,15 @@ def revision_loss(model,prediction,base,target,labels,symmetric):
     seam=F.smooth_l1_loss(p[:,left]-p[:,right],alpha[:,left]-alpha[:,right])
     total=4*occupancy+8*color+2*raw+2*keep_color+.4*gate+.4*semantic+relation+symmetry+alignment+.3*seam
     return total,{k:v.detach() for k,v in dict(occupancy=occupancy,preserve=preserve,correct=correct,color=color,color_gate=gate,relations=relation,symmetry=symmetry,alignment=alignment,empty_outer_cells=(~visible&outer).sum()).items()}
+
+
+def paired_occupancy_loss(model,prediction,target):
+    """Learn changes caused by eyewear while keeping the same person's head.
+
+    The first three rows are a training-only bare/glasses/phones triplet.
+    No pair or target information is read during inference.
+    """
+    truth=target.flatten(2)[:,3,model.ids][:3,model.outer]
+    p=prediction['alpha_probability'][:3,model.outer]
+    delta=truth[1:]-truth[:1];error=(p[1:]-p[:1]-delta).abs()
+    return masked_mean(error,delta!=0)+masked_mean(error,delta==0)

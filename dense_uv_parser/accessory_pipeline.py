@@ -67,7 +67,9 @@ def run_pipeline(model, renderer, images, config=None, complete=False, outputs=N
         cond = reconcile_crown_top(cond, details, renderer, views)
     else:
         raise ValueError('Unknown crown top geometry mode: ' + str(geometry_mode))
-    if 'head_semantics_logits' in outputs:
+    joint_mode=config.get('joint_head_geometry_mode','semantic_prune')
+    if joint_mode not in ('semantic_prune','disabled'):raise ValueError('Unknown joint head geometry mode: '+joint_mode)
+    if 'head_semantics_logits' in outputs and joint_mode=='semantic_prune':
         from SkingToolkit.dense_uv_parser.head_semantics import reconcile_joint_head_geometry
         cond = reconcile_joint_head_geometry(cond, details, renderer, views)
     result = {'foreground_color_sources':color_sources,'foreground_probability':foreground_probability,'conditioning':cond,'details':details,'outputs':outputs,'foreground':fg}
